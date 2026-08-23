@@ -908,6 +908,115 @@ class TransformerConfig(ModelParallelConfig):
     """Quantization format for quantizing weights, options are 32x32 and 1x32. Currently only used in SonicMoE."""
 
     ####################
+    # N-gram Embedding (LongCat-style)
+    ####################
+    ngram_embedding_enabled: bool = False
+    """Master switch for N-gram Embedding. When False, model degrades to baseline.
+
+    Both variants are written for TP = 1: the N-gram tables, their projections and the router are not tensor-parallel sharded."""
+
+    ngram_vocab_size_ratio: float = 12.2
+    """Ratio multiplier: ngram_vocab_size = vocab_size * ngram_vocab_size_ratio."""
+
+    ngram_emb_neighbor_num: int = 3
+    """Max N-gram order. 3 means bigram + trigram."""
+
+    ngram_emb_split_num: int = 4
+    """Number of sub-tables (hash functions) per N-gram level."""
+
+    ngram_emb_dim: int = 0
+    """Sub-embedding dimension per table. 0 means auto (hidden_size // num_embedders)."""
+
+    ngram_pad_token_id: int = 0
+    """Token ID used for padding when shifting sequences for N-gram computation."""
+
+    ####################
+    # N-gram Embedding: routed (MoE-style) sub-table addressing
+    ####################
+    ngram_moe_enabled: bool = False
+    """Use the routed N-gram embedding instead of the fixed K-split one.  False keeps the original implementation untouched.
+
+    The routed variant is sized by the ngram_moe_* fields alone: it ignores ngram_vocab_size_ratio, ngram_emb_split_num and ngram_emb_dim, and shares only ngram_emb_neighbor_num (N) and ngram_pad_token_id with the baseline."""
+
+    ngram_moe_tables_per_order: int = 16
+    """Sub-tables per N-gram order.  Total sub-tables = this * (N - 1)."""
+
+    ngram_moe_active_tables: int = 4
+    """Sub-tables read per token per N-gram order; must be <= ngram_moe_tables_per_order.  Lookups per token = this * (N - 1)."""
+
+    ngram_moe_table_rows_ratio: float = 0.0
+    """Rows of one sub-table, as a multiple of vocab_size -- the routed counterpart of ngram_vocab_size_ratio, and the only quantity here that scales with the vocabulary.
+
+    Sub-table i actually holds ``rows + 2*i + 1`` rows: the moduli must stay pairwise distinct, otherwise every selected sub-table hashes a key to the same offset and the multi-read redundancy collapses.
+    So with T = tables_per_order * (N - 1) sub-tables the table holds T * rows + T**2 rows in total.  Must be set explicitly."""
+
+    ngram_moe_table_dim: int = 128
+    """Embedding width of one sub-table.  Table parameters = total_rows * this, plus (N - 1) * this * hidden_size for the read-out projections."""
+
+    ngram_moe_router_dim: int = 64
+    """Bottleneck width of the sub-table router."""
+
+    ngram_moe_router_width: int = 32
+    """Receptive field of the router, in tokens counted back from the current one.  Must be >> the N-gram order, otherwise the router can only rediscover a hash of the same N-gram."""
+
+    ngram_moe_router_per_order: bool = False
+    """Give each N-gram order its own independent router (separate parameters).
+
+    When False a single shared router is used for all orders, which is cheaper but forces bigram and trigram to always route to the same sub-tables."""
+
+    ####################
+    # N-gram Embedding: sub-table load balancing
+    ####################
+    ngram_moe_balance_type: str = "noaux_bias"
+    """Which style of sub-table load balancing to use.
+
+    - ``"noaux_bias"`` (default): the aux-loss-free strategy of DeepSeek-V3.
+      No loss term at all: a per-sub-table bias is added to the selection score only, and moved by ``sign(mean_load - load_i) * ngram_moe_bias_update_rate`` after every optimizer step.
+      The combine weights keep coming from the unbiased router, so balancing cannot distort the gate values or flatten the router.
+      Requires ``ngram_bias_callback.NgramBiasAdjustCallback`` to be registered on the trainer; without it the bias stays zero and this degrades to ``"none"``.
+      Forces the auxiliary loss off regardless of ``ngram_moe_balance_loss_enabled``.
+    - ``"aux_loss"``: the classic gradient-based auxiliary loss, gated by ``ngram_moe_balance_loss_enabled`` / ``ngram_moe_balance_loss_coef``.
+    - ``"none"``: no balancing of any kind.
+
+    The point of the aux-loss-free form is that it equalizes the marginal per-sub-table load without pushing the per-token router towards uniform hashing, which is what a large enough auxiliary loss coefficient ends up doing."""
+
+    ngram_moe_bias_update_rate: float = 1e-4
+    """Step size of the aux-loss-free sub-table bias update.  Only used when ngram_moe_balance_type="noaux_bias".
+
+    The bias is added to probabilities (a softmax over the sub-tables of one order, mean 1/M), so the natural scale is that of a probability, not of a logit.
+    When set from a yaml config, note that yaml 1.1 parses ``1e-4`` as a string; it has to be written ``1.0e-4``."""
+
+    ngram_moe_balance_loss_enabled: bool = False
+    """Add the classic MoE auxiliary load-balancing loss (Switch/GShard style) independently for each N-gram order.  Has no effect unless ngram_moe_enabled=True, nor when ngram_moe_balance_type != "aux_loss"."""
+
+    ngram_moe_balance_loss_coef: float = 0.0
+    """Coefficient applied to the per-order balance auxiliary loss before it is injected into the backward pass.  Typical starting value: 1e-3.  Has no effect unless ngram_moe_balance_loss_enabled=True."""
+
+    ####################
+    # N-gram Embedding: gram-level (order) gate
+    ####################
+    ngram_moe_order_gate_enabled: bool = False
+    """Add a second, gram-level gate on top of the per-order sub-table routers, so the effective weight of sub-table s of order o becomes ``beta_o(t) * g_{o,s}(t)``.
+
+    ``beta`` is a dense softmax over the N-1 orders.  It is a reweighting of bigram against trigram, nothing else: every order is computed regardless, so there is no capacity, no dropped token and nothing to load-balance, and no auxiliary loss is involved at this level.
+    With only 2 orders a top-k gate would either discard half the signal (k=1) or be a no-op (k=2), which is why the gram level stays dense while the sub-table level stays sparse.
+
+    Defaults to False, in which case no parameter and no operation is added and the forward pass is identical to the ungated model."""
+
+    ngram_moe_order_gate_scale: bool = True
+    """Scale the gram-level gate by the number of orders so the weights sum to (N - 1) instead of 1.
+
+    The plain sum this gate replaces carries an implicit weight of 1 per order, and LanguageModelEmbedding divides the injected signal by ``1 + (N - 1)``.
+    Without the rescale the n-gram signal would silently shrink by a factor of (N - 1), changing the scale of what is added to the residual stream.
+    With it, a freshly initialised gate reproduces the ungated forward pass."""
+
+    ngram_moe_order_gate_dim: int = 0
+    """Bottleneck width of the gram-level gate.  0 reuses ngram_moe_router_dim."""
+
+    ngram_moe_order_gate_width: int = 0
+    """Receptive field of the gram-level gate, in tokens.  0 reuses ngram_moe_router_width.  Deciding which order to trust needs at least as much context as picking a sub-table within an order."""
+
+    ####################
     # MLA
     ####################
     """Configuration object for paddlefleet Multi-Latent Attention (MLA) transformers.
