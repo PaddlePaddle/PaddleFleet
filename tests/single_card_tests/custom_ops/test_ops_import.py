@@ -147,15 +147,5 @@ class TestFLAImport(unittest.TestCase):
             from paddlefleet_ops.fla import xxxx  # noqa: F401
 
 
-class TestMoonEPImport(unittest.TestCase):
-    def test_moonep_import(self):
-        import paddlefleet_ops
-        from paddlefleet_ops.moonep import Buffer, MoonEPCommPlan
-
-        self.assertTrue(callable(Buffer))
-        self.assertTrue(callable(MoonEPCommPlan))
-        print(paddlefleet_ops.moonep)
-
-
 if __name__ == "__main__":
     unittest.main()

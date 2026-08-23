@@ -156,11 +156,6 @@ if paddle.is_compiled_with_cuda():
     FLA_HINT = "For developers: guard imports with `is_fla_available()` and only call `paddlefleet_ops.fla` when CUDA is enabled."
 
     FAST_HADAMARD_TRANSFORM_HINT = "For developers: guard imports with `is_fast_hadamard_transform_available()` and only call `paddlefleet_ops.fast_hadamard_transform` when CUDA is enabled."
-
-    MOON_EP_HINT = (
-        "For developers: guard imports with `is_moonep_available()` and only call `paddlefleet_ops.moonep` when flag branch enabled.\n"
-        "For users: use a GPU with compute capability >= 9.0 (Hopper or Blackwell) to enable."
-    )
 else:
     DEEP_GEMM_HINT = "deep_gemm is not supported on XPU backend."
     DEEP_EP_HINT = "deep_ep is not supported on XPU backend."
@@ -172,7 +167,6 @@ else:
     FAST_HADAMARD_TRANSFORM_HINT = (
         "fast_hadamard_transform is not supported on XPU backend."
     )
-    MOON_EP_HINT = "moonep is not supported on XPU backend."
 
 FLASH_MASK_HINT = (
     "For developers: guard imports with `is_flash_mask_available()` and only call `paddlefleet_ops.flash_mask` when flag branch enabled.\n"
@@ -244,7 +238,6 @@ _FLA_AVAILABLE = False
 _FLASH_MASK_AVAILABLE = False
 _CUDNN_FRONTEND_AVAILABLE = False
 _FAST_HADAMARD_TRANSFORM_AVAILABLE = False
-_MOON_EP_AVAILABLE = False
 
 if paddle.is_compiled_with_cuda():
     _FLA_AVAILABLE = True
@@ -252,7 +245,6 @@ if paddle.is_compiled_with_cuda():
         _DEEP_GEMM_AVAILABLE = True
         _DEEP_EP_AVAILABLE = True
         _FLASH_MLA_AVAILABLE = True
-        _MOON_EP_AVAILABLE = True
         if _cuda_version >= (12, 9):
             _HYBRID_EP_AVAILABLE = True
     if paddle.cuda.get_device_capability()[0] >= 10:
@@ -305,10 +297,6 @@ def is_cudnn_frontend_available():
 
 def is_fast_hadamard_transform_available():
     return _FAST_HADAMARD_TRANSFORM_AVAILABLE
-
-
-def is_moonep_available():
-    return _MOON_EP_AVAILABLE
 
 
 def _try_load_nvshmem(ops_dir: Path):
@@ -462,16 +450,6 @@ if paddle.is_compiled_with_cuda():
         blocked_import_messages["paddlefleet_ops.fast_hadamard_transform"] = (
             error
         )
-
-    if is_moonep_available():
-        paddle.enable_compat(scope={"moonep"}, silent=True)
-        _safe_load_ecosystem_lib("moonep", ops_dir, globals())
-    else:
-        warning, error = _hopper_requirement(
-            "paddlefleet_ops.moonep", hint=MOON_EP_HINT
-        )
-        logger.warning(warning)
-        blocked_import_messages["paddlefleet_ops.moonep"] = error
 
     if is_cudnn_frontend_available():
         paddle.enable_compat(scope={"cudnn"}, silent=True)
