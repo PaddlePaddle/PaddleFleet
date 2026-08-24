@@ -182,14 +182,20 @@ class TestBlockAttnResVPPEquivalence(unittest.TestCase):
                 "ep",
                 "mp",
             ],
-            # BlockAttnRes comm opt does not support the overlap scheduler.
             # BlockAttnRes sends "hidden + blocks", and the number of blocks
             # grows along the pipeline, so the p2p shape meta must not be
-            # cached across sends -> dynamic shape is required (VPP itself
-            # requires p2p_cache_shape, so this is the only way).
+            # cached across sends -> dynamic shape is required.
+            #
+            # These two overlap switches are unrelated, do not flip them
+            # together:
+            #   - forward_backward_overlap_scheduler must stay off, the
+            #     overlapped forward/backward path bypasses _merge_block_cache.
+            #   - overlap_p2p_comm must stay on. With it off, VPP falls back to
+            #     send_forward_backward_recv_forward_backward, which asserts
+            #     `not self._dynamic_shape`.
             "pp_configs": {
                 "forward_backward_overlap_scheduler": False,
-                "overlap_p2p_comm": False,
+                "overlap_p2p_comm": True,
                 "enable_dynamic_shape": True,
             },
         }

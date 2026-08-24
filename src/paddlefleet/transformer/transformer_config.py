@@ -89,6 +89,16 @@ class TransformerConfig(ModelParallelConfig):
     and re-embed there, instead of pre-computing shifted embeddings at first stage
     and concatenating them through the pipeline."""
 
+    separate_mtp_input: bool = False
+    """When True, the shifted MTP embeddings computed by GPTEmbedding are handed to the
+    MTP layer through a dedicated ``mtp_decoder_inputs`` entry in ``dict_args`` instead
+    of being concatenated into ``hidden_states``. This removes the per-layer
+    split/concat of the MTP chunks while leaving GPTEmbedding's shifted-embedding
+    computation (including its CP/SP scatter) untouched, so the MTP layer must not
+    re-scatter them. Intended for pipeline_model_parallel_size == 1, where there is no
+    P2P send for the embeddings to piggyback on; ``enable_mtp_magic_send`` covers the
+    PP > 1 case."""
+
     experimental_dataflow: bool = False
     """When True, use new experimental dataflow where mtp_startend_row_indices_all is passed as a
     separate input instead of being appended to attn_mask_startend_row_indices.
@@ -250,6 +260,24 @@ class TransformerConfig(ModelParallelConfig):
     full cross-head mixing over all num_attention_heads (the earlier VHA design).
     True: within-group block-diagonal mixing that only recombines heads inside each
     o_group (mixing stays within a group)."""
+
+    fuse_inv_rope_into_vha_postmix: bool = False
+    """Fuse the HCA inverse RoPE into the ungrouped VHA postmix GEMM (DSv4 hybrid).
+
+    The unfused path materialises ``inv_rope(O)`` as a full-width tensor and feeds
+    it to the postmix ``[nh,nh]`` GEMM, which costs one extra read+write of the
+    whole attention output plus a second live copy of it. Because RoPE only
+    touches the trailing ``qk_pos_emb_head_dim`` channels while the GEMM
+    contracts the head axis, the same result can be assembled from a full-width
+    GEMM on the *unrotated* output plus a narrow GEMM on the rotated pe channels,
+    which never needs the wide intermediate.
+
+    Bitwise identical to the unfused path -- forward, activation gradient and the
+    postmix U/V gradients -- and asserted as such in
+    ``tests/single_card_tests/test_inv_rope_vha_postmix_fusion.py``. Requires
+    ``use_vha_attention`` and ``apply_rope_fusion``, and is skipped for
+    ``vha_postmix_grouped``, ``high_precision_rope`` and when the postmix has its
+    own selective recompute wrapper."""
 
     use_vha_premix: bool = False
     """If True (and use_vha_attention is also True), replaces the DSv4 hybrid Q up-projection
@@ -1434,6 +1462,31 @@ class TransformerConfig(ModelParallelConfig):
     the switch otherwise rather than let it be a silent no-op.
     """
 
+    sparse_attn_global_kv_idx_remap_fusion: bool = False
+    """Whether to fuse the per-batch-local -> flat-global KV column index remap
+    (``idx + b * seqlen_kv``) consumed by the cuDNN / FlashMLA sparse-attention
+    kernels (``csa_sparse_attn_utils._local_to_global_flat``).
+
+    Not about MoE routing: these are KV *column* indices of the sparse-attention
+    support (window + compressed slots), not expert top-k ids.
+
+    The eager version spends seven elementwise kernels on the full
+    ``[b * sq, topk]`` table (``full`` + ``greater_equal`` + ``arange`` +
+    ``expand`` + ``scale`` + ``add`` + ``where``) to express a single pass; the
+    Triton kernel does it in one. The result is bit-identical, so this only
+    trades kernel count for a Triton dependency and can be flipped freely.
+
+    Scope: every ``_local_to_global_flat`` call site -- the ``"cudnn"``
+    sparse-attention forward and backward of both
+    ``CompressedSparseAttention`` (HCA ``ratio=128`` and CSA/DSA
+    ``1 < ratio < 128`` layers) and ``MQALatentAttention``. No effect on the
+    ``"tilelang"`` / ``"unfused"`` backends, which never build the flat global
+    index table, nor on ``block_sparse_mqa_attention_dsa``, which leaves it at
+    the default. ``MQALatentAttention``'s forward is always FlashMLA, so it
+    remaps regardless of ``mqa_sparse_attn_backward_backend``; only its
+    backward follows that switch.
+    """
+
     stage1_overlap: bool = False
     """
     overlap backward with sharding gradient reduce for non-pipeline parallelism
@@ -1625,6 +1678,41 @@ class TransformerConfig(ModelParallelConfig):
             assert not self.use_dense_mtp, (
                 "mtp_shared_last_layer cannot be True if use_dense_mtp= True"
             )
+
+        if self.separate_mtp_input:
+            # Raise instead of assert: with ``python -O`` assertions are stripped,
+            # and an unsupported combination would then silently enter a path that
+            # only holds for the layout below -- or crash much later inside
+            # MultiTokenPredictionLayer with a missing ``mtp_decoder_inputs``.
+            if self.num_nextn_predict_layers != 1:
+                raise ValueError(
+                    "separate_mtp_input only supports "
+                    "num_nextn_predict_layers == 1, got "
+                    f"num_nextn_predict_layers={self.num_nextn_predict_layers}. "
+                    "The MTP input is consumed once and stripped from dict_args, "
+                    "so deeper MTP layers would not receive it."
+                )
+            if self.pipeline_model_parallel_size != 1:
+                raise ValueError(
+                    "separate_mtp_input requires pipeline_model_parallel_size "
+                    "== 1, got pipeline_model_parallel_size="
+                    f"{self.pipeline_model_parallel_size}. Use "
+                    "enable_mtp_magic_send for pipeline_model_parallel_size > 1."
+                )
+            if self.enable_mtp_magic_send:
+                raise ValueError(
+                    "separate_mtp_input and enable_mtp_magic_send are mutually "
+                    "exclusive, got separate_mtp_input=True and "
+                    "enable_mtp_magic_send=True. They are two transports for the "
+                    "same tensor; pick the one matching the pipeline degree."
+                )
+            if self.mtp_load_weight_only:
+                raise ValueError(
+                    "separate_mtp_input is incompatible with "
+                    "mtp_load_weight_only=True. GPTEmbedding does not build the "
+                    "shifted MTP embeddings in that mode, so separate_mtp_input "
+                    "would silently do nothing."
+                )
 
         if self.enable_mtp_magic_send:
             assert not getattr(self, "tie_word_embeddings", False), (

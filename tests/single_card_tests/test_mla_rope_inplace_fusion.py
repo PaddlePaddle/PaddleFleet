@@ -19,7 +19,10 @@ Verifies, against the unfused PaddleFleet reference path, that
 
   - Forward output equivalent (bit-exact match) to the slice + rope +
     concat baseline used in dsv4_hybrid_attention.py.
-  - Truly in-place: q.data_ptr() preserved.
+  - Truly in-place when clone_input=False: q.data_ptr() preserved and not a
+    single byte of extra device memory allocated.
+  - With clone_input=True: the input is left completely untouched and the
+    result is bit-identical to the clone_input=False result.
   - Backward grads match the autograd reference.
 """
 
@@ -31,7 +34,10 @@ from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
 from paddlefleet.triton_ops import fused_apply_mla_rope_inplace
-from paddlefleet.triton_ops.mla_rope_inplace_fusion import _fused_cos_sin
+from paddlefleet.triton_ops.mla_rope_inplace_fusion import (
+    RoPEMLAInplaceFusion,
+    _fused_cos_sin,
+)
 
 # Shapes from DeepSeek-V4-Flash
 B, S, H, D = 1, 4096, 64, 512
@@ -74,6 +80,7 @@ class TestFusedMLARopeQPeInplace(unittest.TestCase):
         s: int,
         freqs: paddle.Tensor,
         inverse: bool = False,
+        clone_input: bool = False,
     ) -> None:
         """Shared driver: q is contiguous bf16; freqs supplied by caller."""
         x = paddle.randn([b, s, H, D], "bfloat16")
@@ -93,16 +100,24 @@ class TestFusedMLARopeQPeInplace(unittest.TestCase):
         x_fused.stop_gradient = False
         q_fused = x_fused.clone()  # non-leaf — safe target for in-place kernel
         self.assertTrue(q_fused.is_contiguous())
-        nope_before = q_fused[..., :NOPE_DIM].clone()
+        input_before = q_fused.clone()
         ptr_before = q_fused.data_ptr()
         out_fused = fused_apply_mla_rope_inplace(
-            q_fused, freqs, NOPE_DIM, inverse=inverse
+            q_fused, freqs, NOPE_DIM, inverse=inverse, clone_input=clone_input
         )
 
-        # ---- in-place storage invariants ----
-        self.assertIs(out_fused, q_fused)
-        self.assertEqual(out_fused.data_ptr(), ptr_before)
-        _check_equal(q_fused[..., :NOPE_DIM], nope_before)
+        # ---- storage invariants ----
+        if clone_input:
+            # A fresh buffer, and the input must survive completely intact —
+            # this is what the attention backward relies on.
+            self.assertIsNot(out_fused, q_fused)
+            self.assertNotEqual(out_fused.data_ptr(), ptr_before)
+            _check_equal(q_fused, input_before)
+        else:
+            self.assertIs(out_fused, q_fused)
+            self.assertEqual(out_fused.data_ptr(), ptr_before)
+        # The nope channels of the result always carry the input's values.
+        _check_equal(out_fused[..., :NOPE_DIM], input_before[..., :NOPE_DIM])
 
         # ---- forward parity ----
         _check_equal(out_fused, out_ref)
@@ -119,6 +134,12 @@ class TestFusedMLARopeQPeInplace(unittest.TestCase):
         freqs = paddle.randn([B, S, 1, ROPE_DIM])
         freqs.stop_gradient = True
         self._run_case(B, S, freqs)
+
+    def test_forward_backward_clone_input(self) -> None:
+        """Same as above but with clone_input=True (o inv-rope call site)."""
+        freqs = paddle.randn([B, S, 1, ROPE_DIM])
+        freqs.stop_gradient = True
+        self._run_case(B, S, freqs, clone_input=True)
 
     def test_freqs_noncontiguous_b_gt_1(self) -> None:
         """Test multi-batch and non-contiguous freqs."""
@@ -139,6 +160,89 @@ class TestFusedMLARopeQPeInplace(unittest.TestCase):
         freqs = paddle.randn([B, S, 1, ROPE_DIM])
         freqs.stop_gradient = True
         self._run_case(B, S, freqs, inverse=True)
+
+    def test_inverse_clone_input(self) -> None:
+        """Inverse rope with clone_input=True: the production o path."""
+        freqs = paddle.randn([B, S, 1, ROPE_DIM])
+        freqs.stop_gradient = True
+        self._run_case(B, S, freqs, inverse=True, clone_input=True)
+
+    def test_clone_input_matches_inplace_bitwise(self) -> None:
+        """clone_input must not change a single bit of the result.
+
+        Runs both modes on identical inputs and compares outputs and grads
+        bit-for-bit, so the out-of-place kernel path cannot silently diverge
+        from the in-place one (e.g. by reordering the bf16 rounding).
+        """
+        s = 256
+        freqs = paddle.randn([B, s, 1, ROPE_DIM])
+        freqs.stop_gradient = True
+        x = paddle.randn([B, s, H, D], "bfloat16")
+        out_grad = paddle.randn([B, s, H, D], "bfloat16")
+
+        results = {}
+        for clone_input in (False, True):
+            leaf = x.detach()
+            leaf.stop_gradient = False
+            q = leaf.clone()
+            out = fused_apply_mla_rope_inplace(
+                q, freqs, NOPE_DIM, inverse=True, clone_input=clone_input
+            )
+            out.backward(out_grad.clone())
+            results[clone_input] = (out.clone(), leaf.grad.clone())
+
+        _check_equal(results[False][0], results[True][0])
+        _check_equal(results[False][1], results[True][1])
+
+    def test_inplace_allocates_nothing(self) -> None:
+        """clone_input=False must cost zero extra device memory.
+
+        Measured around `RoPEMLAInplaceFusion.apply` rather than the public
+        wrapper, so the cos/sin buffers `_fused_cos_sin` allocates do not
+        pollute the reading. clone_input=True is checked in the same way to
+        confirm it allocates exactly one output tensor and nothing more.
+        """
+        s = 256
+        freqs = paddle.randn([B, s, 1, ROPE_DIM])
+        freqs.stop_gradient = True
+        cos, sin = _fused_cos_sin(freqs, 1.0, False, paddle.bfloat16)
+        nbytes = B * s * H * D * 2  # bf16
+
+        with paddle.no_grad():
+            t = paddle.randn([B, s, H, D], "bfloat16")
+            # Warm up the JIT / any lazy allocator growth first.
+            RoPEMLAInplaceFusion.apply(t, cos, sin, NOPE_DIM, ROPE_DIM, False)
+            RoPEMLAInplaceFusion.apply(t, cos, sin, NOPE_DIM, ROPE_DIM, True)
+            paddle.device.synchronize()
+
+            before = paddle.device.cuda.memory_allocated()
+            out_ip = RoPEMLAInplaceFusion.apply(
+                t, cos, sin, NOPE_DIM, ROPE_DIM, False
+            )
+            paddle.device.synchronize()
+            delta_inplace = paddle.device.cuda.memory_allocated() - before
+            self.assertIs(out_ip, t)
+
+            before = paddle.device.cuda.memory_allocated()
+            out_oop = RoPEMLAInplaceFusion.apply(
+                t, cos, sin, NOPE_DIM, ROPE_DIM, True
+            )
+            paddle.device.synchronize()
+            delta_clone = paddle.device.cuda.memory_allocated() - before
+
+        self.assertEqual(
+            delta_inplace,
+            0,
+            f"clone_input=False allocated {delta_inplace} bytes; the in-place "
+            "path must not allocate",
+        )
+        self.assertEqual(
+            delta_clone,
+            nbytes,
+            f"clone_input=True allocated {delta_clone} bytes, expected exactly "
+            f"one output tensor ({nbytes})",
+        )
+        del out_oop
 
     def test_fused_cos_sin(self) -> None:
         freqs = paddle.randn([B, S, 1, ROPE_DIM])

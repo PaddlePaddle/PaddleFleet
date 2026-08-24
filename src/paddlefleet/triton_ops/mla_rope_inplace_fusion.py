@@ -101,6 +101,7 @@ def _cos_sin_kernel(
 @triton.jit
 def _rope_mla_inplace_fwd_kernel(
     T,
+    T_OUT,
     COS,
     SIN,
     nope_dim,
@@ -109,8 +110,19 @@ def _rope_mla_inplace_fwd_kernel(
     stride_x_seq,
     stride_x_nheads,
     BLOCK_H: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    OUT_OF_PLACE: tl.constexpr,
 ):
-    """Forward: rotate t[..., nope_dim:] in place (interleaved in/out)."""
+    """Forward: rotate t[..., nope_dim:] (interleaved in/out).
+
+    Reads from ``T`` and writes to ``T_OUT``. With ``OUT_OF_PLACE=False`` the
+    caller passes the same pointer for both and the kernel behaves exactly as
+    the original in-place version: the nope channels are never touched, so
+    there is no extra traffic and no extra allocation. With
+    ``OUT_OF_PLACE=True`` the nope channels are additionally copied across,
+    which lets the caller keep the input buffer intact without paying for a
+    separate ``clone()`` pass over the whole tensor.
+    """
     pid_m = tl.program_id(axis=0).to(tl.int64)
     pid_head = tl.program_id(axis=1).to(tl.int64)
 
@@ -130,19 +142,32 @@ def _rope_mla_inplace_fwd_kernel(
 
     # Pointer to the start of this token's (head_block_first) row, then advance
     # past the nope channels to land on the rope slice.
-    T = T + pid_m * stride_x_seq + pid_head * BLOCK_H * stride_x_nheads
+    row_off = pid_m * stride_x_seq + pid_head * BLOCK_H * stride_x_nheads
+    T = T + row_off
+    T_OUT = T_OUT + row_off
+    head_off = tl.arange(0, BLOCK_H)[:, None] * stride_x_nheads.to(tl.int64)
+    head_mask = (pid_head * BLOCK_H + tl.arange(0, BLOCK_H))[:, None] < head_num
+
+    # Out-of-place only: carry the untouched nope channels over to the output
+    # buffer. BLOCK_D is next_power_of_2(nope_dim) on the host, so this is a
+    # single masked pass; the in-place path compiles this branch away entirely.
+    if OUT_OF_PLACE:
+        offs_d = tl.arange(0, BLOCK_D)
+        nope_off = head_off + offs_d[None, :]
+        nope_mask = head_mask & (offs_d[None, :] < nope_dim)
+        tl.store(
+            T_OUT + nope_off,
+            tl.load(T + nope_off, mask=nope_mask),
+            mask=nope_mask,
+        )
+
     # Offsets into the rope slice: [BLOCK_H, pe_dim] with last dim STRIDE=1.
     # We deliberately load the whole pe_dim contiguously instead of poking
     # at 2k / 2k+1 with stride-2 offsets — Triton's lowering for stride-2
     # int64 offsets has historically been flaky (extra sector requests, no
     # vectorization), and explicit contiguous loads compile down to
     # `ld.global.v4.b32` which is the theoretical optimum for bf16.
-    flat_off = (
-        tl.arange(0, BLOCK_H)[:, None] * stride_x_nheads.to(tl.int64)
-        + nope_dim
-        + tl.arange(0, pe_dim)[None, :]
-    )
-    head_mask = (pid_head * BLOCK_H + tl.arange(0, BLOCK_H))[:, None] < head_num
+    flat_off = head_off + nope_dim + tl.arange(0, pe_dim)[None, :]
 
     # One contiguous load per program, then de-interleave in registers.
     x = tl.load(T + flat_off, mask=head_mask)  # [BLOCK_H, pe_dim] bf16
@@ -166,7 +191,7 @@ def _rope_mla_inplace_fwd_kernel(
     # same 2k / 2k+1 positions) and store in one contiguous write.
     y = tl.join(y_left, y_right)  # [BLOCK_H, half, 2]
     y = tl.reshape(y, (BLOCK_H, pe_dim))
-    tl.store(T + flat_off, y, mask=head_mask)
+    tl.store(T_OUT + flat_off, y, mask=head_mask)
 
 
 @triton.jit
@@ -228,8 +253,6 @@ class RoPEMLAInplaceFusion(paddle.autograd.PyLayer):
 
     @staticmethod
     def forward(ctx, t, cos, sin, nope_dim, pe_dim, clone_input):
-        # Clone input if the upstream depends on it.
-        t = t.clone() if clone_input else t
         assert t.stride(-1) == 1
         assert cos.is_contiguous()
         assert sin.is_contiguous()
@@ -246,9 +269,21 @@ class RoPEMLAInplaceFusion(paddle.autograd.PyLayer):
             f"head_num must be divisible by BLOCK_H ({BLOCK_H}), got {H}"
         )
 
+        # When the upstream still needs `t`, write to a fresh buffer instead of
+        # cloning first: `clone()` would read+write the whole tensor and the
+        # kernel would then read+write the rope slice again. Letting the kernel
+        # read `t` and write `out` (carrying the nope channels across on the
+        # way) is a single pass, and leaves `t` untouched just the same.
+        # clone_input=False keeps the true in-place behaviour: same pointer in
+        # and out, nope branch compiled away, no allocation.
+        out = paddle.empty(t.shape, dtype=t.dtype) if clone_input else t
+        out_flat = out.reshape([B * S, H, D]) if clone_input else t_flat
+        BLOCK_D = triton.next_power_of_2(max(nope_dim, 1))
+
         grid = (B * S, triton.cdiv(H, BLOCK_H))
         _rope_mla_inplace_fwd_kernel[grid](
             t_flat,
+            out_flat,
             cos,
             sin,
             nope_dim,
@@ -257,6 +292,8 @@ class RoPEMLAInplaceFusion(paddle.autograd.PyLayer):
             t_flat.stride(0),
             t_flat.stride(1),
             BLOCK_H,
+            BLOCK_D,
+            clone_input,
         )
 
         ctx.save_for_backward(cos, sin)
@@ -264,8 +301,9 @@ class RoPEMLAInplaceFusion(paddle.autograd.PyLayer):
         ctx.pe_dim = pe_dim
         ctx.block_h = BLOCK_H
         ctx.shape = (B, S, H, D)
-        # Return the reshape-back view; storage is identical to input t.
-        return t
+        # clone_input=False returns the reshape-back view of the input, whose
+        # storage is identical to `t`; clone_input=True returns the new buffer.
+        return out
 
     @staticmethod
     def backward(ctx, grad):
@@ -343,17 +381,21 @@ def fused_apply_mla_rope_inplace(
 
     Args:
         t: [B, S, H, nope_dim + pe_dim], contiguous, bf16 (or fp16/fp32).
-            Mutated in place.
+            Mutated in place unless clone_input=True.
         freqs: [B, S, 1, pe_dim], fp32 angle tensor. May be non-contiguous.
         nope_dim: number of leading nope channels left untouched.
         mscale: scaling factor for rotary embedding.
         inverse: if True, apply the inverse rotation (used by the
             inv_rope post-attention canonicalisation step).
-        clone_input: if True, clone the input t before applying rope.
+        clone_input: if True, leave `t` untouched and return a new tensor
+            instead (needed when the upstream still reads `t`, e.g. an
+            attention output that its own backward has saved).
 
     Returns:
-        t (same storage as the input). Channels [..., :nope_dim] are
-        unchanged; channels [..., nope_dim:] are rotated.
+        With clone_input=False, `t` itself (same storage as the input).
+        With clone_input=True, a freshly allocated tensor; `t` is not
+        modified. Either way channels [..., :nope_dim] carry the input's
+        nope values unchanged and [..., nope_dim:] are rotated.
     """
     # Check t
     assert t.is_contiguous(), (

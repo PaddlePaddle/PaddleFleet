@@ -68,6 +68,7 @@ from paddlefleet.transformer.cp_utils import (
     get_compress_topk_idxs_cp,
     get_window_topk_idxs_cp,
     map_compressed_topk_to_kv_full_cp,
+    prepend_prev_window,
 )
 
 # Sentinel value in ``config.csa_compress_ratios`` selecting the full-causal
@@ -127,18 +128,32 @@ def _derive_csa_doc_boundaries(
     mask = startend_row_indices.flatten().cast("int64")
     positions = paddle.arange(seqlen, dtype="int64")
 
-    is_boundary = paddle.zeros([seqlen], dtype="bool")
-    is_boundary[0] = True
-    is_boundary[1:] = (positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1])
+    # Concat rather than ``is_boundary[0] = True``: assigning a Python bool into
+    # a device tensor issues a 1-byte pageable ``cudaMemcpy``, which blocks the
+    # host until the device queue drains. On the layer43 config that lands behind
+    # a DeepEP combine and costs ~2.9 ms per ``-2`` layer.
+    is_boundary = paddle.concat(
+        [
+            paddle.ones([1], dtype="bool"),
+            (positions[1:] == mask[:-1]) & (mask[1:] != mask[:-1]),
+        ]
+    )
 
-    doc_start_per_pos = paddle.cummax(
-        is_boundary.cast("int64") * positions, axis=0
-    ).values
+    # ``doc_start_per_pos`` is the most recent boundary at or before t. Boundary
+    # positions increase, so the running max of ``is_boundary * positions`` is a
+    # forward fill; once the boundaries are materialised -- which this function
+    # needs anyway for ``doc_lens`` / ``doc_starts`` -- a forward fill is cumsum
+    # + gather. ``paddle.cummax`` over a single long row falls into a one-block
+    # scan (``KernelScanInnerWithIndices``): 2.3 ms at seqlen 65536 and 5.3 ms at
+    # 131072, versus ~0.04 ms for cumsum + gather at either length.
+    doc_starts_i64 = paddle.nonzero(is_boundary).flatten()
+    doc_id = paddle.cumsum(is_boundary.cast("int32"), axis=0) - 1
+    doc_start_per_pos = paddle.gather(doc_starts_i64, doc_id, axis=0)
+
     pos_in_doc = positions - doc_start_per_pos
     doc_len_per_pos = mask - doc_start_per_pos
     is_valid = pos_in_doc < doc_len_per_pos
 
-    doc_starts_i64 = paddle.nonzero(is_boundary).flatten()
     doc_lens = (mask[doc_starts_i64] - doc_starts_i64).cast("int32")
     doc_starts = doc_starts_i64
 
@@ -438,10 +453,15 @@ class CSADocMaskMetadata:
     _window_topk_idxs: Tensor | None = None
     _window_size: int | None = None
     _compress_topk_idxs: Tensor | None = None
-    _compress_offset: int | None = None
+    _compress_offset: tuple[int, int, int] | None = None
     _compressed_causal_mask: Tensor | None = None
     _is_first_compressed_group: Tensor | None = None
     _mqa_causal_topk: tuple[Tensor, Tensor] | None = None
+    # Cached densified HCA attention indices (contiguous valid prefix + per-row
+    # count). Keyed by the concatenated width so a config that changes the
+    # window/compressed layout does not reuse a stale entry. Layer-independent,
+    # so the compaction sort runs once per batch and all HCA layers reuse it.
+    _compacted_attn_topk: dict | None = None
 
     @classmethod
     def build(
@@ -613,19 +633,23 @@ class CSADocMaskMetadata:
             self._window_size = window_size
         return self._window_topk_idxs
 
-    def get_compress_topk_idxs(self, offset: int) -> Tensor:
-        """Return ``[batch_size, seqlen, n_compressed]`` compressed indices.
+    def get_compress_topk_idxs(
+        self, offset: int, row_start: int = 0, row_count: int | None = None
+    ) -> Tensor:
+        """Return ``[batch_size, row_count, n_compressed]`` compressed indices.
 
         For each query position, valid compressed positions (within the
         document's causal valid range) carry ``compressed_id + offset``;
-        invalid slots are ``-1``. Cached and keyed by ``offset``.
+        invalid slots are ``-1``. ``row_start`` / ``row_count`` restrict the
+        query rows to build, which under CP lets a rank ask for its own shard
+        instead of the whole table. Cached and keyed by all three.
         """
-        offset = int(offset)
-        cache_hit = (
-            self._compress_topk_idxs is not None
-            and self._compress_offset == offset
+        key = (
+            int(offset),
+            int(row_start),
+            self.seqlen if row_count is None else int(row_count),
         )
-        if not cache_hit:
+        if self._compress_topk_idxs is None or self._compress_offset != key:
             from paddlefleet.triton_ops.document_mask_fusion import (
                 compressed_doc_start_triton,
                 compressed_topk_idxs_triton,
@@ -641,10 +665,34 @@ class CSADocMaskMetadata:
                 self.pos_in_doc,
                 self.doc_len_per_pos,
                 self.ratio,
-                offset,
+                key[0],
+                row_start=key[1],
+                row_count=key[2],
             )
-            self._compress_offset = offset
+            self._compress_offset = key
         return self._compress_topk_idxs
+
+    def compact_attn_topk_idxs(self, topk_idxs: Tensor):
+        """Densify HCA attention indices once per batch (cached, layer-shared).
+
+        Returns ``(compact_topk_idxs, topk_length)``: valid entries moved to a
+        contiguous prefix, ``-1`` trailing, and the exact per-row valid count.
+        The HCA ``[window | compressed]`` layout is derived only from document
+        bounds, so it is identical across all HCA layers -- compact it once here
+        (a sort) and every layer reuses the result, instead of paying a sort per
+        layer in the sparse-attention forward/backward. Keyed by the row width so
+        a differently shaped layout does not reuse a stale entry.
+        """
+        from paddlefleet.fusions.csa_sparse_attn import _csa_compact_topk_idxs
+
+        if self._compacted_attn_topk is None:
+            self._compacted_attn_topk = {}
+        key = int(topk_idxs.shape[-1])
+        cached = self._compacted_attn_topk.get(key)
+        if cached is None:
+            cached = _csa_compact_topk_idxs(topk_idxs)
+            self._compacted_attn_topk[key] = cached
+        return cached
 
     def get_compressed_causal_mask(self) -> Tensor:
         """Return ``[batch_size, seqlen, n_compressed]`` float32 causal mask.
@@ -1643,12 +1691,13 @@ class Compressor(nn.Layer):
             kv, _ = self.linear_wkv(x)  # [b, sq, coff * head_dim]
             score, _ = self.linear_wgate(x)  # [b, sq, coff * head_dim]
 
+        cp_size = getattr(cp_group, "nranks", 1) if cp_group is not None else 1
+        cp_rank = cp_group.rank if cp_size > 1 else 0
+
         # CP: gather projected KV globally before pooling (Miles pattern).
-        # This lets the compressor pool across the full sequence while keeping
-        # communication cheap (projected dim << hidden_size).
         # After all-gather, kv/score are global and sq is updated to sq_global.
         # The rest of the compression logic is shared with the non-CP path.
-        if cp_group is not None and getattr(cp_group, "nranks", 1) > 1:
+        if cp_size > 1:
             kv = all_gather_cp(kv, dim=1, group=cp_group)
             score = all_gather_cp(score, dim=1, group=cp_group)
             b, sq, _ = kv.shape
@@ -1659,6 +1708,31 @@ class Compressor(nn.Layer):
             n_compressed = sq // ratio
             actual_n_compressed = docmask_meta.actual_n_compressed
             cutoff_gather_indices = docmask_meta.cutoff_gather_indices
+
+            # Without the overlap transform a compressed group only reads its own
+            # ``ratio`` cutoff tokens, so the groups can be split across CP ranks.
+            n_shard = (
+                (actual_n_compressed + cp_size - 1) // cp_size
+                if cp_size > 1 and not self.overlap
+                else 0
+            )
+            if n_shard:
+                start = cp_rank * n_shard * ratio
+                cutoff_gather_indices = cutoff_gather_indices[
+                    start : start + n_shard * ratio
+                ]
+                pad_len = n_shard * ratio - cutoff_gather_indices.shape[0]
+                if pad_len > 0:
+                    # Slots past the last real group; dropped after the gather.
+                    cutoff_gather_indices = paddle.concat(
+                        [
+                            cutoff_gather_indices,
+                            paddle.zeros(
+                                [pad_len], dtype=cutoff_gather_indices.dtype
+                            ),
+                        ]
+                    )
+                actual_n_compressed = n_shard
 
             # Pack only valid cutoff data contiguously (no padding)
             kv = paddle.gather(kv, cutoff_gather_indices, axis=1)
@@ -1695,6 +1769,14 @@ class Compressor(nn.Layer):
                 )
             else:
                 kv = self.norm(kv.cast(x.dtype))
+
+            if n_shard:
+                # Shards concatenate into the dense group order; the tail beyond
+                # the last real group is padding and is re-added below.
+                actual_n_compressed = docmask_meta.actual_n_compressed
+                kv = all_gather_cp(kv, dim=1, group=cp_group)[
+                    :, :actual_n_compressed
+                ]
 
             # Pad to n_compressed before RoPE
             if actual_n_compressed < n_compressed:
@@ -2184,6 +2266,13 @@ class CompressedSparseAttention(FleetLayer):
         else:
             self.compressor = None
 
+        # HCA layers pool with the non-overlapping compressor (ratio >= 128), so
+        # a query reads raw KV only through its sliding window. CP relies on this
+        # to replace the global KV all-gather with a one-hop window exchange.
+        self.is_hca_layer = (
+            self.compressor is not None and not self.compressor.overlap
+        )
+
         # Conditionally build Indexer for CSA layers (1 < ratio < 128) and not dense_mode.
         # ratio 128 (HCA) intentionally falls through to the attend-to-all path.
         # Keep this in sync with dsa_attention.py indexer-layer count.
@@ -2204,6 +2293,9 @@ class CompressedSparseAttention(FleetLayer):
             config, "csa_indexer_backend", "tilelang"
         )
         self.indexer_loss_coeff = getattr(config, "dsa_indexer_loss_coeff", 0.0)
+        self.global_kv_idx_remap_fusion = getattr(
+            config, "sparse_attn_global_kv_idx_remap_fusion", False
+        )
 
     def _resolve_topk_effective(self, n_compressed: int):
         """Return the CSA indexer top-k width for current phase.
@@ -2785,6 +2877,7 @@ class CompressedSparseAttention(FleetLayer):
             topk_idxs,
             self.softmax_scale,
             indexer_topk=indexer_topk,
+            docmask_meta=docmask_meta,
         )
         if indexer_topk > 0:
             output, lse_indexer = output
@@ -2981,13 +3074,16 @@ class CompressedSparseAttention(FleetLayer):
         """CP-aware forward: local compress + all-gather, sparse attention.
 
         Mirrors the non-CP forward() structure exactly, with CP adaptations:
-          1. All-gather KV + compress (Miles pattern: gather projected, pool globally)
+          1. All-gather KV + compress; on HCA layers the sliding window is the
+             only raw-KV reader, so the all-gather shrinks to a one-hop
+             ``window_size`` exchange and the column ids are rebased onto it
           2. Indexer topk + fused loss (same three-branch logic as non-CP)
           3. Sparse attention (same compressed_sparse_attn dispatch)
           4. Attach loss (TileLangCSAIndexerLossAutoScaler or DSAIndexerLossAutoScaler)
 
         Gradient correctness:
-          - all_gather_cp backward (reduce-scatter) routes attention/loss grads
+          - all_gather_cp / prepend_prev_window backward route attention and
+            loss grads back to the ranks that own the KV
           - indexer_loss / cp_size corrects local-mean to global-mean scaling
           - param grads are partial (each rank sees local Q); production ZeRO
             reduce_scatter(SUM) + optimizer x cp_size aggregates them correctly
@@ -3013,11 +3109,22 @@ class CompressedSparseAttention(FleetLayer):
             window_idxs = full_window_idxs[
                 :, position_offset : position_offset + sq, ...
             ]
-        window_idxs = window_idxs.astype("int32").contiguous()
-
-        # Step 2: All-gather KV + compress
         kv_local = key.squeeze(2)  # [b, sq, hn]
-        kv_global = all_gather_cp(kv_local, dim=1, group=self.cp_group)
+        if self.is_hca_layer:
+            # A window query looks back at most ``window_size - 1`` rows, so
+            # kv_full can start at ``position_offset - window_size``: only that
+            # many rows cross the wire, and rebasing the ids onto the shorter
+            # kv_full reads the same values. ``-1`` slots must stay ``-1``.
+            kv_reach = prepend_prev_window(
+                kv_local, self.window_size, self.cp_group
+            )
+            kv_base = position_offset - self.window_size
+            window_idxs = paddle.where(
+                window_idxs >= 0, window_idxs - kv_base, window_idxs
+            )
+        else:
+            kv_reach = all_gather_cp(kv_local, dim=1, group=self.cp_group)
+        window_idxs = window_idxs.astype("int32").contiguous()
 
         compressed_kv_global = None
         n_compressed_local = 0
@@ -3040,7 +3147,7 @@ class CompressedSparseAttention(FleetLayer):
         else:
             actual_n_compressed = 0
 
-        offset = sq_global  # compressed indices follow vanilla KV in kv_full
+        offset = kv_reach.shape[1]  # compressed ids follow the reachable KV
 
         if (
             self.compressor is not None
@@ -3054,9 +3161,9 @@ class CompressedSparseAttention(FleetLayer):
                 cp_group=self.cp_group,
                 docmask_meta=docmask_meta,
             )
-            kv_full = paddle.concat([kv_global, compressed_kv_global], axis=1)
+            kv_full = paddle.concat([kv_reach, compressed_kv_global], axis=1)
         else:
-            kv_full = kv_global
+            kv_full = kv_reach
 
         # Step 3: Compressed topk + optional fused indexer loss
         indexer_loss = None
@@ -3301,12 +3408,12 @@ class CompressedSparseAttention(FleetLayer):
                         n_compressed_global,
                     )
                 else:
+                    # Build only this rank's query rows: the table is
+                    # [sq_global, n_compressed] and only sq of those rows are
+                    # ever read here.
                     compress_topk_idxs = docmask_meta.get_compress_topk_idxs(
-                        offset
+                        offset, row_start=position_offset, row_count=sq
                     )
-                    compress_topk_idxs = compress_topk_idxs[
-                        :, position_offset : position_offset + sq, ...
-                    ]
 
             compress_topk_idxs = compress_topk_idxs.astype("int32")
 
@@ -3333,6 +3440,7 @@ class CompressedSparseAttention(FleetLayer):
             topk_idxs,
             self.softmax_scale,
             indexer_topk=indexer_topk,
+            docmask_meta=docmask_meta,
         )
         if indexer_topk > 0:
             output, lse_indexer = output
@@ -3365,8 +3473,12 @@ class CompressedSparseAttention(FleetLayer):
         softmax_scale: float,
         topk_length: Tensor | None = None,
         indexer_topk: int = 0,
+        docmask_meta: CSADocMaskMetadata | None = None,
     ):
-        from paddlefleet.fusions.csa_sparse_attn import csa_sparse_attn
+        from paddlefleet.fusions.csa_sparse_attn import (
+            _csa_bwd_honours_topk_length_holes,
+            csa_sparse_attn,
+        )
 
         attn_sink_fp32 = (
             attn_sink.cast("bfloat16").cast("float32")
@@ -3376,6 +3488,29 @@ class CompressedSparseAttention(FleetLayer):
         sparse_attn_backend = getattr(
             self.config, "csa_sparse_attn_backend", "tilelang"
         )
+        # Compact once per batch via the shared docmask-metadata cache -- but
+        # ONLY for layers with no indexer (``self.indexer is None``: HCA /
+        # attend-to-all). Their ``topk_idxs = concat([window, compressed])`` is
+        # derived purely from document bounds, so it is identical across all
+        # same-ratio layers and safe to reuse by width. A layer WITH an indexer
+        # must NOT use this cache even when ``indexer_topk == 0`` (eval / tilelang
+        # / non-cuDNN indexer path): its ``compress_topk_idxs`` is the indexer's
+        # per-layer dynamic selection, so reusing the first same-ratio layer's
+        # compacted result by width would feed later layers the wrong KV set.
+        # Those layers fall back to the sparse-attn PyLayer's own per-layer
+        # compaction. Skip when a caller already supplied ``topk_length`` (the MQA
+        # path) or metadata is unavailable; cuDNN is the only backend that
+        # consumes ``topk_length``.
+        if (
+            self.indexer is None
+            and topk_length is None
+            and docmask_meta is not None
+            and sparse_attn_backend == "cudnn"
+            and _csa_bwd_honours_topk_length_holes()
+        ):
+            topk_idxs, topk_length = docmask_meta.compact_attn_topk_idxs(
+                topk_idxs
+            )
         return csa_sparse_attn(
             query,
             kv_full,
@@ -3385,4 +3520,5 @@ class CompressedSparseAttention(FleetLayer):
             backend=sparse_attn_backend,
             topk_length=topk_length,
             indexer_topk=indexer_topk,
+            global_kv_idx_remap_fusion=self.global_kv_idx_remap_fusion,
         )
