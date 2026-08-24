@@ -187,9 +187,7 @@ class TestGptEmbeddingErnie5(unittest.TestCase):
 
     def test_ernie5_magic_send_truncation(self) -> None:
         K, B, L, H = 2, 1, 10, 4
-        emb = _make_embedding(
-            K, B, L, H, use_erndata=False, magic_send=True
-        )
+        emb = _make_embedding(K, B, L, H, use_erndata=False, magic_send=True)
         input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
         out = emb.forward({"input_ids": input_ids})
         # magic-send truncates the main embedding to [B, L-K, H] and does not
@@ -395,9 +393,7 @@ class TestGptEmbeddingMagicSendCPSP(unittest.TestCase):
         # covers 555 (CP scatter), 564 (astype), 568/571/574 (SP reshape),
         # 575 (guard eval). 579 is skipped here (experimental&SP True).
         K, B, L, H = 2, 1, 8, 4
-        emb = _make_embedding(
-            K, B, L, H, use_erndata=False, magic_send=True
-        )
+        emb = _make_embedding(K, B, L, H, use_erndata=False, magic_send=True)
         emb.sequence_parallel = True
         emb.config.sequence_parallel = True
         emb.config.experimental_dataflow = True
@@ -410,9 +406,7 @@ class TestGptEmbeddingMagicSendCPSP(unittest.TestCase):
         # experimental_version=False + SP=True: the ``if not (experimental
         # and SP)`` guard is True, so line 579 (reshape/permute) runs.
         K, B, L, H = 2, 1, 8, 4
-        emb = _make_embedding(
-            K, B, L, H, use_erndata=False, magic_send=True
-        )
+        emb = _make_embedding(K, B, L, H, use_erndata=False, magic_send=True)
         emb.config.gpt_model_use_experimental_version = False
         emb.sequence_parallel = True
         emb.config.sequence_parallel = True

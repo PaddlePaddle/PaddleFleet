@@ -456,12 +456,10 @@ class GPTEmbedding(FleetLayer):
                         attn_mask_startend_row_indices is None
                         and cu_seqlens_q is not None
                     ):
-                        attn_mask_startend_row_indices = (
-                            build_startend_row_indices_from_cu_seqlens(
-                                cu_seqlens_q,
-                                decoder_input.shape[0],
-                                include_position_axis=self.config.gpt_model_use_experimental_version,
-                            )
+                        attn_mask_startend_row_indices = build_startend_row_indices_from_cu_seqlens(
+                            cu_seqlens_q,
+                            decoder_input.shape[0],
+                            include_position_axis=self.config.gpt_model_use_experimental_version,
                         )
 
                     # decoder_input: [B, L, H] full-length embedding (already
