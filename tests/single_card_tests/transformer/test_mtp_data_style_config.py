@@ -7,7 +7,8 @@
 
 Guards the new field's __post_init__ checks:
   1. Invalid string is rejected.
-  2. "megatron" requires num_nextn_predict_layers > 0 or mtp_num_layers > 0.
+  2. "megatron" requires num_nextn_predict_layers > 0 (the `mtp_num_layers`
+     alias is deliberately NOT accepted).
   3. "megatron" is incompatible with enable_mtp_magic_send.
   4. "megatron" is incompatible with experimental_dataflow.
   5. "ernie5" (default) never trips any of the new guards regardless of
@@ -39,13 +40,13 @@ class TestMtpDataStyleValidation(unittest.TestCase):
             TransformerConfig(**self._base_kwargs(mtp_data_style="invalid"))
 
     def test_megatron_requires_positive_mtp_k(self) -> None:
-        # Neither num_nextn_predict_layers nor mtp_num_layers > 0 → fail
+        # num_nextn_predict_layers is the only switch the megatron data path
+        # reads → K=0 must fail.
         with self.assertRaisesRegex(ValueError, r"mtp_data_style='megatron'"):
             TransformerConfig(
                 **self._base_kwargs(
                     mtp_data_style="megatron",
                     num_nextn_predict_layers=0,
-                    mtp_num_layers=0,
                 )
             )
 
@@ -58,15 +59,20 @@ class TestMtpDataStyleValidation(unittest.TestCase):
         )
         self.assertEqual(cfg.mtp_data_style, "megatron")
 
-    def test_megatron_accepts_mtp_num_layers(self) -> None:
-        cfg = TransformerConfig(
-            **self._base_kwargs(
-                mtp_data_style="megatron",
-                num_nextn_predict_layers=0,
-                mtp_num_layers=2,
+    def test_megatron_rejects_mtp_num_layers_alias_only(self) -> None:
+        # `mtp_num_layers` is honored by MTP layer *construction*
+        # (_get_effective_mtp_layers) but not by the megatron data path, which
+        # reads num_nextn_predict_layers everywhere. Configuring K only through
+        # the alias would build MTP layers that never receive shifted
+        # embeddings, so it must be rejected rather than silently accepted.
+        with self.assertRaisesRegex(ValueError, r"num_nextn_predict_layers"):
+            TransformerConfig(
+                **self._base_kwargs(
+                    mtp_data_style="megatron",
+                    num_nextn_predict_layers=0,
+                    mtp_num_layers=2,
+                )
             )
-        )
-        self.assertEqual(cfg.mtp_data_style, "megatron")
 
     def test_megatron_incompat_with_magic_send(self) -> None:
         # enable_mtp_magic_send also requires PP>1 (checked earlier in

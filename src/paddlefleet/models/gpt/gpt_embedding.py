@@ -333,6 +333,13 @@ class GPTEmbedding(FleetLayer):
         deepstack_visual_embeds = None
         visual_pos_mask = None
         mtp_emb_res = None
+        # CP zigzag context of the mtp_data_style="megatron" MTP branch below.
+        # The branch slices the embeddings itself (no ContextParallelScatterOp,
+        # which is gated on experimental_dataflow and therefore never runs for
+        # this style), so the RoPE tables have to be sliced with the very same
+        # layout further down. cp_size == 1 means "nothing to slice".
+        mtp_megatron_cp_size = 1
+        mtp_megatron_cp_rank = 0
 
         # Ingest cu_seqlens_q (raw int32 tensor) from the batch dict if the
         # dataloader put it there (mtp_data_style="megatron" path). We keep
@@ -451,6 +458,9 @@ class GPTEmbedding(FleetLayer):
                     _cp_rank = (
                         get_context_parallel_rank() if _cp_size > 1 else 0
                     )
+                    # Publish it so the RoPE tables below get the same slicing.
+                    mtp_megatron_cp_size = _cp_size
+                    mtp_megatron_cp_rank = _cp_rank
 
                     # Main embedding: [B, L, H] → [B, L/cp_size, H] via zigzag.
                     if _cp_size > 1:
@@ -722,6 +732,31 @@ class GPTEmbedding(FleetLayer):
         swa_rotary_pos_cos = None
         swa_rotary_pos_sin = None
 
+        def _slice_rope_for_mtp_megatron_cp(rope_table):
+            """Zigzag-slice a RoPE table for mtp_data_style="megatron" + CP > 1.
+
+            ``RotaryEmbedding.get_rotary_seq_len`` scales the rank-local input
+            length back up by ``cp_group.world_size``, so the tables below are
+            always built for the FULL sequence length L while the hidden states
+            this rank carries are its two zigzag chunks. The generic
+            ``ContextParallelScatterOp`` further down only runs for
+            ``experimental_dataflow``, which megatron style forbids, so the
+            slicing has to happen here -- with exactly the layout the megatron
+            MTP branch used for the embeddings.
+            """
+            if mtp_megatron_cp_size == 1 or rope_table is None:
+                return rope_table
+            from paddlefleet.transformer.multi_token_prediction import (
+                extract_local_zigzag_chunks,
+            )
+
+            return extract_local_zigzag_chunks(
+                rope_table,
+                mtp_megatron_cp_rank,
+                mtp_megatron_cp_size,
+                axis=1,
+            )
+
         # For MTP mode: truncate position_ids to match the actual sequence length
         # MTP reduces sequence length by num_nextn_predict_layers
         mtp_position_ids = position_ids
@@ -730,6 +765,12 @@ class GPTEmbedding(FleetLayer):
             and position_ids is not None
             and self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
+            # megatron style keeps the main decoder at the full length L (the
+            # per-doc shift happens inside the MTP layer), so position_ids
+            # already matches. Under CP mtp_emb_res[0] is the rank-local
+            # zigzag slice, whose length must not be mistaken for L - K: a
+            # contiguous prefix of position_ids is not this rank's chunk.
+            and getattr(self.config, "mtp_data_style", "ernie5") != "megatron"
         ):
             # mtp_emb_res[0] has shape [B, seq_len - num_nextn_predict_layers, H]
             actual_seq_len = mtp_emb_res[0].shape[1]
@@ -760,6 +801,7 @@ class GPTEmbedding(FleetLayer):
             )
 
         if rotary_pos_emb is not None:
+            rotary_pos_emb = _slice_rope_for_mtp_megatron_cp(rotary_pos_emb)
             if self.config.apply_rope_fusion:
                 rotary_pos_cos = paddle.cos(rotary_pos_emb)
                 rotary_pos_sin = paddle.sin(rotary_pos_emb)
@@ -799,6 +841,9 @@ class GPTEmbedding(FleetLayer):
             )
 
         if swa_rotary_pos_emb is not None:
+            swa_rotary_pos_emb = _slice_rope_for_mtp_megatron_cp(
+                swa_rotary_pos_emb
+            )
             if self.config.apply_rope_fusion:
                 swa_rotary_pos_cos = paddle.cos(swa_rotary_pos_emb)
                 swa_rotary_pos_sin = paddle.sin(swa_rotary_pos_emb)

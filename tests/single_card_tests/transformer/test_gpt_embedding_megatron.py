@@ -40,6 +40,7 @@ import unittest
 from unittest import mock
 from unittest.mock import MagicMock
 
+import numpy as np
 import paddle
 
 import paddlefleet.models.gpt.gpt_embedding as ge
@@ -267,6 +268,119 @@ class TestGptEmbeddingErnie5CPSP(unittest.TestCase):
         # SP layout [S, B, H]; concat of K+1 chunks each [L-K, B, H].
         self.assertEqual(
             list(out["hidden_states"].shape), [(K + 1) * (L - K), B, H]
+        )
+
+
+class _StubRope:
+    """Stand-in for ``RotaryEmbedding`` with an assertable layout.
+
+    Mirrors the two behaviours that matter here:
+    ``get_rotary_seq_len`` scales the rank-local length back up by the CP world
+    size (so the table is always built for the FULL length L), and ``__call__``
+    returns a ``[1, S, 1, D]`` table. Every channel holds the *global* position
+    index, which makes the CP slicing directly comparable against
+    ``extract_local_zigzag_chunks``.
+    """
+
+    def __init__(self, cp_size, dim=4):
+        self.cp_size = cp_size
+        self.dim = dim
+
+    def get_rotary_seq_len(
+        self, transformer_input, config, packed_seq_params=None
+    ):
+        return transformer_input.shape[1] * self.cp_size
+
+    def __call__(self, seq_len, packed_seq=False, position_ids=None):
+        pos = paddle.arange(seq_len, dtype="float32")
+        return pos.reshape([1, seq_len, 1, 1]).tile([1, 1, 1, self.dim])
+
+
+def _enable_rope(emb, cp_size, dim=4):
+    """Switch a fake embedding onto the real RoPE codepath."""
+    emb.position_embedding_type = "rope"
+    emb.rotary_pos_emb = _StubRope(cp_size, dim)
+    emb.training = True
+    # gpt_model_use_experimental_version nulls out every rope tensor.
+    emb.config.gpt_model_use_experimental_version = False
+    emb.config.apply_rope_fusion = False
+    return emb
+
+
+class TestGptEmbeddingMegatronCPRope(unittest.TestCase):
+    """RoPE must follow the megatron branch's zigzag CP layout.
+
+    ``ContextParallelScatterOp`` is gated on ``experimental_dataflow``, which
+    mtp_data_style="megatron" forbids, so without an explicit slice the
+    full-length table would reach a decoder that only holds L/cp positions.
+    """
+
+    def setUp(self) -> None:
+        LanguageLoss._cu_seqlens_q_stash = None
+
+    def tearDown(self) -> None:
+        LanguageLoss._cu_seqlens_q_stash = None
+
+    def test_rope_is_zigzag_sliced(self) -> None:
+        from paddlefleet.transformer.multi_token_prediction import (
+            extract_local_zigzag_chunks,
+        )
+
+        K, B, L, H, D = 2, 1, 8, 4, 4
+        emb = _enable_rope(_make_embedding(K, B, L, H), cp_size=2, dim=D)
+        input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
+        cu = paddle.to_tensor([0, 3, 8], dtype="int32")
+        with _fake_cp(cp_size=2):
+            out = emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu})
+
+        full = (
+            paddle.arange(L, dtype="float32")
+            .reshape([1, L, 1, 1])
+            .tile([1, 1, 1, D])
+        )
+        expected = extract_local_zigzag_chunks(full, 0, 2, axis=1)
+        np.testing.assert_array_equal(
+            out["rotary_pos_emb"].numpy(), expected.numpy()
+        )
+        # cp_rank 0 of cp_size 2 owns interval=L/4=2 -> positions [0, 1, 6, 7].
+        np.testing.assert_array_equal(
+            out["rotary_pos_emb"][0, :, 0, 0].numpy(),
+            np.array([0, 1, 6, 7], dtype="float32"),
+        )
+        # Matches the hidden-state length so the decoder can consume it.
+        self.assertEqual(
+            out["rotary_pos_emb"].shape[1], out["hidden_states"].shape[1]
+        )
+
+    def test_rope_untouched_without_cp(self) -> None:
+        K, B, L, H, D = 2, 1, 8, 4, 4
+        emb = _enable_rope(_make_embedding(K, B, L, H), cp_size=1, dim=D)
+        input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
+        cu = paddle.to_tensor([0, 3, 8], dtype="int32")
+        out = emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu})
+        np.testing.assert_array_equal(
+            out["rotary_pos_emb"][0, :, 0, 0].numpy(),
+            np.arange(L, dtype="float32"),
+        )
+
+    def test_ernie5_rope_not_sliced(self) -> None:
+        """Regression guard: the slice must be megatron-only."""
+        K, B, L, H, D = 2, 1, 8, 4, 4
+        # cp_size=2 makes the stub scale the rank-local length (L - K) back up
+        # to the full 2*(L - K), mirroring the real get_rotary_seq_len.
+        emb = _enable_rope(
+            _make_embedding(K, B, L, H, mtp_data_style="ernie5"),
+            cp_size=2,
+            dim=D,
+        )
+        input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
+        with _fake_cp(cp_size=2):
+            out = emb.forward({"input_ids": input_ids})
+        # ernie5 backbone length is L - K and its own CP scatter is gated on
+        # experimental_dataflow, so the table stays full-length as generated.
+        np.testing.assert_array_equal(
+            out["rotary_pos_emb"][0, :, 0, 0].numpy(),
+            np.arange((L - K) * 2, dtype="float32"),
         )
 
 

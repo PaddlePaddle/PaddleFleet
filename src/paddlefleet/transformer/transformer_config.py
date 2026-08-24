@@ -1762,15 +1762,19 @@ class TransformerConfig(ModelParallelConfig):
                 "Must be one of {'ernie5', 'megatron'}."
             )
         if self.mtp_data_style == "megatron":
-            _mtp_k = (
-                self.mtp_num_layers
-                if self.mtp_num_layers > 0
-                else self.num_nextn_predict_layers
-            )
-            if _mtp_k <= 0:
+            # K is read from `num_nextn_predict_layers` by every runtime
+            # consumer of the megatron data path (GPTEmbedding builds the K+1
+            # embedding chunks from it, `_forward_megatron_style` splits
+            # hidden_states into K+1 chunks with it). The `mtp_num_layers`
+            # alias is only honored by MTP *layer construction*
+            # (`_get_effective_mtp_layers`), so configuring K through the alias
+            # alone would build MTP layers that the data path never feeds.
+            # Require the canonical field instead of accepting either.
+            if self.num_nextn_predict_layers <= 0:
                 raise ValueError(
                     "mtp_data_style='megatron' requires "
-                    "num_nextn_predict_layers > 0 or mtp_num_layers > 0."
+                    "num_nextn_predict_layers > 0; the `mtp_num_layers` alias "
+                    "is not honored by the megatron MTP data path."
                 )
             if self.enable_mtp_magic_send:
                 raise ValueError(

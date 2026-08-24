@@ -213,6 +213,11 @@ tests:
   - test_case: [tests/multi_card_tests/test_separate_mtp_input_cp.py]
     products:
       - num_gpus: 2
+  # mtp_data_style="megatron" + CP=2: the RoPE tables must follow the same
+  # zigzag layout the megatron MTP branch slices the embeddings with.
+  - test_case: [tests/multi_card_tests/test_gpt_mtp_megatron_cp.py]
+    products:
+      - num_gpus: 2
   # default fallback for remaining multi_card_tests
   - test_case: [tests/multi_card_tests/pipeline_parallel/*.py]
     products:

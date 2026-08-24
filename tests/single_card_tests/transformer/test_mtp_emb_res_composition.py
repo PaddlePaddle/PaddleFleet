@@ -39,11 +39,25 @@ from __future__ import annotations
 
 import numpy as np
 import paddle
+import pytest
 
 from paddlefleet.transformer.multi_token_prediction import (
     extract_local_zigzag_chunks,
     roll_tensor,
 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_default_device():
+    """The tests below run the pure-python roll/extract helpers on CPU.
+
+    ``paddle.set_device`` is process-global, so without restoring it every test
+    collected after this file in the same pytest session would also run on CPU
+    and hit GPU-only kernels (``rms_norm``).
+    """
+    prev = paddle.get_device()
+    yield
+    paddle.set_device(prev)
 
 
 def _build_mtp_emb_res(
