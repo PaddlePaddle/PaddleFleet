@@ -89,8 +89,18 @@ class TestPipelineParallelMicroStepLocations(unittest.TestCase):
             PipelineParallelMicroStepLocations,
         )
 
-        members = list(PipelineParallelMicroStepLocations)
-        self.assertEqual(len(members), 4)
+        # The enum is an extension point: schedules may raise hooks at new
+        # locations, so pin the members that must exist instead of the total
+        # count, which breaks on every legitimate addition.
+        values = {m.value for m in PipelineParallelMicroStepLocations}
+        self.assertTrue(
+            {
+                "forward_begin",
+                "forward_end",
+                "backward_begin",
+                "backward_end",
+            }.issubset(values)
+        )
 
 
 class TestPipelineParallelMicroStepCallback(unittest.TestCase):
