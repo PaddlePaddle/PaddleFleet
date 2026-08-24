@@ -695,9 +695,11 @@ class GreedyGenerator:
 
         bsz, prompt_len = input_ids.shape
         generated = input_ids.clone()
-        logprob_start_len = _resolve_logprob_start_len(
-            logprob_start_len, prompt_len
-        )
+        # Ignored when log-probs are not requested, so only validate it then.
+        if return_log_probs:
+            logprob_start_len = _resolve_logprob_start_len(
+                logprob_start_len, prompt_len
+            )
 
         # Per-batch list accumulating log-probs from ``logprob_start_len`` on
         log_probs_per_batch: list[list[float]] | None = (
