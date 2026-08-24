@@ -551,6 +551,14 @@ class TransformerLayer(nn.Layer):
         Each block spans ``attn_res_block_size`` transformer layers, and the
         layer whose index is a multiple of that span closes the previous
         block. This matches Kimi K3's ``layer_idx % attn_res_block_size == 0``.
+
+        ``self.layer_number`` is the *physical* index, which the spec builders
+        shift by ``num_empty_layers_add_in_head`` so the empty head layers
+        occupy the leading slots (see
+        ``gpt_layer_specs.get_gpt_decoder_layers_spec``). The schedule is
+        defined on the logical decoder index, so undo that shift here --
+        otherwise the whole block layout slides by the offset and logical
+        layer 0 never opens a block.
         """
         block_span = self.attn_res_block_size
         if block_span <= 0:
@@ -558,7 +566,10 @@ class TransformerLayer(nn.Layer):
                 "attn_res_block_size must be at least 1 when "
                 "block_attention_residuals is enabled."
             )
-        return self.layer_number % block_span == 0
+        head_offset = (
+            getattr(self.config, "num_empty_layers_add_in_head", 0) or 0
+        )
+        return (self.layer_number - head_offset) % block_span == 0
 
     def _forward_impl_block_attn_res_split_recompute(
         self,
@@ -753,6 +764,7 @@ class TransformerLayer(nn.Layer):
             and not is_mtp
             and not self.config.mtp_load_weight_only
             and not self.config.enable_mtp_magic_send
+            and not self.config.separate_mtp_input
         ):
             # process hidden_states
             hidden_states_concat = dict_args["hidden_states"]
@@ -1008,6 +1020,7 @@ class TransformerLayer(nn.Layer):
             and not is_mtp
             and not self.config.mtp_load_weight_only
             and not self.config.enable_mtp_magic_send
+            and not self.config.separate_mtp_input
         ):
             hidden_states_concat = paddle.concat([output, *mtp_input])
             rst["hidden_states"] = hidden_states_concat
@@ -2125,6 +2138,7 @@ class HySparseTransformerLayer(TransformerLayer):
             and not is_mtp
             and not self.config.mtp_load_weight_only
             and not self.config.enable_mtp_magic_send
+            and not self.config.separate_mtp_input
         )
 
     def _mtp_split(self, dict_args, is_mtp):

@@ -54,6 +54,16 @@ PRECISION_SWITCHES = (
         ),
     ),
     PrecisionSwitch(
+        target="yaml",
+        key="mqa_sparse_attn_backward_backend",
+        value="tilelang",
+        reason=(
+            "精度对齐：absorbed-MQA（csa_compress_ratios=-2）层的 dKV 反向"
+            "默认走 cuDNN，其原子累加不可逐位复现，"
+            "与 CSA 后端一起统一切到确定性的 tilelang"
+        ),
+    ),
+    PrecisionSwitch(
         target="json",
         key="multimax_modules",
         value=None,

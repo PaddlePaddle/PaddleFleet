@@ -181,6 +181,14 @@ def _make_dsv4_instance(
         DSv4HybridAttention._full_attn_forward, inst
     )
     inst._gate = types.MethodType(DSv4HybridAttention._gate, inst)
+    # _full_attn_forward consults this before the inverse-RoPE block. Bind the
+    # real gate rather than a stub so a change to its conditions surfaces here;
+    # with use_vha_postmix False it returns False, keeping these tests on the
+    # unfused path they were written for.
+    inst._can_fuse_inv_rope_postmix = types.MethodType(
+        DSv4HybridAttention._can_fuse_inv_rope_postmix, inst
+    )
+    inst.vha_postmix_grouped = False
 
     return inst
 

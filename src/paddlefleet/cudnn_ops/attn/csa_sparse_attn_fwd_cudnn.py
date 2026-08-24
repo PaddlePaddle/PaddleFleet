@@ -22,7 +22,7 @@ and the index/alignment helpers it needs.
 import paddle
 import paddle.nn.functional as F
 
-from paddlefleet.fusions.csa_sparse_attn_utils import _local_to_global_flat
+from paddlefleet.fusions.csa_sparse_attn_utils import local_to_global_flat
 
 try:
     from paddlefleet_ops.flash_mla import (
@@ -55,6 +55,7 @@ def flash_mla_sparse_attn(
     indexer_topk: int = 0,
     d_v=None,
     topk_length=None,
+    global_kv_idx_remap_fusion: bool = False,
 ):
     if _flash_mla_sparse_fwd is None:
         raise RuntimeError("flash_mla is not available")
@@ -69,7 +70,9 @@ def flash_mla_sparse_attn(
 
     q_flat = q.reshape([b * sq, h, d])
     kv_flat = kv.reshape([b * skv, d])
-    global_idxs = _local_to_global_flat(topk_idxs, skv)
+    global_idxs = local_to_global_flat(
+        topk_idxs, skv, fused=global_kv_idx_remap_fusion
+    )
     # [b, sq] -> [b * sq]: one valid-prefix length per flattened query row.
     topk_length_flat = (
         None

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 
+import functools
 import os
 from contextlib import nullcontext
 from copy import deepcopy
@@ -199,7 +200,12 @@ class GroupedMLPExpert(FleetLayer):
         )
 
         if self.config.gated_linear_unit:
-            if self.config.hidden_act in [F.silu, F.gelu]:
+            hidden_act = self.config.hidden_act
+            is_gelu = hidden_act is F.gelu or (
+                isinstance(hidden_act, functools.partial)
+                and hidden_act.func is F.gelu
+            )
+            if hidden_act is F.silu or is_gelu:
 
                 def glu(x):
                     x = paddle.chunk(x, 2, dim=-1)

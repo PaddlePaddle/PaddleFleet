@@ -66,7 +66,7 @@ class TransformerConfig(ModelParallelConfig):
     mtp_num_layers: int = 0
     """MTP Layer number."""
 
-    mtp_loss_scaling_factor: float = 0.3
+    mtp_loss_scaling_factor: float = 0.1
     """Weighting factor of Multi-Token Prediction (MTP) loss."""
 
     add_mtp_loss: bool = True
@@ -88,6 +88,16 @@ class TransformerConfig(ModelParallelConfig):
     """When True, use magic send mechanism for MTP: broadcast input_ids to last PP stage
     and re-embed there, instead of pre-computing shifted embeddings at first stage
     and concatenating them through the pipeline."""
+
+    separate_mtp_input: bool = False
+    """When True, the shifted MTP embeddings computed by GPTEmbedding are handed to the
+    MTP layer through a dedicated ``mtp_decoder_inputs`` entry in ``dict_args`` instead
+    of being concatenated into ``hidden_states``. This removes the per-layer
+    split/concat of the MTP chunks while leaving GPTEmbedding's shifted-embedding
+    computation (including its CP/SP scatter) untouched, so the MTP layer must not
+    re-scatter them. Intended for pipeline_model_parallel_size == 1, where there is no
+    P2P send for the embeddings to piggyback on; ``enable_mtp_magic_send`` covers the
+    PP > 1 case."""
 
     experimental_dataflow: bool = False
     """When True, use new experimental dataflow where mtp_startend_row_indices_all is passed as a
@@ -234,6 +244,24 @@ class TransformerConfig(ModelParallelConfig):
     full cross-head mixing over all num_attention_heads (the earlier VHA design).
     True: within-group block-diagonal mixing that only recombines heads inside each
     o_group (mixing stays within a group)."""
+
+    fuse_inv_rope_into_vha_postmix: bool = False
+    """Fuse the HCA inverse RoPE into the ungrouped VHA postmix GEMM (DSv4 hybrid).
+
+    The unfused path materialises ``inv_rope(O)`` as a full-width tensor and feeds
+    it to the postmix ``[nh,nh]`` GEMM, which costs one extra read+write of the
+    whole attention output plus a second live copy of it. Because RoPE only
+    touches the trailing ``qk_pos_emb_head_dim`` channels while the GEMM
+    contracts the head axis, the same result can be assembled from a full-width
+    GEMM on the *unrotated* output plus a narrow GEMM on the rotated pe channels,
+    which never needs the wide intermediate.
+
+    Bitwise identical to the unfused path -- forward, activation gradient and the
+    postmix U/V gradients -- and asserted as such in
+    ``tests/single_card_tests/test_inv_rope_vha_postmix_fusion.py``. Requires
+    ``use_vha_attention`` and ``apply_rope_fusion``, and is skipped for
+    ``vha_postmix_grouped``, ``high_precision_rope`` and when the postmix has its
+    own selective recompute wrapper."""
 
     use_vha_premix: bool = False
     """If True (and use_vha_attention is also True), replaces the DSv4 hybrid Q up-projection
@@ -385,6 +413,12 @@ class TransformerConfig(ModelParallelConfig):
     block attention residuals. Controls how many layers
     accumulate standard residuals before applying the learned
     attention-weighted combination across blocks."""
+
+    attn_res_fusion: bool = True
+    """If True, use the FLA fused Triton kernel for Block Attention Residuals.
+    Fuses RMSNorm + projection + softmax + weighted sum into a single
+    kernel launch. Requires paddlefleet_ops with fla.ops.attnres.
+    Falls back to PyLayer when unavailable or deterministic_mode=True."""
 
     ####################
     # mixed-precision
@@ -577,8 +611,8 @@ class TransformerConfig(ModelParallelConfig):
     topk_method: str = "greedy"
     """Options are greedy, group_limited_greedy, noaux_tc, quantile_balancing"""
 
-    moe_token_dispatcher_type: str = "deepep"
-    """The type of token dispatcher to use. The default is 'deepep'.
+    moe_token_dispatcher_type: str = "alltoall"
+    """The type of token dispatcher to use. The default is 'alltoall'.
     Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
 
     moe_allgather_gate_overlap: bool = True
@@ -998,6 +1032,36 @@ class TransformerConfig(ModelParallelConfig):
     layout, which is what makes mixing them safe.
     """
 
+    mqa_indexer_cp_mode: str | None = None
+    """Row layout the latent-MQA indexer's forward runs on, under context parallel.
+
+    ``None`` (default) inherits ``cp_balance_mode``: the indexer scores this
+    rank's own contiguous row slice, so under a causal mask its cost grows with
+    the rank index. Measured at 256k/cp16: 2.2ms on cp0 vs 66.8ms on cp15 per
+    layer per pass, i.e. the slowest rank does 1.94x the average and every other
+    rank waits for it at the next collective.
+
+    ``"dualchunk_p2p"`` splits the global sequence into ``2 * cp_size`` chunks
+    and has rank ``r`` score chunks ``(2r, 2*cp_size-1-2r)`` instead of its own
+    ``(2r, 2r+1)``. The ids sum to ``2*cp_size-1`` on every rank, and a causal
+    row's candidate count grows linearly with its global position, so the work is
+    equal everywhere. Only the indexer's rows move -- attention is already
+    balanced at a fixed ``index_topk + window`` columns per row, so ``query`` and
+    the layer output never travel. Rank ``r`` keeps the chunk it already owns and
+    swaps the other with rank ``cp_size-1-r``, which reduces the exchange to a
+    single point-to-point sendrecv rather than an all-to-all.
+
+    The global token layout is untouched: this is a layer-local permutation,
+    undone before the layer returns, so the HCA layers of the same model are
+    unaffected and ``cp_balance_mode`` must stay contiguous.
+
+    Only the sparse training phase honours this, i.e. ``hybrid_mla_attention=
+    "mqa_dsa"`` with ``dsa_indexer_use_sparse_loss=True``. That is the only
+    phase whose indexer runs a top-k over per-rank rows; the warmup phase scores
+    the whole causal set through a different code path that does not permute
+    rows, so the other combinations are rejected rather than accepted-and-inert.
+    """
+
     v_head_dim: int | None = None
     """Dimension of the head in the V projection."""
 
@@ -1179,8 +1243,8 @@ class TransformerConfig(ModelParallelConfig):
     by TransformerConfig.transform_rules.
     """
 
-    dsa_indexer_loss_coeff: float | None = None
-    """KL loss coefficient for DSA Indexer training. None disables the KL loss.
+    dsa_indexer_loss_coeff: float = 0.0
+    """KL loss coefficient for DSA Indexer training. 0 disables the KL loss.
 
     Note: This field corresponds to the HuggingFace config.json field "indexer_loss_coeff".
     The mapping from HuggingFace field name to PaddleFleet internal field name is handled
@@ -1225,9 +1289,6 @@ class TransformerConfig(ModelParallelConfig):
     This allows compatibility with MLA's YaRN RoPE which always generates
     interleaved frequencies.
     """
-
-    dsa_indexer_loss_coeff: float = 0.01
-    """KL loss coefficient for DSA Indexer training. None disables the KL loss."""
 
     ####################
     # CSA / DSv4 Hybrid Attention
@@ -1345,6 +1406,22 @@ class TransformerConfig(ModelParallelConfig):
         kernel.
     """
 
+    mqa_sparse_attn_backward_backend: str = "cudnn"
+    """Backward kernel for the absorbed-MQA latent sparse attention (dkv).
+
+    One of {"cudnn", "tilelang"}:
+      * "cudnn" (default): cuDNN DSA backward. Fast, but ``dkv`` accumulates
+        with atomics and is **not** run-to-run reproducible; the drift is
+        bounded by ``test_block_sparse_dsa_gradcheck.py::TestDeterminism``.
+      * "tilelang": deterministic backward via
+        ``tilelang_ops.attn.mqa_latent_sparse_bwd``. ~14x slower on SM100 and
+        bitwise stable for identical inputs, independent of
+        ``FLAGS_cudnn_deterministic`` -- it always runs the atomic-free kernel
+        rather than selecting one from that flag.
+    The forward is always FlashMLA regardless of this switch; the tilelang
+    forward kernel cannot accept ``d_qk=576`` (not a power of two).
+    """
+
     csa_share_docmask_meta: bool = False
     """Share one ``CSADocMaskMetadata`` per (micro-batch, ratio, mask group).
 
@@ -1367,6 +1444,31 @@ class TransformerConfig(ModelParallelConfig):
     ``CSADocMaskMetadata``), so they can be enabled and measured independently.
     Requires the layers to actually run latent MQA -- ``__post_init__`` rejects
     the switch otherwise rather than let it be a silent no-op.
+    """
+
+    sparse_attn_global_kv_idx_remap_fusion: bool = False
+    """Whether to fuse the per-batch-local -> flat-global KV column index remap
+    (``idx + b * seqlen_kv``) consumed by the cuDNN / FlashMLA sparse-attention
+    kernels (``csa_sparse_attn_utils._local_to_global_flat``).
+
+    Not about MoE routing: these are KV *column* indices of the sparse-attention
+    support (window + compressed slots), not expert top-k ids.
+
+    The eager version spends seven elementwise kernels on the full
+    ``[b * sq, topk]`` table (``full`` + ``greater_equal`` + ``arange`` +
+    ``expand`` + ``scale`` + ``add`` + ``where``) to express a single pass; the
+    Triton kernel does it in one. The result is bit-identical, so this only
+    trades kernel count for a Triton dependency and can be flipped freely.
+
+    Scope: every ``_local_to_global_flat`` call site -- the ``"cudnn"``
+    sparse-attention forward and backward of both
+    ``CompressedSparseAttention`` (HCA ``ratio=128`` and CSA/DSA
+    ``1 < ratio < 128`` layers) and ``MQALatentAttention``. No effect on the
+    ``"tilelang"`` / ``"unfused"`` backends, which never build the flat global
+    index table, nor on ``block_sparse_mqa_attention_dsa``, which leaves it at
+    the default. ``MQALatentAttention``'s forward is always FlashMLA, so it
+    remaps regardless of ``mqa_sparse_attn_backward_backend``; only its
+    backward follows that switch.
     """
 
     stage1_overlap: bool = False
@@ -1464,6 +1566,7 @@ class TransformerConfig(ModelParallelConfig):
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
         "hca_rope_type": "hca_rope_type",
         "csa_rope_type": "csa_rope_type",
+        "mqa_sparse_attn_backward_backend": "mqa_sparse_attn_backward_backend",
     }
 
     # Config keys that were renamed and deliberately left without a silent
@@ -1559,6 +1662,41 @@ class TransformerConfig(ModelParallelConfig):
             assert not self.use_dense_mtp, (
                 "mtp_shared_last_layer cannot be True if use_dense_mtp= True"
             )
+
+        if self.separate_mtp_input:
+            # Raise instead of assert: with ``python -O`` assertions are stripped,
+            # and an unsupported combination would then silently enter a path that
+            # only holds for the layout below -- or crash much later inside
+            # MultiTokenPredictionLayer with a missing ``mtp_decoder_inputs``.
+            if self.num_nextn_predict_layers != 1:
+                raise ValueError(
+                    "separate_mtp_input only supports "
+                    "num_nextn_predict_layers == 1, got "
+                    f"num_nextn_predict_layers={self.num_nextn_predict_layers}. "
+                    "The MTP input is consumed once and stripped from dict_args, "
+                    "so deeper MTP layers would not receive it."
+                )
+            if self.pipeline_model_parallel_size != 1:
+                raise ValueError(
+                    "separate_mtp_input requires pipeline_model_parallel_size "
+                    "== 1, got pipeline_model_parallel_size="
+                    f"{self.pipeline_model_parallel_size}. Use "
+                    "enable_mtp_magic_send for pipeline_model_parallel_size > 1."
+                )
+            if self.enable_mtp_magic_send:
+                raise ValueError(
+                    "separate_mtp_input and enable_mtp_magic_send are mutually "
+                    "exclusive, got separate_mtp_input=True and "
+                    "enable_mtp_magic_send=True. They are two transports for the "
+                    "same tensor; pick the one matching the pipeline degree."
+                )
+            if self.mtp_load_weight_only:
+                raise ValueError(
+                    "separate_mtp_input is incompatible with "
+                    "mtp_load_weight_only=True. GPTEmbedding does not build the "
+                    "shifted MTP embeddings in that mode, so separate_mtp_input "
+                    "would silently do nothing."
+                )
 
         if self.enable_mtp_magic_send:
             assert not getattr(self, "tie_word_embeddings", False), (
@@ -2174,6 +2312,15 @@ class TransformerConfig(ModelParallelConfig):
                     f"csa_sparse_attn_backend={self.csa_sparse_attn_backend!r} is invalid. "
                     "Must be one of {'unfused', 'tilelang', 'cudnn'}."
                 )
+            if self.mqa_sparse_attn_backward_backend not in {
+                "cudnn",
+                "tilelang",
+            }:
+                raise ValueError(
+                    f"mqa_sparse_attn_backward_backend="
+                    f"{self.mqa_sparse_attn_backward_backend!r} is invalid. "
+                    "Must be one of {'cudnn', 'tilelang'}."
+                )
 
             # Per-attention-type RoPE variant validation (HCA / CSA).
             valid_rope_types = {"rope", "yarn"}
@@ -2469,3 +2616,152 @@ class TransformerConfig(ModelParallelConfig):
                     "hybrid_mla_cp_mode can only be set in dsv4_hybrid with "
                     "-2 in csa_compress_ratios."
                 )
+
+        # only support mqa_indexer_cp_mode == dualchunk_p2p if not None
+        if self.mqa_indexer_cp_mode is not None:
+            if self.mqa_indexer_cp_mode != "dualchunk_p2p":
+                raise ValueError(
+                    f"mqa_indexer_cp_mode={self.mqa_indexer_cp_mode!r} is "
+                    "invalid. Must be None or 'dualchunk_p2p'."
+                )
+            # The permutation is layer-local: the rows are swapped inside the
+            # MQA layer and swapped back before it returns, which is only sound
+            # while the *global* layout is the contiguous one the index tables
+            # are built against ("build over the global sequence, then take this
+            # rank's rows"). A dualchunk global layout would double-permute.
+            #
+            # Exact value rather than ``startswith("contiguous")``: under a real
+            # CP group ``MQALatentAttention.__init__`` accepts only
+            # ``contiguous_allgather``, so admitting ``contiguous_a2a`` here
+            # would pass config validation and then raise NotImplementedError at
+            # module construction -- a contract split between two layers.
+            if self.cp_balance_mode != "contiguous_allgather":
+                raise ValueError(
+                    f"mqa_indexer_cp_mode={self.mqa_indexer_cp_mode!r} needs "
+                    "cp_balance_mode='contiguous_allgather' (the only mode the "
+                    "latent-MQA layer supports under context parallel), got "
+                    f"{self.cp_balance_mode!r}."
+                )
+            # Same membership test as hybrid_mla_cp_mode above: no latent-MQA
+            # layer means no indexer to rebalance.
+            if self.experimental_attention_variant != "dsv4_hybrid" or (
+                -2 not in (self.csa_compress_ratios or ())
+            ):
+                raise ValueError(
+                    "mqa_indexer_cp_mode can only be set in dsv4_hybrid with "
+                    "-2 in csa_compress_ratios."
+                )
+            # ``MQALatentAttention`` reads the switch in ``_forward_sparse``
+            # only. The other two phases reach a different indexer path that
+            # does not permute rows -- ``hybrid_mla_attention="mha"`` builds no
+            # latent-MQA layer at all, and ``"mqa_dsa"`` with
+            # ``dsa_indexer_use_sparse_loss=False`` is the warmup phase, whose
+            # KL spans the whole per-document causal set with no top-k anywhere.
+            # Accepting those would start successfully and silently deliver none
+            # of the rebalance this switch advertises.
+            if (
+                self.hybrid_mla_attention != "mqa_dsa"
+                or not self.dsa_indexer_use_sparse_loss
+            ):
+                raise ValueError(
+                    f"mqa_indexer_cp_mode={self.mqa_indexer_cp_mode!r} only "
+                    "takes effect in the sparse training phase, which is "
+                    "hybrid_mla_attention='mqa_dsa' together with "
+                    "dsa_indexer_use_sparse_loss=True. This config has "
+                    f"hybrid_mla_attention={self.hybrid_mla_attention!r} and "
+                    "dsa_indexer_use_sparse_loss="
+                    f"{self.dsa_indexer_use_sparse_loss!r}, which runs an "
+                    "indexer path that scores the full causal set and never "
+                    "permutes rows, so the rebalance would be silently inert. "
+                    "Drop mqa_indexer_cp_mode, or move to the sparse phase. "
+                    "Note that train_indexer_only=True is the warmup phase by "
+                    "definition and so cannot carry it either."
+                )
+            # The two-chunks-per-rank split needs an even per-rank row count.
+            # ``TransformerConfig`` does not carry the sequence length, so that
+            # is checked at the swap itself (``cp_utils.dualchunk_swap``).
+
+        # separate_mtp_headloss validation.
+        if self.separate_mtp_headloss:
+            import warnings as _warnings
+
+            # Resolve the effective number of MTP layers, following the same
+            # logic used elsewhere in __post_init__ (see the csa branch above).
+            mtp_num_layers = self.num_nextn_predict_layers
+            mtp_enabled = mtp_num_layers > 0
+            pp_enabled = self.pipeline_model_parallel_size > 1
+
+            # 1. separate_mtp_headloss is only meaningful when both MTP and PP
+            #    are enabled; otherwise warn and force-disable it.
+            if not mtp_enabled or not pp_enabled:
+                _warnings.warn(
+                    "separate_mtp_headloss=True requires both MTP and pipeline "
+                    "parallel to be enabled "
+                    f"(mtp_num_layers={mtp_num_layers}, "
+                    f"pipeline_model_parallel_size={self.pipeline_model_parallel_size}). "
+                    "Forcing separate_mtp_headloss=False."
+                )
+                self.separate_mtp_headloss = False
+            else:
+                # Once MTP and PP are both enabled:
+                # 2. Layer-count vs pp*vpp guard.
+                #    The framework-enforced constraint is DIVISIBILITY: Paddle's
+                #    interleave segmentation (SegmentLayers.do_segment) asserts
+                #    the number of seg-weight-bearing layers is divisible by
+                #    pp*vpp, so an indivisible layout fails at build time.
+                #    Verified empirically on 8xH800 (pp=4, vpp=2): a divisible
+                #    layout with quotient > 1 (multiple layers per stage) builds
+                #    and constructs shared comm fine, so "exactly 1 layer per
+                #    stage" is stricter than the framework needs. We keep the
+                #    quotient==1 form as a conservative guard because the full
+                #    fwd/bwd path for separate_mtp_headloss under pp>1 is not yet
+                #    covered by any regression test; see
+                #    tests/multi_card_tests/pipeline_parallel/test_separate_mtp_headloss_pp.py
+                #    which asserts the build/segmentation/shared-layer-stage
+                #    contract.
+                pp_degree = self.pipeline_model_parallel_size
+                vpp_degree = self.virtual_pipeline_model_parallel_size
+                # When vpp is not enabled, vpp_degree may be None or a
+                # sentinel like -1. Normalize it to 1 before computing
+                # pp_degree*vpp_degree, otherwise the product would be wrong
+                # (e.g. negative).
+                if vpp_degree is None or vpp_degree <= 1:
+                    print(
+                        "[separate_mtp_headloss] vpp is not enabled "
+                        f"(virtual_pipeline_model_parallel_size={vpp_degree}); "
+                        "using vpp_degree=1 for the pp_degree*vpp_degree check."
+                    )
+                    vpp_degree = 1
+
+                num_empty_layers = self.num_empty_layers_add_in_head + max(
+                    0, self.num_empty_layers_add_in_tail - 1
+                )
+                total_layers = (
+                    self.num_hidden_layers + mtp_num_layers + num_empty_layers
+                )
+                denom = pp_degree * vpp_degree
+                if total_layers % denom != 0 or total_layers // denom != 1:
+                    _warnings.warn(
+                        "separate_mtp_headloss=True requires "
+                        "(num_hidden_layers + num_mtp_layers + num_empty_layers) "
+                        f"({self.num_hidden_layers} + {mtp_num_layers} + "
+                        f"{num_empty_layers} = {total_layers}) to be divisible "
+                        f"by pp_degree*vpp_degree ({pp_degree}*{vpp_degree} = "
+                        f"{denom}) and the quotient to equal 1 (exactly one "
+                        f"layer per pp*vpp stage), but got {total_layers} / "
+                        f"{denom} = {total_layers / denom}. "
+                        "Forcing separate_mtp_headloss=False."
+                    )
+                    self.separate_mtp_headloss = False
+
+                # 3. separate_mtp_headloss reserves tail EmptyLayer slots for the
+                #    separated MTP LMHead/Loss and main LMHead, so it needs at
+                #    least 3 tail empty layers.
+                if self.num_empty_layers_add_in_tail < 3:
+                    _warnings.warn(
+                        "separate_mtp_headloss=True requires "
+                        "num_empty_layers_add_in_tail >= 3 "
+                        f"(got {self.num_empty_layers_add_in_tail}). "
+                        "Forcing separate_mtp_headloss=False."
+                    )
+                    self.separate_mtp_headloss = False

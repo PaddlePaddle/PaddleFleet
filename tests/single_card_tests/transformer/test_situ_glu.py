@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import functools
 import os
 import subprocess
 import sys
@@ -661,6 +662,34 @@ class TestSituGLU(unittest.TestCase):
                         hidden_act(gate) * up,
                     )
                 )
+
+    def test_grouped_expert_supports_gelu_partial(self):
+        hidden_act = functools.partial(F.gelu, approximate=True)
+        config = TransformerConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=8,
+            moe_intermediate_size=4,
+            gated_linear_unit=True,
+            hidden_act=hidden_act,
+            params_dtype="bfloat16",
+        )
+        expert = GroupedMLPExpert(
+            num_local_experts=2,
+            config=config,
+            moe_deep_gemm=False,
+        )
+        x = paddle.linspace(-4.0, 4.0, 16).reshape([2, 8])
+        gate, up = paddle.chunk(x, chunks=2, axis=-1)
+
+        self.assertIs(config.hidden_act, hidden_act)
+        self.assertTrue(
+            paddle.allclose(
+                expert.activation_func(x),
+                F.gelu(gate, approximate=True) * up,
+            )
+        )
 
     def test_sonic_moe_rejects_non_swiglu_configurations(self):
         for hidden_act, gated_linear_unit in (

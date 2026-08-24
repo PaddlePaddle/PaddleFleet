@@ -19,6 +19,11 @@ from .fused_mla_yarn_rope_apply import (
 from .fused_sink_grad import fused_sink_grad
 from .fused_yarn_rope_freqs import fused_yarn_rope_freqs
 from .grouped_matmul_fusion import GroupedMatmulTriton, fused_grouped_matmul
+from .inv_rope_vha_postmix_fusion import (
+    InvRopeVhaPostmixFusion,
+    fused_inv_rope_vha_postmix,
+)
+from .local_to_global_idxs_fusion import local_to_global_flat_triton
 from .mla_rope_inplace_fusion import (
     fused_apply_mla_rope_inplace,
     fused_apply_rope_half,
@@ -54,6 +59,9 @@ __all__ = [
     "fused_apply_mla_rope_inplace",
     "fused_apply_rope_half",
     "fused_rope_cat_key",
+    "fused_inv_rope_vha_postmix",
+    "InvRopeVhaPostmixFusion",
+    "local_to_global_flat_triton",
     "ulysses_alltoall_fused_supported",
     "ulysses_single_all_to_all_fused",
 ]

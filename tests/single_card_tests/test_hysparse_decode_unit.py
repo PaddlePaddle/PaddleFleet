@@ -392,7 +392,7 @@ class TestMLAHySparseForwardRouting(unittest.TestCase):
             use_vha_postmix=False,
             layer_number=0,
             o_proj=lambda x: (x, None),
-            get_query_key_value_tensors=lambda *_: (
+            get_query_key_value_tensors=lambda *_, **__: (
                 query,
                 key,
                 value,
@@ -486,7 +486,7 @@ class TestMQAHySparseForwardRouting(unittest.TestCase):
             o_proj=lambda x: (x, None),
             layer_number=0,
             attn_mask_type=None,
-            get_query_key_value_tensors=lambda *_: (
+            get_query_key_value_tensors=lambda *_, **__: (
                 query,
                 key,
                 value,

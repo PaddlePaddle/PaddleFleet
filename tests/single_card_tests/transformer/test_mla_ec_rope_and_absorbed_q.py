@@ -29,6 +29,7 @@ import numpy as np
 import paddle
 from paddle.distributed.fleet.meta_parallel import build_spec_layer
 
+from paddlefleet.generation.greedy_generator import DynamicKVCache
 from paddlefleet.models.gpt.gpt_config import GPTConfig
 from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
@@ -909,57 +910,122 @@ class TestNonExperimentalVersionPositionIds(unittest.TestCase):
 
 
 class TestApplyRopeFusionNotSupportedInference(unittest.TestCase):
-    """Test that apply_rope_fusion raises NotImplementedError in eval mode (L994-1000).
+    """Fused MLA RoPE inference contract: prefill passes, incremental decode raises.
 
-    Both tests below flip ``config.apply_rope_fusion`` on the *already built*
+    All tests below flip ``config.apply_rope_fusion`` on the *already built*
     model and rely on the change taking effect at forward time. They are the
     regression guard for that contract: the effective fusion decision
     (``config.apply_rope_fusion and not mqa_latent``) is read at each use site
     rather than snapshotted in ``__init__``, so toggling the config after
     construction -- as generation/greedy_generator.py does for KV cache -- still
-    works. A construction-time snapshot would leave the flag False here and this
-    test would stop raising.
+    works.
+
+    The decode test additionally guards the ``is_decode`` gate at the fused
+    branch entry (multi_latent_attention.py, ``qkv_up_proj_and_rope_apply``):
+    once a layer has written its prefill KV into ``past_key_values``, the next
+    single-token call is an incremental decode step and must raise
+    NotImplementedError. Eval + prefill (cache still empty) must pass.
     """
 
-    def test_apply_rope_fusion_raises_in_eval(self):
-        """apply_rope_fusion=True in eval mode should raise NotImplementedError."""
+    def _build_fused_eval_model(self):
+        """Build the MLA GPT model, enable apply_rope_fusion, switch to eval."""
         model, config = _build_gpt_model(
             gpt_model_use_experimental_version=False
         )
-        # Enable apply_rope_fusion on all MLA layers
         for sublayer in model.sublayers():
             if hasattr(sublayer, "config") and hasattr(
                 sublayer.config, "apply_rope_fusion"
             ):
                 sublayer.config.apply_rope_fusion = True
-
         model.eval()
+        return model, config
 
-        sequence_length = 16
-        micro_batch_size = 2
+    def _run_prefill(self, model, config, cache, sequence_length, batch_size):
+        """Prefill through the fused branch, writing the layer KV cache.
+
+        Mirrors the ``greedy_generator.generate`` prefill call: full prompt,
+        ``past_key_values`` + ``use_cache=True``, no attention mask (causal
+        default).
+        """
         input_ids = paddle.randint(
-            0, config.vocab_size, [micro_batch_size, sequence_length]
+            0, config.vocab_size, [batch_size, sequence_length]
         )
         position_ids = (
             paddle.arange(sequence_length, dtype=paddle.int64)
             .unsqueeze(0)
-            .expand([micro_batch_size, sequence_length])
+            .expand([batch_size, sequence_length])
         )
-        attention_mask = paddle.ones(
-            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
+        return model(
+            {
+                "input_ids": input_ids,
+                "position_ids": position_ids,
+                "past_key_values": cache,
+                "use_cache": True,
+            }
         )
 
-        dict_args = {
-            "input_ids": input_ids,
-            "position_ids": position_ids,
-            "attention_mask": attention_mask,
-        }
+    def test_apply_rope_fusion_eval_prefill_succeeds(self):
+        """Eval + prefill must pass: the cache is still empty, so the
+        ``is_decode`` gate stays open even with ``use_cache=True``."""
+        model, config = self._build_fused_eval_model()
+
+        sequence_length = 16
+        micro_batch_size = 2
+        cache = DynamicKVCache(config.num_hidden_layers)
+
+        result = self._run_prefill(
+            model, config, cache, sequence_length, micro_batch_size
+        )
+
+        if isinstance(result, dict):
+            hidden_states = result["hidden_states"]
+        else:
+            hidden_states = result
+        self.assertEqual(
+            hidden_states.shape,
+            [micro_batch_size, sequence_length, config.vocab_size],
+        )
+        self.assertTrue(
+            cache.has_layer_cache(0),
+            "prefill should have written the layer KV cache",
+        )
+
+    def test_apply_rope_fusion_raises_in_decode(self):
+        """A single-token decode step on a populated cache must raise at the
+        fused-branch entry (``is_decode`` gate)."""
+        model, config = self._build_fused_eval_model()
+
+        sequence_length = 16
+        micro_batch_size = 2
+        cache = DynamicKVCache(config.num_hidden_layers)
+
+        self._run_prefill(
+            model, config, cache, sequence_length, micro_batch_size
+        )
+        self.assertTrue(
+            cache.has_layer_cache(0),
+            "prefill should have written the layer KV cache",
+        )
+
+        # Single-token decode step: same cache, non-zero position_ids
+        # (mirrors the greedy_generator decode loop).
+        next_tok = paddle.randint(0, config.vocab_size, [micro_batch_size, 1])
+        decode_position_ids = paddle.full(
+            [micro_batch_size, 1], sequence_length, dtype="int64"
+        )
 
         with self.assertRaises(NotImplementedError) as ctx:
-            model(dict_args)
+            model(
+                {
+                    "input_ids": next_tok,
+                    "position_ids": decode_position_ids,
+                    "past_key_values": cache,
+                    "use_cache": True,
+                }
+            )
 
         self.assertIn(
-            "apply_rope_fusion does not support dynamic inference yet",
+            "apply_rope_fusion does not support incremental decode in MLA yet.",
             str(ctx.exception),
         )
 

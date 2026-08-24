@@ -437,9 +437,12 @@ def all_gather_contiguous(input_tensor, group=None, axis=0):
     nranks = group.nranks
     if nranks == 1:
         return input_tensor.clone()
-    if axis == 0:
+    # NCCL concatenates rank contributions along the flat leading axis, so any
+    # ``axis`` whose preceding dims are all 1 is already an axis-0 gather: one
+    # collective instead of nranks buffers plus a paddle.concat.
+    if list(input_tensor.shape[:axis]) == [1] * axis:
         shape = list(input_tensor.shape)
-        shape[0] *= nranks
+        shape[axis] *= nranks
         gathered = paddle.empty(shape=shape, dtype=input_tensor.dtype)
         dist.stream.all_gather(
             gathered,
