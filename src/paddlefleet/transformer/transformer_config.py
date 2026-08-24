@@ -891,6 +891,20 @@ class TransformerConfig(ModelParallelConfig):
     high_precision_mhc: bool = True
     """Use high precision (float32) for mHC forward and backward computation."""
 
+    mhc_single_stream_init: bool = False
+    """Initialize the mHC mapping head so each sub-layer reads a single stream.
+
+    This is what the paper does. When True the dynamic mapping projection is
+    zero-initialized and the static bias gets the paper's A.6 values (b_pre = -3
+    except +3 on the sub-layer's home stream, b_post = 0, b_res = 6I - 3), so at
+    step 0 H_pre is one-hot on the home stream, H_post = 1 and H_res ~= I --
+    equivalent to a standard residual connection, and token-independent.
+
+    When False (the historical behaviour) the projection is Xavier-uniform and
+    the bias stays at zero, which makes H_pre = sigmoid(~0) = 0.5 and H_res a
+    uniform doubly-stochastic matrix: every sub-layer reads and writes an
+    averaged mixture of the n residual streams from step 0."""
+
     ####################
     # miscellaneous
     ####################

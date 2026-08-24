@@ -47,6 +47,15 @@ _P = _N * _N + 2 * _N
 _C = 64
 _EPS = 1e-6
 
+# Both supported stream counts. n = 2 needs its own coverage: nothing in the
+# init is n-agnostic by construction -- the three bias segments change length,
+# the 6I - 3 block changes shape, and the ``% n`` rotation degenerates. At n = 2
+# the sub-layer numbering 2*index / 2*index + 1 makes every attention sub-layer
+# read stream 0 and every MLP sub-layer read stream 1, so the home stream stops
+# depending on the layer at all -- a property worth pinning, and one that hides
+# phase errors an n = 4 assertion would catch.
+_NS = (2, _N)
+
 
 def _config(**kw):
     """Minimal config that satisfies the mHC field validation."""
@@ -275,6 +284,123 @@ class TestBdaSpanPaysOff(unittest.TestCase):
     def test_high_precision_pays(self):
         m = _module(use_fused_mhc=True, high_precision_mhc=True)
         self.assertTrue(m.bda_span_pays_off(0.0, training=True))
+
+
+class TestSingleStreamInit(unittest.TestCase):
+    """``mhc_single_stream_init`` gates the mapping-head initialization.
+
+    Off is the historical init and must stay what it was: a Xavier-uniform
+    projection and a zero bias. On is the paper's: a zero projection, so
+    h == bias at step 0, plus the A.6 bias.
+    """
+
+    def test_off_keeps_the_historical_init(self):
+        m = _module()
+        self.assertFalse(bool(paddle.all(m.mapping_proj.weight == 0)))
+        self.assertTrue(bool(paddle.all(m.bias == 0)))
+
+    def test_on_zeroes_the_projection(self):
+        m = _module(mhc_single_stream_init=True)
+        self.assertTrue(bool(paddle.all(m.mapping_proj.weight == 0)))
+
+    def test_on_writes_the_a6_bias(self):
+        """b_pre = -3 with +3 on the home stream, b_post = 0, b_res = 6I - 3."""
+        for n in _NS:
+            with self.subTest(n=n):
+                # layer_number=1 -> home stream 1 % n
+                m = _module(mhc_single_stream_init=True, num_residual_streams=n)
+                b = m.bias.astype("float32").numpy()
+                self.assertEqual(b.shape, (n * n + 2 * n,))
+                expected_pre = [-3.0] * n
+                expected_pre[1 % n] = 3.0
+                self.assertEqual(b[:n].tolist(), expected_pre)
+                self.assertEqual(b[n : 2 * n].tolist(), [0.0] * n)
+                res = b[2 * n :].reshape(n, n)
+                for i in range(n):
+                    for j in range(n):
+                        self.assertEqual(res[i][j], 3.0 if i == j else -3.0)
+
+    def test_home_stream_rotates_with_the_sub_layer_index(self):
+        """Consecutive sub-layers read stream 0, 1, ..., n-1, 0, ...
+
+        Constructed without seeding the tracker on purpose: this init is
+        deterministic, so unlike the Xavier branch it must not need the fork.
+
+        The whole b_pre segment is compared rather than its argmax: at n = 2 an
+        index written out of range leaves b_pre at [-3, -3], whose argmax is 0
+        -- the expected answer for every even sub-layer index.
+        """
+        for n in _NS:
+            with self.subTest(n=n):
+                cfg = _config(
+                    mhc_single_stream_init=True, num_residual_streams=n
+                )
+                for ln in range(n + 1):
+                    b = HyperConnectionModule(cfg, layer_number=ln).bias
+                    expected = [-3.0] * n
+                    expected[ln % n] = 3.0
+                    self.assertEqual(
+                        b[:n].astype("float32").numpy().tolist(),
+                        expected,
+                        f"n={n} layer_number={ln}",
+                    )
+                    # the other two segments do not rotate
+                    self.assertEqual(
+                        b[n : 2 * n].astype("float32").numpy().tolist(),
+                        [0.0] * n,
+                        f"n={n} layer_number={ln}",
+                    )
+
+    def test_step_0_mappings_are_a_standard_residual_connection(self):
+        """With W = 0 the mappings are the static ones, token-independent.
+
+        This is the whole point of the zero init, and it is a property of the
+        mappings, not of the bias: H_res only becomes ~= I after Sinkhorn. That
+        last step is n-dependent -- the diagonal is
+        e^3 / (e^3 + (n-1) e^-3), i.e. 0.9975 at n = 2 and 0.9926 at n = 4.
+        """
+        for n in _NS:
+            with self.subTest(n=n):
+                m = _module(mhc_single_stream_init=True, num_residual_streams=n)
+                home = 1 % n  # layer_number=1
+                paddle.seed(23)
+                x = paddle.randn(
+                    [_S, _B, n * _C], dtype=m.mapping_proj.weight.dtype
+                )
+                h_pre, h_post, h_res = m.compute_mappings(x)
+
+                # token-independent: every position sees the same mapping
+                for h in (h_pre, h_post, h_res):
+                    self.assertLess(float((h - h[:1, :1]).abs().max()), 1e-6)
+                # one-hot-ish read of the home stream, unit write, identity mix
+                self.assertAlmostEqual(
+                    float(h_pre[0, 0, home]), 0.9526, places=3
+                )
+                others = [float(h_pre[0, 0, i]) for i in range(n) if i != home]
+                self.assertLess(max(others), 0.05)
+                self.assertLess(float((h_post - 1.0).abs().max()), 1e-6)
+                self.assertGreater(
+                    float(paddle.diagonal(h_res[0, 0]).min()), 0.99
+                )
+
+    def test_the_zero_projection_still_gets_a_gradient(self):
+        """dh/dW = r*alpha*x != 0, so the projection is not pinned at zero.
+
+        A zero weight that also received no gradient would keep the mappings
+        static forever, i.e. the "dynamic" half of mHC would never turn on.
+        """
+        m = _module(mhc_single_stream_init=True)
+        paddle.seed(23)
+        x = paddle.randn([_S, _B, _N * _C], dtype=m.mapping_proj.weight.dtype)
+        h_pre, h_post, h_res = m.compute_mappings(x)
+        # weight the heads unequally so no gradient path cancels out
+        (h_pre.sum() + 2.0 * h_post.sum() + 3.0 * h_res.sum()).backward()
+        g = m.mapping_proj.weight.grad
+        self.assertIsNotNone(g)
+        self.assertEqual(g.shape, m.mapping_proj.weight.shape)
+        # ~7.6e-2 for this fixture, and the same order of magnitude as the
+        # Xavier branch gets: a zero weight does not attenuate its own gradient
+        self.assertGreater(float(g.abs().max()), 1e-4)
 
 
 if __name__ == "__main__":

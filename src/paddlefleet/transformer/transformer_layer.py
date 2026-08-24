@@ -1646,15 +1646,44 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             "HyperConnectionTransformerLayer does not support block_attention_residuals."
         )
 
+        # mHC treats attention and MLP as two independent layers (paper Fig. 3).
+        # HyperConnectionModule uses this index to rotate the one-hot H_pre bias
+        # across the n residual streams (mhc_single_stream_init only), so the two
+        # sub-layers must get distinct numbers or half of the streams would
+        # never be a "home stream".
+        #
+        # The rotation runs over the layer's logical position in the stack, which
+        # is not ``self.layer_number``:
+        #  - decoder layers are numbered index + num_empty_layers_add_in_head
+        #    (get_gpt_decoder_layers_spec), so the offset is subtracted to keep
+        #    the phase independent of the empty-head-layer count;
+        #  - MTP layers are numbered by their own 0-based index and carry no such
+        #    offset (get_gpt_mtp_layers_spec), so subtracting it would shift
+        #    their phase and, with empty head layers, make the index negative.
+        #    They keep reading and writing the n streams the backbone wrote, so
+        #    they continue the decoder's rotation rather than restarting it --
+        #    restarting would hand the first MTP sub-layer the same home stream
+        #    as the last decoder sub-layer whenever n is odd.
+        if self.is_mtp_layer:
+            mhc_logical_index = (
+                self.config.num_hidden_layers + self.layer_number
+            )
+        else:
+            head_offset = (
+                getattr(self.config, "num_empty_layers_add_in_head", 0) or 0
+            )
+            mhc_logical_index = self.layer_number - head_offset
+        mhc_sublayer_base = 2 * mhc_logical_index
+
         self.self_attention_hyper_connection = build_spec_layer(
             sublayers_spec.self_attention_hyper_connection,
             config=self.config,
-            layer_number=self.layer_number,
+            layer_number=mhc_sublayer_base,
         )
         self.mlp_hyper_connection = build_spec_layer(
             sublayers_spec.mlp_hyper_connection,
             config=self.config,
-            layer_number=self.layer_number,
+            layer_number=mhc_sublayer_base + 1,
         )
 
         # The hyper-connection submodules are created after super().__init__()
