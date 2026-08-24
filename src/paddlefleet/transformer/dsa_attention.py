@@ -1445,9 +1445,10 @@ class DSAttention(FleetLayer):
             pg_collection=pg_collection,
         )
 
-        # DSA loss config
-        self.dsa_indexer_loss_coeff = getattr(
-            config, "dsa_indexer_loss_coeff", None
+        # DSA loss config; None is normalized to 0.0 (disabled), so all
+        # downstream checks can key on ``> 0`` instead of ``is not None``.
+        self.dsa_indexer_loss_coeff = float(
+            getattr(config, "dsa_indexer_loss_coeff", 0.0) or 0.0
         )
         self.dsa_indexer_use_sparse_loss = getattr(
             config, "dsa_indexer_use_sparse_loss", False
@@ -1551,8 +1552,9 @@ class DSAttention(FleetLayer):
                 0
             )  # [1, 1, sq, sk]
 
-        # Training with indexer loss
-        if self.training and self.dsa_indexer_loss_coeff is not None:
+        # Training with indexer loss (coeff is normalized to 0.0 when
+        # unset/None, so ``> 0`` is the single "enabled" check)
+        if self.training and self.dsa_indexer_loss_coeff > 0:
             # Indexer forward_before_topk runs WITH gradient tracking
             # RoPE is computed internally by the indexer
             q_idx, k_idx, weights_idx = self.indexer.forward_before_topk(x, qr)
@@ -1565,7 +1567,7 @@ class DSAttention(FleetLayer):
                 key.detach(),
                 self.softmax_scale,
                 self.indexer.index_topk,
-                float(self.dsa_indexer_loss_coeff),
+                self.dsa_indexer_loss_coeff,
                 indexer_float_mask,
                 bool(self.dsa_indexer_use_sparse_loss),
                 self.pg_collection.tp
@@ -1610,10 +1612,7 @@ class DSAttention(FleetLayer):
 
         # Attach indexer loss if training
         if self.training and indexer_loss is not None:
-            if (
-                self.dsa_indexer_loss_coeff is not None
-                and self.dsa_indexer_loss_coeff > 0
-            ):
+            if self.dsa_indexer_loss_coeff > 0:
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(
                     loss=indexer_loss,
                     layer_number=self.layer_number,

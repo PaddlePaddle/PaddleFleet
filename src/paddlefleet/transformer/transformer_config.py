@@ -1246,6 +1246,9 @@ class TransformerConfig(ModelParallelConfig):
     dsa_indexer_loss_coeff: float = 0.0
     """KL loss coefficient for DSA Indexer training. 0 disables the KL loss.
 
+    ``None`` is normalized to 0.0 (disabled) both in ``__post_init__`` and at
+    every read site, so downstream code must never branch on ``is None``.
+
     Note: This field corresponds to the HuggingFace config.json field "indexer_loss_coeff".
     The mapping from HuggingFace field name to PaddleFleet internal field name is handled
     by TransformerConfig.transform_rules.
@@ -1654,6 +1657,11 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        # Normalize the indexer loss coefficient: None (e.g. from a HuggingFace
+        # config.json ``"indexer_loss_coeff": null`` or explicit config) means
+        # "disabled" and collapses to 0.0, so this config object never exposes
+        # None and consumers can key on ``> 0`` instead of ``is not None``.
+        self.dsa_indexer_loss_coeff = float(self.dsa_indexer_loss_coeff or 0.0)
         if self.mtp_shared_last_layer:
             # When MTP reuses the last backbone TransformerLayer's parameters,
             # the MTP transformer block must have an identical structure to the
@@ -2332,8 +2340,10 @@ class TransformerConfig(ModelParallelConfig):
                         "{'rope', 'yarn'} or None (keep default)."
                     )
             if self.train_indexer_only:
-                loss_coeff = getattr(self, "dsa_indexer_loss_coeff", None)
-                if not loss_coeff or float(loss_coeff) <= 0:
+                loss_coeff = float(
+                    getattr(self, "dsa_indexer_loss_coeff", 0.0) or 0.0
+                )
+                if loss_coeff <= 0:
                     raise ValueError(
                         "train_indexer_only=True requires a positive "
                         f"dsa_indexer_loss_coeff, got {loss_coeff!r}; otherwise the "

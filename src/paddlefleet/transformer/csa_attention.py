@@ -2292,7 +2292,9 @@ class CompressedSparseAttention(FleetLayer):
         self.indexer_backend = getattr(
             config, "csa_indexer_backend", "tilelang"
         )
-        self.indexer_loss_coeff = getattr(config, "dsa_indexer_loss_coeff", 0.0)
+        self.indexer_loss_coeff = float(
+            getattr(config, "dsa_indexer_loss_coeff", 0.0) or 0.0
+        )
         self.global_kv_idx_remap_fusion = getattr(
             config, "sparse_attn_global_kv_idx_remap_fusion", False
         )
@@ -2445,8 +2447,8 @@ class CompressedSparseAttention(FleetLayer):
                         docmask_meta=docmask_meta,
                     )
                 )
-                indexer_loss_coeff = getattr(
-                    self.config, "dsa_indexer_loss_coeff", 0.0
+                indexer_loss_coeff = float(
+                    getattr(self.config, "dsa_indexer_loss_coeff", 0.0) or 0.0
                 )
                 key_for_loss = compressed_kv.unsqueeze(2).expand(
                     [-1, -1, np_heads, -1]
@@ -3222,8 +3224,8 @@ class CompressedSparseAttention(FleetLayer):
                     )
                 )
 
-                indexer_loss_coeff = getattr(
-                    self.config, "dsa_indexer_loss_coeff", 0.0
+                indexer_loss_coeff = float(
+                    getattr(self.config, "dsa_indexer_loss_coeff", 0.0) or 0.0
                 )
 
                 if use_tilelang_indexer or use_cudnn_indexer:
