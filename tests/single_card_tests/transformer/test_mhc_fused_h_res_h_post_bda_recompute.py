@@ -35,7 +35,7 @@ change, so it is only bounded loosely, and it is checked at all so that the
 bitwise assertions cannot pass vacuously.
 
 Coverage: both BDA kernels (native / ``fused_h_post_bda``), bias present and
-absent, ``high_precision_mhc`` on and off, fp32 and bf16, two stacked
+absent, fp32 and bf16, two stacked
 half-layers so the second aggregate consumes the first BDA output (this is what
 caught the ``h_res``/``h_post`` ``_clear_data()`` aliasing bug), the whole layer
 through ``recompute_modules=['mhc_forward']``, and the span contract itself: a
@@ -348,21 +348,6 @@ class TestFusedHResHPostBDASpanNumerics(_CompareMixin, unittest.TestCase):
             dtype="bfloat16",
         )
 
-    def test_low_precision_mhc_is_not_wrapped(self):
-        # Without high_precision_mhc the kernel saves only live tensors (reshape
-        # is a view, no up-cast), so the helper must decline to wrap: a span
-        # there would cost a replay and save nothing.
-        self._check({"high_precision_mhc": False}, expect_span=False)
-
-    def test_low_precision_mhc_with_dropout_is_wrapped(self):
-        # ...but active dropout puts even a low-precision config on the
-        # sequential path, whose mask the span does hide, so the
-        # high_precision_mhc veto must not swallow this case.
-        self._check(
-            {"high_precision_mhc": False, "hidden_dropout_prob": 0.1},
-            with_bias=True,
-        )
-
     def test_sequential_path_with_dropout_with_bias(self):
         # Active dropout takes fused_h_res_h_post_bda down the sequential path,
         # where the span hides that path's dropout mask instead of an up-cast,
@@ -418,17 +403,6 @@ class TestFusedHResHPostBDASpanContract(_CompareMixin, unittest.TestCase):
         )
         self.assertIsNone(span)
 
-    def test_no_span_without_high_precision_mhc(self):
-        # The helper must veto the caller here: with no up-cast to hide there is
-        # nothing to save, only a replay to pay for.
-        layer, hc = self._prepare(high_precision_mhc=False)
-        resid, _, h_res, h_post, x = _bda_inputs(layer, hc, "float32")
-        out, span = layer._fused_h_res_h_post_bda(
-            hc, h_res, resid, h_post, (x, None), True
-        )
-        self.assertIsNone(span)
-        self.assertEqual(out.dtype, resid.dtype)
-
     def test_span_created_when_it_pays_off(self):
         layer, hc = self._prepare()
         resid, _, h_res, h_post, x = _bda_inputs(layer, hc, "float32")
@@ -464,19 +438,6 @@ class TestFusedHResHPostBDASpanContract(_CompareMixin, unittest.TestCase):
             span.preserve_rng_state,
             "the dropout mask cannot be reproduced without the RNG state",
         )
-
-    def test_span_created_for_low_precision_dropout(self):
-        # The mask is a byte per output element whatever the mHC precision, so
-        # the high_precision_mhc veto must not run before the dropout check
-        # (measured: same 252 KiB saving as the high-precision config).
-        layer, hc = self._prepare(
-            high_precision_mhc=False, hidden_dropout_prob=0.1
-        )
-        resid, _, h_res, h_post, x = _bda_inputs(layer, hc, "float32")
-        _, span = layer._fused_h_res_h_post_bda(
-            hc, h_res, resid, h_post, (x, None), True
-        )
-        self.assertIsInstance(span, RecomputeWithoutOutput)
 
     def test_span_created_for_accuracy_compatible_kernel_with_dropout(self):
         # Same reasoning for the other sequential-path trigger: the switch
@@ -654,11 +615,6 @@ class TestFusedHResHPostBDASpanMemory(unittest.TestCase):
 
     def test_span_shrinks_the_retained_set_on_the_sequential_path(self):
         self._assert_sequential_span_saves()
-
-    def test_span_shrinks_the_retained_set_without_high_precision_mhc(self):
-        # The mask does not care about mHC precision, so the gate must not veto
-        # this config on the high_precision_mhc check alone.
-        self._assert_sequential_span_saves(high_precision_mhc=False)
 
 
 def _span_spy(created, force_disable=False):

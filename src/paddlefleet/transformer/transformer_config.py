@@ -1906,6 +1906,11 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError(
                     "use_fused_mhc requires enable_hyper_connections=True."
                 )
+        if self.enable_hyper_connections:
+            if not self.high_precision_mhc:
+                raise ValueError(
+                    "enable_hyper_connections not support high_precision_mhc=False yet."
+                )
 
         # Shared document-mask metadata validation. Both switches only mean
         # something on a DSv4-hybrid model, and the MQA one additionally needs the
