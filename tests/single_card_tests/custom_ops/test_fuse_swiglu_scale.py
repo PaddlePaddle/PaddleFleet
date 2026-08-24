@@ -604,6 +604,12 @@ class TestFusedSwiGLUScale(unittest.TestCase):
                 dynamic_clamp_out = ops.fused_swiglu_scale_clamp(
                     dynamic_x, dynamic_scale, 7.0
                 )
+                dynamic_dout = paddle.static.data(
+                    "dynamic_dout", [-1, -1], dtype="bfloat16"
+                )
+                dynamic_weighted = ops.fused_swiglu_weighted_clamp_bwd(
+                    dynamic_x, dynamic_scale, dynamic_dout, 7.0
+                )
 
                 self.assertEqual(out.shape, [-1, 8])
                 self.assertEqual(
@@ -611,8 +617,9 @@ class TestFusedSwiGLUScale(unittest.TestCase):
                 )
                 self.assertEqual(clamp_out.shape, [-1, 8])
                 self.assertEqual(grad_x.shape, [-1, 16])
-                self.assertEqual(dynamic_out.shape[0], -1)
-                self.assertEqual(dynamic_clamp_out.shape[0], -1)
+                self.assertEqual(dynamic_out.shape, [-1, -1])
+                self.assertEqual(dynamic_clamp_out.shape, [-1, -1])
+                self.assertEqual(dynamic_weighted[2].shape, [-1, -1])
         finally:
             paddle.disable_static()
 

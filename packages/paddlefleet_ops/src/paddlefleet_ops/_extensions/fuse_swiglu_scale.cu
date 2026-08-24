@@ -379,6 +379,15 @@ static void CheckFusedSwiGLUXShape(const std::vector<int64_t>& x_shape,
            ": the last dimension of X must be divisible by 2");
 }
 
+static std::vector<int64_t> InferFusedSwiGLUOutputShape(
+    const std::vector<int64_t>& x_shape, const char* op_name) {
+  CheckFusedSwiGLUXShape(x_shape, op_name);
+  // Preserve Paddle's unknown-dimension sentinel instead of evaluating
+  // -1 / 2 as zero during static shape inference.
+  const int64_t hidden_size = x_shape[1] < 0 ? -1 : x_shape[1] / 2;
+  return {x_shape[0], hidden_size};
+}
+
 static void CheckFusedSwiGLUInputs(const paddle::Tensor& x,
                                    const paddle::Tensor& scale,
                                    const paddle::Tensor* d_out,
@@ -814,8 +823,7 @@ static std::vector<std::vector<int64_t>> FusedFwdInferShapeImpl(
     const std::vector<int64_t>& x_shape,
     const std::vector<int64_t>& scale_shape,
     const char* op_name) {
-  CheckFusedSwiGLUXShape(x_shape, op_name);
-  return {{x_shape[0], x_shape[1] / 2}};
+  return {InferFusedSwiGLUOutputShape(x_shape, op_name)};
 }
 
 std::vector<std::vector<int64_t>> FusedFwdInferShape(
@@ -919,8 +927,10 @@ std::vector<std::vector<int64_t>> WeightedBwdClampInferShape(
     std::vector<int64_t> x_shape,
     std::vector<int64_t> probs_shape,
     std::vector<int64_t> dout_shape) {
-  CheckFusedSwiGLUXShape(x_shape, "fused_swiglu_weighted_clamp_bwd");
-  return {x_shape, {x_shape[0], 1}, {x_shape[0], x_shape[1] / 2}};
+  return {x_shape,
+          {x_shape[0], 1},
+          InferFusedSwiGLUOutputShape(
+              x_shape, "fused_swiglu_weighted_clamp_bwd")};
 }
 
 PD_BUILD_OP(fused_swiglu_weighted_clamp_bwd)
