@@ -805,10 +805,24 @@ class MultiTokenPredictionLayer(FleetLayer):
                 "multi token prediction + sequence packing is not yet supported."
             )
 
-        # === Magic Send branch ===
-        if self.config.enable_mtp_magic_send:
+        # === MTP input arrives outside hidden_states ===
+        # hidden_states is the pure backbone output in both cases. The shifted MTP
+        # embeddings either come from a local re-embedding of input_ids
+        # (magic_send, PP > 1) or straight from GPTEmbedding through
+        # mtp_decoder_inputs (separate_mtp_input, PP == 1), in which case they are
+        # already CP/SP-scattered and must not be scattered again.
+        if self.config.enable_mtp_magic_send or self.config.separate_mtp_input:
             prev = dict_args["hidden_states"]
             mhc_multistream = dict_args.pop("mhc_multistream", None)
+            # Consumed by this layer only: pop it so it does not ride along in
+            # the **kwargs passthrough of _proj_and_transformer_layer.
+            mtp_decoder_inputs = dict_args.pop("mtp_decoder_inputs", None)
+            if self.config.separate_mtp_input and mtp_decoder_inputs is None:
+                raise RuntimeError(
+                    "separate_mtp_input=True but mtp_decoder_inputs not found in "
+                    "dict_args. GPTEmbedding may not have produced the shifted MTP "
+                    "embeddings."
+                )
 
             # Split prev into segments, take last as chain_input
             n_slices = self.layer_number + 1
@@ -828,38 +842,10 @@ class MultiTokenPredictionLayer(FleetLayer):
                 )
                 chain_input = mhc_chunks[self.layer_number]
 
-            # --- Index-based input_ids addressing ---
-            from paddlefleet.models.gpt.mtp_embedding_layer import (
-                mtp_magic_instance,
-            )
-
-            magic_count = mtp_magic_instance.get_magic_count(self.magic_key)
-            # Skip increment during recompute replay
-            if paddle.is_grad_enabled() or not self.training:
-                magic_count += 1
-                mtp_magic_instance.set_magic_count(self.magic_key, magic_count)
-            input_ids_list = mtp_magic_instance.get("input_ids")
-            magic_idx = magic_count % len(input_ids_list)
-            input_ids = input_ids_list[magic_idx]
-
-            # Re-embed input_ids locally
-            mtp_input_embeds = self.mtp_embed(input_ids).astype(
-                self.mtp_embed.weight.dtype
-            )
-
-            # Zero-out padding for MoE routing
-            if (
-                self.config.expert_model_parallel_size > 1
-                and self.config.tensor_model_parallel_size < 2
-            ):
-                from paddlefleet.models.gpt.utils import fill_feature
-
-                pad_token_id = getattr(self.config, "pad_token_id", 0) or 0
-                mtp_input_embeds = fill_feature(
-                    mtp_input_embeds, input_ids == pad_token_id, 0
-                )
-
-            # Compute global seq_len
+            # Main sequence length as seen from chain_input, which is already
+            # CP-local and/or SP-local.  Used to trim rotary below, and (magic
+            # send only) scaled back up to the global length for slicing the
+            # re-embedded input_ids.
             cp_world_size = get_context_parallel_world_size()
             if self.config.sequence_parallel:
                 seq_len = (
@@ -868,37 +854,85 @@ class MultiTokenPredictionLayer(FleetLayer):
                 )
             else:
                 seq_len = chain_input.shape[1]
-            if cp_world_size > 1 and self.config.experimental_dataflow:
-                seq_len = seq_len * cp_world_size
-
-            # Shifted embedding slice for current depth
             depth = self.layer_number
-            decoder_input = mtp_input_embeds[
-                :, (depth + 1) : (depth + 1 + seq_len), :
-            ]
 
-            # CP/SP scatter
-            if cp_world_size > 1 and self.config.experimental_dataflow:
-                decoder_input = ContextParallelScatterOp.apply(
-                    decoder_input, axis=1, mode=self.config.cp_balance_mode
+            if self.config.separate_mtp_input:
+                # GPTEmbedding already produced this depth's shifted embedding in
+                # exactly the layout chain_input has, so there is nothing to
+                # slice and nothing to scatter.
+                decoder_input = mtp_decoder_inputs[depth]
+                mtp_input_ids_all = dict_args.get(
+                    "mtp_input_ids_for_moe_mask", None
                 )
-            if self.config.sequence_parallel:
-                batch_size, local_seq_len, hidden_size = decoder_input.shape
-                decoder_input = decoder_input.reshape(
-                    [-1, decoder_input.shape[-1]]
+                mtp_input_ids_local = (
+                    mtp_input_ids_all[:, depth, :].contiguous()
+                    if mtp_input_ids_all is not None
+                    else None
                 )
-                decoder_input = ScatterOp.apply(decoder_input)
-                if not self.config.gpt_model_use_experimental_version:
-                    decoder_input = (
-                        decoder_input.reshape([batch_size, -1, hidden_size])
-                        .permute(1, 0, 2)
-                        .contiguous()
-                    )  # [S/tp, B, H]
+            else:
+                if cp_world_size > 1 and self.config.experimental_dataflow:
+                    seq_len = seq_len * cp_world_size
 
-            # Per-depth input_ids for MoE mask
-            mtp_input_ids_local = input_ids[
-                :, (depth + 1) : (depth + 1 + seq_len)
-            ].contiguous()
+                # --- Index-based input_ids addressing ---
+                from paddlefleet.models.gpt.mtp_embedding_layer import (
+                    mtp_magic_instance,
+                )
+
+                magic_count = mtp_magic_instance.get_magic_count(self.magic_key)
+                # Skip increment during recompute replay
+                if paddle.is_grad_enabled() or not self.training:
+                    magic_count += 1
+                    mtp_magic_instance.set_magic_count(
+                        self.magic_key, magic_count
+                    )
+                input_ids_list = mtp_magic_instance.get("input_ids")
+                magic_idx = magic_count % len(input_ids_list)
+                input_ids = input_ids_list[magic_idx]
+
+                # Re-embed input_ids locally
+                mtp_input_embeds = self.mtp_embed(input_ids).astype(
+                    self.mtp_embed.weight.dtype
+                )
+
+                # Zero-out padding for MoE routing
+                if (
+                    self.config.expert_model_parallel_size > 1
+                    and self.config.tensor_model_parallel_size < 2
+                ):
+                    from paddlefleet.models.gpt.utils import fill_feature
+
+                    pad_token_id = getattr(self.config, "pad_token_id", 0) or 0
+                    mtp_input_embeds = fill_feature(
+                        mtp_input_embeds, input_ids == pad_token_id, 0
+                    )
+
+                # Shifted embedding slice for current depth
+                decoder_input = mtp_input_embeds[
+                    :, (depth + 1) : (depth + 1 + seq_len), :
+                ]
+
+                # CP/SP scatter, mirroring what GPTEmbedding does per chunk
+                if cp_world_size > 1 and self.config.experimental_dataflow:
+                    decoder_input = ContextParallelScatterOp.apply(
+                        decoder_input, axis=1, mode=self.config.cp_balance_mode
+                    )
+                if self.config.sequence_parallel:
+                    batch_size, local_seq_len, hidden_size = decoder_input.shape
+                    decoder_input = decoder_input.reshape(
+                        [-1, decoder_input.shape[-1]]
+                    )
+                    decoder_input = ScatterOp.apply(decoder_input)
+                    if not self.config.gpt_model_use_experimental_version:
+                        decoder_input = (
+                            decoder_input.reshape([batch_size, -1, hidden_size])
+                            .permute(1, 0, 2)
+                            .contiguous()
+                        )  # [S/tp, B, H]
+
+                # Per-depth input_ids for MoE mask
+                mtp_input_ids_local = input_ids[
+                    :, (depth + 1) : (depth + 1 + seq_len)
+                ].contiguous()
 
             # Trim rotary embeddings to seq_len (once; seq_len is constant across depths)
             _rotary_keys = (

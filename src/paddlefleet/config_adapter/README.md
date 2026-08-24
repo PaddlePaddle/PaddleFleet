@@ -21,9 +21,11 @@ sharding 与 batch，必要时缩小 EP/PP 并联动改写 `model_config.json`�
 
 两种组合都遵守同一条硬规则：**源配置里大于 1 的并行度，最小只能缩到 2，不允许
 缩成 1**（EP8 最多缩到 EP2，不会变成 EP1）。把一个维度缩成 1 等于把待测的通信
-组直接去掉，测出来的结果没有参考价值。
+组直接去掉，测出来的结果没有参考价值。唯一例外是 VPP：框架硬断言 VPP>1 需要
+PP>2，PP 缩到 2 时 VPP 只能是 1。
 
-TP 与 SEP 永远不改：减小 TP 会增大单卡显存占用，有 OOM 风险。
+TP 与 SEP 永远不改：减小 TP 会增大单卡显存占用，有 OOM 风险。EP 与 PP 都要缩时按
+**EP 优先于 PP** 的顺序缩（缩 EP 只损失路由专家数，缩 PP 会连带改层数与逐层配置）。
 
 ---
 
@@ -123,6 +125,7 @@ C3/C5 只取决于并行度本身，与卡数无关：这两项冲突时不会�
   -> model_config.json 有改动时另存一份，并把 model_name_or_path 指过去
   -> 应用并行度改动并复核 C1..C4
   -> 缩放 batch、sharding、data_parallel_size
+  -> sharding 路数变小时注入补偿开关（数据流路数 / 优化器 offload）
   -> 写出 YAML 并打印报告
 ```
 
@@ -141,7 +144,19 @@ C3/C5 只取决于并行度本身，与卡数无关：这两项冲突时不会�
   因长度不符直接启动失败。源列表长度本身与 `num_hidden_layers` 不一致，或裁剪会让
   `csa_compress_ratios` 丢掉某一类注意力层（框架要求每类至少一层）时，该候选会被
   拒绝而不是硬改。
-- 联合缩：EP × PP 笛卡尔积，平局时先取最大 EP，再取最大 PP。
+- 联合缩：EP × PP 笛卡尔积，按 **EP 优先于 PP** 的缩容顺序取点 —— 先把 EP 压到可行
+  下限，再取该 EP 下最大的 PP。缩 EP 只损失路由专家数，缩 PP 会连带改层数、逐层配置、
+  VPP 和空尾层，所以宁可多缩 EP、少缩 PP。
+
+两条按框架真实行为兜住的不变量：
+
+- `mtp_shared_last_layer` 为真且有 MTP 层时，末层 decoder 与 MTP 层通过
+  `SharedLayerDesc` 共享 attention 权重，两者注意力类型必须一致；裁剪后末层
+  `csa_compress_ratios` 会被**改写成** MTP 项的值，否则共享权重跨 stage broadcast
+  时几何不匹配，训练直接挂死（不报错）。
+- VPP>1 需要 PP>2（框架硬断言 `virtual pipeline must run under pp degree > 2`）。
+  PP 缩到 2 时 VPP 一并置 1，冻结 / 只缩 EP / 维度已合法这几条不动 PP 的路径同样会
+  兜一次，避免把源里 PP≤2 且 VPP>1 的组合原样透传成启动即挂的配置。
 
 写盘时机：所有规划与校验都在内存里完成后才落盘，中途任何一步失败都不改动源文件；
 写文件走临时文件 + 原子替换，`--in-place` 下若 YAML 写失败会回滚已写的
@@ -181,6 +196,35 @@ C/E/M 全部不通过时，报错会给出候选淘汰明细和最近的合法�
 
 ---
 
+## sharding 缩容的补偿开关
+
+卡数变少 → `sharding` 变小，有两件事按缩容倍数一起变差：数据流被切成
+`dataset_world_size = sharding / CP` 份，每份要走更长的文件列表才拿到第一个 batch；
+优化器状态按同一个度切分，单卡优化器显存按倍数放大。目标路数比源窄时自动注入：
+
+| 字段 | 值 | 原因 |
+|---|---|---|
+| `debug_reeao_dataset_world_size` | 源路数 | 把**数据切分**的份数固定回源规模（rank 仍是真实 rank，各 rank 读到的切片依旧互不重叠） |
+| `tensorwise_offload_optimizer` | `true` | 优化器状态放到 host 内存，防止单卡放大若干倍后 OOM |
+
+offload 有一条全由框架硬报错撑起来的依赖链，按顺序一并关掉；只改源里**显式声明且
+取值冲突**的键（框架默认 `false` / `0` 本来就兼容），`--set tensorwise_offload_optimizer=false`
+时整条链都不动：
+
+```
+tensorwise_offload_optimizer=true
+  -> fuse_optimizer_states=false        # fuse 与 offload 冲突，框架直接报错
+  -> enable_zero_cost_checkpoint=false  # ZCC 断言 fuse_optimizer_states=true
+  -> flash_device_save_steps=0          # >0 断言 enable_zero_cost_checkpoint=true
+```
+
+线上 YAML 常把 `global_batch_size` 注释掉、也不写 `sharding_parallel_size`，源规模推
+不出来；这两个开关在那种配置上同样必要，所以此时按「源配置自己的 `dense_sharding`
+（= `EP/(TP·SEP)`，实际加载数据的卡数）× 96」估计源路数。路数往大估只会让每路切片更
+短，没有代价。
+
+---
+
 ## 输出
 
 只列**真正发生了变化**的字段（值没变的写入不会出现在日志里），每条都带上
@@ -189,26 +233,46 @@ C/E/M 全部不通过时，报错会给出候选淘汰明细和最近的合法�
 `MODEL_CONFIG_OUTPUT=`）：
 
 ```
-===== config_adapter: 适配成功 =====
+========================================================================================
+config_adapter: 适配成功
+========================================================================================
 输入      ：big.yaml
 模式      ：accuracy（--test-accuracy），batch 策略 scale_accumulation
 机器规模  ：96 节点 / 768 卡 -> 1 节点 / 8 卡（每节点 8 卡）
-并行度    ：TP 1->1  PP 8->2  EP 64->4  CP 1->1  SEP 1->1
-sharding  ：96 -> 4（moe_sharding=1, dense_sharding=4）
-缩容方案  ：EP+PP 联合缩容：EP 64 -> 4，PP 8 -> 2
-YAML 改动（6 项）-> adapted_configs/big_adapted_8cards.yaml
-  CHANGE field=expert_model_parallel_size old=64 new=4
-      原因：缩小 EP 64 -> 4：单独缩 EP 或单独缩 PP 都无法适配 8 卡，改为联合缩容
+并行度    ：TP 1->1  PP 8->4  EP 64->2  CP 1->1  SEP 1->1
+sharding  ：96 -> 2（moe_sharding=1, dense_sharding=2）
+缩容方案  ：EP+PP 联合缩容：EP 64 -> 2，PP 8 -> 4
+
+--- YAML 改动（9 项） ------------------------------------------------------------------
+写入      ：adapted_configs/big_adapted_8cards.yaml
+
+  CHANGE field=expert_model_parallel_size old=64 new=2
+      原因：缩小 EP 64 -> 2：单独缩 EP 或单独缩 PP 都无法适配 8 卡，改为联合缩容；按 EP
+            优先于 PP 的缩容顺序，先把 EP 压到可行下限，再尽量少缩 PP（缩 PP 会连带改层
+            数/VPP/尾部空层/逐层配置）
+
   CHANGE field=gradient_accumulation_steps old=2 new=192
       原因：保持等效 batch：GBS 保持 1536 不变，acc 放大为 2 × 768 / 8 = 192
+
+  ADD field=tensorwise_offload_optimizer new=True
+      原因：sharding 路数 96 -> 2，单卡优化器状态放大 48 倍，offload 到 host 内存防 OOM
+
   ...
-model_config.json 改动（3 项）-> adapted_configs/model_config_separated/model_dir_adapted_8cards/model_config.json
-  CHANGE field=n_routed_experts old=256 new=16
-      原因：随 EP 64 -> 4 等比缩减专家数 256 -> 16（>= top-k=8）
+
+--- model_config.json 改动（3 项） -----------------------------------------------------
+写入      ：adapted_configs/model_config_separated/model_dir_adapted_8cards/model_config.json
+
+  CHANGE field=n_routed_experts old=256 new=8
+      原因：随 EP 64 -> 2 等比缩减专家数 256 -> 8（>= top-k=8）
+
   ...
+
+--- 机器可读摘要 -----------------------------------------------------------------------
 ORIGINAL_CARDS=768
+ORIGINAL_NODES=96
 TARGET_CARDS=8
 OUTPUT=adapted_configs/big_adapted_8cards.yaml
+MODEL_CONFIG_OUTPUT=adapted_configs/model_config_separated/model_dir_adapted_8cards/model_config.json
 ```
 
 ---
@@ -223,6 +287,7 @@ config_adapter/
 ├── planner.py                # 并行度规划：冻结 / EP-PP 分层缩容
 ├── plan.py                   # ParallelismPlan
 ├── precision.py              # 精度开关表
+├── sharding_shrink.py        # sharding 缩容的补偿开关
 ├── strategies.py             # scale_batch / scale_accumulation
 ├── topology.py               # C1..C4 通信组约束
 ├── constraints.py            # E/M 族约束 + 候选枚举 + 层对齐

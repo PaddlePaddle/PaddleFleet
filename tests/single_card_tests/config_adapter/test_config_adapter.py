@@ -26,14 +26,18 @@ from pathlib import Path
 from unittest import mock
 
 from paddlefleet.config_adapter import (
+    DEFAULT_SHRINK_FACTOR,
+    OFFLOAD_PREREQUISITES,
     AdaptOptions,
     ConfigAdapter,
     inspect_config,
     main,
     parse_overrides,
     plan_precision_switches,
+    plan_sharding_shrink_switches,
 )
 from paddlefleet.config_adapter.constraints import (
+    MIN_PP_FOR_VPP,
     align_layers,
     check_ep_shrink,
     check_hardware,
@@ -47,7 +51,11 @@ from paddlefleet.config_adapter.field_spec import (
     describe_missing,
     resolve_fields,
 )
-from paddlefleet.config_adapter.io_writers import JsonWriter, YamlWriter
+from paddlefleet.config_adapter.io_writers import (
+    JsonWriter,
+    YamlWriter,
+    detect_map_indent,
+)
 from paddlefleet.config_adapter.layer_fields import (
     effective_mtp_layers,
     plan_layer_field_shrink,
@@ -59,7 +67,9 @@ from paddlefleet.config_adapter.model_config_resolver import (
     rewrite_model_name_or_path,
 )
 from paddlefleet.config_adapter.report import (
+    LINE_WIDTH,
     ChangeLog,
+    _width,
     format_header,
     format_report,
 )
@@ -250,6 +260,93 @@ class TestPrecisionSwitches(unittest.TestCase):
         targets = {(t, k) for t, k, _v, _r in applied}
         self.assertIn(("yaml", "mqa_sparse_attn_backward_backend"), targets)
         self.assertIn(("json", "mqa_sparse_attn_backward_backend"), targets)
+
+
+class TestShardingShrinkSwitches(unittest.TestCase):
+    """A smaller sharding degree gets its two compensations."""
+
+    def plan(self, config, orig_ways, new_ways, base_ways=None):
+        """``{key: value}`` of the planned switches."""
+        return {
+            key: value
+            for key, value, _reason in plan_sharding_shrink_switches(
+                config, orig_ways, new_ways, base_ways=base_ways
+            )
+        }
+
+    def test_shrink_pins_the_data_width_and_offloads(self):
+        planned = self.plan({}, 96, 4)
+        self.assertEqual(planned["debug_reeao_dataset_world_size"], 96)
+        self.assertIs(planned["tensorwise_offload_optimizer"], True)
+
+    def test_no_switches_without_a_shrink(self):
+        self.assertEqual(plan_sharding_shrink_switches({}, 96, 96), [])
+        self.assertEqual(plan_sharding_shrink_switches({}, 4, 96), [])
+
+    def test_no_switches_when_a_scale_is_unknown(self):
+        self.assertEqual(plan_sharding_shrink_switches({}, 96, None), [])
+
+    def test_an_assumed_source_width_still_needs_a_real_shrink(self):
+        # The estimate is only a stand-in for the source width, so it obeys
+        # the same "target must be narrower" guard: a target that already
+        # reaches the estimate needs no compensation.
+        self.assertEqual(
+            plan_sharding_shrink_switches(
+                {}, None, 2 * DEFAULT_SHRINK_FACTOR, base_ways=2
+            ),
+            [],
+        )
+        self.assertEqual(
+            plan_sharding_shrink_switches(
+                {}, None, 4 * DEFAULT_SHRINK_FACTOR, base_ways=2
+            ),
+            [],
+        )
+
+    def test_unknown_source_scale_multiplies_the_source_data_width(self):
+        # The base is the source's own dense_sharding, not the width the
+        # target actually runs at after EP/PP shrinking.
+        planned = self.plan({}, None, 4, base_ways=8)
+        self.assertEqual(
+            planned["debug_reeao_dataset_world_size"],
+            8 * DEFAULT_SHRINK_FACTOR,
+        )
+        self.assertIs(planned["tensorwise_offload_optimizer"], True)
+
+    def test_the_target_width_stands_in_for_a_missing_base(self):
+        planned = self.plan({}, None, 4)
+        self.assertEqual(
+            planned["debug_reeao_dataset_world_size"],
+            4 * DEFAULT_SHRINK_FACTOR,
+        )
+
+    def test_the_assumed_width_is_called_out(self):
+        reasons = [
+            r for _k, _v, r in plan_sharding_shrink_switches({}, None, 4)
+        ]
+        self.assertTrue(all("源规模推不出来" in reason for reason in reasons))
+        known = [r for _k, _v, r in plan_sharding_shrink_switches({}, 96, 4)]
+        self.assertTrue(all("源规模推不出来" not in reason for reason in known))
+
+    def test_declared_prerequisites_are_all_turned_off(self):
+        config = {key: not value for key, value, _why in OFFLOAD_PREREQUISITES}
+        config["flash_device_save_steps"] = 50
+        planned = self.plan(config, 96, 4)
+        for key, value, _why in OFFLOAD_PREREQUISITES:
+            self.assertEqual(planned[key], value)
+
+    def test_compatible_prerequisites_are_left_alone(self):
+        config = {key: value for key, value, _why in OFFLOAD_PREREQUISITES}
+        planned = self.plan(config, 96, 4)
+        for key, _value, _why in OFFLOAD_PREREQUISITES:
+            self.assertNotIn(key, planned)
+
+    def test_inexact_ratio_is_not_rounded_down_to_one(self):
+        reasons = [r for _k, _v, r in plan_sharding_shrink_switches({}, 96, 64)]
+        self.assertTrue(reasons)
+        for reason in reasons:
+            self.assertNotIn("放大 1 倍", reason)
+            self.assertIn("1.5", reason)
 
 
 class TestOverrideParsing(unittest.TestCase):
@@ -455,9 +552,9 @@ class TestHardwareAndModelConstraints(unittest.TestCase):
         self.assertEqual(experts, 64)
 
     def test_pp_shrink_reports_layer_and_alignment(self):
-        ok, why, meta = check_pp_shrink(8, 2, 64, 0, 0, 2)
+        ok, why, meta = check_pp_shrink(8, 4, 64, 0, 0, 2)
         self.assertTrue(ok, why)
-        self.assertEqual(meta["layers_new"], 16)
+        self.assertEqual(meta["layers_new"], 32)
         self.assertEqual(meta["vpp_new"], 2)
 
     def test_pp_shrink_warns_on_few_layers(self):
@@ -476,13 +573,46 @@ class TestHardwareAndModelConstraints(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("M5", why)
 
+    def test_pp_shrink_recomputes_the_tail_instead_of_padding_it(self):
+        # 43 -> 10 layers: the source tail (11 empty layers, sized for the
+        # 43-layer stack) must not survive as a floor, and PP 2 leaves no
+        # room for the interleave scheduler, so VPP 6 collapses to 1.
+        ok, why, meta = check_pp_shrink(8, 2, 43, 2, 11, 6, min_tail=1)
+        self.assertTrue(ok, why)
+        self.assertEqual(meta["layers_new"], 10)
+        self.assertEqual((meta["vpp_new"], meta["tail_new"]), (1, 2))
+
     def test_align_layers_pads_the_tail(self):
-        vpp_new, tail_new = align_layers(15, 0, 0, 2, 2)
+        vpp_new, tail_new = align_layers(15, 0, 4, 2)
         self.assertEqual(vpp_new, 2)
         self.assertEqual(tail_new, 1)
 
+    def test_align_layers_prefers_the_least_padding(self):
+        # vpp 6 would need 11 empty layers for 13 real ones; vpp 2 needs 3.
+        self.assertEqual(align_layers(13, 0, 4, 6), (2, 3))
+
+    def test_align_layers_honours_the_tail_floor(self):
+        # separate_mtp_headloss silently consumes one tail layer, so the yaml
+        # tail must stay >= 1.
+        self.assertEqual(align_layers(10, 2, 4, 6, min_tail=1), (2, 4))
+
+    def test_align_layers_keeps_vpp_when_padding_ties(self):
+        self.assertEqual(align_layers(24, 0, 4, 6), (6, 0))
+
+    def test_align_layers_never_collapses_vpp_to_one(self):
+        # vpp_new=1 would need less padding (3 vs 7) but dropping the
+        # interleave scheduler is not allowed.
+        self.assertEqual(align_layers(9, 0, 4, 2), (2, 7))
+
+    def test_align_layers_turns_vpp_off_below_three_stages(self):
+        # Paddle asserts "virtual pipeline must run under pp degree > 2", so
+        # at PP 2 that hard failure outranks the no-collapse rule.
+        self.assertEqual(MIN_PP_FOR_VPP, 3)
+        self.assertEqual(align_layers(9, 0, 2, 6), (1, 1))
+        self.assertEqual(align_layers(9, 0, 3, 6), (3, 0))
+
     def test_align_layers_refuses_pp_below_the_floor(self):
-        self.assertEqual(align_layers(16, 0, 0, 1, 2), (None, None))
+        self.assertEqual(align_layers(16, 0, 1, 2), (None, None))
 
 
 class TestSourceScaleInference(unittest.TestCase):
@@ -725,6 +855,42 @@ class TestChangeReporting(unittest.TestCase):
         text = format_report(self._info(), ChangeLog())
         self.assertIn("YAML 改动：无", text)
 
+    def test_every_report_line_fits_the_console(self):
+        log = ChangeLog()
+        log.record(
+            "yaml",
+            [("added", "debug_reeao_dataset_world_size", None, 768)],
+            "源规模推不出来，按源配置实际加载数据的路数（dense_sharding）8 的 "
+            "96 倍估计源规模为 768 路，每路数据量放大 192 倍、数据加载明显变慢；"
+            "把数据流路数固定回 768（只影响数据切分，rank 仍是真实 rank）",
+        )
+        log.record(
+            "yaml", [("modified", "ratios", [128] * 44, [128] * 11)], "裁剪"
+        )
+        lines = format_report(self._info(), log).splitlines()
+        for line in lines:
+            self.assertLessEqual(_width(line), LINE_WIDTH, line)
+            self.assertEqual(line, line.rstrip())
+
+    def test_a_wrapped_reason_hangs_under_its_field(self):
+        log = ChangeLog()
+        log.record("yaml", [("modified", "ep", 64, 4)], "缩容原因" * 30)
+        lines = format_report(self._info(), log).splitlines()
+        start = lines.index("  CHANGE field=ep old=64 new=4")
+        self.assertTrue(lines[start + 1].startswith("      原因："))
+        self.assertTrue(lines[start + 2].startswith(" " * 12))
+        self.assertFalse(lines[start + 2].startswith(" " * 13))
+
+    def test_a_long_value_moves_off_the_field_line(self):
+        log = ChangeLog()
+        log.record("yaml", [("modified", "ratios", [128] * 44, [-2])], "裁剪")
+        lines = format_report(self._info(), log).splitlines()
+        self.assertIn("  CHANGE field=ratios", lines)
+        self.assertTrue(
+            any(line.startswith("      old=[128,") for line in lines)
+        )
+        self.assertIn("      new=[-2]", lines)
+
     def test_header_is_a_comment_block(self):
         header = format_header(self._info())
         self.assertTrue(
@@ -771,6 +937,52 @@ class TestLayerFieldPlanning(unittest.TestCase):
         self.assertEqual(len(by_key["window_attn_skip_freq"]), 17)
         self.assertEqual(len(by_key["layer_types"]), 16)
 
+    def _mtp_shared_config(self, ratios, **overrides):
+        """43 decoder layers + 1 MTP layer, MTP sharing the last layer."""
+        return {
+            "num_hidden_layers": 43,
+            "num_nextn_predict_layers": 1,
+            "mtp_shared_last_layer": True,
+            "csa_compress_ratios": ratios,
+            "window_attn_skip_freq": [0] * 44,
+            "layer_types": ["full_attention"] * 43,
+            **overrides,
+        }
+
+    def test_last_layer_is_realigned_with_the_shared_mtp_layer(self):
+        # HCA(128) everywhere but layer 7 and the MTP layer, which are MLA(-2).
+        ratios = [128] * 7 + [-2] + [128] * 35 + [-2]
+        changes, err = plan_layer_field_shrink(
+            self._mtp_shared_config(ratios), 43, 10, 1
+        )
+        self.assertIsNone(err)
+        by_key = {key: value for key, value, _reason in changes}
+        reasons = {key: reason for key, _value, reason in changes}
+        kept = by_key["csa_compress_ratios"]
+        # A plain truncation would end [..., 128, -2]: the last decoder layer
+        # and the MTP layer must be the same attention type.
+        self.assertEqual(len(kept), 11)
+        self.assertEqual(kept[-2:], [-2, -2])
+        self.assertIn("mtp_shared_last_layer", reasons["csa_compress_ratios"])
+
+    def test_no_realignment_without_mtp_shared_last_layer(self):
+        ratios = [128] * 7 + [-2] + [128] * 35 + [-2]
+        config = self._mtp_shared_config(ratios, mtp_shared_last_layer=False)
+        changes, err = plan_layer_field_shrink(config, 43, 10, 1)
+        self.assertIsNone(err)
+        by_key = {key: value for key, value, _reason in changes}
+        self.assertEqual(by_key["csa_compress_ratios"][-2:], [128, -2])
+
+    def test_realignment_that_erases_a_family_is_refused(self):
+        # HCA(128) survives the truncation only as the last kept layer, so
+        # realigning it to the MTP layer's MLA(-2) would erase the family.
+        ratios = [-2] * 9 + [128] + [-2] * 33 + [-2]
+        _changes, err = plan_layer_field_shrink(
+            self._mtp_shared_config(ratios), 43, 10, 1
+        )
+        self.assertIsNotNone(err)
+        self.assertIn("丢掉注意力类型", err)
+
     def test_growing_or_equal_layer_counts_change_nothing(self):
         changes, err = plan_layer_field_shrink(self._config(), 64, 64, 1)
         self.assertIsNone(err)
@@ -813,12 +1025,13 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         config = self.load_output_yaml(8)
         model_config = self.load_output_json(8)
 
-        # EP and PP shrink together; neither collapses to 1.
-        self.assertEqual(config["expert_model_parallel_size"], 4)
-        self.assertEqual(config["pipeline_model_parallel_size"], 2)
-        self.assertEqual(config["sharding_parallel_size"], 4)
-        self.assertEqual(model_config["n_routed_experts"], 16)
-        self.assertEqual(model_config["num_hidden_layers"], 16)
+        # EP absorbs the shrink first (priority EP > PP), so it lands on its
+        # floor and PP only gives up what is left; neither collapses to 1.
+        self.assertEqual(config["expert_model_parallel_size"], 2)
+        self.assertEqual(config["pipeline_model_parallel_size"], 4)
+        self.assertEqual(config["sharding_parallel_size"], 2)
+        self.assertEqual(model_config["n_routed_experts"], 8)
+        self.assertEqual(model_config["num_hidden_layers"], 32)
         # Default batch strategy shrinks GBS and leaves acc alone.
         self.assertEqual(config["global_batch_size"], 2)
         self.assertEqual(config["gradient_accumulation_steps"], 2)
@@ -827,6 +1040,29 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         self.assertEqual(model_config["multimax_modules"], ["lm_head"])
         # Environment-specific pin is always dropped.
         self.assertNotIn("fa_version", config)
+
+    def test_pp_is_shrunk_as_little_as_the_card_count_allows(self):
+        # EP 64 -> 2 alone cannot reach 8 cards, but it lets PP stop at 4
+        # instead of 2: shrinking PP also scales num_hidden_layers, VPP, the
+        # empty tail and every per-layer list, so it goes last.
+        ok, message = self.adapt(target_nodes=1)
+        self.assertTrue(ok, message)
+        config = self.load_output_yaml(8)
+        self.assertEqual(config["pipeline_model_parallel_size"], 4)
+        self.assertEqual(config["virtual_pipeline_model_parallel_size"], 2)
+        self.assertIn("先把 EP 压到可行下限", message)
+
+    def test_vpp_is_switched_off_when_pp_drops_below_three(self):
+        # Paddle asserts "virtual pipeline must run under pp degree > 2" while
+        # building any interleaved schedule, so PP 2 leaves VPP no choice.
+        # 4 cards leave no room for PP 4: C2 wants 4 % (PP x EP) == 0 and EP
+        # cannot go below 2, so the joint tier lands on EP 2 / PP 2.
+        ok, message = self.adapt(target_nodes=1, cards_per_node=4)
+        self.assertTrue(ok, message)
+        config = self.load_output_yaml(4)
+        self.assertEqual(config["pipeline_model_parallel_size"], 2)
+        self.assertEqual(config["virtual_pipeline_model_parallel_size"], 1)
+        self.assertIn("框架断言 VPP>1 需要 PP>2", message)
 
     def test_existing_output_dir_needs_force(self):
         ok, message = self.adapt(target_nodes=1)
@@ -838,6 +1074,50 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
 
         ok, message = self.adapt(target_nodes=1, force=True)
         self.assertTrue(ok, message)
+
+    def test_mtp_aware_layer_alignment(self):
+        # separate_mtp_headloss pulls the MTP layer into the segmentation and
+        # silently consumes one tail empty layer, so the emitted layout must
+        # still divide evenly -- otherwise do_segment() aborts the run.
+        self.write_yaml(
+            SOURCE_YAML.replace(
+                "num_empty_layers_add_in_head: 0",
+                "num_empty_layers_add_in_head: 2",
+            )
+            .replace(
+                "num_empty_layers_add_in_tail: 0",
+                "num_empty_layers_add_in_tail: 3",
+            )
+            .replace(
+                "separate_mtp_headloss: false",
+                "separate_mtp_headloss: true",
+            )
+            .replace(
+                "virtual_pipeline_model_parallel_size: 2",
+                "virtual_pipeline_model_parallel_size: 6",
+            )
+        )
+        self.write_json(dict(MODEL_CONFIG, num_hidden_layers=43))
+
+        ok, message = self.adapt(target_nodes=1)
+        self.assertTrue(ok, message)
+        config = self.load_output_yaml(8)
+        model_config = self.load_output_json(8)
+
+        tail = config["num_empty_layers_add_in_tail"]
+        self.assertGreaterEqual(tail, 1)
+        segmented = (
+            config["num_empty_layers_add_in_head"]
+            + model_config["num_hidden_layers"]
+            + model_config["num_nextn_predict_layers"]
+            + tail
+            - 1
+        )
+        parts = (
+            config["pipeline_model_parallel_size"]
+            * config["virtual_pipeline_model_parallel_size"]
+        )
+        self.assertEqual(segmented % parts, 0)
 
     def test_unchanged_keys_are_not_reported(self):
         ok, message = self.adapt(
@@ -874,6 +1154,22 @@ class TestPerformanceSwitch(ConfigAdapterTestBase):
         self.assertEqual(
             JsonWriter().load(self.json_path)["n_routed_experts"], 256
         )
+
+    def test_vpp_is_switched_off_even_when_the_dims_are_frozen(self):
+        # Freezing never touches PP, so a source that already declares PP 2
+        # with VPP 2 would sail through into a config that dies on Paddle's
+        # "virtual pipeline must run under pp degree > 2" assert.
+        self.write_yaml(
+            SOURCE_YAML.replace(
+                "pipeline_model_parallel_size: 8",
+                "pipeline_model_parallel_size: 2",
+            )
+        )
+        ok, message = self.adapt(target_nodes=16, test_performance=True)
+        self.assertTrue(ok, message)
+        config = self.load_output_yaml(128)
+        self.assertEqual(config["pipeline_model_parallel_size"], 2)
+        self.assertEqual(config["virtual_pipeline_model_parallel_size"], 1)
 
 
 class TestAccuracySwitch(ConfigAdapterTestBase):
@@ -996,6 +1292,73 @@ class TestAutoOverrideRouting(ConfigAdapterTestBase):
         self.assertTrue(ok, message)
         self.assertEqual(self.load_output_json(8)["brand_new_field"], 7)
         self.assertNotIn("brand_new_field", self.load_output_yaml(8))
+
+
+class TestShardingShrinkCompensation(ConfigAdapterTestBase):
+    """End-to-end view of the data-width and offload switches."""
+
+    PREREQUISITES = """\
+fuse_optimizer_states: true
+enable_zero_cost_checkpoint: true
+flash_device_save_steps: 50
+"""
+
+    def test_both_switches_land_in_the_yaml(self):
+        ok, message = self.adapt(target_nodes=1)
+        self.assertTrue(ok, message)
+        output = self.load_output_yaml(8)
+        # 768 source cards / (TP 1 * SEP 1 * PP 8 * CP 1) = 96 source ways.
+        self.assertEqual(output["debug_reeao_dataset_world_size"], 96)
+        self.assertIs(output["tensorwise_offload_optimizer"], True)
+
+    def test_prerequisite_chain_is_disabled(self):
+        self.write_yaml(SOURCE_YAML + self.PREREQUISITES)
+        ok, message = self.adapt(target_nodes=1)
+        self.assertTrue(ok, message)
+        output = self.load_output_yaml(8)
+        self.assertIs(output["fuse_optimizer_states"], False)
+        self.assertIs(output["enable_zero_cost_checkpoint"], False)
+        self.assertEqual(output["flash_device_save_steps"], 0)
+
+    def test_set_can_opt_out_of_the_offload(self):
+        self.write_yaml(SOURCE_YAML + self.PREREQUISITES)
+        ok, message = self.adapt(
+            target_nodes=1,
+            auto_overrides={"tensorwise_offload_optimizer": False},
+        )
+        self.assertTrue(ok, message)
+        output = self.load_output_yaml(8)
+        self.assertIs(output["tensorwise_offload_optimizer"], False)
+        # The cascade only exists to serve the offload, so it stays put.
+        self.assertIs(output["fuse_optimizer_states"], True)
+        self.assertIs(output["enable_zero_cost_checkpoint"], True)
+        self.assertEqual(output["flash_device_save_steps"], 50)
+
+    def test_no_switches_when_the_data_width_is_unchanged(self):
+        # 96 target ways = the source's, so nothing is amplified.
+        ok, message = self.adapt(target_nodes=96)
+        self.assertTrue(ok, message)
+        output = self.load_output_yaml(768)
+        self.assertNotIn("debug_reeao_dataset_world_size", output)
+        self.assertNotIn("tensorwise_offload_optimizer", output)
+
+    def test_unknown_source_scale_still_gets_the_switches(self):
+        # A production YAML that declares neither its batch nor its sharding.
+        hidden = "".join(
+            line + "\n"
+            for line in SOURCE_YAML.splitlines()
+            if not line.startswith(("global_batch_size", "sharding_parallel"))
+        )
+        self.write_yaml(hidden)
+        ok, message = self.adapt(target_nodes=1)
+        self.assertTrue(ok, message)
+        output = self.load_output_yaml(8)
+        # The base is the source's dense_sharding = EP 64 / (TP 1 * SEP 1).
+        self.assertEqual(
+            output["debug_reeao_dataset_world_size"],
+            64 * DEFAULT_SHRINK_FACTOR,
+        )
+        self.assertIs(output["tensorwise_offload_optimizer"], True)
 
 
 class TestErrorPaths(ConfigAdapterTestBase):
@@ -1223,16 +1586,37 @@ class TestLayerFields(ConfigAdapterTestBase):
         ok, message = self.adapt(target_nodes=1)
         self.assertTrue(ok, message)
         model_config = self.load_output_json(8)
-        # 64 -> 16 layers, MTP entries kept at the tail.
-        self.assertEqual(model_config["num_hidden_layers"], 16)
-        self.assertEqual(len(model_config["csa_compress_ratios"]), 17)
+        # 64 -> 32 layers, MTP entries kept at the tail.
+        self.assertEqual(model_config["num_hidden_layers"], 32)
+        self.assertEqual(len(model_config["csa_compress_ratios"]), 33)
         self.assertEqual(model_config["csa_compress_ratios"][-1], -2)
-        self.assertEqual(len(model_config["window_attn_skip_freq"]), 17)
-        self.assertEqual(len(model_config["layer_types"]), 16)
+        self.assertEqual(len(model_config["window_attn_skip_freq"]), 33)
+        self.assertEqual(len(model_config["layer_types"]), 32)
         # Both attention families of the source pattern survive.
-        self.assertIn(128, model_config["csa_compress_ratios"][:16])
-        self.assertIn(-2, model_config["csa_compress_ratios"][:16])
+        self.assertIn(128, model_config["csa_compress_ratios"][:32])
+        self.assertIn(-2, model_config["csa_compress_ratios"][:32])
         self.assertIn("逐层配置", message)
+
+    def test_last_layer_is_realigned_with_the_shared_mtp_layer(self):
+        # mtp_shared_last_layer aliases the MTP layer's attention onto the last
+        # decoder layer, so a truncation that ends on HCA(128) next to an
+        # MLA(-2) MTP layer would hang the run instead of failing.
+        self.write_json(
+            {
+                **MODEL_CONFIG,
+                "mtp_shared_last_layer": True,
+                "csa_compress_ratios": [-2] + [128] * 63 + [-2],
+                "window_attn_skip_freq": [0] * 65,
+                "layer_types": ["full_attention"] * 64,
+            }
+        )
+        ok, message = self.adapt(target_nodes=1)
+        self.assertTrue(ok, message)
+        ratios = self.load_output_json(8)["csa_compress_ratios"]
+        self.assertEqual(len(ratios), 33)
+        self.assertEqual(ratios[-2:], [-2, -2])
+        self.assertIn(128, ratios[:32])
+        self.assertIn("mtp_shared_last_layer", message)
 
     def test_refuses_when_an_attention_family_would_vanish(self):
         # Every -2 layer sits beyond the shrunk layer range.
@@ -1269,10 +1653,10 @@ class TestLayerFields(ConfigAdapterTestBase):
         ok, message = self.adapt(target_nodes=1)
         self.assertTrue(ok, message)
         model_config = self.load_output_json(8)
-        self.assertEqual(model_config["num_hidden_layers"], 16)
-        # 16 layers + the 2 MTP entries.
-        self.assertEqual(len(model_config["csa_compress_ratios"]), 18)
-        self.assertEqual(len(model_config["layer_types"]), 16)
+        self.assertEqual(model_config["num_hidden_layers"], 32)
+        # 32 layers + the 2 MTP entries.
+        self.assertEqual(len(model_config["csa_compress_ratios"]), 34)
+        self.assertEqual(len(model_config["layer_types"]), 32)
 
 
 class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):
@@ -1309,6 +1693,41 @@ class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):
         self.assertFalse((self.output_dir / "model_config_separated").exists())
 
 
+class TestYamlIndentPreservation(ConfigAdapterTestBase):
+    """A round-trip keeps the source's own nested-mapping indentation."""
+
+    NESTED = """\
+deepep_buffer_configs:
+  num_sms: 52
+muon_configs:
+    muon_momentum: 0.95
+    muon_version: 3
+    muon_exclude_patterns:
+    - "embed"
+    - "bias"
+"""
+
+    def test_detect_map_indent_takes_the_dominant_style(self):
+        self.write_yaml(SOURCE_YAML + self.NESTED)
+        document = YamlWriter().load(self.yaml_path)
+        self.assertEqual(detect_map_indent(document), 4)
+
+    def test_detect_map_indent_falls_back_without_nesting(self):
+        self.assertEqual(
+            detect_map_indent(YamlWriter().load(self.yaml_path)), 2
+        )
+
+    def test_nested_block_is_not_reindented(self):
+        self.write_yaml(SOURCE_YAML + self.NESTED)
+        ok, message = self.adapt(target_nodes=1)
+        self.assertTrue(ok, message)
+        text = (self.output_dir / "source_adapted_8cards.yaml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("    muon_momentum: 0.95", text)
+        self.assertIn('    - "embed"', text)
+
+
 class TestPinnedModelPathConflict(ConfigAdapterTestBase):
     """A pinned model_name_or_path cannot coexist with a JSON rewrite."""
 
@@ -1342,13 +1761,13 @@ class TestInPlace(ConfigAdapterTestBase):
         )
         self.assertTrue(ok, message)
         config = YamlWriter().load(self.yaml_path)
-        self.assertEqual(config["pipeline_model_parallel_size"], 2)
+        self.assertEqual(config["pipeline_model_parallel_size"], 4)
         self.assertEqual(config["model_name_or_path"], "./model_dir")
         self.assertNotIn(
             "[config_adapter]", self.yaml_path.read_text(encoding="utf-8")
         )
         self.assertEqual(
-            JsonWriter().load(self.json_path)["num_hidden_layers"], 16
+            JsonWriter().load(self.json_path)["num_hidden_layers"], 32
         )
 
 
