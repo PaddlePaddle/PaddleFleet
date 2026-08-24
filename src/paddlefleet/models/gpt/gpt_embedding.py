@@ -438,9 +438,31 @@ class GPTEmbedding(FleetLayer):
                         "erndata MTP path does not support multimodal for now."
                     )
                     from paddlefleet.transformer.multi_token_prediction import (
+                        build_startend_row_indices_from_cu_seqlens,
                         extract_local_zigzag_chunks,
                         roll_tensor,
                     )
+
+                    # The erndata contract only guarantees length-L tensors plus
+                    # cu_seqlens_q; the main flashmask boundaries are optional
+                    # (erndata emits them only when pack_by_cu_seqlen=True and
+                    # the sample has documents). Without a mask the CP branch of
+                    # DotProductAttention synthesizes an all-visible one and
+                    # calls flashmask with causal=False, silently dropping both
+                    # causality and doc boundaries from the backbone. Derive the
+                    # mask from cu_seqlens_q here so the backbone sees the same
+                    # per-doc boundaries the MTP depths do.
+                    if (
+                        attn_mask_startend_row_indices is None
+                        and cu_seqlens_q is not None
+                    ):
+                        attn_mask_startend_row_indices = (
+                            build_startend_row_indices_from_cu_seqlens(
+                                cu_seqlens_q,
+                                decoder_input.shape[0],
+                                include_position_axis=self.config.gpt_model_use_experimental_version,
+                            )
+                        )
 
                     # decoder_input: [B, L, H] full-length embedding (already
                     # computed above from the length-L input_ids in this branch).

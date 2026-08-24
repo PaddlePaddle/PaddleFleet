@@ -163,8 +163,17 @@ def _make_config():
     )
 
 
-def _make_inputs():
-    """Megatron contract: length-L tensors (no L+K padding) + cu_seqlens_q."""
+def _make_inputs(with_mask=True):
+    """Megatron contract: length-L tensors (no L+K padding) + cu_seqlens_q.
+
+    ``with_mask=False`` reproduces the minimal erndata contract, where only
+    ``cu_seqlens_q`` carries the doc boundaries and no materialized flashmask is
+    supplied (erndata emits ``attn_mask_startend_row_indices`` only when
+    ``pack_by_cu_seqlen=True``). ``GPTEmbedding`` must then derive the main mask
+    itself, otherwise the CP branch of ``DotProductAttention`` synthesizes an
+    all-visible mask and runs flashmask with ``causal=False``, silently dropping
+    causality and doc boundaries from the backbone.
+    """
     paddle.seed(SEED)
     data = paddle.randint(low=1, high=VOCAB, shape=(BATCH, SEQ + 1)).cuda()
     # Same data on every CP rank. Skipped at world size 1, where fleet leaves
@@ -182,43 +191,43 @@ def _make_inputs():
     )
     cu_seqlens_q = paddle.to_tensor(CU_SEQLENS, dtype="int32").cuda()
 
-    # Full-length per-doc flashmask boundaries. CP attention allgathers KV and
-    # remaps these global row values itself (preprocess_index_dual_chunks), so
-    # they are intentionally NOT sliced. 1 column because
-    # gpt_model_use_experimental_version=False.
-    end = np.zeros(SEQ, dtype=np.int32)
-    for j in range(len(CU_SEQLENS) - 1):
-        s, e = CU_SEQLENS[j], CU_SEQLENS[j + 1]
-        end[s:e] = e
-    attn_mask_startend_row_indices = (
-        paddle.to_tensor(end[None, None, :, None]).tile([BATCH, 1, 1, 1]).cuda()
-    )
-
-    return {
+    out = {
         "input_ids": input_ids,
         "labels": labels,
         "position_ids": position_ids,
         "cu_seqlens_q": cu_seqlens_q,
-        "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
     }
+    if with_mask:
+        # Full-length per-doc flashmask boundaries. CP attention allgathers KV
+        # and remaps these global row values itself
+        # (preprocess_index_dual_chunks), so they are intentionally NOT sliced.
+        # 1 column because gpt_model_use_experimental_version=False.
+        end = np.zeros(SEQ, dtype=np.int32)
+        for j in range(len(CU_SEQLENS) - 1):
+            s, e = CU_SEQLENS[j], CU_SEQLENS[j + 1]
+            end[s:e] = e
+        out["attn_mask_startend_row_indices"] = (
+            paddle.to_tensor(end[None, None, :, None])
+            .tile([BATCH, 1, 1, 1])
+            .cuda()
+        )
+    return out
 
 
 def _forward_backward(model, raw):
     pipe_model = NoPipelineParallel(model, STRATEGY)
     labels = raw["labels"].clone()
-    inputs = (
-        {
-            "input_ids": [raw["input_ids"].clone()],
-            "position_ids": [raw["position_ids"].clone()],
-            "cu_seqlens_q": [raw["cu_seqlens_q"].clone()],
-            "attn_mask_startend_row_indices": [
-                raw["attn_mask_startend_row_indices"].clone()
-            ],
-            "labels": [labels],
-        },
-        labels,
-    )
-    return pipe_model.forward_backward_pipeline(inputs)
+    micro = {
+        "input_ids": [raw["input_ids"].clone()],
+        "position_ids": [raw["position_ids"].clone()],
+        "cu_seqlens_q": [raw["cu_seqlens_q"].clone()],
+        "labels": [labels],
+    }
+    if "attn_mask_startend_row_indices" in raw:
+        micro["attn_mask_startend_row_indices"] = [
+            raw["attn_mask_startend_row_indices"].clone()
+        ]
+    return pipe_model.forward_backward_pipeline((micro, labels))
 
 
 def _find_embedding(model):
@@ -332,6 +341,106 @@ class TestMTPMegatronCP(unittest.TestCase):
             self.assertTrue(
                 np.isfinite(float(v)), f"MTP loss {k}={v} must be finite"
             )
+
+
+class TestMTPMegatronMainMaskFromCuSeqlens(unittest.TestCase):
+    """The main flashmask must be derived when the contract omits it.
+
+    erndata only guarantees length-L tensors + cu_seqlens_q. When
+    ``attn_mask_startend_row_indices`` is absent, ``GPTEmbedding`` must build it
+    from ``cu_seqlens_q``; otherwise the CP branch of ``DotProductAttention``
+    fills in an all-visible mask and calls flashmask with ``causal=False``,
+    which drops both causality and document boundaries from the backbone.
+    """
+
+    def test_embedding_derives_main_mask(self):
+        paddle.seed(SEED)
+        model = gpt_builder(_make_config(), num_stages=1)
+        emb = _find_embedding(model)
+        raw = _make_inputs(with_mask=False)
+        self.assertNotIn("attn_mask_startend_row_indices", raw)
+
+        out = emb.forward(
+            {
+                "input_ids": raw["input_ids"],
+                "position_ids": raw["position_ids"],
+                "cu_seqlens_q": raw["cu_seqlens_q"],
+            }
+        )
+
+        mask = out.get("attn_mask_startend_row_indices")
+        self.assertIsNotNone(
+            mask,
+            "GPTEmbedding must derive the main mask from cu_seqlens_q",
+        )
+        # Full length L (not the rank-local L/cp): CP attention allgathers KV
+        # and remaps these global row values itself.
+        self.assertEqual(list(mask.shape), [BATCH, 1, SEQ, 1])
+        self.assertEqual(mask.dtype, paddle.int32)
+
+        # Values must be the per-doc end rows implied by CU_SEQLENS.
+        expected = np.zeros(SEQ, dtype=np.int32)
+        for j in range(len(CU_SEQLENS) - 1):
+            s, e = CU_SEQLENS[j], CU_SEQLENS[j + 1]
+            expected[s:e] = e
+        np.testing.assert_array_equal(
+            mask.numpy()[0, 0, :, 0],
+            expected,
+        )
+
+    def test_derived_mask_matches_explicit_mask(self):
+        """Deriving must be equivalent to passing the mask in explicitly."""
+        paddle.seed(SEED)
+        model = gpt_builder(_make_config(), num_stages=1)
+        emb = _find_embedding(model)
+
+        raw_with = _make_inputs(with_mask=True)
+        raw_without = _make_inputs(with_mask=False)
+
+        out_with = emb.forward(
+            {
+                "input_ids": raw_with["input_ids"],
+                "position_ids": raw_with["position_ids"],
+                "cu_seqlens_q": raw_with["cu_seqlens_q"],
+                "attn_mask_startend_row_indices": raw_with[
+                    "attn_mask_startend_row_indices"
+                ],
+            }
+        )
+        out_without = emb.forward(
+            {
+                "input_ids": raw_without["input_ids"],
+                "position_ids": raw_without["position_ids"],
+                "cu_seqlens_q": raw_without["cu_seqlens_q"],
+            }
+        )
+        np.testing.assert_array_equal(
+            out_with["attn_mask_startend_row_indices"].numpy(),
+            out_without["attn_mask_startend_row_indices"].numpy(),
+        )
+
+    def test_cp_loss_without_explicit_mask(self):
+        """End-to-end on the minimal contract: same loss as with the mask."""
+        if (
+            not paddle.device.current_device_is_cpu
+            and paddle.device.get_device_capability()[0] < 9
+        ):
+            self.skipTest("requires SM90+ for the CP flashmask kernels")
+
+        paddle.seed(SEED)
+        model = gpt_builder(_make_config(), num_stages=1)
+        model = paddle.amp.decorate(
+            models=model, optimizers=None, level="O2", dtype="bfloat16"
+        )
+        loss = _forward_backward(model, _make_inputs(with_mask=False))
+        val = float(loss.astype("float32"))
+        print(
+            f"[MTP-MEGATRON-CP] cp={CP_SIZE} loss(no explicit mask)={val}",
+            flush=True,
+        )
+        self.assertTrue(np.isfinite(val), f"loss must be finite, got {val}")
+        if REF_LOSS is not None:
+            np.testing.assert_allclose(val, REF_LOSS, rtol=5e-3, atol=0)
 
 
 if __name__ == "__main__":

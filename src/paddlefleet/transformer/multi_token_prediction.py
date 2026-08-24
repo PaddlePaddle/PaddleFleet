@@ -315,6 +315,62 @@ def extract_local_zigzag_chunks(tensor_full, cp_rank, cp_size, axis=1):
     return paddle.concat([chunk_start, chunk_end], axis=dim)
 
 
+def build_startend_row_indices_from_cu_seqlens(
+    cu_seqlens_q, batch_size, include_position_axis=False
+):
+    """Derive flashmask ``attn_mask_startend_row_indices`` from ``cu_seqlens_q``.
+
+    The erndata MTP contract carries packed-document boundaries as a
+    cumulative-length int32 vector ``[num_docs + 1]`` rather than a materialized
+    attention mask. Every consumer of that contract (the main backbone via
+    ``GPTEmbedding``, and each MTP depth via
+    ``MultiTokenPredictionLayer._forward_megatron_style``) needs the equivalent
+    flashmask boundaries, so the derivation lives here once.
+
+    For a token at position ``i`` inside document ``j``
+    (``cu[j] <= i < cu[j+1]``), the end row is ``cu[j+1]`` — i.e. attention is
+    confined to the token's own document.
+
+    Args:
+        cu_seqlens_q: ``[num_docs + 1]`` int32 cumulative doc lengths. The last
+            entry is the full sequence length ``L``.
+        batch_size: batch axis size to broadcast to.
+        include_position_axis: when True emit the 2-column
+            ``[B, 1, L, 2]`` layout (``[end, position]``) that
+            ``gpt_model_use_experimental_version`` expects; otherwise the
+            1-column ``[B, 1, L, 1]`` fleet-mode layout.
+
+    Returns:
+        ``[batch_size, 1, L, 1 or 2]`` int32 tensor on GPU.
+    """
+    import numpy as _np
+
+    cu_np = (
+        cu_seqlens_q.numpy()
+        if isinstance(cu_seqlens_q, paddle.Tensor)
+        else _np.asarray(cu_seqlens_q)
+    )
+    seqlen = int(cu_np[-1])
+
+    end = _np.zeros(seqlen, dtype=_np.int32)
+    for j in range(len(cu_np) - 1):
+        s, e = int(cu_np[j]), int(cu_np[j + 1])
+        end[s:e] = e
+    if include_position_axis:
+        pos = _np.arange(seqlen, dtype=_np.int32)
+        # [L, 2] -> [1, 1, L, 2]
+        startend_np = _np.stack([end, pos], axis=-1)[None, None, ...]
+    else:
+        # [L] -> [1, 1, L, 1]
+        startend_np = end[None, None, :, None]
+
+    out = paddle.to_tensor(startend_np).cuda()
+    if batch_size > 1:
+        # expand is zero-copy; attention only reads these values.
+        out = out.expand([batch_size, *out.shape[1:]])
+    return out
+
+
 class MTPLossLoggingHelper:
     """Helper class for logging MTP losses."""
 
@@ -1699,17 +1755,6 @@ class MultiTokenPredictionLayer(FleetLayer):
         # dict has been mutated by an earlier depth.
         cu_seqlens_q = dict_args.get("cu_seqlens_q", None)
         if cu_seqlens_q is not None:
-            # cu_seqlens_q lives on GPU (GPTEmbedding ensured that); pull to
-            # host for the small O(num_docs) derivation loop.
-            import numpy as _np
-
-            cu_np = (
-                cu_seqlens_q.numpy()
-                if isinstance(cu_seqlens_q, paddle.Tensor)
-                else _np.asarray(cu_seqlens_q)
-            )
-            seqlen = int(cu_np[-1])
-
             # experimental_dataflow: 2-col [B, 1, S, 2]; fleet-mode: 1-col [B, 1, S, 1].
             # ernie5 flashmask & SWA helpers require a 4D layout [B, heads, S, num_vec]
             # (see startend_row_indices_add_sliding_window in utils.py).
@@ -1718,36 +1763,18 @@ class MultiTokenPredictionLayer(FleetLayer):
                     self.config, "gpt_model_use_experimental_version", False
                 )
             )
-
-            # Inline derivation (mirrors _mtp_utils.build_startend_row_indices_from_cu_seqlens
-            # but self-contained so this module has no import dependency on
-            # ernie5.src.datasets — those in turn import torchvision which is
-            # not required by this training path).
-            _end = _np.zeros(seqlen, dtype=_np.int32)
-            for _j in range(len(cu_np) - 1):
-                _s, _e = int(cu_np[_j]), int(cu_np[_j + 1])
-                _end[_s:_e] = _e
-            if include_pos:
-                _pos = _np.arange(seqlen, dtype=_np.int32)
-                # [S, 2] -> [1, 1, S, 2]
-                startend_np = _np.stack([_end, _pos], axis=-1)[None, None, ...]
-            else:
-                # [S] -> [1, 1, S, 1]
-                startend_np = _end[None, None, :, None]
-
-            # Attention expects a batch axis. Broadcast [1, S, ...] to
-            # [B, S, ...] via paddle.expand (zero-copy).
             batch_size = (
                 dict_args["hidden_states"].shape[1]
                 if getattr(self.config, "sequence_parallel", False)
                 else dict_args["hidden_states"].shape[0]
             )
-            attn_mask_startend = paddle.to_tensor(startend_np).cuda()
-            if batch_size > 1:
-                attn_mask_startend = attn_mask_startend.expand(
-                    [batch_size, *attn_mask_startend.shape[1:]]
+            dict_args["attn_mask_startend_row_indices"] = (
+                build_startend_row_indices_from_cu_seqlens(
+                    cu_seqlens_q,
+                    batch_size,
+                    include_position_axis=include_pos,
                 )
-            dict_args["attn_mask_startend_row_indices"] = attn_mask_startend
+            )
 
         # Run transformer layer.
         hidden_states = self._proj_and_transformer_layer(**dict_args)
