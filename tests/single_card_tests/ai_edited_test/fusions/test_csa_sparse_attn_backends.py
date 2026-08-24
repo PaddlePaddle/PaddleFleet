@@ -546,20 +546,30 @@ class TestCsaBwdTopkLengthArchGate(unittest.TestCase):
 class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
     """What ``backward`` actually forwards to the cuDNN kernel per architecture.
 
-    The gate is only useful if the call site honours it, so drive
+    The arch-gated decision is made in the forward (recorded on
+    ``ctx.compacted_idxs``): on SM100 the forward order-preserving-densifies
+    ``topk_idxs`` (interior ``-1`` removed) and the backward recounts the valid
+    prefix, feeding the kernel's compact KV-load path an exact per-row count;
+    on SM90 it stays ``compacted_idxs == False`` so the backward passes
+    ``topk_length=None`` (the guarded, ``-1``-safe full-width path). This drives
     ``CSASparseAttention.backward`` end to end with a shape-faithful mock kernel
-    and record the ``topk_length`` it receives.
+    and records the ``topk_length`` it receives, mirroring what the forward
+    would have saved for the mocked arch.
     """
 
     B, SQ, NP, HN, S_KV, TOPK = 1, 4, 2, 8, 16, 6
 
-    def _fake_ctx(self):
+    def _fake_ctx(self, *, compacted):
         b, sq, np_heads, hn = self.B, self.SQ, self.NP, self.HN
         query = paddle.randn([b, sq, np_heads, hn])
         kv_full = paddle.randn([b, self.S_KV, hn])
         attn_sink = paddle.randn([np_heads])
-        # Interior -1 holes: precisely the layout the SM90 kernel mishandles.
-        row = [0, -1, 2, -1, 5, -1]
+        # 3 valid entries {0, 2, 5}. When the forward compacted (SM100) it saved
+        # the densified prefix with -1 only trailing; otherwise (SM90) it saved
+        # the raw holey layout. Either way the backward's recount is the valid
+        # count (3) -- only the compacted layout is -1-hole-free (safe for the
+        # kernel's unguarded compact KV-load).
+        row = [0, 2, 5, -1, -1, -1] if compacted else [0, -1, 2, -1, 5, -1]
         topk_idxs = paddle.to_tensor([[row] * sq], dtype="int32")
         output = paddle.randn([b, sq, np_heads, hn])
         lse = paddle.randn([b, sq, np_heads])
@@ -577,7 +587,15 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
             softmax_scale=0.125,
             attn_sink_dtype=attn_sink.dtype,
             backend="cudnn",
+            global_kv_idx_remap_fusion=False,
+            compacted_idxs=compacted,
             has_topk_length=False,
+            # Head count the saved tensors are in; equal to np_heads unless the
+            # forward padded them up to a kernel head tile.
+            bwd_heads=np_heads,
+            # Latent width the kernels run at; equal to hn unless the forward
+            # zero-padded a narrower latent up to 512.
+            kernel_hn=hn,
             query_needs_grad=True,
             kv_full_needs_grad=True,
             attn_sink_needs_grad=True,
@@ -588,7 +606,6 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
     def _topk_length_passed_to_kernel(self, capability):
         from paddlefleet.fusions import csa_sparse_attn as mod
 
-        ctx, grad_output = self._fake_ctx()
         seen = {}
 
         def fake_bwd(
@@ -615,6 +632,10 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
                     fake_bwd,
                 ),
             ):
+                # Mirror the forward's arch-gated decision (indexer_topk == 0):
+                # SM100 densifies + sets compacted_idxs, SM90 does not.
+                compacted = mod._csa_bwd_honours_topk_length_holes()
+                ctx, grad_output = self._fake_ctx(compacted=compacted)
                 mod.CSASparseAttention.backward(ctx, grad_output)
         finally:
             gate.cache_clear()
@@ -625,10 +646,116 @@ class TestCsaBwdTopkLengthDispatch(unittest.TestCase):
     def test_sm90_receives_none(self):
         self.assertIsNone(self._topk_length_passed_to_kernel((9, 0)))
 
-    def test_sm100_receives_int32_bound(self):
+    def test_sm100_receives_int32_count(self):
         topk_length = self._topk_length_passed_to_kernel((10, 0))
         self.assertIsNotNone(topk_length)
         self.assertEqual(topk_length.dtype, paddle.int32)
         self.assertEqual(list(topk_length.shape), [self.B * self.SQ])
-        # Trailing bound of [0, -1, 2, -1, 5, -1] is 5 (last valid index 4 + 1).
-        self.assertEqual(topk_length.tolist(), [5] * (self.B * self.SQ))
+        # Compacted valid count of the densified {0, 2, 5} prefix is 3 -- the
+        # exact per-row early-stop bound, with interior -1 holes removed.
+        self.assertEqual(topk_length.tolist(), [3] * (self.B * self.SQ))
+
+
+@unittest.skipUnless(
+    paddle.is_compiled_with_cuda(),
+    "the topk_length compaction promise test requires CUDA",
+)
+class TestTopkLengthCompactionPromise(unittest.TestCase):
+    """A caller-supplied ``topk_length`` must not enable the compact backward.
+
+    The kernel's compact KV-load path (taken for any non-None ``topk_length``)
+    gathers ``mKV[-1]`` on an interior ``-1``, so it is only valid over
+    compacted indices. ``topk_length`` on its own does not imply that: it is
+    documented as a forward-only early-stop hint and the forward predicates
+    ``-1``. So the backward may keep that path only when the caller also passes
+    ``topk_idxs_compacted=True``, which ``csa_attention.py`` does right after
+    ``compact_attn_topk_idxs``.
+
+    Here the unsafe combination is passed on purpose -- holey indices plus the
+    trailing bound of ``_csa_compute_topk_length`` -- and the backward must fall
+    back to the guarded full-width path and stay correct. Inferring the promise
+    from ``topk_length`` instead measures dq and dkv at ~5e-01, or yields nan /
+    ``CUDA error(700)``, since the gather reads uninitialised device memory.
+    """
+
+    # Against the fp32 ``unfused`` reference, so ~2x the bf16 noise floor
+    # (measured out 2.3e-3, dq 2.6e-3, dkv 3.2e-3) rather than the much tighter
+    # tilelang-vs-cuDNN ceilings above.
+    CEILING = {"out": 6e-3, "dq": 6e-3, "dkv": 6e-3, "d_sink": 8e-3}
+
+    @classmethod
+    def setUpClass(cls):
+        """Probe the real cuDNN backward instead of trusting a feature flag.
+
+        ``_HAS_CUDNN_SPARSE_BWD`` above is gated on a top-level ``import
+        cudnn``, which the ops loader has already renamed to
+        ``paddlefleet_ops.cudnn``, so it reads False even where the kernel runs
+        fine. One tiny backward settles it; anything other than a missing module
+        is re-raised so a real regression still fails loudly.
+        """
+        if not _HAS_FLASH_MLA:
+            raise unittest.SkipTest("this test requires FlashMLA")
+        try:
+            run_forward_backward(
+                *make_inputs(1, 8, 64, 64, 512, 64), backend="cudnn"
+            )
+        except Exception as exc:
+            if isinstance(exc, ImportError) or "No module named" in str(exc):
+                raise unittest.SkipTest(
+                    "the cuDNN sparse backward does not run here"
+                ) from exc
+            raise
+
+    def test_holey_idxs_with_a_bound_stay_correct(self):
+        from paddlefleet.fusions.csa_sparse_attn import (
+            _csa_compute_topk_length,
+            csa_sparse_attn,
+        )
+
+        batch, sq, s_kv, num_heads, hn, topk = 1, 128, 256, 64, 512, 64
+        paddle.seed(0)
+        q, kv, attn_sink, topk_idxs, scale = make_inputs(
+            batch, sq, s_kv, num_heads, hn, topk
+        )
+        holes = paddle.rand([batch, sq, topk]) < 0.3
+        topk_idxs = paddle.where(
+            holes, paddle.full_like(topk_idxs, -1), topk_idxs
+        )
+        # Keep column 0 valid: an all-invalid row has no reference output.
+        topk_idxs[:, :, 0] = paddle.randint(0, s_kv, [batch, sq]).cast("int32")
+        topk_length = _csa_compute_topk_length(
+            topk_idxs.reshape([batch * sq, topk])
+        ).reshape([batch, sq])
+
+        ref = run_forward_backward(
+            q, kv, attn_sink, topk_idxs, scale, backend="unfused"
+        )
+        tensors = [t.detach().clone() for t in (q, kv, attn_sink)]
+        for t in tensors:
+            t.stop_gradient = False
+        q_c, kv_c, sink_c = tensors
+        out = csa_sparse_attn(
+            q_c,
+            kv_c,
+            sink_c,
+            topk_idxs,
+            scale,
+            backend="cudnn",
+            topk_length=topk_length,
+        )
+        out.sum().backward()
+
+        got = (out, q_c.grad, kv_c.grad, sink_c.grad)
+        for name, actual, expected in zip(
+            ("out", "dq", "dkv", "d_sink"), got, ref
+        ):
+            self.assertEqual(
+                int(paddle.isfinite(actual.cast("float32")).all()),
+                1,
+                f"{name} is not finite",
+            )
+            self.assertLess(
+                rel_l2(actual, expected),
+                self.CEILING[name],
+                f"{name} diverges from the fp32 reference",
+            )

@@ -24,6 +24,7 @@ Four fused operations:
   - h_aggregate:  weighted n-stream -> 1-stream aggregation
   - h_post_bda:   fused H_res @ residual + H_post * (x + bias)
   - proj_rms:     fused projection + RMS normalization
+  - compute_h:    fused r * proj * alpha + bias, plus the two sigmoid heads
 """
 
 import math
@@ -59,6 +60,7 @@ def _get_cuda_stream():
 
 if _CUTILE_AVAILABLE:
     ConstInt = ct.Constant[int]
+    ConstBool = ct.Constant[bool]
     PAD_ZERO = ct.PaddingMode.ZERO
     LOG2E = 1.4426950408889634
     _INT32_MAX = 2**31 - 1
@@ -234,12 +236,276 @@ if _CUTILE_AVAILABLE:
         )
         return grad_input.reshape(original_shape)
 
+    # -- compute_h kernels ---------------------------------------------------
+    #
+    # Column layout of proj / bias / g_proj, all of width P = N*N + 2*N:
+    #
+    #     [ pre : N ][ post : N ][ res : N*N ]
+    #
+    # Everything is addressed in tiles of width N. ``ct.load``/``ct.store``
+    # index in whole tiles: tile 0 is the pre segment, tile 1 the post, and
+    # tiles 2 .. N+1 the res segment (N*N is exactly N of them). Slicing the res
+    # segment out in one piece is not expressible -- a width-N*N tile can only
+    # start at a multiple of N*N, and it starts at 2*N -- which is why the res
+    # work below is an unrolled loop over N sub-tiles rather than one operation.
+    #
+    # On dtypes: alpha and bias arrive in params_dtype and the global default
+    # dtype respectively, i.e. bf16 in bf16 training, while proj and r are fp32
+    # under high_precision_mhc. Nothing below widens them, and nothing needs to:
+    # every expression pairs them with ``r * proj``, which is fp32 already, so
+    # the promotion lifts the whole expression -- the same thing Paddle's
+    # promotion does in ``native_compute_h``.
+    #
+    # The rule, established by mutating every widening in this file and watching
+    # which removals the tests catch: an expression only degrades to the narrow
+    # dtype when *all* of its narrow operands stay narrow. The one place that
+    # happens is ``_ct_proj_rms_fwd_kernel``'s ``a_tile * a_tile``, which is
+    # widened explicitly.
+
+    @ct.kernel
+    def _ct_compute_h_fwd_kernel(
+        proj,
+        r,
+        a_pre,
+        a_post,
+        a_res,
+        bias,
+        h_pre,
+        h_post,
+        h_res,
+        N: ConstInt,
+        TILE_M: ConstInt,
+        eps: float,
+    ):
+        """h = r * proj * alpha + bias, then the two sigmoid heads.
+
+        Replaces ``expand x3 -> concat -> mul -> mul -> add -> sigmoid x2`` with
+        one launch. The alpha vector the reference builds by concatenating three
+        broadcast scalars never materializes: which scalar a column belongs to
+        is a compile-time fact here, so each segment gets its own scalar.
+
+        The sigmoid is ``1 / (1 + exp(-u))`` because cuTile has no sigmoid. That
+        form is bitwise equal to ``paddle.sigmoid`` on fp32 via ``ct.exp`` --
+        but not via ``ct.exp2``, which drifts ~1e-6 relative, so do not rewrite
+        into the exp2 form the softmax above uses.
+        """
+        pid = ct.bid(0)
+        r_tile = ct.load(
+            r, index=(pid, 0), shape=(TILE_M, 1), padding_mode=PAD_ZERO
+        )
+        ap = ct.reshape(ct.load(a_pre, index=(0,), shape=(1,)), (1, 1))
+        aq = ct.reshape(ct.load(a_post, index=(0,), shape=(1,)), (1, 1))
+        ar = ct.reshape(ct.load(a_res, index=(0,), shape=(1,)), (1, 1))
+
+        u_pre = r_tile * ct.load(
+            proj, index=(pid, 0), shape=(TILE_M, N), padding_mode=PAD_ZERO
+        ) * ap + ct.reshape(
+            ct.load(bias, index=(0,), shape=(N,), padding_mode=PAD_ZERO), (1, N)
+        )
+        u_post = r_tile * ct.load(
+            proj, index=(pid, 1), shape=(TILE_M, N), padding_mode=PAD_ZERO
+        ) * aq + ct.reshape(
+            ct.load(bias, index=(1,), shape=(N,), padding_mode=PAD_ZERO), (1, N)
+        )
+
+        s_pre = 1.0 / (1.0 + ct.exp(-u_pre))
+        s_post = 1.0 / (1.0 + ct.exp(-u_post))
+        ct.store(h_pre, index=(pid, 0), tile=(s_pre + eps).astype(h_pre.dtype))
+        ct.store(
+            h_post, index=(pid, 0), tile=(s_post * 2.0).astype(h_post.dtype)
+        )
+
+        for k in range(N):
+            u_k = r_tile * ct.load(
+                proj,
+                index=(pid, 2 + k),
+                shape=(TILE_M, N),
+                padding_mode=PAD_ZERO,
+            ) * ar + ct.reshape(
+                ct.load(
+                    bias, index=(2 + k,), shape=(N,), padding_mode=PAD_ZERO
+                ),
+                (1, N),
+            )
+            ct.store(h_res, index=(pid, k), tile=u_k.astype(h_res.dtype))
+
+    @ct.kernel
+    def _ct_compute_h_bwd_kernel(
+        g_h_pre,
+        g_h_post,
+        g_h_res,
+        proj,
+        r,
+        h_pre,
+        h_post,
+        a_pre,
+        a_post,
+        a_res,
+        g_proj,
+        g_r,
+        ga_part,
+        gb_part,
+        N: ConstInt,
+        TILE_M: ConstInt,
+        eps: float,
+    ):
+        """Backward of ``_ct_compute_h_fwd_kernel``.
+
+        ``g_proj`` and ``g_r`` are per-token and final here. The alpha and bias
+        gradients reduce over every token, which one block cannot finish: each
+        block writes its own partial into ``ga_part``/``gb_part`` and the
+        launcher sums those. That costs ``num_blocks * (3 + P)`` elements and is
+        deterministic, unlike an atomic accumulation.
+
+        The sigmoid derivatives come from the forward outputs
+        (``s_pre = h_pre - eps``, ``s_post = h_post / 2``) rather than from a
+        recomputed ``u``, which would need the bias and another pass over proj.
+
+        Multiplication order follows the chain rule the reference's autograd
+        actually walks -- ``t = r*proj``, ``u = t*alpha``, ``h = u+bias`` -- so
+        ``d(proj) = (du*alpha)*r`` and ``d(alpha) = du*(r*proj)``, not the
+        left-to-right grouping. Float multiplication is commutative but not
+        associative, and the wrong grouping costs a ULP for no reason.
+        """
+        pid = ct.bid(0)
+        r_tile = ct.load(
+            r, index=(pid, 0), shape=(TILE_M, 1), padding_mode=PAD_ZERO
+        )
+        ap = ct.reshape(ct.load(a_pre, index=(0,), shape=(1,)), (1, 1))
+        aq = ct.reshape(ct.load(a_post, index=(0,), shape=(1,)), (1, 1))
+        ar = ct.reshape(ct.load(a_res, index=(0,), shape=(1,)), (1, 1))
+
+        # du = dL/d(r * proj * alpha + bias), one segment at a time
+        s_pre = (
+            ct.load(
+                h_pre, index=(pid, 0), shape=(TILE_M, N), padding_mode=PAD_ZERO
+            )
+            - eps
+        )
+        du_pre = (
+            ct.load(
+                g_h_pre,
+                index=(pid, 0),
+                shape=(TILE_M, N),
+                padding_mode=PAD_ZERO,
+            )
+            * s_pre
+            * (1.0 - s_pre)
+        )
+        s_post = (
+            ct.load(
+                h_post, index=(pid, 0), shape=(TILE_M, N), padding_mode=PAD_ZERO
+            )
+            / 2.0
+        )
+        du_post = (
+            ct.load(
+                g_h_post,
+                index=(pid, 0),
+                shape=(TILE_M, N),
+                padding_mode=PAD_ZERO,
+            )
+            * 2.0
+            * s_post
+            * (1.0 - s_post)
+        )
+
+        p_pre = ct.load(
+            proj, index=(pid, 0), shape=(TILE_M, N), padding_mode=PAD_ZERO
+        )
+        p_post = ct.load(
+            proj, index=(pid, 1), shape=(TILE_M, N), padding_mode=PAD_ZERO
+        )
+
+        # d(proj) = du * r * alpha ; d(bias) = du summed over tokens
+        ct.store(
+            g_proj,
+            index=(pid, 0),
+            tile=(du_pre * ap * r_tile).astype(g_proj.dtype),
+        )
+        ct.store(
+            g_proj,
+            index=(pid, 1),
+            tile=(du_post * aq * r_tile).astype(g_proj.dtype),
+        )
+        ct.store(
+            gb_part,
+            index=(pid, 0),
+            tile=ct.sum(du_pre, axis=0, keepdims=True).astype(gb_part.dtype),
+        )
+        ct.store(
+            gb_part,
+            index=(pid, 1),
+            tile=ct.sum(du_post, axis=0, keepdims=True).astype(gb_part.dtype),
+        )
+
+        # d(r) sums over every column; d(alpha) over every column and token
+        dr = ct.sum(du_pre * ap * p_pre, axis=1, keepdims=True) + ct.sum(
+            du_post * aq * p_post, axis=1, keepdims=True
+        )
+        da_pre = ct.sum(
+            ct.sum(du_pre * (r_tile * p_pre), axis=1, keepdims=True),
+            axis=0,
+            keepdims=True,
+        )
+        da_post = ct.sum(
+            ct.sum(du_post * (r_tile * p_post), axis=1, keepdims=True),
+            axis=0,
+            keepdims=True,
+        )
+        da_res = ct.full((1, 1), 0.0, dtype=ct.float32)
+        for k in range(N):
+            du_k = ct.load(
+                g_h_res,
+                index=(pid, k),
+                shape=(TILE_M, N),
+                padding_mode=PAD_ZERO,
+            )
+            p_k = ct.load(
+                proj,
+                index=(pid, 2 + k),
+                shape=(TILE_M, N),
+                padding_mode=PAD_ZERO,
+            )
+            ct.store(
+                g_proj,
+                index=(pid, 2 + k),
+                tile=(du_k * ar * r_tile).astype(g_proj.dtype),
+            )
+            ct.store(
+                gb_part,
+                index=(pid, 2 + k),
+                tile=ct.sum(du_k, axis=0, keepdims=True).astype(gb_part.dtype),
+            )
+            dr = dr + ct.sum(du_k * ar * p_k, axis=1, keepdims=True)
+            da_res = da_res + ct.sum(
+                ct.sum(du_k * (r_tile * p_k), axis=1, keepdims=True),
+                axis=0,
+                keepdims=True,
+            )
+        ct.store(g_r, index=(pid, 0), tile=dr.astype(g_r.dtype))
+        ct.store(ga_part, index=(pid, 0), tile=da_pre.astype(ga_part.dtype))
+        ct.store(ga_part, index=(pid, 1), tile=da_post.astype(ga_part.dtype))
+        ct.store(ga_part, index=(pid, 2), tile=da_res.astype(ga_part.dtype))
+
     # -- H_aggregate kernels -------------------------------------------------
 
     @ct.kernel
     def _ct_h_agg_fwd_kernel(
-        x, h_pre, out, N: ConstInt, TILE_M: ConstInt, TILE_C: ConstInt
+        x,
+        h_pre,
+        out,
+        N: ConstInt,
+        TILE_M: ConstInt,
+        TILE_C: ConstInt,
+        UPCAST_INPUTS: ConstBool,
     ):
+        """n-stream -> 1-stream weighted aggregation.
+
+        ``UPCAST_INPUTS`` widens ``x`` in-register when it arrives narrower than
+        ``h_pre``; without it the product and its reduction over ``N`` would run
+        in the narrow dtype.
+        """
         pid = ct.bid(0)
         num_tiles = ct.num_tiles(x, axis=2, shape=(TILE_M, N, TILE_C))
         h_tile = ct.load(
@@ -253,13 +519,28 @@ if _CUTILE_AVAILABLE:
                 shape=(TILE_M, N, TILE_C),
                 padding_mode=PAD_ZERO,
             )
+            if UPCAST_INPUTS:
+                x_tile = x_tile.astype(ct.float32)
             acc = ct.sum(x_tile * h_tile, axis=1).astype(ct.float32)
             ct.store(out, index=(pid, j), tile=acc.astype(out.dtype))
 
     @ct.kernel
     def _ct_h_agg_bwd_kernel(
-        go, x, h_pre, gx, gh, N: ConstInt, TILE_M: ConstInt, TILE_C: ConstInt
+        go,
+        x,
+        h_pre,
+        gx,
+        gh,
+        N: ConstInt,
+        TILE_M: ConstInt,
+        TILE_C: ConstInt,
+        UPCAST_INPUTS: ConstBool,
     ):
+        """Backward of ``_ct_h_agg_fwd_kernel``.
+
+        ``UPCAST_INPUTS`` widens ``x`` before the ``gh`` reduction. ``gx`` does
+        not involve ``x`` at all, so it is unaffected.
+        """
         pid = ct.bid(0)
         num_c_tiles = ct.num_tiles(go, axis=1, shape=(TILE_M, TILE_C))
         h_tile = ct.load(
@@ -274,6 +555,12 @@ if _CUTILE_AVAILABLE:
                 shape=(TILE_M, TILE_C),
                 padding_mode=PAD_ZERO,
             )
+            if UPCAST_INPUTS:
+                # ``go`` is the gradient of ``aggregated``, which the fusion
+                # narrows too, so it needs widening as well -- otherwise both
+                # products below would fall back to cuTile's implicit promotion
+                # instead of the fp32 arithmetic the un-fused path did.
+                go_tile = go_tile.astype(ct.float32)
             go_expanded = ct.expand_dims(go_tile, axis=1)
             x_tile = ct.load(
                 x,
@@ -281,16 +568,124 @@ if _CUTILE_AVAILABLE:
                 shape=(TILE_M, N, TILE_C),
                 padding_mode=PAD_ZERO,
             )
+            if UPCAST_INPUTS:
+                x_tile = x_tile.astype(ct.float32)
             gx_tile = go_expanded * h_expanded
             ct.store(gx, index=(pid, 0, ct_idx), tile=gx_tile.astype(gx.dtype))
             gh_acc += ct.sum(go_expanded * x_tile, axis=2)
         ct.store(gh, index=(pid, 0), tile=gh_acc.astype(gh.dtype))
 
-    def _cutile_h_aggregate_fwd(x: Tensor, h_pre: Tensor) -> Tensor:
+    def _cutile_compute_h_fwd(
+        proj: Tensor,
+        r: Tensor,
+        alpha_pre: Tensor,
+        alpha_post: Tensor,
+        alpha_res: Tensor,
+        bias: Tensor,
+        n: int,
+        eps: float,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        leading = list(proj.shape[:-1])
+        P = proj.shape[-1]
+        M = math.prod(leading)
+        TILE_M = 64
+        dt = proj.dtype
+        h_pre = paddle.empty(shape=[M, n], dtype=dt)
+        h_post = paddle.empty(shape=[M, n], dtype=dt)
+        h_res = paddle.empty(shape=[M, n * n], dtype=dt)
+        ct.launch(
+            _get_cuda_stream(),
+            (math.ceil(M / TILE_M),),
+            _ct_compute_h_fwd_kernel,
+            (
+                proj.detach().reshape([M, P]),
+                r.detach().reshape([M, 1]),
+                alpha_pre.detach(),
+                alpha_post.detach(),
+                alpha_res.detach(),
+                bias.detach(),
+                h_pre,
+                h_post,
+                h_res,
+                n,
+                TILE_M,
+                eps,
+            ),
+        )
+        return (
+            h_pre.reshape([*leading, n]),
+            h_post.reshape([*leading, n]),
+            h_res.reshape([*leading, n * n]),
+        )
+
+    def _cutile_compute_h_bwd(
+        g_h_pre: Tensor,
+        g_h_post: Tensor,
+        g_h_res: Tensor,
+        proj: Tensor,
+        r: Tensor,
+        h_pre: Tensor,
+        h_post: Tensor,
+        alpha_pre: Tensor,
+        alpha_post: Tensor,
+        alpha_res: Tensor,
+        bias: Tensor,
+        n: int,
+        eps: float,
+    ):
+        leading = list(proj.shape[:-1])
+        P = proj.shape[-1]
+        M = math.prod(leading)
+        TILE_M = 64
+        blocks = math.ceil(M / TILE_M)
+        g_proj = paddle.empty(shape=[M, P], dtype=proj.dtype)
+        g_r = paddle.empty(shape=[M, 1], dtype=r.dtype)
+        # One partial row per block; the cross-token sums finish below in fp32.
+        ga_part = paddle.empty(shape=[blocks, 3], dtype="float32")
+        gb_part = paddle.empty(shape=[blocks, P], dtype="float32")
+        ct.launch(
+            _get_cuda_stream(),
+            (blocks,),
+            _ct_compute_h_bwd_kernel,
+            (
+                g_h_pre.detach().reshape([M, n]),
+                g_h_post.detach().reshape([M, n]),
+                g_h_res.detach().reshape([M, n * n]),
+                proj.detach().reshape([M, P]),
+                r.detach().reshape([M, 1]),
+                h_pre.detach().reshape([M, n]),
+                h_post.detach().reshape([M, n]),
+                alpha_pre.detach(),
+                alpha_post.detach(),
+                alpha_res.detach(),
+                g_proj,
+                g_r,
+                ga_part,
+                gb_part,
+                n,
+                TILE_M,
+                eps,
+            ),
+        )
+        g_alpha = ga_part.sum(axis=0)
+        return (
+            g_proj.reshape([*leading, P]),
+            g_r.reshape([*leading, 1]),
+            g_alpha[0:1].astype(alpha_pre.dtype),
+            g_alpha[1:2].astype(alpha_post.dtype),
+            g_alpha[2:3].astype(alpha_res.dtype),
+            gb_part.sum(axis=0).astype(bias.dtype),
+        )
+
+    def _cutile_h_aggregate_fwd(
+        x: Tensor, h_pre: Tensor, fuse_cast: bool = False
+    ) -> Tensor:
         s, b, n, C = x.shape
         sb = s * b
         TILE_SIZE = math.gcd(sb, 4)
         TILE_C = math.gcd(C, 1024)
+        # ``out`` follows x either way: under fuse_cast x is already the dtype
+        # the downstream layernorm wants, so no override is needed.
         out = paddle.empty(shape=[sb, C], dtype=x.dtype)
         ct.launch(
             _get_cuda_stream(),
@@ -303,12 +698,16 @@ if _CUTILE_AVAILABLE:
                 n,
                 TILE_SIZE,
                 TILE_C,
+                fuse_cast,
             ),
         )
         return out.reshape([s, b, C])
 
     def _cutile_h_aggregate_bwd(
-        grad_output: Tensor, x: Tensor, h_pre: Tensor
+        grad_output: Tensor,
+        x: Tensor,
+        h_pre: Tensor,
+        fuse_cast: bool = False,
     ) -> tuple[Tensor, Tensor]:
         s, b, n, C = x.shape
         sb = s * b
@@ -316,7 +715,11 @@ if _CUTILE_AVAILABLE:
         TILE_C = min(C, 4096) if C <= 4096 else math.gcd(C, 1024)
         TILE_M = math.gcd(sb, 2)
         gx = paddle.empty(shape=[sb, n, C], dtype=x.dtype)
-        gh = paddle.empty(shape=[sb, n], dtype=x.dtype)
+        # gh is the gradient of h_pre, which stays fp32 under fuse_cast even
+        # though x does not, so it cannot follow x's dtype there.
+        gh = paddle.empty(
+            shape=[sb, n], dtype=h_pre.dtype if fuse_cast else x.dtype
+        )
         ct.launch(
             _get_cuda_stream(),
             (math.ceil(sb / TILE_M),),
@@ -330,6 +733,7 @@ if _CUTILE_AVAILABLE:
                 n,
                 TILE_M,
                 TILE_C,
+                fuse_cast,
             ),
         )
         return gx.reshape([s, b, n, C]), gh.reshape([s, b, n])
@@ -338,8 +742,25 @@ if _CUTILE_AVAILABLE:
 
     @ct.kernel
     def _ct_hpb_fwd_kernel(
-        hr, orig, hp, x, out, N: ConstInt, TILE_C: ConstInt, TILE_SIZE: ConstInt
+        hr,
+        orig,
+        hp,
+        x,
+        out,
+        N: ConstInt,
+        TILE_C: ConstInt,
+        TILE_SIZE: ConstInt,
+        UPCAST_INPUTS: ConstBool,
     ):
+        """Fused H_res @ residual + H_post * x.
+
+        ``UPCAST_INPUTS`` is a compile-time constant: set it when ``orig``/``x``
+        arrive narrower than the fp32 the arithmetic below runs in, so they
+        get widened in-register instead of the caller materializing fp32
+        copies. When false the guard folds away and this is the original
+        kernel, including its bf16-in/bf16-out behaviour -- ``TestConstGuard``
+        pins that down.
+        """
         pid = ct.bid(0)
         num_c_tiles = ct.num_tiles(x, axis=1, shape=(TILE_SIZE, TILE_C))
         hp_tile = ct.load(
@@ -365,6 +786,9 @@ if _CUTILE_AVAILABLE:
                 shape=(TILE_SIZE, TILE_C),
                 padding_mode=PAD_ZERO,
             )
+            if UPCAST_INPUTS:
+                orig_tile = orig_tile.astype(ct.float32)
+                x_tile = x_tile.astype(ct.float32)
             x_exp = ct.expand_dims(x_tile, axis=1)  # (TILE_SIZE, 1, TILE_C)
             out_tile = hp_exp * x_exp  # (TILE_SIZE, N, TILE_C)
             for j in range(N):
@@ -390,6 +814,12 @@ if _CUTILE_AVAILABLE:
         TILE_C: ConstInt,
         TILE_SIZE: ConstInt,
     ):
+        """As ``_ct_hpb_fwd_kernel``, plus ``+ bias`` on the layer output.
+
+        No ``UPCAST_INPUTS``: the fusion is vetoed whenever a bias is present,
+        see ``_cutile_h_post_bda_bwd`` for why, so this kernel only ever sees
+        pre-widened operands.
+        """
         pid = ct.bid(0)
         num_c_tiles = ct.num_tiles(x, axis=1, shape=(TILE_SIZE, TILE_C))
         hp_tile = ct.load(
@@ -447,7 +877,18 @@ if _CUTILE_AVAILABLE:
         N: ConstInt,
         TILE_C: ConstInt,
         TILE_SIZE: ConstInt,
+        UPCAST_INPUTS: ConstBool,
     ):
+        """Backward of ``_ct_hpb_fwd_kernel``.
+
+        ``UPCAST_INPUTS`` widens ``go``/``x``/``orig`` in-register, same
+        contract as the forward. Note this is where the fused path stops being
+        bit-identical to the un-fused one: narrowing those three halves the tile
+        footprint, so cuTile schedules the two ``ct.sum`` reductions differently
+        and the fp32 additions group differently. Only ``g_hp``/``g_hr`` are
+        affected -- they are the ones reduced over ``TILE_C``. The summands are
+        unchanged, so this is a reassociation, not a precision loss.
+        """
         pid = ct.bid(0)
         num_c_tiles = ct.cdiv(go.shape[2], TILE_C)
         hp_tile = ct.load(hp, index=(pid, 0), shape=(TILE_SIZE, N))
@@ -468,6 +909,8 @@ if _CUTILE_AVAILABLE:
                 shape=(TILE_SIZE, TILE_C),
                 padding_mode=PAD_ZERO,
             )
+            if UPCAST_INPUTS:
+                x_tile = x_tile.astype(ct.float32)
             x_2d = ct.reshape(x_tile, (1, TILE_C))
             go_tile = ct.load(
                 go,
@@ -475,6 +918,8 @@ if _CUTILE_AVAILABLE:
                 shape=(TILE_SIZE, N, TILE_C),
                 padding_mode=PAD_ZERO,
             )
+            if UPCAST_INPUTS:
+                go_tile = go_tile.astype(ct.float32)
             go_2d = ct.reshape(go_tile, (N, TILE_C))
             orig_tile = ct.load(
                 orig,
@@ -482,6 +927,8 @@ if _CUTILE_AVAILABLE:
                 shape=(TILE_SIZE, N, TILE_C),
                 padding_mode=PAD_ZERO,
             )
+            if UPCAST_INPUTS:
+                orig_tile = orig_tile.astype(ct.float32)
             orig_2d = ct.reshape(orig_tile, (N, TILE_C))
             g_x_2d = ct.full((1, TILE_C), 0, dtype=hp.dtype)
             g_orig_2d = ct.full((N, TILE_C), 0, dtype=hp.dtype)
@@ -536,6 +983,10 @@ if _CUTILE_AVAILABLE:
         TILE_C: ConstInt,
         TILE_SIZE: ConstInt,
     ):
+        """As ``_ct_hpb_bwd_kernel``, plus the ``bias`` gradient path.
+
+        No ``UPCAST_INPUTS`` -- see ``_cutile_h_post_bda_bwd``.
+        """
         pid = ct.bid(0)
         num_c_tiles = ct.cdiv(go.shape[2], TILE_C)
         hp_tile = ct.load(hp, index=(pid, 0), shape=(TILE_SIZE, N))
@@ -619,6 +1070,7 @@ if _CUTILE_AVAILABLE:
         h_post: Tensor,
         x: Tensor,
         bias: Tensor | None,
+        fuse_cast: bool = False,
     ) -> Tensor:
         s, b, n, C = original_residual.shape
         sb = s * b
@@ -632,7 +1084,24 @@ if _CUTILE_AVAILABLE:
             else math.gcd(C, 1024)
         )
         TILE_SIZE = math.gcd(sb, 1)
-        out = paddle.empty(shape=[sb, n, C], dtype=h_res.dtype)
+        # ``fuse_cast`` means the caller skipped the fp32 widening it would
+        # otherwise have done, so the kernel widens in-register and the result
+        # comes back in the residual dtype. This cannot be sniffed
+        # from dtypes -- h_res is fp32 either way -- so the caller states it.
+        # UPCAST_INPUTS is a compile-time constant: fuse_cast=False compiles
+        # to exactly the pre-fusion kernel.
+        #
+        # Declined when a bias is present: ``g_bias`` is computed outside the
+        # kernel as ``g_x.sum(axis=0)``, i.e. a [sb, C] -> [C] reduction with no
+        # fp32 accumulator of its own. A narrow g_x would therefore be summed in
+        # bf16 and lose ~5e-3 relative, which is real precision loss rather than
+        # the ULP-scale reassociation the other gradients see. Fixing it means
+        # accumulating g_bias in-kernel from the un-rounded registers, but the
+        # grid is one block per token so that needs a deterministic cross-block
+        # reduction -- worth revisiting only for a bias-carrying config.
+        fuse_cast = fuse_cast and bias is None
+        out_dtype = original_residual.dtype if fuse_cast else h_res.dtype
+        out = paddle.empty(shape=[sb, n, C], dtype=out_dtype)
         grid = (math.ceil(sb / TILE_SIZE),)
         if bias is not None:
             ct.launch(
@@ -665,6 +1134,7 @@ if _CUTILE_AVAILABLE:
                     n,
                     TILE_C,
                     TILE_SIZE,
+                    fuse_cast,
                 ),
             )
         return out.reshape([s, b, n, C])
@@ -676,16 +1146,27 @@ if _CUTILE_AVAILABLE:
         h_post: Tensor,
         x: Tensor,
         bias: Tensor | None,
+        fuse_cast: bool = False,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor | None]:
         s, b, n, C = original_residual.shape
         sb = s * b
         # Optimized: use 2048 when possible (fastest for bwd), fall back to gcd for non-power-of-2 C
         TILE_C = math.gcd(C, 2048) if C % 2048 == 0 else math.gcd(C, 1024)
         TILE_SIZE = math.gcd(sb, 1)
+        # Under ``fuse_cast`` residual/x arrived narrow, so their grads must
+        # come back narrow too: returning fp32 would only make Paddle insert
+        # the cast this path exists to remove. h_res/h_post stay fp32. Same
+        # bias veto as the forward -- g_bias reduces over g_x.
+        fuse_cast = fuse_cast and bias is None
         g_hr = paddle.empty(shape=[sb, n, n], dtype=h_res.dtype)
-        g_res = paddle.empty(shape=[sb, n, C], dtype=h_res.dtype)
+        g_res = paddle.empty(
+            shape=[sb, n, C],
+            dtype=original_residual.dtype if fuse_cast else h_res.dtype,
+        )
         g_hp = paddle.empty(shape=[sb, n], dtype=h_res.dtype)
-        g_x = paddle.empty(shape=[sb, C], dtype=h_res.dtype)
+        g_x = paddle.empty(
+            shape=[sb, C], dtype=x.dtype if fuse_cast else h_res.dtype
+        )
         grid = (sb,)
         if bias is not None:
             ct.launch(
@@ -726,6 +1207,7 @@ if _CUTILE_AVAILABLE:
                     n,
                     TILE_C,
                     TILE_SIZE,
+                    fuse_cast,
                 ),
             )
         g_bias = g_x.sum(axis=0) if bias is not None else None
@@ -761,7 +1243,16 @@ if _CUTILE_AVAILABLE:
         TILE_M: ConstInt,
         TILE_N: ConstInt,
         TILE_K: ConstInt,
+        UPCAST_INPUTS: ConstBool,
     ):
+        """Fused projection + RMS norm.
+
+        ``UPCAST_INPUTS`` widens ``A`` in-register when it arrives narrower than
+        the fp32 the norm reduction runs in. The ``ct.mma`` below is unaffected
+        either way -- it truncates both operands to tfloat32, and a bf16-valued
+        tile survives that exactly -- but ``sum_sq`` would otherwise square and
+        accumulate in the narrow dtype and lose real precision.
+        """
         tile_m_id = ct.bid(0)
         num_k_tiles = ct.cdiv(K, TILE_K)
         acc = ct.full((TILE_M, TILE_N), 0.0, dtype=ct.float32)
@@ -779,6 +1270,8 @@ if _CUTILE_AVAILABLE:
                 shape=(TILE_N, TILE_K),
                 padding_mode=PAD_ZERO,
             )
+            if UPCAST_INPUTS:
+                a_tile = a_tile.astype(ct.float32)
             acc = ct.mma(
                 a_tile.astype(ct.tfloat32),
                 b_tile.transpose().astype(ct.tfloat32),
@@ -808,7 +1301,14 @@ if _CUTILE_AVAILABLE:
         TILE_SIZE_M: ConstInt,
         TILE_SIZE_N: ConstInt,
         TILE_SIZE_K: ConstInt,
+        UPCAST_INPUTS: ConstBool,
     ):
+        """Backward of ``_ct_proj_rms_fwd_kernel`` for the large-K path.
+
+        ``UPCAST_INPUTS`` widens ``A`` before ``_ct_rms_dnorm``; the mma below
+        truncates to tfloat32 regardless. ``_ct_proj_rms_bwd_small_k_kernel``
+        needs no such flag -- it already widens unconditionally.
+        """
         zero_pad = ct.PaddingMode.ZERO
         tile_k_id = ct.bid(0)
         NUM_M_TILES = ct.cdiv(M, TILE_SIZE_M)
@@ -837,6 +1337,8 @@ if _CUTILE_AVAILABLE:
                 shape=(TILE_SIZE_M, 1),
                 padding_mode=zero_pad,
             )
+            if UPCAST_INPUTS:
+                a_tile = a_tile.astype(ct.float32)
             accumulator_da = accumulator_da + _ct_rms_dnorm(
                 a_tile, norm_tile, dr_tile, K, eps
             )
@@ -988,7 +1490,7 @@ if _CUTILE_AVAILABLE:
         return n
 
     def _cutile_proj_rms_fwd(
-        x: Tensor, weight: Tensor, eps: float = 1e-8
+        x: Tensor, weight: Tensor, eps: float = 1e-8, fuse_cast: bool = False
     ) -> tuple[Tensor, Tensor, Tensor]:
         M, K = x.shape
         N = weight.shape[0]
@@ -997,9 +1499,14 @@ if _CUTILE_AVAILABLE:
         TILE_N = _next_power_of_2(N)
         TILE_K = 128
         num_tiles_m = math.ceil(M / TILE_M)
-        proj = paddle.empty(shape=[M, N], dtype=x.dtype)
-        norm = paddle.empty(shape=[M, 1], dtype=x.dtype)
-        r = paddle.empty(shape=[M, 1], dtype=x.dtype)
+        # Under fuse_cast x is narrow but the three outputs must stay fp32: proj
+        # and r feed _compute_h, and narrowing them there would drag h_res /
+        # h_post down with them, i.e. silently undo high_precision_mhc. norm is
+        # kept for backward and consumed at fp32 by _ct_rms_dnorm.
+        out_dtype = "float32" if fuse_cast else x.dtype
+        proj = paddle.empty(shape=[M, N], dtype=out_dtype)
+        norm = paddle.empty(shape=[M, 1], dtype=out_dtype)
+        r = paddle.empty(shape=[M, 1], dtype=out_dtype)
         ct.launch(
             _get_cuda_stream(),
             (num_tiles_m,),
@@ -1017,6 +1524,7 @@ if _CUTILE_AVAILABLE:
                 TILE_M,
                 TILE_N,
                 TILE_K,
+                fuse_cast,
             ),
         )
         return proj, norm, r
@@ -1028,6 +1536,7 @@ if _CUTILE_AVAILABLE:
         weight: Tensor,
         norm: Tensor,
         eps: float = 1e-8,
+        fuse_cast: bool = False,
     ) -> tuple[Tensor, Tensor]:
         M, K = x.shape
         N = weight.shape[0]
@@ -1061,6 +1570,7 @@ if _CUTILE_AVAILABLE:
                     TILE_SIZE_M,
                     TILE_SIZE_N,
                     TILE_SIZE_K,
+                    fuse_cast,
                 ),
             )
         else:
@@ -1104,6 +1614,7 @@ if not _CUTILE_AVAILABLE:
     fused_h_aggregate = _no_cutile_error
     fused_h_post_bda = _no_cutile_error
     fused_proj_rms = _no_cutile_error
+    fused_compute_h = _no_cutile_error
 
 else:
 
@@ -1148,6 +1659,76 @@ else:
             )
             return grad_input
 
+    class FusedComputeH(paddle.autograd.PyLayer):
+        """Fused ``h = r * proj * alpha + bias`` plus the two sigmoid heads.
+
+        See ``FusedSinkhornKnopp`` for why the ``stop_gradient`` flags are
+        recorded in forward and honored in backward: the mHC parameters are
+        frozen under ``train_indexer_only``, and Paddle demands ``None`` at
+        every position whose forward input was detached.
+        """
+
+        @staticmethod
+        def forward(
+            ctx,
+            proj: Tensor,
+            r: Tensor,
+            alpha_pre: Tensor,
+            alpha_post: Tensor,
+            alpha_res: Tensor,
+            bias: Tensor,
+            n: int,
+            eps: float,
+        ):
+            h_pre, h_post, h_res = _cutile_compute_h_fwd(
+                proj, r, alpha_pre, alpha_post, alpha_res, bias, n, eps
+            )
+            ctx.save_for_backward(
+                proj, r, h_pre, h_post, alpha_pre, alpha_post, alpha_res, bias
+            )
+            ctx.n = n
+            ctx.eps = eps
+            ctx.stop = (
+                proj.stop_gradient,
+                r.stop_gradient,
+                alpha_pre.stop_gradient,
+                alpha_post.stop_gradient,
+                alpha_res.stop_gradient,
+                bias.stop_gradient,
+            )
+            return h_pre, h_post, h_res
+
+        @staticmethod
+        def backward(ctx, g_h_pre, g_h_post, g_h_res):
+            (
+                proj,
+                r,
+                h_pre,
+                h_post,
+                alpha_pre,
+                alpha_post,
+                alpha_res,
+                bias,
+            ) = ctx.saved_tensor()
+            grads = _cutile_compute_h_bwd(
+                g_h_pre,
+                g_h_post,
+                g_h_res,
+                proj,
+                r,
+                h_pre,
+                h_post,
+                alpha_pre,
+                alpha_post,
+                alpha_res,
+                bias,
+                ctx.n,
+                ctx.eps,
+            )
+            return tuple(
+                None if frozen else g for g, frozen in zip(grads, ctx.stop)
+            )
+
     class FusedHAggregate(paddle.autograd.PyLayer):
         """Fused n-stream weighted aggregation (cuTile).
 
@@ -1156,19 +1737,22 @@ else:
         """
 
         @staticmethod
-        def forward(ctx, x: Tensor, h_pre: Tensor):
+        def forward(ctx, x: Tensor, h_pre: Tensor, fuse_cast: bool = False):
             """cuTile fused h_aggregate forward."""
-            output = _cutile_h_aggregate_fwd(x, h_pre)
+            output = _cutile_h_aggregate_fwd(x, h_pre, fuse_cast)
             ctx.save_for_backward(x, h_pre)
             ctx.x_stop_gradient = x.stop_gradient
             ctx.h_pre_stop_gradient = h_pre.stop_gradient
+            ctx.fuse_cast = fuse_cast
             return output
 
         @staticmethod
         def backward(ctx, grad_output):
             """cuTile fused h_aggregate backward."""
             x, h_pre = ctx.saved_tensor()
-            g_x, g_h_pre = _cutile_h_aggregate_bwd(grad_output, x, h_pre)
+            g_x, g_h_pre = _cutile_h_aggregate_bwd(
+                grad_output, x, h_pre, ctx.fuse_cast
+            )
             if ctx.x_stop_gradient:
                 g_x = None
             if ctx.h_pre_stop_gradient:
@@ -1190,10 +1774,11 @@ else:
             h_post: Tensor,
             x: Tensor,
             bias: Tensor | None,
+            fuse_cast: bool = False,
         ):
             """cuTile fused h_post_bda forward."""
             output = _cutile_h_post_bda_fwd(
-                h_res, original_residual, h_post, x, bias
+                h_res, original_residual, h_post, x, bias, fuse_cast
             )
             if bias is not None:
                 ctx.save_for_backward(h_res, original_residual, h_post, x, bias)
@@ -1201,6 +1786,7 @@ else:
             else:
                 ctx.save_for_backward(h_res, original_residual, h_post, x)
                 ctx.has_bias = False
+            ctx.fuse_cast = fuse_cast
             ctx.h_res_stop_gradient = h_res.stop_gradient
             ctx.original_residual_stop_gradient = (
                 original_residual.stop_gradient
@@ -1218,12 +1804,12 @@ else:
             if ctx.has_bias:
                 h_res, orig_res, h_post, x, bias = ctx.saved_tensor()
                 g_hr, g_res, g_hp, g_x, g_bias = _cutile_h_post_bda_bwd(
-                    grad_output, h_res, orig_res, h_post, x, bias
+                    grad_output, h_res, orig_res, h_post, x, bias, ctx.fuse_cast
                 )
             else:
                 h_res, orig_res, h_post, x = ctx.saved_tensor()
                 g_hr, g_res, g_hp, g_x, _ = _cutile_h_post_bda_bwd(
-                    grad_output, h_res, orig_res, h_post, x, None
+                    grad_output, h_res, orig_res, h_post, x, None, ctx.fuse_cast
                 )
                 g_bias = None
             if ctx.h_res_stop_gradient:
@@ -1251,14 +1837,21 @@ else:
         """
 
         @staticmethod
-        def forward(ctx, x: Tensor, weight: Tensor, eps: float = 1e-6):
+        def forward(
+            ctx,
+            x: Tensor,
+            weight: Tensor,
+            eps: float = 1e-6,
+            fuse_cast: bool = False,
+        ):
             """cuTile fused proj_rms forward."""
             original_shape = x.shape
             K = original_shape[-1]
             x_2d = x.reshape([-1, K])
-            proj, norm, r = _cutile_proj_rms_fwd(x_2d, weight, eps)
+            proj, norm, r = _cutile_proj_rms_fwd(x_2d, weight, eps, fuse_cast)
             ctx.save_for_backward(x_2d, weight, norm)
             ctx.eps = eps
+            ctx.fuse_cast = fuse_cast
             ctx.original_shape = original_shape
             ctx.x_stop_gradient = x.stop_gradient
             ctx.weight_stop_gradient = weight.stop_gradient
@@ -1274,7 +1867,13 @@ else:
             grad_proj_2d = grad_proj.reshape([-1, grad_proj.shape[-1]])
             grad_r_2d = grad_r.reshape([-1, 1])
             grad_x, grad_weight = _cutile_proj_rms_bwd(
-                grad_proj_2d, grad_r_2d, x_2d, weight, norm, ctx.eps
+                grad_proj_2d,
+                grad_r_2d,
+                x_2d,
+                weight,
+                norm,
+                ctx.eps,
+                ctx.fuse_cast,
             )
             return (
                 None if ctx.x_stop_gradient else grad_x.reshape(original_shape),
@@ -1312,12 +1911,73 @@ else:
         )
         return FusedSinkhornKnopp.apply(input_logits, num_iterations, eps)
 
-    def fused_h_aggregate(x: Tensor, h_pre: Tensor) -> Tensor:
+    def fused_compute_h(
+        proj: Tensor,
+        r: Tensor,
+        alpha_pre: Tensor,
+        alpha_post: Tensor,
+        alpha_res: Tensor,
+        bias: Tensor,
+        n: int,
+        eps: float,
+    ) -> tuple[Tensor, Tensor, Tensor]:
+        """Fused mHC mapping head.
+
+        Replaces ``expand x3 -> concat -> mul -> mul -> add -> sigmoid x2`` with
+        one launch, and drops the ``alpha`` vector entirely: ``n`` is a
+        compile-time constant in the kernel, so each output segment applies its
+        own scalar directly.
+
+        Args:
+            proj: [..., n*n + 2*n] projection of the n-stream hidden states
+            r: [..., 1] inverse RMS scale
+            alpha_pre / alpha_post / alpha_res: [1] learnable gates
+            bias: [n*n + 2*n] static bias
+            n: number of residual streams
+            eps: the constant added to h_pre
+
+        Returns:
+            h_pre: [..., n] sigmoid(u_pre) + eps
+            h_post: [..., n] 2 * sigmoid(u_post)
+            h_res: [..., n*n] u_res, unactivated
+        """
+        P = n * n + 2 * n
+        # Raised, not asserted: ``python -O`` strips asserts, and a wrong P or
+        # bias length then reaches a kernel that addresses the three output
+        # segments at fixed offsets, i.e. reads out of bounds.
+        if proj.shape[-1] != P:
+            raise ValueError(
+                f"fused_compute_h: proj last dim must be n*n+2*n={P}, "
+                f"got {proj.shape[-1]} (proj.shape={list(proj.shape)})"
+            )
+        if r.shape[-1] != 1:
+            raise ValueError(
+                f"fused_compute_h: r last dim must be 1, got {list(r.shape)}"
+            )
+        if list(r.shape[:-1]) != list(proj.shape[:-1]):
+            raise ValueError(
+                f"fused_compute_h: r shape {list(r.shape)} and proj shape "
+                f"{list(proj.shape)} must agree on the leading dims"
+            )
+        if bias.shape != [P]:
+            raise ValueError(
+                f"fused_compute_h: bias must be [{P}], got {list(bias.shape)}"
+            )
+        return FusedComputeH.apply(
+            proj, r, alpha_pre, alpha_post, alpha_res, bias, n, eps
+        )
+
+    def fused_h_aggregate(
+        x: Tensor, h_pre: Tensor, fuse_cast: bool = False
+    ) -> Tensor:
         """Weighted n-stream to 1-stream aggregation.
 
         Args:
             x: [s, b, n, C] n-stream hidden states
             h_pre: [s, b, n] aggregation weights
+            fuse_cast: when True, ``x`` may be narrower than ``h_pre``; the
+                kernel widens it in-register. Only the caller knows whether it
+                skipped the widening, so it cannot be inferred from dtypes.
 
         Returns:
             [s, b, C] aggregated hidden states
@@ -1339,7 +1999,7 @@ else:
         assert C <= _INT32_MAX, (
             f"fused_h_aggregate: C={C} exceeds int32 max ({_INT32_MAX})"
         )
-        return FusedHAggregate.apply(x, h_pre)
+        return FusedHAggregate.apply(x, h_pre, fuse_cast)
 
     def fused_h_post_bda(
         h_res: Tensor,
@@ -1347,6 +2007,7 @@ else:
         h_post: Tensor,
         x: Tensor,
         bias: Tensor | None,
+        fuse_cast: bool = False,
     ) -> Tensor:
         """Fused H_res @ residual + H_post * (x + bias).
 
@@ -1356,6 +2017,13 @@ else:
             h_post: [s, b, n] expansion weights
             x: [s, b, C] layer output
             bias: [C] or None
+            fuse_cast: when True, ``original_residual``/``x`` may be narrower
+                than the fp32 the kernel computes in; it widens them in-register
+                and returns its result in ``original_residual``'s dtype. Only
+                the caller knows whether it skipped the widening, so this cannot
+                be inferred from dtypes -- ``h_res`` is fp32 either way.
+                Declined when ``bias`` is not None, since ``g_bias`` reduces
+                over ``g_x`` and would lose precision if ``g_x`` were narrow.
 
         Returns:
             [s, b, n, C] fused output
@@ -1384,10 +2052,15 @@ else:
         assert C <= _INT32_MAX, (
             f"fused_h_post_bda: C={C} exceeds int32 max ({_INT32_MAX})"
         )
-        return FusedHPostBDA.apply(h_res, original_residual, h_post, x, bias)
+        return FusedHPostBDA.apply(
+            h_res, original_residual, h_post, x, bias, fuse_cast
+        )
 
     def fused_proj_rms(
-        x: Tensor, weight: Tensor, eps: float = 1e-6
+        x: Tensor,
+        weight: Tensor,
+        eps: float = 1e-6,
+        fuse_cast: bool = False,
     ) -> tuple[Tensor, Tensor]:
         """Fused projection + RMS normalization.
 
@@ -1395,6 +2068,9 @@ else:
             x: [..., K] input (last dim is K)
             weight: [K, N] projection weight
             eps: stability epsilon
+            fuse_cast: when True, ``x``/``weight`` may be narrow; the kernel
+                widens ``x`` in-register and returns ``proj``/``r`` in fp32 so
+                the mappings built from them keep their precision.
 
         Returns:
             proj: [..., N] = x @ weight^T
@@ -1423,4 +2099,4 @@ else:
         assert K <= _INT32_MAX, (
             f"fused_proj_rms: K={K} exceeds int32 max ({_INT32_MAX})"
         )
-        return FusedProjRms.apply(x, weight, eps)
+        return FusedProjRms.apply(x, weight, eps, fuse_cast)

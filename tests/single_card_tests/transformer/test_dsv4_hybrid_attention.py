@@ -163,6 +163,7 @@ def _make_config(
     num_nextn_predict_layers=0,
     csa_indexer_backend="unfused",
     csa_sparse_attn_backend="unfused",
+    mqa_sparse_attn_backward_backend="cudnn",
     tensor_model_parallel_size=1,
     context_parallel_size=1,
     csa_dense_mode=False,
@@ -230,6 +231,7 @@ def _make_config(
         softmax_type="vanilla",
         csa_indexer_backend=csa_indexer_backend,
         csa_sparse_attn_backend=csa_sparse_attn_backend,
+        mqa_sparse_attn_backward_backend=mqa_sparse_attn_backward_backend,
         tensor_model_parallel_size=tensor_model_parallel_size,
         context_parallel_size=context_parallel_size,
         csa_dense_mode=csa_dense_mode,
@@ -524,6 +526,25 @@ class TestDSv4HybridConfigAndSpec(unittest.TestCase):
             ValueError, "csa_sparse_attn_backend='paddle' is invalid"
         ):
             _make_config(csa_sparse_attn_backend="paddle")
+
+    def test_mqa_sparse_attn_backward_backend_validation(self):
+        # Only the absorbed-MQA *backward* is switchable (the forward is always
+        # FlashMLA sparse), so this list is deliberately shorter than the two
+        # above -- there is no "unfused" backward for the Dk != Dv layout.
+        for backend in ("cudnn", "tilelang"):
+            cfg = _make_config(mqa_sparse_attn_backward_backend=backend)
+            self.assertEqual(cfg.mqa_sparse_attn_backward_backend, backend)
+
+        with self.assertRaisesRegex(
+            ValueError, "mqa_sparse_attn_backward_backend='unfused' is invalid"
+        ):
+            _make_config(mqa_sparse_attn_backward_backend="unfused")
+
+    def test_mqa_sparse_attn_backward_backend_defaults_to_cudnn(self):
+        # The deterministic backward is ~14x slower, so it must stay opt-in.
+        self.assertEqual(
+            _make_config().mqa_sparse_attn_backward_backend, "cudnn"
+        )
 
     def test_csa_cudnn_indexer_allows_config_with_cp(self):
         cfg = _make_config(csa_indexer_backend="cudnn", context_parallel_size=2)

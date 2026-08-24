@@ -1040,6 +1040,7 @@ class AllToAllTokenDispatcher(nn.Layer):
     ) -> tuple[paddle.Tensor, paddle.Tensor]:
         self.routing_map = mask
         self.probs = probs
+        self.hidden_states_dtype = hidden_states.dtype
         self.num_experts = (
             self.num_experts_per_device * self.expert_model_parallel_size
         )
@@ -1237,7 +1238,8 @@ class AllToAllTokenDispatcher(nn.Layer):
             routing_map=self.routing_map,
             use_accuracy_compatible=self.use_accuracy_compatible,
         )
-        return output
+        output_dtype = getattr(self, "hidden_states_dtype", output.dtype)
+        return output.cast(output_dtype)
 
 
 class _RouterAllGather(paddle.autograd.PyLayer):

@@ -778,8 +778,19 @@ class GPTEmbedding(FleetLayer):
                 and not self.config.mtp_load_weight_only
             )
             assert len(mtp_emb_res) == self.config.num_nextn_predict_layers + 1
-            hidden_states_concat = paddle.concat(mtp_emb_res)
-            preproc_output["hidden_states"] = hidden_states_concat
+            if self.config.separate_mtp_input:
+                # Keep hidden_states free of MTP chunks so the backbone layers do not
+                # have to split/concat them. The shifted embeddings travel to the MTP
+                # layer through a dedicated key instead. Every entry of mtp_emb_res is
+                # already CP/SP-scattered above, so stack() is a pure container op and
+                # MultiTokenPredictionLayer must not re-scatter them.
+                preproc_output["hidden_states"] = mtp_emb_res[0].contiguous()
+                preproc_output["mtp_decoder_inputs"] = paddle.stack(
+                    mtp_emb_res[1:]
+                )
+            else:
+                hidden_states_concat = paddle.concat(mtp_emb_res)
+                preproc_output["hidden_states"] = hidden_states_concat
 
         # Pass through KV cache kwargs for inference
         for key in ("past_key_values", "use_cache"):

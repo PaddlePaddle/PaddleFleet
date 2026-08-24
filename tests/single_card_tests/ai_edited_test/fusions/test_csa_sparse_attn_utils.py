@@ -312,6 +312,7 @@ class TestCudnnBackendDispatch(unittest.TestCase):
             sm_scale=None,
             indexer_topk=0,
             topk_length=None,
+            **kwargs,
         ):
             bb, ss, hh, dd = q.shape
             out = paddle.ones([bb, ss, hh, dd], dtype=q.dtype)

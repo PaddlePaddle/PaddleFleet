@@ -24,7 +24,9 @@ Shrinking EP / PP additionally requires:
 Hard rule shared by every candidate generator: **a parallel degree that is
 greater than 1 in the source config is never collapsed to 1.** Dropping a
 dimension entirely (EP 8 -> 1) removes the communication group under test,
-so the smallest legal shrink target is :data:`MIN_PARALLEL_DEGREE`.
+so the smallest legal shrink target is :data:`MIN_PARALLEL_DEGREE`.  VPP is
+the one exception, because the framework refuses to interleave fewer than
+:data:`MIN_PP_FOR_VPP` stages.
 
 All functions here are pure: no I/O, no mutation of the arguments.
 """
@@ -37,6 +39,16 @@ DEFAULT_MIN_HIDDEN_LAYERS = 4
 
 #: A source degree > 1 may shrink no further than this.
 MIN_PARALLEL_DEGREE = 2
+
+#: Pipeline stages required before ``virtual_pipeline_model_parallel_size``
+#: may exceed 1.
+#:
+#: Every interleaved schedule asserts ``num_stages > 2`` ("virtual pipeline
+#: must run under pp degree > 2") while it is being built, so a PP <= 2 config
+#: with VPP > 1 dies at startup instead of falling back to a plain 1F1B
+#: schedule.  Being a hard framework assert, this outranks the no-collapse
+#: rule: VPP does go to 1 when PP has to shrink that far.
+MIN_PP_FOR_VPP = 3
 
 
 def divisors(n):
@@ -64,13 +76,14 @@ def floor_dims(tp, pp, ep, cp, sep):
     return tp, shrink_floor(pp), shrink_floor(ep), cp, sep
 
 
-def ep_candidates(ep_orig, tp):
+def ep_candidates(ep_orig, tp, sep=1):
     """EP-shrink candidates, largest first.
 
     Set: ``({powers of 2} | {multiples of 8})`` restricted to
-    ``[MIN_PARALLEL_DEGREE, ep_orig)`` and filtered by ``ep_new % tp == 0``
-    (C3).  Real deployments only ever pick EP from those two families, which
-    keeps the search space small and avoids exotic values like EP=3.
+    ``[MIN_PARALLEL_DEGREE, ep_orig)`` and filtered by
+    ``ep_new % (tp * sep) == 0`` (C3: dense_sharding = EP / (TP * SEP)).
+    Real deployments only ever pick EP from those two families, which keeps
+    the search space small and avoids exotic values like EP=3.
     """
     if ep_orig <= MIN_PARALLEL_DEGREE:
         return []
@@ -79,8 +92,9 @@ def ep_candidates(ep_orig, tp):
     pool = (powers_of_2 | multiples_of_8) & set(
         range(MIN_PARALLEL_DEGREE, ep_orig)
     )
+    dense_factor = tp * sep
     return sorted(
-        (c for c in pool if tp == 1 or c % tp == 0),
+        (c for c in pool if dense_factor == 1 or c % dense_factor == 0),
         reverse=True,
     )
 
@@ -100,29 +114,56 @@ def pp_candidates(pp_orig):
     )
 
 
-def align_layers(layers_new, head, tail_orig, pp_new, vpp_orig):
+def align_layers(layers_new, head, pp_new, vpp_orig, min_tail=0):
     """Align pipeline layers to ``pp_new * vpp_new`` with empty tail layers.
 
-    Returns ``(vpp_new, tail_new)``, or ``(None, None)`` when no divisor of
-    ``vpp_orig`` can be aligned.  ``pp_new`` is always >= 2 here because a
-    source PP > 1 never collapses to 1.
+    The framework segments ``head + layers_new + tail_new`` layers into
+    ``pp_new * vpp_new`` virtual stages, so that total must be a multiple of
+    the product.  Empty tail layers exist *only* to make that division work,
+    so ``tail_new`` is recomputed from scratch -- the source value is not a
+    floor, otherwise a shrunk 10-layer model would keep the padding of the
+    43-layer original.  ``min_tail`` is the smallest tail the framework
+    tolerates (1 when it silently consumes one tail layer for MTP).
+
+    Among the divisors of ``vpp_orig`` the one needing the least padding
+    wins, ties going to the largest VPP (closest to the source).  A source
+    ``vpp_orig > 1`` never collapses to 1, same no-collapse rule as the other
+    degrees -- except below :data:`MIN_PP_FOR_VPP` stages, where the framework
+    assert leaves 1 as the only legal VPP.  Returns ``(vpp_new, tail_new)``,
+    or ``(None, None)`` when ``pp_new`` is below the floor.
     """
     if pp_new < MIN_PARALLEL_DEGREE:
         return None, None
     if vpp_orig is None or vpp_orig < 1:
         vpp_orig = 1
-    for vpp_new in sorted(divisors(vpp_orig), reverse=True):
+    floor = shrink_floor(vpp_orig)
+    candidates = [
+        vpp_new
+        for vpp_new in sorted(divisors(vpp_orig), reverse=True)
+        if vpp_new >= floor
+    ]
+    if pp_new < MIN_PP_FOR_VPP:
+        candidates = [1]
+    best = None
+    for vpp_new in candidates:
         divisor = pp_new * vpp_new
-        pad = (-(layers_new + head + tail_orig)) % divisor
-        if pad < divisor:
-            return vpp_new, tail_orig + pad
-    return None, None
+        pad = (-(layers_new + head + min_tail)) % divisor
+        if best is None or min_tail + pad < best[1]:
+            best = (vpp_new, min_tail + pad)
+    if best is None:
+        return None, None
+    return best
 
 
 def min_shrink_cards(tp, pp, ep, cp, sep, cards_per_node):
-    """Smallest GPU count reachable without collapsing any degree to 1."""
+    """Smallest GPU count reachable without collapsing any degree to 1.
+
+    ``None`` when the dims break a card-count-independent rule (C3 or C5), so
+    no scale exists and callers must talk about the dims instead.
+    """
     validator = TopologyValidator(cards_per_node, cards_per_node)
-    return validator.suggest_valid_cards(*floor_dims(tp, pp, ep, cp, sep))[0]
+    cards = validator.suggest_valid_cards(*floor_dims(tp, pp, ep, cp, sep))
+    return cards[0] if cards else None
 
 
 def check_hardware(target_cards, cards_per_node, tp, pp, ep, cp, sep):
@@ -154,6 +195,13 @@ def check_hardware(target_cards, cards_per_node, tp, pp, ep, cp, sep):
     max_intra = min(cards_per_node, target_cards)
     if tp * sep > max_intra:
         min_cards = min_shrink_cards(tp, pp, ep, cp, sep, cards_per_node)
+        if min_cards is None:
+            return False, (
+                f"E2 不满足：TP={tp} × SEP={sep} 需要单机内 {tp * sep} 张卡，"
+                f"但目标只有 {target_cards} 张卡；而且当前维度组合本身就不合法"
+                f"（C3 要求 EP % (TP×SEP) == 0，C5 禁止 SEP 与 CP 同时 >1），"
+                f"任何卡数都无法适配，必须先修改 TP/SEP/EP/CP"
+            )
         return False, (
             f"E2 不满足：TP={tp} × SEP={sep} 需要单机内 {tp * sep} 张卡，"
             f"但目标只有 {target_cards} 张卡。\n"
@@ -206,12 +254,15 @@ def check_pp_shrink(
     vpp,
     first_k_dense_replace=0,
     min_hidden_layers=DEFAULT_MIN_HIDDEN_LAYERS,
+    min_tail=0,
 ):
     """M3 + M4 + M5 for one ``pp_new``.
 
     Returns ``(ok, reason, meta)`` where ``meta`` carries ``layers_new``,
     ``vpp_new``, ``tail_new`` and an optional soft ``warning``.  M4 is a
     warning rather than a rejection; the hard floor is one hidden layer.
+    ``tail`` is only the source value reported back when nothing shrinks;
+    the padding actually needed is recomputed from ``min_tail``.
     """
     if pp_new >= pp_orig:
         return (
@@ -252,12 +303,14 @@ def check_pp_shrink(
         )
 
     # M3: layer alignment feasibility.
-    vpp_new, tail_new = align_layers(layers_new, head, tail, pp_new, vpp)
+    vpp_new, tail_new = align_layers(
+        layers_new, head, pp_new, vpp, min_tail=min_tail
+    )
     if vpp_new is None:
         return (
             False,
             f"M3 不满足：(layers_new={layers_new} + head={head} + "
-            f"tail>={tail}) 无法对齐到 pp_new={pp_new} × vpp_new",
+            f"tail>={min_tail}) 无法对齐到 pp_new={pp_new} × vpp_new",
             meta,
         )
 
