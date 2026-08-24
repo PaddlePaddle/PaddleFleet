@@ -61,6 +61,11 @@ def _make_embedding(K, B, L, H, *, mtp_data_style="megatron", magic_send=False):
     cfg.mtp_load_weight_only = False
     cfg.mtp_data_style = mtp_data_style
     cfg.enable_mtp_magic_send = magic_send
+    # MagicMock attributes are truthy by default; pin the real default so the
+    # mtp_emb_res tail keeps concatenating into hidden_states instead of taking
+    # the separate_mtp_input transport (which is a PP=1/K=1 optimization and is
+    # rejected for mtp_data_style="megatron").
+    cfg.separate_mtp_input = False
     cfg.pad_token_id = 0
     cfg.experimental_dataflow = False
     cfg.apply_rope_fusion = False

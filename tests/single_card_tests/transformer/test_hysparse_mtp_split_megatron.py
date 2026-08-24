@@ -44,6 +44,7 @@ def _make_config(mtp_data_style):
         sequence_parallel=False,
         tensor_model_parallel_size=1,
         experimental_dataflow=False,
+        separate_mtp_input=False,
         mtp_data_style=mtp_data_style,
     )
 

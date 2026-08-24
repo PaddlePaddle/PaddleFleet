@@ -91,6 +91,18 @@ class TestMtpDataStyleValidation(unittest.TestCase):
                 )
             )
 
+    def test_megatron_incompat_with_separate_mtp_input(self) -> None:
+        # separate_mtp_input routes the shifted embeddings through
+        # mtp_decoder_inputs, which _forward_megatron_style never reads.
+        with self.assertRaisesRegex(ValueError, r"separate_mtp_input"):
+            TransformerConfig(
+                **self._base_kwargs(
+                    mtp_data_style="megatron",
+                    num_nextn_predict_layers=1,
+                    separate_mtp_input=True,
+                )
+            )
+
     def test_megatron_cp_requires_dualchunk_allgather(self) -> None:
         # `contiguous_allgather` is not equivalent to MCore's zigzag layout.
         with self.assertRaisesRegex(

@@ -1786,6 +1786,19 @@ class TransformerConfig(ModelParallelConfig):
                     "experimental_dataflow=True (which expects the ernie5-style "
                     "mtp_startend_row_indices_all payload)."
                 )
+            if self.separate_mtp_input:
+                # separate_mtp_input hands the shifted embeddings to the MTP
+                # layer through `mtp_decoder_inputs` and leaves hidden_states as
+                # the bare backbone chunk. `_forward_megatron_style` instead
+                # splits hidden_states into K+1 chunks and never reads
+                # `mtp_decoder_inputs`, so the combination would silently
+                # mis-slice the batch axis.
+                raise ValueError(
+                    "mtp_data_style='megatron' is incompatible with "
+                    "separate_mtp_input=True (the megatron MTP forward reads "
+                    "the shifted embeddings from hidden_states, not from "
+                    "mtp_decoder_inputs)."
+                )
             # PaddleFleet's `dualchunk_allgather` scatter layout is the only
             # mode equivalent to MCore's zigzag balancing; the other two
             # (`contiguous_allgather`, `contiguous_a2a`) are not covered by
