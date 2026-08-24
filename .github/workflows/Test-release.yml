@@ -155,6 +155,7 @@ jobs:
             -e UV_HTTP_TIMEOUT \
             -e PR_ID \
             -e COMMIT_ID \
+            -e NCCL_NVLS_ENABLE=0 \
             -e PADDLE_CUDA_ARCH_LIST="8.0;9.0" \
             -e BRANCH \
             -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
@@ -309,6 +310,7 @@ jobs:
             -e CI_name \
             -e PIP_CACHE_DIR \
             -e work_dir \
+            -e NCCL_NVLS_ENABLE=0 \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
@@ -414,6 +416,7 @@ jobs:
             -e CI_name \
             -e PIP_CACHE_DIR \
             -e work_dir \
+            -e NCCL_NVLS_ENABLE=0 \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
@@ -529,6 +532,7 @@ jobs:
             -e formers_branch \
             -e CI_name \
             -e PIP_CACHE_DIR \
+            -e NCCL_NVLS_ENABLE=0 \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
@@ -712,6 +716,7 @@ jobs:
             -e CI_name \
             -e formers_branch \
             -e PIP_CACHE_DIR \
+            -e NCCL_NVLS_ENABLE=0 \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
@@ -1071,6 +1076,7 @@ jobs:
             -e CI_name \
             -e formers_branch \
             -e PIP_CACHE_DIR \
+            -e NCCL_NVLS_ENABLE=0 \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
@@ -1145,6 +1151,7 @@ jobs:
             -e formers_branch \
             -e CI_name \
             -e PIP_CACHE_DIR \
+            -e NCCL_NVLS_ENABLE=0 \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
