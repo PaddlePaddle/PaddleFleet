@@ -2354,6 +2354,13 @@ class CompressedSparseAttention(FleetLayer):
         # only materialize main-attention indices. The backend branch remains
         # fixed across both forwards.
         need_indexer_loss = self.training and paddle.is_grad_enabled()
+        # coeff == 0 disables the indexer-loss path entirely (matching
+        # DSAttention: 0 disables the KL loss), so the loss kernels/state must
+        # not be built -- attention top-k is unaffected.
+        indexer_loss_coeff = float(
+            getattr(self.config, "dsa_indexer_loss_coeff", 0.0) or 0.0
+        )
+        need_indexer_loss = need_indexer_loss and indexer_loss_coeff > 0
         topk_effective = self._resolve_topk_effective(n_compressed)
 
         causal_mask = _build_compressed_causal_mask(
@@ -2447,9 +2454,6 @@ class CompressedSparseAttention(FleetLayer):
                         docmask_meta=docmask_meta,
                     )
                 )
-                indexer_loss_coeff = float(
-                    getattr(self.config, "dsa_indexer_loss_coeff", 0.0) or 0.0
-                )
                 key_for_loss = compressed_kv.unsqueeze(2).expand(
                     [-1, -1, np_heads, -1]
                 )
@@ -2474,7 +2478,9 @@ class CompressedSparseAttention(FleetLayer):
 
                 topk_indices_compressed = FusedDSAIndexerLoss._last_topk_indices
 
-                if indexer_loss_coeff > 0:
+                if (
+                    indexer_loss_coeff > 0
+                ):  # always True inside this branch; kept for clarity
                     DSAIndexerLossLoggingHelper.save_loss_to_tracker(
                         loss=indexer_loss,
                         layer_number=self.layer_number,
@@ -2482,7 +2488,7 @@ class CompressedSparseAttention(FleetLayer):
                             self.config
                         ),
                     )
-            else:  # First recompute no-grad forward; only materialize unfused top-k for attention.
+            else:  # No loss (coeff == 0 or no-grad first recompute pass); only materialize unfused top-k for attention.
                 _, topk_indices_compressed = self.indexer(
                     x_det,
                     qr_det,
@@ -3197,10 +3203,18 @@ class CompressedSparseAttention(FleetLayer):
                 )
                 use_tilelang_indexer = indexer_backend == "tilelang"
                 use_cudnn_indexer = indexer_backend == "cudnn"
+                # coeff == 0 disables the indexer-loss path entirely (matching
+                # DSAttention: 0 disables the KL loss), so the loss kernels and
+                # TilelangIndexerLossState must not be built -- attention top-k
+                # keeps flowing through the no-loss branches below.
+                indexer_loss_coeff = float(
+                    getattr(self.config, "dsa_indexer_loss_coeff", 0.0) or 0.0
+                )
                 use_fused_indexer_loss_path = (
                     (use_tilelang_indexer or use_cudnn_indexer)
                     and self.training
                     and paddle.is_grad_enabled()
+                    and indexer_loss_coeff > 0
                 )
                 topk_effective = self._resolve_topk_effective(
                     n_compressed_global
@@ -3222,10 +3236,6 @@ class CompressedSparseAttention(FleetLayer):
                         cp_group=self.cp_group,
                         docmask_meta=docmask_meta,
                     )
-                )
-
-                indexer_loss_coeff = float(
-                    getattr(self.config, "dsa_indexer_loss_coeff", 0.0) or 0.0
                 )
 
                 if use_tilelang_indexer or use_cudnn_indexer:
@@ -3303,12 +3313,13 @@ class CompressedSparseAttention(FleetLayer):
                         )
 
                 elif (
-                    self.training
+                    indexer_loss_coeff > 0
+                    and self.training
                     and not use_tilelang_indexer
                     and not use_cudnn_indexer
                 ):
                     # CP training forward with unfused indexer backend.
-                    # Paddle reference loss path
+                    # Paddle reference loss path (coeff == 0 never gets here).
                     key_for_loss = (
                         compressed_kv_global.detach()
                         .unsqueeze(2)
@@ -3355,7 +3366,7 @@ class CompressedSparseAttention(FleetLayer):
                     topk_indices_compressed = (
                         FusedDSAIndexerLoss._last_topk_indices
                     )
-                    if indexer_loss_coeff > 0:
+                    if indexer_loss_coeff > 0:  # always True in this branch
                         # CP unfused training path logs only when indexer loss
                         # is enabled.
                         DSAIndexerLossLoggingHelper.save_loss_to_tracker(
@@ -3367,8 +3378,9 @@ class CompressedSparseAttention(FleetLayer):
                         indexer_loss = indexer_loss / self.cp_size
 
                 elif not use_tilelang_indexer and not use_cudnn_indexer:
-                    # CP eval/no-grad forward with unfused backend; only
-                    # materialize attention top-k.
+                    # CP no-loss forward with unfused backend (eval/no-grad,
+                    # or training with coeff == 0); only materialize attention
+                    # top-k.
                     # Inference-only Paddle topk (use already-gathered global K)
                     if docmask_meta is None:
                         causal_mask = build_causal_mask_cp(
