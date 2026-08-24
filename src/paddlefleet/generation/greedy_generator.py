@@ -587,7 +587,13 @@ class GreedyGenerator:
                 next_tok = _sample_next_token(
                     last_logits, temperature, top_k, top_p
                 )
-                if return_log_probs and log_probs_per_batch is not None:
+                # Token sampled this step sits at absolute position ``cur_len``;
+                # skip it until that position reaches ``logprob_start_len``.
+                if (
+                    return_log_probs
+                    and log_probs_per_batch is not None
+                    and cur_len >= logprob_start_len
+                ):
                     step_log_probs = paddle.nn.functional.log_softmax(
                         last_logits.cast("float32"), axis=-1
                     )  # [B, vocab]
@@ -795,7 +801,13 @@ class GreedyGenerator:
             next_tok = _sample_next_token(
                 last_logits, temperature, top_k, top_p
             )
-            if return_log_probs and log_probs_per_batch is not None:
+            # First generated token sits at absolute position ``prompt_len``;
+            # skip it until that position reaches ``logprob_start_len``.
+            if (
+                return_log_probs
+                and log_probs_per_batch is not None
+                and prompt_len >= logprob_start_len
+            ):
                 step_log_probs = paddle.nn.functional.log_softmax(
                     last_logits.cast("float32"), axis=-1
                 )  # [B, vocab]
@@ -844,7 +856,14 @@ class GreedyGenerator:
                 next_tok = _sample_next_token(
                     last_logits, temperature, top_k, top_p
                 )
-                if return_log_probs and log_probs_per_batch is not None:
+                # Token sampled this step sits at absolute position
+                # ``prompt_len + 1 + step``; skip it until that position
+                # reaches ``logprob_start_len``.
+                if (
+                    return_log_probs
+                    and log_probs_per_batch is not None
+                    and prompt_len + 1 + step >= logprob_start_len
+                ):
                     step_log_probs = paddle.nn.functional.log_softmax(
                         last_logits.cast("float32"), axis=-1
                     )  # [B, vocab]
