@@ -106,12 +106,13 @@ def _make_hc_config(**overrides):
     return _make_config(**hc_defaults)
 
 
-def _make_hc_layer(config, layer_number=1):
+def _make_hc_layer(config, layer_number=1, is_mtp_layer=False):
     spec = get_gpt_layer_local_spec(config)
     return HyperConnectionTransformerLayer(
         config=config,
         sublayers_spec=spec.sublayers_spec,
         layer_number=layer_number,
+        is_mtp_layer=is_mtp_layer,
     )
 
 
@@ -720,6 +721,44 @@ class TestHyperConnectionTransformerLayerConstruction(unittest.TestCase):
         )
         self.assertIsInstance(layer.mlp_hyper_connection, HyperConnectionModule)
 
+    def test_attention_and_mlp_are_numbered_as_two_mhc_layers(self):
+        """mHC counts attention and MLP as independent layers (paper Fig. 3).
+
+        ``mhc_single_stream_init`` rotates the one-hot H_pre bias with this
+        index, so the two modules must get consecutive numbers. Sharing one
+        would halve the rotation period and leave half of the residual streams
+        without a sub-layer that reads them.
+        """
+        config = _make_hc_config()
+        for i in range(3):
+            layer = _make_hc_layer(config, layer_number=i)
+            self.assertEqual(
+                layer.self_attention_hyper_connection.layer_number, 2 * i
+            )
+            self.assertEqual(layer.mlp_hyper_connection.layer_number, 2 * i + 1)
+
+    def test_the_two_sublayers_read_different_home_streams(self):
+        config = _make_hc_config(mhc_single_stream_init=True)
+        n = config.num_residual_streams
+        layer = _make_hc_layer(config, layer_number=0)
+        homes = (
+            int(layer.self_attention_hyper_connection.bias[:n].argmax()),
+            int(layer.mlp_hyper_connection.bias[:n].argmax()),
+        )
+        self.assertEqual(homes, (0, 1))
+
+    def test_empty_head_layers_do_not_shift_the_rotation(self):
+        """``layer_number`` counts the empty layers added in the head.
+
+        Those carry no mHC sub-layer, so the rotation phase has to be taken
+        from the logical decoder index instead, or inserting them would
+        renumber every home stream.
+        """
+        config = _make_hc_config(num_empty_layers_add_in_head=1)
+        layer = _make_hc_layer(config, layer_number=1)  # logical decoder 0
+        self.assertEqual(layer.self_attention_hyper_connection.layer_number, 0)
+        self.assertEqual(layer.mlp_hyper_connection.layer_number, 1)
+
     def test_raises_without_hc_spec(self):
         """Should raise if sublayers_spec has IdentityOp for hyper connections."""
         config = _make_hc_config()
@@ -1294,6 +1333,46 @@ class TestMTPLayerWithHCConstruction(unittest.TestCase):
         self.assertIsNone(layer.e_proj)
         self.assertIsNone(layer.h_proj)
         self.assertFalse(layer.mhc_enabled)
+
+    def test_mhc_sublayers_continue_the_decoder_rotation(self):
+        """Built through the real spec path, which is where the trap is.
+
+        ``get_gpt_mtp_layers_spec`` numbers MTP layers by their own 0-based
+        index, with no num_empty_layers_add_in_head offset -- unlike
+        ``get_gpt_decoder_layers_spec``. Applying the decoder's subtraction here
+        would shift the phase and, with empty head layers, drive the index
+        negative, silently picking the wrong home stream.
+        """
+        config = _make_mtp_hc_config(
+            mhc_single_stream_init=True, num_empty_layers_add_in_head=1
+        )
+        n = config.num_residual_streams
+        n_decoder = config.num_hidden_layers
+        for i in range(2):
+            inner = _make_mtp_layer(config, layer_number=i).transformer_layer
+            attn = inner.self_attention_hyper_connection
+            mlp = inner.mlp_hyper_connection
+            base = 2 * (n_decoder + i)
+            self.assertEqual(attn.layer_number, base)
+            self.assertEqual(mlp.layer_number, base + 1)
+            self.assertEqual(int(attn.bias[:n].argmax()), base % n)
+            self.assertEqual(int(mlp.bias[:n].argmax()), (base + 1) % n)
+
+    def test_the_mhc_seam_does_not_repeat_a_home_stream(self):
+        """The first MTP sub-layer picks up where the last decoder one left off."""
+        config = _make_mtp_hc_config(
+            mhc_single_stream_init=True, num_empty_layers_add_in_head=1
+        )
+        n = config.num_residual_streams
+        # last decoder layer: layer_number = index + head offset
+        last_decoder = _make_hc_layer(
+            config, layer_number=config.num_hidden_layers
+        )
+        mtp0 = _make_mtp_layer(config, layer_number=0).transformer_layer
+        self.assertNotEqual(
+            int(last_decoder.mlp_hyper_connection.bias[:n].argmax()),
+            int(mtp0.self_attention_hyper_connection.bias[:n].argmax()),
+        )
 
 
 class TestMTPLayerWithHCConcatEmbeddings(unittest.TestCase):
