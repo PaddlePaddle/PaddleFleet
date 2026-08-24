@@ -3,7 +3,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 
-"""PP>1 support for cu_seqlens_q under mtp_data_style="megatron".
+"""PP>1 support for cu_seqlens_q under use_erndata=True.
 
 Two invariants pinned here:
 

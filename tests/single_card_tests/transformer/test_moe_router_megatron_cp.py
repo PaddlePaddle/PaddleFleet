@@ -15,13 +15,13 @@
 """Single-card coverage for TopKRouter.forward's megatron-MTP CP branch.
 
 The router's ``forward`` has an ``elif`` that, under CP>1 +
-mtp_data_style="megatron", zigzag-slices ``input_ids`` to match the
+use_erndata=True, zigzag-slices ``input_ids`` to match the
 embedding's per-rank chunk (moe_router.py:1500, 1514, 1518-1520). We reach
 it single-card by:
 
 - ``TopKRouter.__new__`` + MagicMock config (experimental_dataflow=False so
   the preceding ``if`` is skipped and the ``elif`` is evaluated;
-  mtp_data_style="megatron");
+  use_erndata=True);
 - monkeypatching the module-level ``get_context_parallel_world_size`` -> 2
   and ``get_context_parallel_rank`` -> 0;
 - feeding a 3-D ``input`` and an ``input_ids`` whose seq length differs from
@@ -75,7 +75,7 @@ class TestTopKRouterMegatronCPSlice(unittest.TestCase):
         router = TopKRouter.__new__(TopKRouter)
         cfg = MagicMock()
         cfg.experimental_dataflow = False  # skip the preceding `if`
-        cfg.mtp_data_style = "megatron"
+        cfg.use_erndata = True
         cfg.cp_balance_mode = "zigzag"
         router.config = cfg
         router.sequence_parallel = False

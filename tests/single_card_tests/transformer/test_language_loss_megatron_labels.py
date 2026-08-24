@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Single-card coverage for LanguageLoss.forward under mtp_data_style="megatron".
+"""Single-card coverage for LanguageLoss.forward under use_erndata=True.
 
 Drives the REAL ``LanguageLoss.forward`` via ``__new__`` + MagicMock config
 and stubbed ``_forward`` / ``loss_func`` so the megatron label-shift paths
@@ -52,12 +52,12 @@ def _make_cu(seq_lens):
     return paddle.to_tensor(cu, dtype="int32")
 
 
-def _make_loss(K, *, distill, mtp_data_style="megatron"):
+def _make_loss(K, *, distill, use_erndata=True):
     loss = LanguageLoss.__new__(LanguageLoss)
     cfg = MagicMock()
     cfg.num_nextn_predict_layers = K
     cfg.mtp_load_weight_only = False
-    cfg.mtp_data_style = mtp_data_style
+    cfg.use_erndata = use_erndata
     cfg.mtp_distillation_loss = distill
     cfg.train_mtp_only = False
     cfg.gpt_model_use_experimental_version = True
@@ -159,7 +159,7 @@ class TestLanguageLossErnie5Slice(unittest.TestCase):
 
     def test_ernie5_non_distill_slice(self) -> None:
         K, B, L, V = 2, 1, 10, 5
-        loss = _make_loss(K, distill=False, mtp_data_style="ernie5")
+        loss = _make_loss(K, distill=False, use_erndata=False)
         logits = [
             paddle.randn([B, L, V], dtype="float32") for _ in range(K + 1)
         ]

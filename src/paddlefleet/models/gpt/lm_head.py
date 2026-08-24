@@ -304,7 +304,7 @@ class GPTLMHead(ColumnParallelLinear):
         return logits
 
     def _stash_cu_seqlens_q(self, dict_args):
-        """Deliver cu_seqlens_q to the loss stage under mtp_data_style="megatron".
+        """Deliver cu_seqlens_q to the loss stage under use_erndata.
 
         ``LanguageLoss.forward`` only receives ``(logits, labels)`` and cannot
         see the pipeline dict. ``cu_seqlens_q`` (packed-doc boundaries) travels
@@ -314,7 +314,7 @@ class GPTLMHead(ColumnParallelLinear):
         PP>1 (GPTEmbedding.forward writes the same stash on the PP=1 / first
         stage). No external dataloader broadcast is required.
 
-        Non-megatron runs never populate ``cu_seqlens_q`` (it is stripped from
+        Non-erndata runs never populate ``cu_seqlens_q`` (it is stripped from
         the dict in GPTEmbedding.forward), so this is a no-op there.
         """
         cu_seqlens_q = dict_args.get("cu_seqlens_q", None)
@@ -427,7 +427,7 @@ class GPTMTPLMHead(GPTLMHead):
     def forward(self, dict_args: dict):
         # Under separate_mtp_headloss this head runs on the last stage BEFORE
         # MTPLanguageLoss, which needs cu_seqlens_q to roll per-depth labels
-        # under mtp_data_style="megatron"; stash it here on the loss rank.
+        # under use_erndata; stash it here on the loss rank.
         self._stash_cu_seqlens_q(dict_args)
         hidden_states = dict_args["hidden_states"]
         num_mtp = self.config.num_nextn_predict_layers

@@ -1499,12 +1499,11 @@ class TopKRouter(StandardMoERouter):
                 )
             elif (
                 get_context_parallel_world_size() > 1
-                and getattr(self.config, "mtp_data_style", "ernie5")
-                == "megatron"
+                and getattr(self.config, "use_erndata", False)
                 and input_ids is not None
                 and input_ids.shape[1] != seq_len
             ):
-                # Megatron-style MTP path: PaddleFleet dataloader broadcasts
+                # erndata MTP path: PaddleFleet dataloader broadcasts
                 # input_ids full-length [B, L] to every CP rank (unlike
                 # experimental_dataflow which pre-scatters). Embedding was
                 # already zigzag-sliced to [B, L/cp, H] via

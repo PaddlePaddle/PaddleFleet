@@ -333,7 +333,7 @@ class GPTEmbedding(FleetLayer):
         deepstack_visual_embeds = None
         visual_pos_mask = None
         mtp_emb_res = None
-        # CP zigzag context of the mtp_data_style="megatron" MTP branch below.
+        # CP zigzag context of the use_erndata MTP branch below.
         # The branch slices the embeddings itself (no ContextParallelScatterOp,
         # which is gated on experimental_dataflow and therefore never runs for
         # this style), so the RoPE tables have to be sliced with the very same
@@ -342,7 +342,7 @@ class GPTEmbedding(FleetLayer):
         mtp_megatron_cp_rank = 0
 
         # Ingest cu_seqlens_q (raw int32 tensor) from the batch dict if the
-        # dataloader put it there (mtp_data_style="megatron" path). We keep
+        # dataloader put it there (use_erndata path). We keep
         # it as a raw tensor throughout — no PackedSeqParams wrapper — to
         # avoid triggering the attention-kernel THD path (qkv_format="thd")
         # which the ernie5 flashmask stack does not use. Downstream
@@ -352,7 +352,7 @@ class GPTEmbedding(FleetLayer):
         if cu_seqlens_q is not None and not cu_seqlens_q.place.is_gpu_place():
             cu_seqlens_q = cu_seqlens_q.cuda()
 
-        # Stash cu_seqlens_q for the loss layer (mtp_data_style="megatron"
+        # Stash cu_seqlens_q for the loss layer (use_erndata
         # per-doc parity path). LanguageLoss.forward reads this class-level
         # slot to drive per-doc `paddle.roll` with EOS zero-masking, matching
         # the boundary semantics of the embedding-side rolls above. Under PP>1
@@ -423,7 +423,7 @@ class GPTEmbedding(FleetLayer):
                 and not self.config.mtp_load_weight_only
             ):
                 # ------------------------------------------------------------
-                # Megatron-style branch: input_ids is [B, L] (no L+K append);
+                # erndata branch: input_ids is [B, L] (no L+K append);
                 # produce K shifted embeddings by rolling decoder_input in
                 # place with per-doc boundary zero-fill via cu_seqlens_q.
                 # Under CP>1, each rank holds the full-length embedding (per
@@ -433,10 +433,9 @@ class GPTEmbedding(FleetLayer):
                 # The ernie5 (default) path in the ``else`` below retains
                 # upstream develop's full logic, including multimodal + MTP.
                 # ------------------------------------------------------------
-                _style = getattr(self.config, "mtp_data_style", "ernie5")
-                if _style == "megatron":
+                if getattr(self.config, "use_erndata", False):
                     assert not self.multimodal_embedding, (
-                        "MTP megatron style does not support multimodal for now."
+                        "erndata MTP path does not support multimodal for now."
                     )
                     from paddlefleet.transformer.multi_token_prediction import (
                         extract_local_zigzag_chunks,
@@ -733,7 +732,7 @@ class GPTEmbedding(FleetLayer):
         swa_rotary_pos_sin = None
 
         def _slice_rope_for_mtp_megatron_cp(rope_table):
-            """Zigzag-slice a RoPE table for mtp_data_style="megatron" + CP > 1.
+            """Zigzag-slice a RoPE table for use_erndata + CP > 1.
 
             ``RotaryEmbedding.get_rotary_seq_len`` scales the rank-local input
             length back up by ``cp_group.world_size``, so the tables below are
@@ -765,12 +764,12 @@ class GPTEmbedding(FleetLayer):
             and position_ids is not None
             and self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
-            # megatron style keeps the main decoder at the full length L (the
+            # erndata keeps the main decoder at the full length L (the
             # per-doc shift happens inside the MTP layer), so position_ids
             # already matches. Under CP mtp_emb_res[0] is the rank-local
             # zigzag slice, whose length must not be mistaken for L - K: a
             # contiguous prefix of position_ids is not this rank's chunk.
-            and getattr(self.config, "mtp_data_style", "ernie5") != "megatron"
+            and not getattr(self.config, "use_erndata", False)
         ):
             # mtp_emb_res[0] has shape [B, seq_len - num_nextn_predict_layers, H]
             actual_seq_len = mtp_emb_res[0].shape[1]
@@ -921,7 +920,7 @@ class GPTEmbedding(FleetLayer):
                 if self.config.gpt_model_use_experimental_version
                 else None
             ),
-            # Under mtp_data_style="megatron" cu_seqlens_q travels down the
+            # Under use_erndata cu_seqlens_q travels down the
             # pipeline dict as a raw int32 tensor. MultiTokenPredictionLayer
             # derives per-depth attn_mask_startend_row_indices from it via
             # build_startend_row_indices_from_cu_seqlens. Under "ernie5"

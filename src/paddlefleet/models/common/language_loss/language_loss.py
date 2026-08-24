@@ -202,7 +202,7 @@ class LanguageLoss(FleetLayer):
     # Class-level tracker for MTP loss, read by trainer for logging.
     mtp_loss_tracker: dict[str, float] = {}
 
-    # Class-level stash for cu_seqlens_q under mtp_data_style="megatron".
+    # Class-level stash for cu_seqlens_q under use_erndata=True.
     # Populated on every rank by the dataloader (ernie5
     # dist_data_loader.py — right after the three broadcast_data_obj calls),
     # and additionally by gpt_embedding.forward on the embedding stage as a
@@ -490,7 +490,7 @@ class LanguageLoss(FleetLayer):
     def _megatron_label_for_depth(self, labels_ori, depth):
         """Megatron-style per-MTP-depth labels.
 
-        Under mtp_data_style="megatron" labels arrive length-L (no L+K append).
+        Under use_erndata=True labels arrive length-L (no L+K append).
         ``depth < 0`` returns the main labels unchanged (length L); ``depth >= 0``
         rolls labels_ori left ``depth + 1`` times, filling ``ignored_index`` at
         every packed-document boundary (via the stashed cu_seqlens_q) so the
@@ -506,7 +506,7 @@ class LanguageLoss(FleetLayer):
             _cu = LanguageLoss._cu_seqlens_q_stash
             if _cu is None:
                 raise RuntimeError(
-                    "mtp_data_style='megatron' requires cu_seqlens_q to be "
+                    "use_erndata=True requires cu_seqlens_q to be "
                     "stashed on LanguageLoss._cu_seqlens_q_stash before the loss "
                     "stage, but it is None on this rank. It should be set by "
                     "GPTEmbedding.forward (PP=1) or the LM head on the last PP "
@@ -548,15 +548,13 @@ class LanguageLoss(FleetLayer):
             )
             assert len(logits) == self.config.num_nextn_predict_layers + 1
             labels_ori = labels
-            # Under mtp_data_style="megatron" labels are already [B, L]
+            # Under use_erndata=True labels are already [B, L]
             # (no L+K trailing padding). The main-decoder logits also live
             # at length L (no L→L-K slicing was performed upstream), so
             # skip the L+K→L trim; likewise per-depth MTP labels come from
             # a per-depth roll — approximated here by shifting labels_ori
             # left by (depth+1) positions with -100 fill at the tail.
-            _mtp_is_megatron = (
-                getattr(self.config, "mtp_data_style", "ernie5") == "megatron"
-            )
+            _mtp_is_megatron = getattr(self.config, "use_erndata", False)
             # Under CP>1 the megatron path keeps labels_ori full-length on
             # every rank. Local zigzag chunks must be extracted here so that
             # shape matches the local logits produced by the embedding branch.
@@ -602,7 +600,7 @@ class LanguageLoss(FleetLayer):
                 for depth in range(self.config.num_nextn_predict_layers):
                     logits_cur_depth = mtp_logits[depth]
                     if _mtp_is_megatron:
-                        # Under mtp_data_style="megatron" labels_ori is [B, L]
+                        # Under use_erndata=True labels_ori is [B, L]
                         # (no L+K padding). MTP depth k predicts x[i+k+2],
                         # i.e. labels rolled left (k+1) times with per-doc
                         # boundary fill via cu_seqlens_q. For labels the
@@ -642,7 +640,7 @@ class LanguageLoss(FleetLayer):
                             # GPTLMHead.forward on the last PP stage; reaching
                             # here means neither ran on this rank.
                             raise RuntimeError(
-                                "mtp_data_style='megatron' requires cu_seqlens_q "
+                                "use_erndata=True requires cu_seqlens_q "
                                 "to be stashed on LanguageLoss._cu_seqlens_q_stash "
                                 "before the loss stage, but it is None on this "
                                 "rank. It should be set by GPTEmbedding.forward "
@@ -673,7 +671,7 @@ class LanguageLoss(FleetLayer):
                         ):
                             # In EB data flow and CP size > 1, since we do not use _forward
                             # we need to scatter labels to cp local here.
-                            # Under mtp_data_style="megatron" labels_cur_depth is
+                            # Under use_erndata=True labels_cur_depth is
                             # already local zigzag chunks (extract_local_zigzag_chunks
                             # above), so skip the scatter to avoid double-scatter.
                             labels_cur_depth = ContextParallelScatterOp.apply(
@@ -709,7 +707,7 @@ class LanguageLoss(FleetLayer):
                             and not _mtp_is_megatron
                         ):
                             # In EB data flow and CP size > 1, loss and labels need to be gathered back.
-                            # Under mtp_data_style="megatron" labels stay local — the
+                            # Under use_erndata=True labels stay local — the
                             # subsequent lossmask/sum reduction is per-rank (allreduce
                             # happens implicitly via DP grad-averaging), so skip the
                             # gather to keep the length-L/cp local view.
@@ -811,7 +809,7 @@ class LanguageLoss(FleetLayer):
                                 # labels across packed docs, so fail loudly
                                 # rather than corrupt the loss silently.
                                 raise RuntimeError(
-                                    "mtp_data_style='megatron' requires "
+                                    "use_erndata=True requires "
                                     "cu_seqlens_q to be stashed on "
                                     "LanguageLoss._cu_seqlens_q_stash before the "
                                     "loss stage, but it is None on this rank. "
@@ -987,8 +985,8 @@ class MainLanguageLoss(LanguageLoss):
             and not self.config.mtp_load_weight_only
         )
         labels_ori = labels
-        if getattr(self.config, "mtp_data_style", "ernie5") == "megatron":
-            # Megatron: labels are length-L already; main logits are length-L
+        if getattr(self.config, "use_erndata", False):
+            # erndata: labels are length-L already; main logits are length-L
             # too, so keep the full labels (no L+K trim) and CP-extract to match.
             lm_labels = self._megatron_label_for_depth(labels_ori, -1)
         else:
@@ -1073,11 +1071,9 @@ class MTPLanguageLoss(LanguageLoss):
             and not self.config.mtp_load_weight_only
         )
         labels_ori = labels
-        _mtp_is_megatron = (
-            getattr(self.config, "mtp_data_style", "ernie5") == "megatron"
-        )
+        _mtp_is_megatron = getattr(self.config, "use_erndata", False)
         if _mtp_is_megatron:
-            # Megatron: labels are length-L; per-depth labels come from a
+            # erndata: labels are length-L; per-depth labels come from a
             # per-doc roll (ignored_index at boundaries), NOT the ernie5 L+K
             # slice. seq_length is only used by the ernie5 slice path below.
             seq_length = labels_ori.shape[1]

@@ -19,7 +19,7 @@ MagicMock config + a stubbed ``_proj_and_transformer_layer`` so the whole
 megatron-style prologue is exercised:
 
 - ``forward`` dispatch to ``_forward_megatron_style`` under
-  ``mtp_data_style="megatron"`` (multi_token_prediction.py:1062).
+  ``use_erndata=True`` (multi_token_prediction.py:1062).
 - (K+1) split, per-depth hidden_states/decoder_input dispatch, field pops
   (lines 1636-1656).
 - per-depth attn_mask_startend_row_indices derivation from cu_seqlens_q,
@@ -52,7 +52,7 @@ def _make_layer(
 ):
     layer = MultiTokenPredictionLayer.__new__(MultiTokenPredictionLayer)
     cfg = MagicMock()
-    cfg.mtp_data_style = "megatron"
+    cfg.use_erndata = True
     cfg.enable_mtp_magic_send = magic_send
     cfg.num_nextn_predict_layers = K
     cfg.gpt_model_use_experimental_version = include_pos

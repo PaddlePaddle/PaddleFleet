@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CP-aware ``mtp_data_style="megatron"`` end-to-end test (CP=1 vs CP=2).
+"""CP-aware ``use_erndata=True`` end-to-end test (CP=1 vs CP=2).
 
 The megatron MTP branch in ``GPTEmbedding`` slices the sequence itself with
 ``extract_local_zigzag_chunks`` instead of going through
@@ -140,7 +140,7 @@ def _make_config():
         # MTP, megatron data style
         num_nextn_predict_layers=NUM_MTP,
         mtp_loss_scaling_factor=0.3,
-        mtp_data_style="megatron",
+        use_erndata=True,
         # CP
         context_parallel_size=CP_SIZE,
         cp_balance_mode="dualchunk_allgather",

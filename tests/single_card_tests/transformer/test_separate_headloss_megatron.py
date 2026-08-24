@@ -17,7 +17,7 @@
 Drives the REAL ``MainLanguageLoss`` / ``MTPLanguageLoss`` / base
 ``LanguageLoss._megatron_label_for_depth`` via ``__new__`` + MagicMock config
 and a stubbed ``_forward`` that records the labels handed to it. Under
-mtp_data_style="megatron":
+use_erndata=True:
 
   * main labels stay length-L (no ``labels[:, :-K]`` trim);
   * per-MTP-depth labels come from ``_roll_tensor_packed_seq`` with
@@ -77,7 +77,7 @@ def _base_loss(K):
     loss = LanguageLoss.__new__(LanguageLoss)
     loss.config = MagicMock()
     loss.config.num_nextn_predict_layers = K
-    loss.config.mtp_data_style = "megatron"
+    loss.config.use_erndata = True
     loss.ignored_index = IGNORED
     return loss
 
@@ -154,7 +154,7 @@ class TestMegatronLabelForDepth(unittest.TestCase):
 
 
 class TestMTPLanguageLossMegatron(unittest.TestCase):
-    """Real ``MTPLanguageLoss.forward`` under mtp_data_style="megatron"."""
+    """Real ``MTPLanguageLoss.forward`` under use_erndata=True."""
 
     def setUp(self) -> None:
         LanguageLoss._cu_seqlens_q_stash = None
@@ -167,7 +167,7 @@ class TestMTPLanguageLossMegatron(unittest.TestCase):
         cfg = MagicMock()
         cfg.num_nextn_predict_layers = K
         cfg.mtp_load_weight_only = False
-        cfg.mtp_data_style = "megatron"
+        cfg.use_erndata = True
         cfg.mtp_distillation_loss = False
         loss.config = cfg
         loss.ignored_index = IGNORED
@@ -212,7 +212,7 @@ class TestMTPLanguageLossMegatron(unittest.TestCase):
 
 
 class TestMainLanguageLossMegatron(unittest.TestCase):
-    """Real ``MainLanguageLoss.forward`` under mtp_data_style="megatron"."""
+    """Real ``MainLanguageLoss.forward`` under use_erndata=True."""
 
     def setUp(self) -> None:
         LanguageLoss._cu_seqlens_q_stash = None
@@ -225,7 +225,7 @@ class TestMainLanguageLossMegatron(unittest.TestCase):
         cfg = MagicMock()
         cfg.num_nextn_predict_layers = K
         cfg.mtp_load_weight_only = False
-        cfg.mtp_data_style = "megatron"
+        cfg.use_erndata = True
         cfg.mtp_distillation_loss = False
         cfg.train_mtp_only = False
         cfg.add_mtp_loss = True

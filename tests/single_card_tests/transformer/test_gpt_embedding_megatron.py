@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Single-card coverage for GPTEmbedding.forward under mtp_data_style="megatron".
+"""Single-card coverage for GPTEmbedding.forward under use_erndata=True.
 
 Drives the REAL ``GPTEmbedding.forward`` via ``__new__`` + MagicMock config
 and a stubbed ``embedding`` so the megatron MTP embedding branch runs on a
@@ -48,7 +48,7 @@ from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 
 
-def _make_embedding(K, B, L, H, *, mtp_data_style="megatron", magic_send=False):
+def _make_embedding(K, B, L, H, *, use_erndata=True, magic_send=False):
     emb = GPTEmbedding.__new__(GPTEmbedding)
     cfg = MagicMock()
     cfg.gpt_model_use_experimental_version = True
@@ -60,12 +60,12 @@ def _make_embedding(K, B, L, H, *, mtp_data_style="megatron", magic_send=False):
     cfg.tensor_model_parallel_size = 1
     cfg.num_nextn_predict_layers = K
     cfg.mtp_load_weight_only = False
-    cfg.mtp_data_style = mtp_data_style
+    cfg.use_erndata = use_erndata
     cfg.enable_mtp_magic_send = magic_send
     # MagicMock attributes are truthy by default; pin the real default so the
     # mtp_emb_res tail keeps concatenating into hidden_states instead of taking
     # the separate_mtp_input transport (which is a PP=1/K=1 optimization and is
-    # rejected for mtp_data_style="megatron").
+    # rejected for use_erndata=True).
     cfg.separate_mtp_input = False
     cfg.pad_token_id = 0
     cfg.experimental_dataflow = False
@@ -177,7 +177,7 @@ class TestGptEmbeddingErnie5(unittest.TestCase):
 
     def test_ernie5_concat_shift_path(self) -> None:
         K, B, L, H = 2, 1, 10, 4
-        emb = _make_embedding(K, B, L, H, mtp_data_style="ernie5")
+        emb = _make_embedding(K, B, L, H, use_erndata=False)
         input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
         out = emb.forward({"input_ids": input_ids})
         # mtp_emb_res holds K+1 chunks each [B, L-K, H], concatenated on axis 0.
@@ -188,7 +188,7 @@ class TestGptEmbeddingErnie5(unittest.TestCase):
     def test_ernie5_magic_send_truncation(self) -> None:
         K, B, L, H = 2, 1, 10, 4
         emb = _make_embedding(
-            K, B, L, H, mtp_data_style="ernie5", magic_send=True
+            K, B, L, H, use_erndata=False, magic_send=True
         )
         input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
         out = emb.forward({"input_ids": input_ids})
@@ -246,7 +246,7 @@ class TestGptEmbeddingErnie5CPSP(unittest.TestCase):
         # experimental_dataflow + cp_size>1 -> ContextParallelScatterOp
         # (identity) at lines 603 and 638.
         K, B, L, H = 2, 1, 10, 4
-        emb = _make_embedding(K, B, L, H, mtp_data_style="ernie5")
+        emb = _make_embedding(K, B, L, H, use_erndata=False)
         emb.config.experimental_dataflow = True
         input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
         with _fake_cp(cp_size=2), _identity_scatter():
@@ -259,7 +259,7 @@ class TestGptEmbeddingErnie5CPSP(unittest.TestCase):
         # sequence_parallel path with identity ScatterOp
         # (lines 610, 613-614, 647, 650, 653).
         K, B, L, H = 2, 1, 10, 4
-        emb = _make_embedding(K, B, L, H, mtp_data_style="ernie5")
+        emb = _make_embedding(K, B, L, H, use_erndata=False)
         emb.sequence_parallel = True
         emb.config.sequence_parallel = True
         input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
@@ -311,7 +311,7 @@ class TestGptEmbeddingMegatronCPRope(unittest.TestCase):
     """RoPE must follow the megatron branch's zigzag CP layout.
 
     ``ContextParallelScatterOp`` is gated on ``experimental_dataflow``, which
-    mtp_data_style="megatron" forbids, so without an explicit slice the
+    use_erndata=True forbids, so without an explicit slice the
     full-length table would reach a decoder that only holds L/cp positions.
     """
 
@@ -369,7 +369,7 @@ class TestGptEmbeddingMegatronCPRope(unittest.TestCase):
         # cp_size=2 makes the stub scale the rank-local length (L - K) back up
         # to the full 2*(L - K), mirroring the real get_rotary_seq_len.
         emb = _enable_rope(
-            _make_embedding(K, B, L, H, mtp_data_style="ernie5"),
+            _make_embedding(K, B, L, H, use_erndata=False),
             cp_size=2,
             dim=D,
         )
@@ -387,7 +387,7 @@ class TestGptEmbeddingMegatronCPRope(unittest.TestCase):
 class TestGptEmbeddingMagicSendCPSP(unittest.TestCase):
     """magic-send truncation branch CP/SP sublines (gpt_embedding.py:555,
     564, 568, 571, 574-575, 579). magic-send lives in the ernie5
-    (non-megatron) path, so mtp_data_style stays "ernie5".
+    (non-megatron) path, so use_erndata stays "ernie5".
     """
 
     def test_magic_experimental_sp_cp(self) -> None:
@@ -396,7 +396,7 @@ class TestGptEmbeddingMagicSendCPSP(unittest.TestCase):
         # 575 (guard eval). 579 is skipped here (experimental&SP True).
         K, B, L, H = 2, 1, 8, 4
         emb = _make_embedding(
-            K, B, L, H, mtp_data_style="ernie5", magic_send=True
+            K, B, L, H, use_erndata=False, magic_send=True
         )
         emb.sequence_parallel = True
         emb.config.sequence_parallel = True
@@ -411,7 +411,7 @@ class TestGptEmbeddingMagicSendCPSP(unittest.TestCase):
         # and SP)`` guard is True, so line 579 (reshape/permute) runs.
         K, B, L, H = 2, 1, 8, 4
         emb = _make_embedding(
-            K, B, L, H, mtp_data_style="ernie5", magic_send=True
+            K, B, L, H, use_erndata=False, magic_send=True
         )
         emb.config.gpt_model_use_experimental_version = False
         emb.sequence_parallel = True

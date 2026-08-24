@@ -14,7 +14,7 @@
 
 """Tests for the LanguageLoss cu_seqlens_q stash (per-doc parity path).
 
-Under `mtp_data_style="megatron"`, `gpt_embedding.forward` stashes
+Under `use_erndata=True`, `gpt_embedding.forward` stashes
 `cu_seqlens_q` onto `LanguageLoss._cu_seqlens_q_stash` so the MTP label-roll
 in `LanguageLoss.forward` can call `_roll_tensor_packed_seq` and match the
 embedding-side per-doc roll bit-exactly at EOS boundaries.

@@ -14,7 +14,7 @@
 
 """GPTLMHead._stash_cu_seqlens_q: deliver cu_seqlens_q to the loss stage.
 
-Under mtp_data_style="megatron" and PP>1, the last pipeline stage runs the
+Under use_erndata=True and PP>1, the last pipeline stage runs the
 LM head (which sees the pipeline dict) immediately before LanguageLoss (which
 does not). GPTLMHead.forward must stash cu_seqlens_q onto
 LanguageLoss._cu_seqlens_q_stash so the loss rank can roll labels per packed

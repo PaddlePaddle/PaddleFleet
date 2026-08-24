@@ -105,20 +105,21 @@ class TransformerConfig(ModelParallelConfig):
     The new dataflow requires: input_ids, labels, startend_row_indices (last dim=1, main seq only),
     mtp_startend_row_indices_all ([B, num_nextn, S, 1]), position_ids."""
 
-    mtp_data_style: str = "ernie5"
-    """MTP data-flow style.
+    use_erndata: bool = False
+    """Whether the training job is fed by the erndata (Energon) data pipeline.
 
-    - "ernie5"  : the historical PaddleFleet MTP path — the data pipeline
+    This selects the MTP data-flow contract:
+
+    - False (default): the historical PaddleFleet MTP path — the data pipeline
       constructs mtp_startend_row_indices_all, mtp_hidden_inputs_mask_all and
-      appends K MTP tokens to input_ids/labels/loss_mask (see
-      ``ernie5/src/datasets/pretrain_online_task.py:get_mtp_inputs_info`` and
-      ``pretrain_task.py:__getitem__``). MultiTokenPredictionLayer.forward
-      consumes those pre-computed masks per depth.
+      appends K MTP tokens to input_ids/labels/loss_mask.
+      MultiTokenPredictionLayer.forward consumes those pre-computed masks per
+      depth.
 
-    - "megatron": the MCore-8c4df6b07 style. The data pipeline emits only the
-      main [L]-length tensors plus ``packed_seq_params.cu_seqlens_q`` for
-      packed doc boundaries; MTP shifting happens inside
-      MultiTokenPredictionLayer.forward via ``roll_tensor(packed_seq_params=...)``.
+    - True: the MCore-8c4df6b07 style. erndata emits only the main [L]-length
+      tensors plus ``cu_seqlens_q`` for packed doc boundaries; MTP shifting
+      happens inside MultiTokenPredictionLayer.forward via
+      ``roll_tensor(cu_seqlens_q=...)``.
     """
 
     num_empty_layers_add_in_head: int = 0
@@ -1756,38 +1757,35 @@ class TransformerConfig(ModelParallelConfig):
                     "enable_mtp_magic_send with vpp requires variable_seq_lengths=True"
                 )
 
-        if self.mtp_data_style not in {"ernie5", "megatron"}:
-            raise ValueError(
-                f"mtp_data_style={self.mtp_data_style!r} is invalid. "
-                "Must be one of {'ernie5', 'megatron'}."
-            )
-        if self.mtp_data_style == "megatron":
+        if self.use_erndata and (
+            self.num_nextn_predict_layers > 0 or self.mtp_num_layers > 0
+        ):
+            # erndata + MTP selects the packed-doc (MCore 8c4df6b07) contract.
             # K is read from `num_nextn_predict_layers` by every runtime
-            # consumer of the megatron data path (GPTEmbedding builds the K+1
-            # embedding chunks from it, `_forward_megatron_style` splits
-            # hidden_states into K+1 chunks with it). The `mtp_num_layers`
-            # alias is only honored by MTP *layer construction*
-            # (`_get_effective_mtp_layers`), so configuring K through the alias
-            # alone would build MTP layers that the data path never feeds.
-            # Require the canonical field instead of accepting either.
+            # consumer of that path (GPTEmbedding builds the K+1 embedding
+            # chunks from it, `_forward_megatron_style` splits hidden_states
+            # into K+1 chunks with it). The `mtp_num_layers` alias is only
+            # honored by MTP *layer construction* (`_get_effective_mtp_layers`),
+            # so configuring K through the alias alone would build MTP layers
+            # that the data path never feeds.
             if self.num_nextn_predict_layers <= 0:
                 raise ValueError(
-                    "mtp_data_style='megatron' requires "
+                    "use_erndata=True with MTP requires "
                     "num_nextn_predict_layers > 0; the `mtp_num_layers` alias "
-                    "is not honored by the megatron MTP data path."
+                    "is not honored by the erndata MTP data path."
                 )
             if self.enable_mtp_magic_send:
                 raise ValueError(
-                    "mtp_data_style='megatron' is incompatible with "
+                    "use_erndata=True with MTP is incompatible with "
                     "enable_mtp_magic_send=True."
                 )
             if self.experimental_dataflow:
                 # experimental_dataflow specifically produces
-                # mtp_startend_row_indices_all as a separate input. Under the
-                # Megatron path we do not produce that field.
+                # mtp_startend_row_indices_all as a separate input, which
+                # erndata does not produce.
                 raise ValueError(
-                    "mtp_data_style='megatron' is incompatible with "
-                    "experimental_dataflow=True (which expects the ernie5-style "
+                    "use_erndata=True with MTP is incompatible with "
+                    "experimental_dataflow=True (which expects the legacy "
                     "mtp_startend_row_indices_all payload)."
                 )
             if self.separate_mtp_input:
@@ -1798,19 +1796,19 @@ class TransformerConfig(ModelParallelConfig):
                 # `mtp_decoder_inputs`, so the combination would silently
                 # mis-slice the batch axis.
                 raise ValueError(
-                    "mtp_data_style='megatron' is incompatible with "
-                    "separate_mtp_input=True (the megatron MTP forward reads "
+                    "use_erndata=True with MTP is incompatible with "
+                    "separate_mtp_input=True (the erndata MTP forward reads "
                     "the shifted embeddings from hidden_states, not from "
                     "mtp_decoder_inputs)."
                 )
             # PaddleFleet's `dualchunk_allgather` scatter layout is the only
             # mode equivalent to MCore's zigzag balancing; the other two
             # (`contiguous_allgather`, `contiguous_a2a`) are not covered by
-            # the megatron path's MTP roll semantics.
+            # this path's MTP roll semantics.
             if self.context_parallel_size > 1:
                 if self.cp_balance_mode != "dualchunk_allgather":
                     raise ValueError(
-                        f"mtp_data_style='megatron' + context_parallel_size>1 "
+                        f"use_erndata=True with MTP + context_parallel_size>1 "
                         f"requires cp_balance_mode='dualchunk_allgather', got "
                         f"{self.cp_balance_mode!r}."
                     )

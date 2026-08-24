@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HySparseTransformerLayer._mtp_split must honor mtp_data_style="megatron".
+"""HySparseTransformerLayer._mtp_split must honor use_erndata=True.
 
 Under megatron style position_ids / attn_mask_startend_row_indices arrive at
 main-decoder length L (per-doc shifting happens inside the MTP layer via
@@ -35,7 +35,7 @@ K = 2
 B, L, H = 1, 12, 4
 
 
-def _make_config(mtp_data_style):
+def _make_config(use_erndata):
     return SimpleNamespace(
         num_nextn_predict_layers=K,
         mtp_load_weight_only=False,
@@ -45,12 +45,12 @@ def _make_config(mtp_data_style):
         tensor_model_parallel_size=1,
         experimental_dataflow=False,
         separate_mtp_input=False,
-        mtp_data_style=mtp_data_style,
+        use_erndata=use_erndata,
     )
 
 
-def _make_fake_layer(mtp_data_style):
-    fake = SimpleNamespace(config=_make_config(mtp_data_style))
+def _make_fake_layer(use_erndata):
+    fake = SimpleNamespace(config=_make_config(use_erndata))
     fake._mtp_enabled = lambda is_mtp: HySparseTransformerLayer._mtp_enabled(
         fake, is_mtp
     )
@@ -78,7 +78,7 @@ def _make_dict_args(seq_len):
 
 class TestMegatronSkipsSeqTrims:
     def test_position_ids_kept_full_length(self):
-        fake = _make_fake_layer("megatron")
+        fake = _make_fake_layer(True)
         dict_args = _make_dict_args(L)
         ctx = HySparseTransformerLayer._mtp_split(fake, dict_args, is_mtp=False)
         assert ctx is not None
@@ -86,14 +86,14 @@ class TestMegatronSkipsSeqTrims:
         assert ctx["mtp_ids"] is None
 
     def test_attn_mask_kept_full_length(self):
-        fake = _make_fake_layer("megatron")
+        fake = _make_fake_layer(True)
         dict_args = _make_dict_args(L)
         ctx = HySparseTransformerLayer._mtp_split(fake, dict_args, is_mtp=False)
         assert dict_args["attn_mask_startend_row_indices"].shape == [B, 1, L, 1]
         assert ctx["attn_mask_mtp"] is None
 
     def test_hidden_states_split_still_applies(self):
-        fake = _make_fake_layer("megatron")
+        fake = _make_fake_layer(True)
         dict_args = _make_dict_args(L)
         stacked = dict_args["hidden_states"].clone()
         ctx = HySparseTransformerLayer._mtp_split(fake, dict_args, is_mtp=False)
@@ -106,7 +106,7 @@ class TestMegatronSkipsSeqTrims:
         )
 
     def test_restore_roundtrips_without_touching_aux(self):
-        fake = _make_fake_layer("megatron")
+        fake = _make_fake_layer(True)
         dict_args = _make_dict_args(L)
         ctx = HySparseTransformerLayer._mtp_split(fake, dict_args, is_mtp=False)
         output = dict_args["hidden_states"]
@@ -122,7 +122,7 @@ class TestErnie5TrimsStillApply:
     """Regression guard: adding the megatron guard must not disturb ernie5."""
 
     def test_position_ids_and_mask_trimmed(self):
-        fake = _make_fake_layer("ernie5")
+        fake = _make_fake_layer(False)
         dict_args = _make_dict_args(L + K)
         ctx = HySparseTransformerLayer._mtp_split(fake, dict_args, is_mtp=False)
         assert dict_args["position_ids"].shape == [B, L]
@@ -131,7 +131,7 @@ class TestErnie5TrimsStillApply:
         assert ctx["attn_mask_mtp"].shape == [B, 1, K, 1]
 
     def test_restore_reassembles_full_length(self):
-        fake = _make_fake_layer("ernie5")
+        fake = _make_fake_layer(False)
         dict_args = _make_dict_args(L + K)
         ctx = HySparseTransformerLayer._mtp_split(fake, dict_args, is_mtp=False)
         output = dict_args["hidden_states"]
@@ -146,9 +146,9 @@ class TestErnie5TrimsStillApply:
 
 
 class TestMtpDisabledIsNoop:
-    @pytest.mark.parametrize("style", ["ernie5", "megatron"])
-    def test_is_mtp_layer_returns_none(self, style):
-        fake = _make_fake_layer(style)
+    @pytest.mark.parametrize("use_erndata", [False, True])
+    def test_is_mtp_layer_returns_none(self, use_erndata):
+        fake = _make_fake_layer(use_erndata)
         dict_args = _make_dict_args(L)
         assert (
             HySparseTransformerLayer._mtp_split(fake, dict_args, is_mtp=True)

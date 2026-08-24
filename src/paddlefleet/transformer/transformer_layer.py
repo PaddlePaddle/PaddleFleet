@@ -758,16 +758,14 @@ class TransformerLayer(nn.Layer):
         )
         mtp_input = None
         mtp_ids = None
-        # Under mtp_data_style="megatron" the data pipeline emits length-L
+        # Under use_erndata the data pipeline emits length-L
         # tensors (input_ids / labels / position_ids / attn_mask) and
         # GPTEmbedding produces mtp_emb_res as (K+1) length-L blocks — the
         # per-depth left-shift is performed inline via roll_tensor. That means
         # the main decoder here runs at seq_len = L (not L-K), so the ernie5
         # L+K path below must be skipped for position_ids / input_ids / mask
         # trims.
-        _mtp_is_megatron = (
-            getattr(self.config, "mtp_data_style", "ernie5") == "megatron"
-        )
+        _mtp_is_megatron = getattr(self.config, "use_erndata", False)
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
@@ -786,7 +784,7 @@ class TransformerLayer(nn.Layer):
             dict_args["hidden_states"] = hidden_states
 
             # process position_ids
-            # Under mtp_data_style="megatron" position_ids is [B, L] already
+            # Under use_erndata position_ids is [B, L] already
             # (roll happens inside MTP layer), so DO NOT strip K positions.
             if (
                 not self.config.gpt_model_use_experimental_version
@@ -1044,7 +1042,7 @@ class TransformerLayer(nn.Layer):
         ):
             hidden_states_concat = paddle.concat([output, *mtp_input])
             rst["hidden_states"] = hidden_states_concat
-            # Under mtp_data_style="megatron" the L+K position-ids split was
+            # Under use_erndata the L+K position-ids split was
             # skipped up front, so there is nothing to concat back either.
             if (
                 not self.config.gpt_model_use_experimental_version
@@ -2180,14 +2178,12 @@ class HySparseTransformerLayer(TransformerLayer):
         if not self._mtp_enabled(is_mtp):
             return None
         n = self.config.num_nextn_predict_layers
-        # Under mtp_data_style="megatron" position_ids / masks are already
+        # Under use_erndata position_ids / masks are already
         # main-decoder length L (per-doc shifting happens inside the MTP layer
         # via roll_tensor), so the L+K -> L seq-dim trims below must be
         # skipped. Mirrors the ``_mtp_is_megatron`` guards in
         # ``TransformerLayer.forward``.
-        _mtp_is_megatron = (
-            getattr(self.config, "mtp_data_style", "ernie5") == "megatron"
-        )
+        _mtp_is_megatron = getattr(self.config, "use_erndata", False)
         ctx = {
             "mtp_ids": None,
             "mtp_input_ids": None,

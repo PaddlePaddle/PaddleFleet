@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""PP>1 + separate_mtp_headloss=True + mtp_data_style="megatron" end-to-end.
+"""PP>1 + separate_mtp_headloss=True + use_erndata=True end-to-end.
 
 Companion to ``test_gpt_pp_mtp_megatron.py`` (fused GPTLMHead + LanguageLoss).
 This variant exercises the SEPARATE head/loss path:
@@ -109,7 +109,7 @@ def _build_config(vocab_size, seq_len):
         num_nextn_predict_layers=MTP_DEGREE,
         mtp_loss_scaling_factor=0.3,
         separate_mtp_headloss=True,
-        mtp_data_style="megatron",
+        use_erndata=True,
         overlap_p2p_comm=True,
     )
 

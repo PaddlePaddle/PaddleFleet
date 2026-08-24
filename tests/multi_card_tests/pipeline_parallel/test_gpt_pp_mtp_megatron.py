@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""PP>1 + mtp_data_style="megatron" end-to-end loss smoke test.
+"""PP>1 + use_erndata=True end-to-end loss smoke test.
 
 Pins the fix in ``GPTLMHead.forward`` / ``GPTMainLMHead.forward``:
 ``_stash_cu_seqlens_q`` writes the pipeline dict's ``cu_seqlens_q`` onto
@@ -107,7 +107,7 @@ def _build_config(vocab_size, seq_len):
         # MTP + megatron data style: the whole point of this test.
         num_nextn_predict_layers=MTP_DEGREE,
         mtp_loss_scaling_factor=0.3,
-        mtp_data_style="megatron",
+        use_erndata=True,
         overlap_p2p_comm=False,
         batch_p2p_comm=True,
     )

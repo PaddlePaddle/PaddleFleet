@@ -182,7 +182,7 @@ def roll_tensor(
     """Roll the tensor input along the given dimension(s).
 
     Paddle port of MCore ``multi_token_prediction.roll_tensor``. Used by the
-    Megatron-style MTP path (config.mtp_data_style="megatron") to shift
+    packed-doc MTP path (config.use_erndata=True) to shift
     input_ids / position_ids / labels / loss_mask by one token at each MTP
     depth, while respecting packed-document boundaries.
 
@@ -274,7 +274,7 @@ def extract_local_zigzag_chunks(tensor_full, cp_rank, cp_size, axis=1):
     ``cp_size`` × embedding-lookup redundancy that would otherwise result
     from doing embedding on the full-length ``input_ids``.
 
-    Callers under ``mtp_data_style="megatron"`` typically:
+    Callers under ``use_erndata=True`` typically:
 
     1. Roll the full-length int tensor with ``roll_tensor(cu_seqlens_q=...)``.
     2. Extract this rank's local slice via this helper.
@@ -1052,13 +1052,12 @@ class MultiTokenPredictionLayer(FleetLayer):
         return outputs
 
     def forward(self, dict_args: dict):
-        # Dispatch by config.mtp_data_style. Under "megatron" the data pipeline
+        # Dispatch by config.use_erndata. Under erndata the data pipeline
         # emits no mtp_startend_row_indices_all / mtp_hidden_inputs_mask_all
         # and no L+K token concatenation; instead we shift input_ids /
         # position_ids / labels / loss_mask inside this layer via
-        # roll_tensor(packed_seq_params=...).
-        style = getattr(self.config, "mtp_data_style", "ernie5")
-        if style == "megatron":
+        # roll_tensor(cu_seqlens_q=...).
+        if getattr(self.config, "use_erndata", False):
             return self._forward_megatron_style(dict_args)
 
         if "context" in dict_args:
@@ -1604,18 +1603,18 @@ class MultiTokenPredictionLayer(FleetLayer):
         return ScheduleNode(self.forward, name="MultiTokenPredictionLayer")
 
     # ------------------------------------------------------------------ #
-    # Megatron-style MTP forward (config.mtp_data_style == "megatron").
+    # Packed-doc MTP forward (config.use_erndata is True).
     #
     # Contract vs. the historical ernie5 path:
     #   * The data pipeline emits ONLY the main L-length tensors plus
-    #     packed_seq_params (with cu_seqlens_q). It does NOT emit
+    #     cu_seqlens_q. It does NOT emit
     #     mtp_startend_row_indices_all or mtp_hidden_inputs_mask_all,
     #     and it does NOT append K MTP tokens to input_ids / labels.
     #   * The shifted MTP embeddings for each depth are still prepared upstream
-    #     by GPTEmbedding, but using roll_tensor(packed_seq_params=...) — i.e.
+    #     by GPTEmbedding, but using roll_tensor(cu_seqlens_q=...) — i.e.
     #     per-doc left-shift with boundary zero-fill — rather than the L+K
     #     index-slice used by ernie5. GPTEmbedding.forward has a mirrored
-    #     mtp_data_style branch that produces the same
+    #     use_erndata branch that produces the same
     #     ``hidden_states_concat`` shape (concatenation of the main slice and
     #     K per-depth shifted slices), so the pipeline plumbing stays intact.
     #   * The MTP LMHead / loss layer downstream is responsible for rolling
@@ -1655,7 +1654,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         if dict_args.get("context") is not None:
             raise NotImplementedError(
                 "multi token prediction + cross attention is not yet supported "
-                "under mtp_data_style='megatron'."
+                "under use_erndata=True."
             )
         if (
             dict_args.get("mtp_input_embeds") is not None
@@ -1664,7 +1663,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             # Config validation in TransformerConfig.__post_init__ should have
             # caught this, but keep a hard guard here for defence in depth.
             raise ValueError(
-                "mtp_data_style='megatron' is incompatible with enable_mtp_magic_send."
+                "use_erndata=True is incompatible with enable_mtp_magic_send."
             )
 
         num_nextn = self.config.num_nextn_predict_layers
@@ -1690,7 +1689,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         if input_ids is not None and input_ids.ndim > 2:
             # Defensive: some ernie5 codepaths stash [B, K, L] here.
             raise RuntimeError(
-                f"Under mtp_data_style='megatron', input_ids must be [B, L], got shape {input_ids.shape}."
+                f"Under use_erndata=True, input_ids must be [B, L], got shape {input_ids.shape}."
             )
 
         # Derive per-depth attn_mask_startend_row_indices from cu_seqlens_q.
