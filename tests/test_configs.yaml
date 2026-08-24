@@ -199,6 +199,10 @@ tests:
   - test_case: [tests/multi_card_tests/transformer/test_indexer_topk_col_mask_cp.py]
     products:
       - num_gpus: 2
+  # separate_mtp_input: bitwise fwd/bwd equivalence vs concat/split baseline (CP=2)
+  - test_case: [tests/multi_card_tests/test_separate_mtp_input_cp.py]
+    products:
+      - num_gpus: 2
   # default fallback for remaining multi_card_tests
   - test_case: [tests/multi_card_tests/pipeline_parallel/*.py]
     products:

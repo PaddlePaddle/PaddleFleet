@@ -25,7 +25,10 @@ Shrinking PP shrinks ``num_hidden_layers``, and every per-layer list in
 The rewrite keeps the first ``layers_new`` entries -- so the dense prefix
 (``first_k_dense_replace``) and the leading attention pattern survive -- and
 re-appends the trailing MTP entries verbatim for the fields whose length counts
-them.
+them.  ``csa_compress_ratios`` then gets one extra fix: with
+``mtp_shared_last_layer`` the MTP layer aliases the last decoder layer's
+attention weights, so the truncated tail is forced back to the MTP layer's own
+attention type (see :func:`_shares_mtp_attention`).
 
 Truncation is refused, rather than silently producing an unusable config, when
 
@@ -83,6 +86,22 @@ def _csa_family(ratio):
     return "CSA(2..127)"
 
 
+def _shares_mtp_attention(model_config, mtp_layers):
+    """Whether the MTP layer aliases the last decoder layer's attention.
+
+    ``GPTModel.get_sequential_layers`` wraps both the backbone's last
+    transformer layer and every MTP layer in
+    ``SharedLayerDesc("mtp_reuse_transformer", ...,
+    shared_weight_attr="transformer_layer_weights")`` once
+    ``mtp_shared_last_layer`` is set and MTP is present.  Paddle then
+    broadcasts that parameter list across the two pipeline stages attribute by
+    attribute, so the two layers must be the same kind of attention: MLA and
+    HCA/CSA expose different parameters, and the mismatched broadcast hangs the
+    job instead of raising.
+    """
+    return bool(model_config.get("mtp_shared_last_layer")) and mtp_layers > 0
+
+
 def plan_layer_field_shrink(model_config, layers_old, layers_new, mtp_layers):
     """Plan the per-layer list rewrites implied by a layer-count shrink.
 
@@ -94,6 +113,8 @@ def plan_layer_field_shrink(model_config, layers_old, layers_new, mtp_layers):
     changes = []
     if model_config is None or layers_new >= layers_old:
         return changes, None
+
+    shares_mtp = _shares_mtp_attention(model_config, mtp_layers)
 
     for field in LAYER_FIELDS:
         key = next((a for a in field.aliases if a in model_config), None)
@@ -116,8 +137,17 @@ def plan_layer_field_shrink(model_config, layers_old, layers_new, mtp_layers):
 
         layer_part, mtp_part = value[:layers_old], value[layers_old:]
         kept = layer_part[:layers_new]
+        extra = ""
 
         if field.families:
+            if shares_mtp and kept and mtp_part and kept[-1] != mtp_part[0]:
+                extra = (
+                    f"；并把末层的 {kept[-1]} 改成 MTP 层的 {mtp_part[0]}"
+                    f"（mtp_shared_last_layer 让末层与 MTP 层共享 attention "
+                    f"权重，两者注意力类型必须一致，"
+                    f"否则共享权重跨 stage broadcast 时几何不匹配、训练挂死）"
+                )
+                kept = [*kept[:-1], mtp_part[0]]
             lost = {_csa_family(r) for r in layer_part} - {
                 _csa_family(r) for r in kept
             }
@@ -135,7 +165,8 @@ def plan_layer_field_shrink(model_config, layers_old, layers_new, mtp_layers):
                 f"逐层配置随层数 {layers_old} -> {layers_new} 裁剪："
                 f"保留前 {layers_new} 层"
                 + (f" + 末尾 {len(mtp_part)} 个 MTP 层" if mtp_part else "")
-                + f"，长度 {len(value)} -> {len(kept + mtp_part)}",
+                + f"，长度 {len(value)} -> {len(kept + mtp_part)}"
+                + extra,
             )
         )
 

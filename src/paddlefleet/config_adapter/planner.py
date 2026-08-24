@@ -30,9 +30,15 @@
   ``num_hidden_layers`` and realigns VPP / empty tail layers -- those writes
   land in a *separate* copy of ``model_config.json``, never in the source.
 
+  Within a tier the rule is "shrink as little as possible", except for the
+  joint tier, where the two axes follow the shrink priority ``EP > PP``: EP
+  goes down to its floor first and PP absorbs only the remainder.
+
 TP and SEP are never shrunk: a smaller TP raises per-card memory and risks
 OOM.  No dimension that is > 1 in the source is ever reduced to 1, because
-that would delete the communication group under test.
+that would delete the communication group under test.  VPP is the exception:
+whichever planner ran, :func:`enforce_vpp_limit` switches it off when the
+final PP is too small for an interleaved schedule.
 """
 
 from __future__ import annotations
@@ -41,6 +47,7 @@ import re
 
 from .constraints import (
     MIN_PARALLEL_DEGREE,
+    MIN_PP_FOR_VPP,
     check_ep_shrink,
     check_hardware,
     check_pp_shrink,
@@ -57,16 +64,52 @@ from .topology import TopologyValidator
 # can put the more actionable model-structure reasons first.
 _CONSTRAINT_RE = re.compile(r"C[1-4]\s*不满足")
 
+VPP_FIELD = "virtual_pipeline_model_parallel_size"
+
+
+def _vpp_off_reason(vpp_old, pp):
+    """Why VPP must be 1 at this PP."""
+    return (
+        f"PP={pp} 时不能开虚拟流水：框架断言 VPP>1 需要 PP>"
+        f"{MIN_PP_FOR_VPP - 1}"
+        f"（virtual pipeline must run under pp degree > 2），"
+        f"VPP {vpp_old} -> 1"
+    )
+
 
 def plan_parallelism(
     config, dims, target_cards, cards_per_node, options, context=None
 ):
     """Plan the final parallel dims. Returns ``(plan, error_or_None)``."""
     if options.freeze_parallel:
-        return plan_frozen(dims, target_cards, cards_per_node)
-    return ShrinkPlanner().plan(
-        config, dims, target_cards, cards_per_node, context
-    )
+        plan, err = plan_frozen(dims, target_cards, cards_per_node)
+    else:
+        plan, err = ShrinkPlanner().plan(
+            config, dims, target_cards, cards_per_node, context
+        )
+    if err:
+        return None, err
+    enforce_vpp_limit(config, plan)
+    return plan, None
+
+
+def enforce_vpp_limit(config, plan):
+    """Turn VPP off when the planned PP cannot run an interleaved schedule.
+
+    :data:`~.constraints.MIN_PP_FOR_VPP` is a hard framework assert, and the
+    PP-shrink planner already respects it, which leaves the plans that never
+    touch PP -- a frozen plan, an EP-only shrink, a source that already fits
+    the target -- carrying whatever VPP the source declared.  Dropping it to 1
+    cannot break the layer alignment: the number of segments goes from
+    ``PP * VPP`` down to ``PP``, which divides it.
+    """
+    if plan.pp >= MIN_PP_FOR_VPP:
+        return
+    planned = {key: value for key, value, _reason in plan.yaml_changes}
+    vpp = planned.get(VPP_FIELD, config.get(VPP_FIELD, 1) or 1)
+    if int(vpp) <= 1:
+        return
+    plan.yaml_changes.append((VPP_FIELD, 1, _vpp_off_reason(vpp, plan.pp)))
 
 
 def plan_frozen(dims, target_cards, cards_per_node):
@@ -253,7 +296,7 @@ class ShrinkPlanner:
     def _pipeline_layout(config, resolved, missing, model_config):
         """Collect everything PP shrinking needs. ``(layout, error)``."""
         if "num_hidden_layers" in missing:
-            return None, "精度模式：" + describe_missing(
+            return None, describe_missing(
                 "num_hidden_layers", missing["num_hidden_layers"]
             )
 
@@ -265,18 +308,30 @@ class ShrinkPlanner:
         # alias: mtp_num_layers wins when non-zero.
         mtp = effective_mtp_layers(model_config)
 
-        # MTP layers only take part in the stage division when
-        # separate_mtp_headloss is on; otherwise they are weight-0 free
-        # passengers pinned to the last stage.
+        # What the framework actually segments (gpt_builders.build_gpt_model
+        # + GPTModel.get_sequential_layers) is
+        #     head_empty + num_hidden_layers + mtp + tail_empty
+        # and the MTP layers only join that count when
+        # separate_mtp_headloss puts MultiTokenPredictionLayer into
+        # seg_method.  In that case the builder also drops exactly one tail
+        # empty layer to make room for them
+        # (``num_empty_layers_add_in_tail -= 1``), so the yaml tail must stay
+        # >= 1 and contributes ``tail - 1`` segmented layers.  Net effect on
+        # the total: ``mtp - 1``, which is zero for the usual single MTP
+        # layer -- adding the full ``mtp`` here would overshoot by one and
+        # produce a config that dies in do_segment().
         head = int(config.get("num_empty_layers_add_in_head", 0) or 0)
+        min_tail = 0
         if config.get("separate_mtp_headloss"):
-            head += mtp
+            head += mtp - 1
+            min_tail = 1
 
         return {
             "layers": value_of("num_hidden_layers"),
             "layers_key": resolved["num_hidden_layers"].writeback_key,
             "head": head,
             "tail": int(config.get("num_empty_layers_add_in_tail", 0) or 0),
+            "min_tail": min_tail,
             "vpp": int(
                 config.get("virtual_pipeline_model_parallel_size", 1) or 1
             ),
@@ -298,20 +353,20 @@ class ShrinkPlanner:
             )
         ]
         if meta["vpp_new"] != layout["vpp"]:
-            yaml_changes.append(
-                (
-                    "virtual_pipeline_model_parallel_size",
-                    meta["vpp_new"],
+            if meta["vpp_new"] == 1 and pp_new < MIN_PP_FOR_VPP:
+                reason = _vpp_off_reason(layout["vpp"], pp_new)
+            else:
+                reason = (
                     f"PP 缩容后重新对齐 VPP "
-                    f"{layout['vpp']} -> {meta['vpp_new']}",
+                    f"{layout['vpp']} -> {meta['vpp_new']}"
                 )
-            )
+            yaml_changes.append((VPP_FIELD, meta["vpp_new"], reason))
         if meta["tail_new"] != layout["tail"]:
             yaml_changes.append(
                 (
                     "num_empty_layers_add_in_tail",
                     meta["tail_new"],
-                    f"补空层把总层数对齐到 PP×VPP："
+                    f"调整尾部空层把总层数对齐到 PP×VPP："
                     f"{layout['tail']} -> {meta['tail_new']}",
                 )
             )
@@ -357,6 +412,7 @@ class ShrinkPlanner:
                 layout["tail"],
                 layout["vpp"],
                 first_k_dense_replace=layout["first_k"],
+                min_tail=layout["min_tail"],
             )
             if not ok:
                 rejections.append(f"PP {pp} -> {pp_new}：{why}")
@@ -414,6 +470,14 @@ class ShrinkPlanner:
         Reached only when neither single-axis shrink survives -- e.g. a source
         ``(pp=8, ep=8)`` targeting 8 cards, where any one-dimension shrink
         still overshoots the card count.
+
+        The two axes are not interchangeable, so they follow the shrink
+        priority ``EP > PP``: EP absorbs the reduction down to its floor and PP
+        is only shrunk for whatever is left over.  Shrinking EP costs routed
+        experts and nothing else, while shrinking PP scales
+        ``num_hidden_layers`` -- and with it every per-layer list, the VPP
+        degree and the empty tail -- so a shallower pipeline cut is worth a
+        deeper expert cut.
         """
         tp, pp, ep, cp, sep = dims
         num_experts, topk, experts_key = moe
@@ -434,6 +498,7 @@ class ShrinkPlanner:
                     layout["tail"],
                     layout["vpp"],
                     first_k_dense_replace=layout["first_k"],
+                    min_tail=layout["min_tail"],
                 )
                 if not ok:
                     continue
@@ -458,10 +523,10 @@ class ShrinkPlanner:
         if not pool:
             return None
 
-        # Prefer the largest EP first, then the largest PP: one unit of EP
-        # change is less intrusive on the model structure than one of PP.
-        ep_new, pp_new, experts_new, meta, layer_changes = max(
-            pool, key=lambda item: (item[0], item[1])
+        # Shrink priority EP > PP: smallest feasible EP first, then the
+        # largest PP that still fits under it.
+        ep_new, pp_new, experts_new, meta, layer_changes = min(
+            pool, key=lambda item: (item[0], -item[1])
         )
         yaml_changes, json_changes = self._pp_changes(
             pp,
@@ -478,7 +543,9 @@ class ShrinkPlanner:
                 "expert_model_parallel_size",
                 ep_new,
                 f"缩小 EP {ep} -> {ep_new}：单独缩 EP 或单独缩 PP 都无法"
-                f"适配 {target_cards} 卡，改为联合缩容",
+                f"适配 {target_cards} 卡，改为联合缩容；按 EP 优先于 PP 的"
+                f"缩容顺序，先把 EP 压到可行下限，再尽量少缩 PP"
+                f"（缩 PP 会连带改层数/VPP/尾部空层/逐层配置）",
             ),
         )
         json_changes.insert(
@@ -574,7 +641,7 @@ class ShrinkPlanner:
                 "必须先修改 TP/SEP/EP/CP"
             )
             return (
-                f"精度模式：{target_cards} 卡下找不到合法的 EP/PP 缩容方案 "
+                f"{target_cards} 卡下找不到合法的 EP/PP 缩容方案 "
                 f"(tp={tp}, pp={pp}, ep={ep}, cp={cp}, sep={sep})。\n"
                 f"  阻断原因：\n    "
                 + "\n    ".join(reasons)
@@ -595,7 +662,7 @@ class ShrinkPlanner:
                 f"整除的值>），或手动降低源 YAML 的 TP/PP/EP 后重试"
             )
         return (
-            f"精度模式：{target_cards} 卡下找不到合法的 EP/PP 缩容方案 "
+            f"{target_cards} 卡下找不到合法的 EP/PP 缩容方案 "
             f"(tp={tp}, pp={pp}, ep={ep}, cp={cp}, sep={sep})。\n"
             f"  阻断原因：\n    " + "\n    ".join(reasons) + detail_block + "\n"
             "  建议：" + advice

@@ -89,6 +89,16 @@ class TransformerConfig(ModelParallelConfig):
     and re-embed there, instead of pre-computing shifted embeddings at first stage
     and concatenating them through the pipeline."""
 
+    separate_mtp_input: bool = False
+    """When True, the shifted MTP embeddings computed by GPTEmbedding are handed to the
+    MTP layer through a dedicated ``mtp_decoder_inputs`` entry in ``dict_args`` instead
+    of being concatenated into ``hidden_states``. This removes the per-layer
+    split/concat of the MTP chunks while leaving GPTEmbedding's shifted-embedding
+    computation (including its CP/SP scatter) untouched, so the MTP layer must not
+    re-scatter them. Intended for pipeline_model_parallel_size == 1, where there is no
+    P2P send for the embeddings to piggyback on; ``enable_mtp_magic_send`` covers the
+    PP > 1 case."""
+
     experimental_dataflow: bool = False
     """When True, use new experimental dataflow where mtp_startend_row_indices_all is passed as a
     separate input instead of being appended to attn_mask_startend_row_indices.
@@ -1652,6 +1662,41 @@ class TransformerConfig(ModelParallelConfig):
             assert not self.use_dense_mtp, (
                 "mtp_shared_last_layer cannot be True if use_dense_mtp= True"
             )
+
+        if self.separate_mtp_input:
+            # Raise instead of assert: with ``python -O`` assertions are stripped,
+            # and an unsupported combination would then silently enter a path that
+            # only holds for the layout below -- or crash much later inside
+            # MultiTokenPredictionLayer with a missing ``mtp_decoder_inputs``.
+            if self.num_nextn_predict_layers != 1:
+                raise ValueError(
+                    "separate_mtp_input only supports "
+                    "num_nextn_predict_layers == 1, got "
+                    f"num_nextn_predict_layers={self.num_nextn_predict_layers}. "
+                    "The MTP input is consumed once and stripped from dict_args, "
+                    "so deeper MTP layers would not receive it."
+                )
+            if self.pipeline_model_parallel_size != 1:
+                raise ValueError(
+                    "separate_mtp_input requires pipeline_model_parallel_size "
+                    "== 1, got pipeline_model_parallel_size="
+                    f"{self.pipeline_model_parallel_size}. Use "
+                    "enable_mtp_magic_send for pipeline_model_parallel_size > 1."
+                )
+            if self.enable_mtp_magic_send:
+                raise ValueError(
+                    "separate_mtp_input and enable_mtp_magic_send are mutually "
+                    "exclusive, got separate_mtp_input=True and "
+                    "enable_mtp_magic_send=True. They are two transports for the "
+                    "same tensor; pick the one matching the pipeline degree."
+                )
+            if self.mtp_load_weight_only:
+                raise ValueError(
+                    "separate_mtp_input is incompatible with "
+                    "mtp_load_weight_only=True. GPTEmbedding does not build the "
+                    "shifted MTP embeddings in that mode, so separate_mtp_input "
+                    "would silently do nothing."
+                )
 
         if self.enable_mtp_magic_send:
             assert not getattr(self, "tie_word_embeddings", False), (

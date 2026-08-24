@@ -457,6 +457,11 @@ class CSADocMaskMetadata:
     _compressed_causal_mask: Tensor | None = None
     _is_first_compressed_group: Tensor | None = None
     _mqa_causal_topk: tuple[Tensor, Tensor] | None = None
+    # Cached densified HCA attention indices (contiguous valid prefix + per-row
+    # count). Keyed by the concatenated width so a config that changes the
+    # window/compressed layout does not reuse a stale entry. Layer-independent,
+    # so the compaction sort runs once per batch and all HCA layers reuse it.
+    _compacted_attn_topk: dict | None = None
 
     @classmethod
     def build(
@@ -666,6 +671,28 @@ class CSADocMaskMetadata:
             )
             self._compress_offset = key
         return self._compress_topk_idxs
+
+    def compact_attn_topk_idxs(self, topk_idxs: Tensor):
+        """Densify HCA attention indices once per batch (cached, layer-shared).
+
+        Returns ``(compact_topk_idxs, topk_length)``: valid entries moved to a
+        contiguous prefix, ``-1`` trailing, and the exact per-row valid count.
+        The HCA ``[window | compressed]`` layout is derived only from document
+        bounds, so it is identical across all HCA layers -- compact it once here
+        (a sort) and every layer reuses the result, instead of paying a sort per
+        layer in the sparse-attention forward/backward. Keyed by the row width so
+        a differently shaped layout does not reuse a stale entry.
+        """
+        from paddlefleet.fusions.csa_sparse_attn import _csa_compact_topk_idxs
+
+        if self._compacted_attn_topk is None:
+            self._compacted_attn_topk = {}
+        key = int(topk_idxs.shape[-1])
+        cached = self._compacted_attn_topk.get(key)
+        if cached is None:
+            cached = _csa_compact_topk_idxs(topk_idxs)
+            self._compacted_attn_topk[key] = cached
+        return cached
 
     def get_compressed_causal_mask(self) -> Tensor:
         """Return ``[batch_size, seqlen, n_compressed]`` float32 causal mask.
@@ -2850,6 +2877,7 @@ class CompressedSparseAttention(FleetLayer):
             topk_idxs,
             self.softmax_scale,
             indexer_topk=indexer_topk,
+            docmask_meta=docmask_meta,
         )
         if indexer_topk > 0:
             output, lse_indexer = output
@@ -3412,6 +3440,7 @@ class CompressedSparseAttention(FleetLayer):
             topk_idxs,
             self.softmax_scale,
             indexer_topk=indexer_topk,
+            docmask_meta=docmask_meta,
         )
         if indexer_topk > 0:
             output, lse_indexer = output
@@ -3444,8 +3473,12 @@ class CompressedSparseAttention(FleetLayer):
         softmax_scale: float,
         topk_length: Tensor | None = None,
         indexer_topk: int = 0,
+        docmask_meta: CSADocMaskMetadata | None = None,
     ):
-        from paddlefleet.fusions.csa_sparse_attn import csa_sparse_attn
+        from paddlefleet.fusions.csa_sparse_attn import (
+            _csa_bwd_honours_topk_length_holes,
+            csa_sparse_attn,
+        )
 
         attn_sink_fp32 = (
             attn_sink.cast("bfloat16").cast("float32")
@@ -3455,6 +3488,29 @@ class CompressedSparseAttention(FleetLayer):
         sparse_attn_backend = getattr(
             self.config, "csa_sparse_attn_backend", "tilelang"
         )
+        # Compact once per batch via the shared docmask-metadata cache -- but
+        # ONLY for layers with no indexer (``self.indexer is None``: HCA /
+        # attend-to-all). Their ``topk_idxs = concat([window, compressed])`` is
+        # derived purely from document bounds, so it is identical across all
+        # same-ratio layers and safe to reuse by width. A layer WITH an indexer
+        # must NOT use this cache even when ``indexer_topk == 0`` (eval / tilelang
+        # / non-cuDNN indexer path): its ``compress_topk_idxs`` is the indexer's
+        # per-layer dynamic selection, so reusing the first same-ratio layer's
+        # compacted result by width would feed later layers the wrong KV set.
+        # Those layers fall back to the sparse-attn PyLayer's own per-layer
+        # compaction. Skip when a caller already supplied ``topk_length`` (the MQA
+        # path) or metadata is unavailable; cuDNN is the only backend that
+        # consumes ``topk_length``.
+        if (
+            self.indexer is None
+            and topk_length is None
+            and docmask_meta is not None
+            and sparse_attn_backend == "cudnn"
+            and _csa_bwd_honours_topk_length_holes()
+        ):
+            topk_idxs, topk_length = docmask_meta.compact_attn_topk_idxs(
+                topk_idxs
+            )
         return csa_sparse_attn(
             query,
             kv_full,

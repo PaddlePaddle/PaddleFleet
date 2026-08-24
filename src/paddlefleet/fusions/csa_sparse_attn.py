@@ -128,19 +128,66 @@ def _csa_compute_topk_length(topk_idxs_flat: Tensor) -> Tensor:
     return trailing_len
 
 
+def _csa_compact_topk_idxs(topk_idxs_flat: Tensor) -> tuple[Tensor, Tensor]:
+    """Densify a ``[N, W]`` global-index tensor for the cuDNN DSA backward.
+
+    Moves valid (``>= 0``) entries into a contiguous prefix and pushes ``-1`` to
+    the trailing region, returning ``(compact_idxs, topk_length)`` where
+    ``topk_length`` is the exact per-row valid count.
+
+    The kernel's compact (``topk_length`` given) KV-load path is unguarded
+    against interior ``-1`` holes. Multi-doc CSA/HCA rows carry them (a query in a
+    later document has *leading* ``-1`` for earlier docs' compressed slots, plus
+    the window/compressed concat), and DSA's ``[top-k | window]`` carries them
+    too. Compacting removes every interior hole, so the compact path is both safe
+    (no ``mKV[-1]`` gather) and a genuine early-stop (``topk_length`` = true count,
+    not the trailing bound).
+
+    Compaction is *order-preserving*: valid entries keep their original
+    left-to-right order (holes are just removed). Although the backward is
+    set-based (dq/softmax are reductions over the key set, dkv scatters by global
+    index), preserving order keeps the kept terms in the same accumulation
+    sequence as the un-compacted layout, and holes contribute exact ``0.0``, so
+    dq/out/lse stay bit-identical -- a value-sort would instead reorder them and
+    drift in the last bits. Empty rows get ``topk_length == 0`` and hit the
+    kernel's empty-row fast path. It must NOT clip to a minimum: clipping to 1
+    would leave a ``-1`` at column 0 and reintroduce the ``mKV[-1]`` gather.
+    """
+    with paddle.no_grad():
+        valid = topk_idxs_flat >= 0
+        lengths = valid.astype("int32").sum(-1).astype("int32")
+        w = int(topk_idxs_flat.shape[-1])
+        cols = paddle.arange(w, dtype="int32")
+        # Order-preserving densify: a valid entry sorts by its real column
+        # (0..w-1); a hole gets col+w (w..2w-1) so it lands after every valid
+        # while BOTH groups keep their original left-to-right order. So the kept
+        # entries are walked in exactly the same sequence as the un-compacted
+        # layout -- and holes contribute exact 0.0 -- so dq/out/lse accumulate
+        # bit-identically (unlike a value-sort, which would reorder them).
+        key = paddle.where(valid, cols, cols + w)
+        order = paddle.argsort(key, axis=-1)
+        compact = paddle.take_along_axis(topk_idxs_flat, order, axis=-1)
+    return compact, lengths
+
+
 @functools.cache
 def _csa_bwd_honours_topk_length_holes() -> bool:
-    """Whether the cuDNN DSA backward kernel guards ``-1`` inside ``topk_length``.
+    """Whether it is safe to hand the cuDNN DSA backward a *compacted*
+    ``topk_length`` (dense prefix, possibly ``0`` for all-invalid rows) on this
+    arch.
 
-    ``_csa_compute_topk_length`` returns a *trailing* bound, so ``-1`` entries may
-    still appear inside ``[0, topk_length)`` (multi-doc leading/interior holes).
-    The SM100 kernel keeps its ``topk_idx >= 0`` guard on that path, but the SM90
-    kernel drops it once ``topk_length`` is given: it dereferences ``mKV[-1]``
-    while loading KV and atomically adds dKV at a negative row offset -> CUDA 700.
+    Compaction can yield ``topk_length == 0`` for a fully-``-1`` padding row, and
+    only the SM100 kernel early-exits (zeros dQ) on ``topk <= 0``
+    (``dsa_bwd_sm100.py``). The SM90 kernel has no such guard: for ``topK == 0``
+    it computes ``n_block = n_block_max - 1 = -1`` and still runs the first-block
+    load, reading top-k/KV from a negative row -> OOB/NaN
+    (``dsa_bwd_sm90.py``). (Interior ``-1`` inside ``[0, topk_length)`` is a
+    non-issue after our order-preserving compaction, which removes them on both
+    archs; the empty-row exit is the remaining arch difference.)
 
-    Until the SM90 kernel is fixed upstream, report False there so the caller
-    falls back to the ``topk_length=None`` path, which keeps both guards. That
-    path is functionally identical; it only loses the early-stop speedup.
+    So a compacted ``topk_length`` is only safe on SM100. SM90 callers must keep
+    ``topk_length=None`` (the guarded full-width path, which masks ``-1`` and
+    zeroes empty rows). Return ``major >= 10``.
     """
     major, _ = paddle.device.cuda.get_device_capability()
     return major >= 10
@@ -189,6 +236,30 @@ class CSASparseAttention(paddle.autograd.PyLayer):
             attn_sink,
             topk_idxs,
         )
+
+        # Compact the indices up front for the no-indexer-loss path (HCA,
+        # indexer_topk == 0). Densifying the [window|compressed] layout lets the
+        # forward AND backward run hole-free with a true-count early-stop, and the
+        # backward never re-sorts (it just recounts). Order within the valid set
+        # is irrelevant to attention/dq/dkv, and with no indexer loss there is no
+        # lse_indexer column alignment to keep. When indexer_topk > 0 the holey
+        # layout is preserved so the fused lse_indexer over the first
+        # indexer_topk columns stays valid.
+        # Compaction can produce topk_length == 0 for all-invalid rows, which only
+        # SM100 early-exits safely (SM90 would gather from a negative KV row); so
+        # only compact on SM100. SM90 keeps topk_length=None (guarded full-width).
+        ctx.compacted_idxs = (
+            backend == "cudnn"
+            and indexer_topk == 0
+            and _csa_bwd_honours_topk_length_holes()
+        )
+        if ctx.compacted_idxs and topk_length is None:
+            # Fallback densify: the caller (HCA) normally pre-compacts once per
+            # batch and passes topk_length, in which case topk_idxs is already
+            # dense and we skip the sort. This handles paths that did not
+            # pre-compact (e.g. CP without cached docmask metadata).
+            topk_idxs, topk_length = _csa_compact_topk_idxs(topk_idxs)
+
         if backend == "cudnn":
             from paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn import (
                 flash_mla_sparse_attn,
@@ -245,13 +316,22 @@ class CSASparseAttention(paddle.autograd.PyLayer):
                 topk_idxs, s_kv, fused=ctx.global_kv_idx_remap_fusion
             )
 
-            # SM90's backward kernel is unsafe with a trailing topk_length bound
-            # (see _csa_bwd_honours_topk_length_holes), so fall back to None there.
-            topk_length = (
-                _csa_compute_topk_length(topk_idxs_flat)
-                if _csa_bwd_honours_topk_length_holes()
-                else None
-            )
+            # ``topk_idxs`` was already densified in the forward for the compacted
+            # path (HCA, no indexer loss), so the saved indices have a dense valid
+            # prefix with -1 only trailing. Recover the per-row count cheaply (a
+            # sum, NO re-sort) and pass it -- the compact KV-load path is then
+            # hole-free and early-stops. If the forward did not compact
+            # (indexer_topk>0, holey layout kept for the fused lse_indexer), pass
+            # None to take the guarded full-width path.
+            if ctx.compacted_idxs:
+                topk_length = (
+                    (topk_idxs_flat >= 0)
+                    .astype("int32")
+                    .sum(-1)
+                    .astype("int32")
+                )
+            else:
+                topk_length = None
 
             dq_flat, dkv_flat, d_sink = csa_sparse_attn_bwd_cudnn(
                 q_flat,

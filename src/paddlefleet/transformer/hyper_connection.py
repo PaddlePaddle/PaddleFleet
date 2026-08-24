@@ -899,6 +899,7 @@ class HyperConnectionContractLayer(FleetLayer):
 
         self.num_mtp = getattr(config, "num_nextn_predict_layers", 0) or 0
         self.magic_send = getattr(config, "enable_mtp_magic_send", False)
+        self.separate_mtp_input = getattr(config, "separate_mtp_input", False)
 
         # Learned contraction parameters (DSv4 style, always used)
         n = self.n
@@ -935,7 +936,9 @@ class HyperConnectionContractLayer(FleetLayer):
         ):
             dict_args["mhc_multistream"] = hidden_states
 
-            if self.magic_send:
+            if self.magic_send or self.separate_mtp_input:
+                # hidden_states is the pure backbone output in both cases, so the
+                # whole tensor is contracted (no MTP chunks to split off).
                 # Expand mhc_multistream to num_mtp+1 slots; zeros will be overwritten by MTP layers.
                 dict_args["mhc_multistream"] = paddle.concat(
                     [hidden_states]

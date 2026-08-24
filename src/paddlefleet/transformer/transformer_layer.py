@@ -764,6 +764,7 @@ class TransformerLayer(nn.Layer):
             and not is_mtp
             and not self.config.mtp_load_weight_only
             and not self.config.enable_mtp_magic_send
+            and not self.config.separate_mtp_input
         ):
             # process hidden_states
             hidden_states_concat = dict_args["hidden_states"]
@@ -1019,6 +1020,7 @@ class TransformerLayer(nn.Layer):
             and not is_mtp
             and not self.config.mtp_load_weight_only
             and not self.config.enable_mtp_magic_send
+            and not self.config.separate_mtp_input
         ):
             hidden_states_concat = paddle.concat([output, *mtp_input])
             rst["hidden_states"] = hidden_states_concat
@@ -2136,6 +2138,7 @@ class HySparseTransformerLayer(TransformerLayer):
             and not is_mtp
             and not self.config.mtp_load_weight_only
             and not self.config.enable_mtp_magic_send
+            and not self.config.separate_mtp_input
         )
 
     def _mtp_split(self, dict_args, is_mtp):
