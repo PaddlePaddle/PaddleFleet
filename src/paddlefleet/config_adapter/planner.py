@@ -304,8 +304,6 @@ class ShrinkPlanner:
             field = resolved.get(name)
             return field.value if field is not None else None
 
-        # Follow the framework's effective-MTP rule rather than a single
-        # alias: mtp_num_layers wins when non-zero.
         mtp = effective_mtp_layers(model_config)
 
         # What the framework actually segments (gpt_builders.build_gpt_model

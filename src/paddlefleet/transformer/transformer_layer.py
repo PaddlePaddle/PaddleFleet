@@ -88,12 +88,7 @@ def is_mtp_shared_last_layer(config, layer_number, is_mtp_layer):
     if not getattr(config, "stage1_overlap", False):
         return False
     # Only re-color when MTP is actually present in the model.
-    mtp_num_layers = (
-        config.mtp_num_layers
-        if getattr(config, "mtp_num_layers", 0)
-        else (getattr(config, "num_nextn_predict_layers", 0) or 0)
-    )
-    if mtp_num_layers <= 0:
+    if (getattr(config, "num_nextn_predict_layers", 0) or 0) <= 0:
         return False
     if is_mtp_layer:
         return False

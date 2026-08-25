@@ -1212,9 +1212,8 @@ class DSAIndexerLossLoggingHelper:
 
     @staticmethod
     def get_total_num_layers(config):
-        mtp_num_layers = getattr(config, "mtp_num_layers", 0) or 0
         nextn_num_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
-        return config.num_hidden_layers + (mtp_num_layers or nextn_num_layers)
+        return config.num_hidden_layers + nextn_num_layers
 
     @staticmethod
     def register_total_num_layers(config):

@@ -914,16 +914,17 @@ class TestLayerFieldPlanning(unittest.TestCase):
             **overrides,
         }
 
-    def test_effective_mtp_follows_the_framework_rule(self):
-        # mtp_num_layers wins whenever it is non-zero.
+    def test_effective_mtp_reads_num_nextn_predict_layers(self):
+        # num_nextn_predict_layers is the only key; the historical
+        # mtp_num_layers alias was removed from TransformerConfig.
+        self.assertEqual(
+            effective_mtp_layers({"num_nextn_predict_layers": 3}), 3
+        )
         self.assertEqual(
             effective_mtp_layers(
                 {"mtp_num_layers": 2, "num_nextn_predict_layers": 0}
             ),
-            2,
-        )
-        self.assertEqual(
-            effective_mtp_layers({"num_nextn_predict_layers": 3}), 3
+            0,
         )
         self.assertEqual(effective_mtp_layers({}), 0)
         self.assertEqual(effective_mtp_layers(None), 0)
@@ -1637,15 +1638,13 @@ class TestLayerFields(ConfigAdapterTestBase):
         self.assertTrue(ok, message)
         self.assertEqual(self.load_output_json(8)["window_attn_skip_freq"], 4)
 
-    def test_mtp_num_layers_alias_wins_over_a_zero(self):
-        # The framework resolves the MTP count as
-        # `mtp_num_layers or num_nextn_predict_layers`, so a zero in the
-        # second key must not hide a valid value in the first.
+    def test_mtp_count_comes_from_num_nextn_predict_layers(self):
+        # The removed mtp_num_layers alias must not contribute to the layer
+        # count: only num_nextn_predict_layers does.
         self.write_json(
             {
                 **MODEL_CONFIG,
-                "num_nextn_predict_layers": 0,
-                "mtp_num_layers": 2,
+                "num_nextn_predict_layers": 2,
                 "csa_compress_ratios": [128, 128, 128, -2] * 16 + [-2, -2],
                 "layer_types": ["full_attention"] * 64,
             }

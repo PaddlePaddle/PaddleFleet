@@ -59,17 +59,12 @@ LAYER_FIELDS = (
 def effective_mtp_layers(model_config):
     """MTP layer count the framework actually uses.
 
-    ``TransformerConfig`` resolves it as ``mtp_num_layers or
-    num_nextn_predict_layers``, i.e. ``mtp_num_layers`` wins whenever it is
-    non-zero.  A plain "first alias that is not None" lookup would read
-    ``num_nextn_predict_layers: 0`` and miss a valid ``mtp_num_layers: 2``,
-    which then makes every per-layer list look inconsistent.
+    ``num_nextn_predict_layers`` is the single source of truth; the historical
+    ``mtp_num_layers`` alias has been removed from ``TransformerConfig``.
     """
     if model_config is None:
         return 0
-    primary = int(model_config.get("mtp_num_layers") or 0)
-    fallback = int(model_config.get("num_nextn_predict_layers") or 0)
-    return primary or fallback
+    return int(model_config.get("num_nextn_predict_layers") or 0)
 
 
 def _csa_family(ratio):

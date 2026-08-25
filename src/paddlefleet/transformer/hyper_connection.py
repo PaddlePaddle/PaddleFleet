@@ -962,9 +962,8 @@ class HyperConnectionContractLayer(FleetLayer):
         super().__init__(config)
         self.n = config.num_residual_streams
         self.mtp_enabled = (
-            getattr(config, "num_nextn_predict_layers", 0) > 0
-            or getattr(config, "mtp_num_layers", 0) > 0
-        )
+            getattr(config, "num_nextn_predict_layers", 0) or 0
+        ) > 0
 
         self.num_mtp = getattr(config, "num_nextn_predict_layers", 0) or 0
         self.magic_send = getattr(config, "enable_mtp_magic_send", False)

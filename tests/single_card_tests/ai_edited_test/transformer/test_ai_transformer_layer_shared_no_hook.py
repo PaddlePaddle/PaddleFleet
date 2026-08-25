@@ -45,7 +45,6 @@ def _make_config(**overrides):
     cfg = {
         "mtp_shared_last_layer": True,
         "stage1_overlap": True,
-        "mtp_num_layers": 0,
         "num_nextn_predict_layers": 1,
         "num_hidden_layers": 2,
         "num_empty_layers_add_in_head": 0,
@@ -78,8 +77,8 @@ class TestIsMtpSharedLastLayer(unittest.TestCase):
         self.assertFalse(is_mtp_shared_last_layer(cfg, 1, False))
 
     def test_no_mtp_layers(self):
-        """mtp_num_layers 与 num_nextn_predict_layers 均为 0 -> False"""
-        cfg = _make_config(mtp_num_layers=0, num_nextn_predict_layers=0)
+        """num_nextn_predict_layers 为 0 -> False"""
+        cfg = _make_config(num_nextn_predict_layers=0)
         self.assertFalse(is_mtp_shared_last_layer(cfg, 1, False))
 
     def test_is_mtp_layer(self):
@@ -92,13 +91,13 @@ class TestIsMtpSharedLastLayer(unittest.TestCase):
 
     def test_last_layer_via_num_nextn(self):
         """通过 num_nextn_predict_layers 判定 MTP 存在 -> True"""
-        cfg = _make_config(mtp_num_layers=0, num_nextn_predict_layers=1)
+        cfg = _make_config(num_nextn_predict_layers=1)
         self.assertTrue(is_mtp_shared_last_layer(cfg, 1, False))
 
-    def test_last_layer_via_mtp_num_layers(self):
-        """通过 mtp_num_layers 判定 MTP 存在 -> True"""
+    def test_removed_alias_does_not_enable_mtp(self):
+        """已移除的 mtp_num_layers 别名不再被识别 -> False"""
         cfg = _make_config(mtp_num_layers=2, num_nextn_predict_layers=0)
-        self.assertTrue(is_mtp_shared_last_layer(cfg, 1, False))
+        self.assertFalse(is_mtp_shared_last_layer(cfg, 1, False))
 
     def test_empty_layers_offset(self):
         """num_empty_layers_add_in_head 影响最后一层编号

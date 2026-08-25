@@ -975,7 +975,9 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
 
     def test_get_total_num_layers_treats_none_as_zero(self):
         """None nextn layer count should be treated as zero."""
-        config = SimpleNamespace(num_hidden_layers=4, mtp_num_layers=0)
+        config = SimpleNamespace(
+            num_hidden_layers=4, num_nextn_predict_layers=0
+        )
         config.num_nextn_predict_layers = None
         self.assertEqual(
             DSAIndexerLossLoggingHelper.get_total_num_layers(config), 4
@@ -984,7 +986,9 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
     def test_register_total_num_layers_clears_stale_tracker(self):
         DSAIndexerLossLoggingHelper.num_layers = 1
         DSAIndexerLossLoggingHelper.tracker["values"] = paddle.zeros([1])
-        config = SimpleNamespace(num_hidden_layers=4, mtp_num_layers=0)
+        config = SimpleNamespace(
+            num_hidden_layers=4, num_nextn_predict_layers=0
+        )
 
         DSAIndexerLossLoggingHelper.register_total_num_layers(config)
 

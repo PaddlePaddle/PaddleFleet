@@ -9,8 +9,7 @@
 (Energon) pipeline emits length-L tensors + cu_seqlens_q, False means the
 historical ernie5 L+K layout. Guards checked here:
   1. Default is False.
-  2. use_erndata + MTP requires num_nextn_predict_layers > 0 (the
-     `mtp_num_layers` alias is deliberately NOT accepted).
+  2. The removed `mtp_num_layers` alias is rejected outright (TypeError).
   3. use_erndata + MTP is incompatible with enable_mtp_magic_send.
   4. use_erndata + MTP is incompatible with experimental_dataflow.
   5. use_erndata without MTP (K == 0) trips none of the guards — the packed-doc
@@ -61,13 +60,10 @@ class TestUseErndataValidation(unittest.TestCase):
         )
         self.assertTrue(cfg.use_erndata)
 
-    def test_erndata_rejects_mtp_num_layers_alias_only(self) -> None:
-        # `mtp_num_layers` is honored by MTP layer *construction*
-        # (_get_effective_mtp_layers) but not by the erndata data path, which
-        # reads num_nextn_predict_layers everywhere. Configuring K only through
-        # the alias would build MTP layers that never receive shifted
-        # embeddings, so it must be rejected rather than silently accepted.
-        with self.assertRaisesRegex(ValueError, r"num_nextn_predict_layers"):
+    def test_mtp_num_layers_is_rejected(self) -> None:
+        # The alias has been removed from TransformerConfig entirely; passing it
+        # must fail loudly rather than silently configure nothing.
+        with self.assertRaises(TypeError):
             TransformerConfig(
                 **self._base_kwargs(
                     use_erndata=True,

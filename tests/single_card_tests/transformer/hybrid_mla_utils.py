@@ -218,7 +218,6 @@ def _create_mqa_config(mode="mqa", loss_coeff=0.0, num_hidden_layers=2):
     config.rotary_percent = 1.0
     config.apply_rope_fusion = False
     config.num_nextn_predict_layers = 0
-    config.mtp_num_layers = 0
     config.init_method = init_method_normal(0.02)
     config.output_layer_init_method = scaled_init_method_normal(0.02, 1, 2.0)
     config.rms_norm_eps = 1e-5

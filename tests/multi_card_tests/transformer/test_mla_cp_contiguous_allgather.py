@@ -216,7 +216,6 @@ def build_cfg(cp_size, sink=False, attn_mode="mha"):
     c.rotary_percent = 1.0
     c.apply_rope_fusion = False
     c.num_nextn_predict_layers = 0
-    c.mtp_num_layers = 0
     c.init_method = init_method_normal(0.02)
     c.output_layer_init_method = scaled_init_method_normal(0.02, 1, 1)
     c.rms_norm_eps = 1e-5

@@ -21,7 +21,7 @@ The same structural quantity is spelled differently per model family::
                      num_experts (Qwen), moe_num_experts (ERNIE4.5)
     top-k          : num_experts_per_tok (most), moe_k (ERNIE4.5)
     dense prefix   : first_k_dense_replace, moe_layer_start_index
-    MTP layers     : num_nextn_predict_layers, mtp_num_layers
+    MTP layers     : num_nextn_predict_layers
 
 Centralising the aliases means supporting a new family is a one-line edit to
 :data:`FIELD_SPECS`.  The resolver also remembers which physical key matched,
@@ -65,7 +65,7 @@ FIELD_SPECS = {
         needed_by="PP",
     ),
     "num_nextn_predict_layers": FieldSpec(
-        aliases=("num_nextn_predict_layers", "mtp_num_layers"),
+        aliases=("num_nextn_predict_layers",),
         default=0,
         needed_by="PP",
     ),
