@@ -366,7 +366,7 @@ __global__ void VectorizedFusedSwiGLUWeightedBwd(
 }
 
 // ==========================================================================
-// Scale Host Wrappers (templated on kHasClamp; non-clamp wrappers forward 0.0)
+// SwiGLU host wrappers.
 // ==========================================================================
 
 static void CheckFusedSwiGLUXShape(const std::vector<int64_t>& x_shape,
@@ -382,8 +382,7 @@ static void CheckFusedSwiGLUXShape(const std::vector<int64_t>& x_shape,
 static std::vector<int64_t> InferFusedSwiGLUOutputShape(
     const std::vector<int64_t>& x_shape, const char* op_name) {
   CheckFusedSwiGLUXShape(x_shape, op_name);
-  // Preserve Paddle's unknown-dimension sentinel instead of evaluating
-  // -1 / 2 as zero during static shape inference.
+  // Preserve -1 for unknown hidden dimensions during static shape inference.
   const int64_t hidden_size = x_shape[1] < 0 ? -1 : x_shape[1] / 2;
   return {x_shape[0], hidden_size};
 }
@@ -453,8 +452,7 @@ static void CheckFusedSwiGLUInputs(const paddle::Tensor& x,
            ": float32 X requires float32 ",
            scale_name);
 
-  // Packed128 loads/stores require one complete vector per lane. H == 0 is
-  // allowed; the kernel's column loop is empty and performs no packed access.
+  // Packed128 accesses require a complete vector; hidden_size == 0 is valid.
   const int64_t vec_size = x_is_bf16 ? 8 : 4;
   PD_CHECK(hidden_size % vec_size == 0,
            op_name,
@@ -478,8 +476,7 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleForwardImpl(
   auto hidden_size = hidden2 / 2;
   auto out = paddle::empty({rows, hidden_size}, x.dtype(), x.place());
 
-  // Avoid passing zero-byte tensors to data<T>(); the kernel has no work for
-  // either an empty batch or an empty hidden dimension.
+  // Avoid data<T>() and kernel launch for zero-byte tensors.
   if (rows == 0 || hidden_size == 0) {
     return {out};
   }
@@ -491,8 +488,6 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleForwardImpl(
   int block_size = kSwiGLUBlockSize;
   auto stream = x.stream();
 
-  // The checks above make the fallback branches unreachable for the current
-  // dtype set; keep them explicit so a future dtype cannot skip the launch.
   if (x.dtype() == paddle::DataType::BFLOAT16) {
     using paddle_bf16 = paddle::bfloat16;
     using cuda_bf16 = __nv_bfloat16;
@@ -553,8 +548,7 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleBackwardImpl(
   auto hidden2 = x.shape()[1];
   auto hidden_size = hidden2 / 2;
   auto d_x = paddle::empty_like(x);
-  // Clamp keeps the historical [rows, 1] reduction shape; non-clamp keeps
-  // the input Scale shape.
+  // Clamp gradients use [rows, 1]; non-clamp gradients match Scale.
   const std::vector<int64_t> d_scale_shape =
       kHasClamp ? std::vector<int64_t>{rows, 1} : scale.shape();
 
@@ -563,9 +557,8 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleBackwardImpl(
   }
 
   auto d_scale = paddle::empty(d_scale_shape, scale.dtype(), scale.place());
-  // DOut is framework-produced and may be strided. Materialize it on the
-  // current custom-op stream instead of rejecting a layout callers cannot
-  // control.
+  // DOut may be strided because it is framework-produced; materialize it
+  // before the kernel.
   const auto kernel_d_out =
       d_out.is_contiguous() ? d_out : d_out.contiguous();
 
@@ -576,8 +569,6 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleBackwardImpl(
   int block_size = kSwiGLUBlockSize;
   auto stream = x.stream();
 
-  // Keep explicit fallback errors even though input validation currently
-  // makes these branches unreachable.
   if (x.dtype() == paddle::DataType::BFLOAT16) {
     using paddle_bf16 = paddle::bfloat16;
     using cuda_bf16 = __nv_bfloat16;
@@ -652,8 +643,7 @@ static std::vector<paddle::Tensor> FusedSwiGLUWeightedBackwardImpl(
     return {d_x, paddle::zeros(d_probs_shape, probs.dtype(), probs.place()), out};
   }
 
-  // DProbs intentionally follows Megatron's keepdim contract even when Probs
-  // is rank 1; the main MoE backward path normalizes Probs to [rows, 1].
+  // DProbs follows Megatron's [rows, 1] keepdim contract.
   auto d_probs =
       paddle::empty(d_probs_shape, probs.dtype(), probs.place());
   const auto kernel_d_out =
@@ -666,8 +656,6 @@ static std::vector<paddle::Tensor> FusedSwiGLUWeightedBackwardImpl(
   int block_size = kSwiGLUBlockSize;
   auto stream = x.stream();
 
-  // Keep explicit fallback errors even though input validation currently
-  // makes these branches unreachable.
   if (x.dtype() == paddle::DataType::BFLOAT16) {
     using paddle_bf16 = paddle::bfloat16;
     using cuda_bf16 = __nv_bfloat16;
@@ -895,8 +883,7 @@ std::vector<paddle::DataType> WeightedBwdInferDtype(
   return {x_dtype, probs_dtype, x_dtype};
 }
 
-// Clamp InferShape: d_probs is always [rows, 1] matching Megatron keepdim
-// semantics, even when the rank-1 Probs input is accepted.
+// Clamp gradients use the [rows, 1] keepdim contract.
 std::vector<std::vector<int64_t>> WeightedBwdClampInferShape(
     std::vector<int64_t> x_shape,
     std::vector<int64_t> probs_shape,
