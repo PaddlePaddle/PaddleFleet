@@ -1100,14 +1100,20 @@ class MoELayer(nn.Layer):
         routing_map: paddle.Tensor,
         topk_weights: paddle.Tensor | None = None,
         topk_indices: paddle.Tensor | None = None,
+        combine_overlap_handle: dict | None = None,
     ):
-        """RingMoE scheme-1 MoE forward (bf16 + SonicMoE, serial, no overlap).
+        """RingMoE scheme-1 MoE forward (bf16 + SonicMoE).
 
         Standalone path: instead of the flat dispatch/compute/combine pipeline,
         it drives the 2-level ring collectives (RingMoETokenDispatcher.ring_forward)
         around the SonicMoE expert GEMM. Latent projection is applied here (same
         as fusion_moe_forward), the ring runs in latent space, then the output is
         projected back.
+
+        ``combine_overlap_handle``, when given, is consumed at the tail of
+        ``ring_forward``: the shared-expert subgraph runs on the calc stream
+        while the final inter-node ReduceScatter is in flight, and its result is
+        written back into the handle as ``fn_out`` for the caller to add in.
         """
         if not self.using_sonic_moe:
             raise ValueError(
@@ -1135,6 +1141,7 @@ class MoELayer(nn.Layer):
                 self.grouped_gemm_experts,
                 probs.dtype,
                 recompute_moe_gate_up=self.recompute_moe_gate_up,
+                combine_overlap_handle=combine_overlap_handle,
             )
 
         # Latent MoE: project back from latent space to hidden_size
@@ -1447,10 +1454,6 @@ class MoELayer(nn.Layer):
             and self.moe_shared_expert_overlap
             and self.moe_use_fusion_node
             and self.expert_model_parallel_size > 1
-            # RingMoE drives its own collectives and never calls self.combine(),
-            # so nothing would populate the handle's "fn_out" and the shared
-            # experts would never run. Compute them serially below instead.
-            and not self.use_ring_moe
         ):
             combine_overlap_handle = {
                 "fn": self.shared_experts,
@@ -1468,6 +1471,7 @@ class MoELayer(nn.Layer):
                     mask,
                     topk_weights=topk_weights,
                     topk_indices=topk_indices,
+                    combine_overlap_handle=combine_overlap_handle,
                 )
             elif self.moe_use_fusion_node:
                 output = self.fusion_moe_forward(
