@@ -275,7 +275,12 @@ class HyperConnectionModule(nn.Layer):
 
     Args:
         config: TransformerConfig with hyper-connection fields
-        layer_number: Current layer index for initialization
+        layer_number: mHC sub-layer index. Attention and MLP count as two
+            independent layers, so this is 2*decoder_index (+1 for the MLP
+            sub-layer). Only used to rotate the one-hot H_pre bias across the
+            n residual streams (``layer_number % n``), i.e. only when
+            ``config.mhc_single_stream_init`` is set; see
+            ``_single_stream_init_weights``.
     """
 
     def __init__(self, config: TransformerConfig, layer_number: int):
@@ -285,6 +290,7 @@ class HyperConnectionModule(nn.Layer):
         self.n = config.num_residual_streams
         self.hidden_size = config.hidden_size
         self.sinkhorn_iterations = config.mhc_sinkhorn_iterations
+        self.single_stream_init = config.mhc_single_stream_init
         self.compute_h_eps = _MHC_COMPUTE_H_EPS
 
         # Projection weights for dynamic mappings
@@ -316,7 +322,9 @@ class HyperConnectionModule(nn.Layer):
             default_initializer=nn.initializer.Constant(init_alpha),
         )
 
-        # Static bias terms
+        # Static bias terms. Stay zero unless ``mhc_single_stream_init``
+        # replaces them with the paper's A.6 values in
+        # ``_single_stream_init_weights``.
         self.bias = self.create_parameter(
             shape=[self.n * self.n + 2 * self.n],
             default_initializer=nn.initializer.Constant(0.0),
@@ -371,14 +379,18 @@ class HyperConnectionModule(nn.Layer):
 
     def _init_weights(self) -> None:
         """Initialize weights for stable training."""
-        # Xavier uniform for mapping projection.
-        # Use model-parallel RNG tracker to keep initialization deterministic
-        # regardless of layer_index shifts.
-        if paddle.distributed.get_world_size() <= 1:
-            nn.initializer.XavierUniform()(self.mapping_proj.weight)
+        if self.single_stream_init:
+            self._single_stream_init_weights()
         else:
-            with get_cuda_rng_tracker().fork():
+            # Xavier uniform for the mapping projection; the bias keeps the
+            # zero from ``__init__``.
+            # Use model-parallel RNG tracker to keep initialization
+            # deterministic regardless of layer_index shifts.
+            if paddle.distributed.get_world_size() <= 1:
                 nn.initializer.XavierUniform()(self.mapping_proj.weight)
+            else:
+                with get_cuda_rng_tracker().fork():
+                    nn.initializer.XavierUniform()(self.mapping_proj.weight)
 
         # Set sequence_parallel attribute on parameters for gradient synchronization
         if self.config.sequence_parallel:
@@ -387,6 +399,51 @@ class HyperConnectionModule(nn.Layer):
             self.alpha_post.is_distributed = False
             self.alpha_res.is_distributed = False
             self.bias.is_distributed = False
+
+    def _single_stream_init_weights(self) -> None:
+        """Paper mapping-head init (``mhc_single_stream_init``)."""
+        # Zero-init the fused mapping projection, following the paper: "we
+        # initialize all linear projections for the dynamic mappings to zero"
+        # (Sec. 2.2 / p.7; A.6 uses ``torch.zeros`` for ``self.weight``).
+        # ``_compute_h`` computes h = r*proj*alpha + bias, so a zero weight
+        # makes h == bias at step 0: H_pre / H_post / H_res are then exactly the
+        # static mappings encoded in ``bias`` below -- token-independent and free
+        # of the ~0.014 std logit perturbation XavierUniform adds on top of the
+        # +-3 bias. Gradients still flow (dh/dW = r*alpha*x != 0), so the
+        # projection is not pinned at zero.
+        # Deterministic, hence no model-parallel RNG tracker fork is needed.
+        self.mapping_proj.weight.set_value(
+            paddle.zeros_like(self.mapping_proj.weight)
+        )
+
+        # Static bias terms, following the paper's A.6 pseudo implementation.
+        # ``_compute_h`` computes h = r*proj*alpha + bias and slices it as
+        # [0:n] -> H_pre, [n:2n] -> H_post, [2n:] -> H_res, so:
+        #   b_pre  = -3 for every stream, except the "home stream" of this
+        #            sub-layer which is +3. H_pre = sigmoid(b_pre) is then
+        #            one-hot-ish (0.953 vs 0.047), i.e. the layer reads
+        #            essentially a single stream.
+        #   b_post = 0  =>  H_post = 2*sigmoid(0) = 1 (all-ones).
+        #   b_res  = 6*I - 3  =>  the row softmax inside Sinkhorn yields a
+        #            diagonal of e^3/(e^3+(n-1)e^-3) ~= 0.993, so H_res ~= I.
+        # Together these make the initial state equivalent to a standard
+        # residual connection while keeping the n streams distinguishable.
+        #
+        # The +3 rotates with the mHC sub-layer index: attention and MLP count
+        # as two independent layers (paper Fig. 3, see how
+        # HyperConnectionTransformerLayer numbers them), so consecutive
+        # sub-layers read stream 0, 1, ..., n-1, 0, ... Without the rotation a
+        # one-hot H_pre would leave n-1 streams write-only.
+        n = self.n
+        bias_init = paddle.concat(
+            [
+                paddle.full([n], -3.0, dtype="float32"),
+                paddle.zeros([n], dtype="float32"),
+                (6.0 * paddle.eye(n, dtype="float32") - 3.0).flatten(),
+            ]
+        )
+        bias_init[self.layer_number % n] = 3.0
+        self.bias.set_value(bias_init.astype(self.bias.dtype))
 
     def _projection_and_get_norm(self, x: Tensor) -> tuple[Tensor, Tensor]:
         """
