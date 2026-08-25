@@ -37,23 +37,27 @@ import paddle.distributed as dist
 
 
 def _try_get_comm_groups():
-    """Get the (tp, cp, dp, sharding) groups to all-reduce the QB histogram over.
+    """Get the (tp, dp, sharding) groups to all-reduce the QB histogram over.
 
     These are the groups whose ranks route a *different* set of tokens, so their
     histograms must be summed to recover global-batch statistics. EP is absent
     because all EP ranks see the same router scores.
 
+    CP is deliberately NOT reduced separately: in Paddle's EPHybridCommunicateGroup
+    the context-parallel group is a contiguous sub-slice of the sharding comm list
+    (sharding = cp x cp_sharding, see split_context_comm_list), i.e. CP ranks are a
+    subset of the sharding group. The sharding all-reduce below therefore already
+    sums over the CP dimension; reducing over CP again would double-count it.
+
     A group is None when the reduction does not apply: distributed training is
-    not initialized, the group does not exist (e.g. CP is off), or it is a single
-    rank. TP is additionally guarded at the call site (only needed under SP with
-    EP > 1, where moe_layer skips the AllGather).
+    not initialized, the group does not exist, or it is a single rank. TP is
+    additionally guarded at the call site (only needed under SP with EP > 1,
+    where moe_layer skips the AllGather).
     """
     from paddle.distributed import fleet
 
-    from paddlefleet.parallel_state import get_context_parallel_group
-
     if not dist.is_initialized():
-        return None, None, None, None
+        return None, None, None
 
     hcg = fleet.get_hybrid_communicate_group()
 
@@ -63,9 +67,8 @@ def _try_get_comm_groups():
     tp_group = _needs_reduce(hcg.get_model_parallel_group())
     dp_group = _needs_reduce(hcg.get_data_parallel_group())
     sd_group = _needs_reduce(hcg.get_sharding_parallel_group())
-    cp_group = _needs_reduce(get_context_parallel_group())
 
-    return tp_group, cp_group, dp_group, sd_group
+    return tp_group, dp_group, sd_group
 
 
 class MoEQuantileBalancingCallback:
@@ -102,16 +105,12 @@ class MoEQuantileBalancingCallback:
             return
 
         # Determine communication groups
-        tp_group, cp_group, dp_group, sd_group = _try_get_comm_groups()
+        tp_group, dp_group, sd_group = _try_get_comm_groups()
 
         for layer in layers:
-            self._update_single_layer(
-                layer, tp_group, cp_group, dp_group, sd_group
-            )
+            self._update_single_layer(layer, tp_group, dp_group, sd_group)
 
-    def _update_single_layer(
-        self, layer, tp_group, cp_group, dp_group, sd_group
-    ):
+    def _update_single_layer(self, layer, tp_group, dp_group, sd_group):
         """Run QB recovery for a single router layer."""
         histogram = layer.qb_histogram  # [E, B], int32
         E, B = histogram.shape
@@ -119,20 +118,23 @@ class MoEQuantileBalancingCallback:
         n = layer.num_experts
 
         # --- Step 1: All-reduce histogram across all ranks that see different tokens ---
-        hist_float = histogram.cast(paddle.float32)
+        # NOTE: CP is not reduced here. In Paddle's EPHybridCommunicateGroup the CP
+        # group is a sub-slice of the sharding group, so the sharding all-reduce
+        # already covers the CP dimension. Reducing CP again would double-count.
+        # int64 (not fp32) is used for the reduction: it is exact for integer
+        # counts (fp32 loses precision above 2**24) and avoids int32 overflow when
+        # summing counts across ranks. all_reduce supports int64 on NCCL.
+        hist_global = histogram.cast(paddle.int64)  # [E, B]
         if (
             tp_group is not None
             and layer.config.sequence_parallel
             and layer.config.expert_model_parallel_size > 1
         ):
-            dist.all_reduce(hist_float, group=tp_group)
-        if cp_group is not None:
-            dist.all_reduce(hist_float, group=cp_group)
+            dist.all_reduce(hist_global, group=tp_group)
         if dp_group is not None:
-            dist.all_reduce(hist_float, group=dp_group)
+            dist.all_reduce(hist_global, group=dp_group)
         if sd_group is not None:
-            dist.all_reduce(hist_float, group=sd_group)
-        hist_global = hist_float.cast(paddle.int64)  # [E, B]
+            dist.all_reduce(hist_global, group=sd_group)
 
         # --- Step 2: Compute total token count and target quantile ---
         total_per_expert = hist_global.sum(axis=1)  # [E]

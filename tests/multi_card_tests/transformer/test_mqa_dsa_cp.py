@@ -43,6 +43,15 @@ the full-MLA integration):
 6. The attention sink under CP.
 7. The ``cp_balance_mode`` guard.
 
+Backend note: the full-causal phases (``mqa_full_causal`` and the phase-2 warmup)
+have dense FA4 as their only backend -- ``_assert_dense_fa4`` raises when the
+process flags do not resolve to it -- and a bare launcher process leaves
+``FLAGS_flash_attn_version`` at the image default 2. ``setUpModule`` therefore
+pins 4, the value ``TrainingArguments.__post_init__`` derives on the SM100 boxes
+these tests are gated to. A consequence is that no ``[b, s, s]`` column table
+exists on those phases, so the column-set assertion applies to the phase-3 DSA
+tests only.
+
 Run (2 GPUs), from the repository root::
 
     PYTHONPATH=.:./src python -m paddle.distributed.launch \
@@ -85,11 +94,19 @@ GRAD_RTOL = 2e-2
 # reproducible, so the index-set test below can demand exact equality.
 S_GLOBAL = 512
 
+# The full-causal phases refuse to run on anything but dense FA4, and a bare
+# launcher process never constructs ``TrainingArguments``, so the flag has to be
+# pinned to the value production derives on these boxes -- and left alone where
+# no FA4 backend exists, or the non-``_GPU``-gated cases would break. Module
+# scope: nothing here asserts on the refusal.
+_FA4_PIN = U._fa4_pin()
+
 
 def setUpModule():
     global CP_SIZE, CP_RANK, CP_GROUP
     if dist.get_world_size() < 2:
         raise unittest.SkipTest("MQA context-parallel tests require >= 2 GPUs")
+    _FA4_PIN.__enter__()
     world = dist.get_world_size()
     strategy = fleet.DistributedStrategy()
     strategy.hybrid_configs = {
@@ -116,6 +133,10 @@ def setUpModule():
     CP_GROUP = fleet.get_hybrid_communicate_group().get_context_parallel_group()
     CP_RANK = CP_GROUP.rank
     CP_SIZE = CP_GROUP.nranks
+
+
+def tearDownModule():
+    _FA4_PIN.__exit__(None, None, None)
 
 
 def _build(mode, cp_group, loss_coeff=0.0, sink=None, sparse_loss=True, seed=7):
@@ -200,6 +221,17 @@ def _logged_indexer_loss(layer_number=1):
     return float(values[layer_number - 1])
 
 
+def _last_captured():
+    """Last ``token_indices`` the sparse kernel saw, or ``None``.
+
+    ``None`` means no column table was built, which on these paths means a
+    full-causal phase ran: dense FA4 is their only backend. Which backend ran is
+    itself an assertion target (``test_mqa_dsa_warmup_cp.py::TestDenseFA4CP``),
+    so this returns ``None`` rather than raising.
+    """
+    return U._CAPTURED[-1] if U._CAPTURED else None
+
+
 def run_core_cp(
     mode,
     doc_lens,
@@ -248,7 +280,7 @@ def run_core_cp(
         input_ids=ids,
     )
     oa.sum().backward()
-    idx_ref = U._CAPTURED[-1]
+    idx_ref = _last_captured()
     logged_ref = _logged_indexer_loss()
 
     U._CAPTURED.clear()
@@ -272,7 +304,7 @@ def run_core_cp(
         input_ids=ids,
     )
     ob.sum().backward()
-    idx_cp = U._CAPTURED[-1]
+    idx_cp = _last_captured()
     logged_cp = _logged_indexer_loss()
 
     # Parameter grads: this rank only saw its own query rows, so the CP group's
@@ -308,7 +340,9 @@ def run_core_cp(
         "dw": _rel(dw, ra["w_v"].grad),
         "param_err": param_err,
         "per_pos": per_pos,
-        "idx_ref_slice": idx_ref[:, off : off + sl],
+        "idx_ref_slice": (
+            None if idx_ref is None else idx_ref[:, off : off + sl]
+        ),
         "idx_cp": idx_cp,
         # Raw tensors + the logged indexer loss, for the assertions that are not
         # a relative error: bitwise mode-vs-mode output equality, pad-row
@@ -364,7 +398,17 @@ class TestMQADSACP(unittest.TestCase):
         all-gathered ``kv``), so this is a plain set equality per row -- no
         offset arithmetic. Set equality rather than sequence equality because
         the top-k order churns; see the top-k reproducibility audit.
+
+        Only applicable to the phase-3 DSA path. The full-causal phases run dense
+        FA4 and build no column table at all, so ``None`` here means the caller
+        pointed this assertion at a phase that cannot support it.
         """
+        for key in ("idx_ref_slice", "idx_cp"):
+            self.assertIsNotNone(
+                res[key],
+                f"{tag}: {key} is None, so no column table was built; this "
+                "assertion only applies to the phase-3 sparse path",
+            )
         ref_sets = _row_sets(res["idx_ref_slice"])
         cp_sets = _row_sets(res["idx_cp"])
         self.assertEqual(len(ref_sets), len(cp_sets), f"{tag}: row count")
@@ -393,10 +437,13 @@ class TestMQADSACP(unittest.TestCase):
         A per-rank build would clip every row at ``q - position_offset``, i.e.
         drop the whole prefix owned by lower ranks, which shows up here as an
         O(1) forward error on rank > 0.
+
+        Dense FA4 encodes that table as an ``O(s)`` row bound rather than a
+        column list, so the forward/gradient equivalence is the whole
+        observable; ``_check_index_sets`` has nothing to read on this phase.
         """
         res = run_core_cp("mqa", _STRADDLE)
         self._check(res, "dense/3doc")
-        self._check_index_sets(res, "dense/3doc")
 
     # ------------------------------------------------------------------
     # 2. DSA path

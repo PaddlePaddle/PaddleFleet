@@ -1218,6 +1218,365 @@ class TestNoCacheEosListBranch(unittest.TestCase):
         self.assertEqual(len(log_probs[0]), 3)
 
 
+class TestResolveLogprobStartLen(unittest.TestCase):
+    """Unit tests for the ``logprob_start_len`` normalisation helper."""
+
+    def setUp(self):
+        from paddlefleet.generation.greedy_generator import (
+            _resolve_logprob_start_len,
+        )
+
+        self.resolve = _resolve_logprob_start_len
+
+    def test_none_defaults_to_prompt_len(self):
+        """None means "generated tokens only", i.e. start at prompt_len."""
+        self.assertEqual(self.resolve(None, 7), 7)
+
+    def test_zero_is_clamped_to_one(self):
+        """Position 0 has no preceding context, so it can never be scored."""
+        self.assertEqual(self.resolve(0, 7), 1)
+
+    def test_positive_value_passes_through(self):
+        self.assertEqual(self.resolve(1, 7), 1)
+        self.assertEqual(self.resolve(4, 7), 4)
+
+    def test_value_beyond_prompt_len_passes_through(self):
+        """Start positions inside the generated region are legal."""
+        self.assertEqual(self.resolve(9, 7), 9)
+
+    def test_negative_raises(self):
+        with self.assertRaises(ValueError):
+            self.resolve(-1, 7)
+
+
+class _LogprobStartLenMixin:
+    """Shared ``logprob_start_len`` assertions for both generate paths.
+
+    Subclasses set ``no_cache``. Every fake model here returns logits for the
+    *whole* input so the prompt-scoring slice is exercised; the KV-cache path
+    is driven with a full-length prefill exactly like the real model.
+    """
+
+    no_cache = False
+    prompt = [[1, 2, 3, 4]]  # prompt_len = 4
+    max_new_tokens = 3
+
+    def _make_generator(self, token_sequence, batch_size=1, vocab_size=100):
+        """Fake model whose last-position argmax follows ``token_sequence``."""
+        from unittest.mock import MagicMock
+
+        from paddlefleet.generation.greedy_generator import (
+            DynamicKVCache,
+            GreedyGenerator,
+        )
+
+        call_idx = {"i": 0}
+        seq = token_sequence
+        bsz = batch_size
+
+        def fake_forward(inputs):
+            cur_len = inputs["input_ids"].shape[1]
+            logits = paddle.zeros([bsz, cur_len, vocab_size], dtype="float32")
+            tok_id = seq[min(call_idx["i"], len(seq) - 1)]
+            logits[:, -1, tok_id] = 10.0
+            call_idx["i"] += 1
+            return logits
+
+        model = MagicMock()
+        model.side_effect = fake_forward
+        model.config = MagicMock()
+        model.config.num_hidden_layers = 1
+        model.config.sequence_parallel = False
+        model.config.apply_rope_fusion = False
+        model.config.recompute_granularity = None
+        model.config.num_empty_layers_add_in_head = 0
+        model.config.num_empty_layers_add_in_tail = 0
+
+        gen = object.__new__(GreedyGenerator)
+        gen.model = model
+        gen.cache = DynamicKVCache(num_layers=1)
+        return gen
+
+    def _run(self, batch_size=1, **kwargs):
+        input_ids = paddle.to_tensor(self.prompt * batch_size, dtype="int64")
+        gen = self._make_generator([5, 6, 7], batch_size=batch_size)
+        return gen.generate(
+            input_ids,
+            max_new_tokens=self.max_new_tokens,
+            return_log_probs=True,
+            no_cache=self.no_cache,
+            **kwargs,
+        )
+
+    # -- length semantics -------------------------------------------------
+
+    def test_default_scores_generated_tokens_only(self):
+        """Omitting logprob_start_len keeps the pre-existing behaviour."""
+        generated, log_probs = self._run()
+        num_new = generated.shape[1] - len(self.prompt[0])
+        self.assertEqual(num_new, self.max_new_tokens)
+        self.assertEqual(len(log_probs[0]), self.max_new_tokens)
+
+    def test_start_zero_includes_prompt(self):
+        """start=0 scores prompt positions 1.. plus every generated token."""
+        prompt_len = len(self.prompt[0])
+        _, log_probs = self._run(logprob_start_len=0)
+        self.assertEqual(
+            len(log_probs[0]), (prompt_len - 1) + self.max_new_tokens
+        )
+
+    def test_start_zero_and_one_are_equivalent(self):
+        """Position 0 is unscoreable, so 0 and 1 must agree exactly."""
+        _, lp_zero = self._run(logprob_start_len=0)
+        _, lp_one = self._run(logprob_start_len=1)
+        self.assertEqual(lp_zero, lp_one)
+
+    def test_mid_prompt_start(self):
+        """A start inside the prompt drops only the positions before it."""
+        prompt_len = len(self.prompt[0])
+        start = 2
+        _, log_probs = self._run(logprob_start_len=start)
+        self.assertEqual(
+            len(log_probs[0]), (prompt_len - start) + self.max_new_tokens
+        )
+
+    def test_start_equal_prompt_len_matches_default(self):
+        """start=prompt_len is the explicit spelling of the default."""
+        prompt_len = len(self.prompt[0])
+        _, lp_default = self._run()
+        _, lp_explicit = self._run(logprob_start_len=prompt_len)
+        self.assertEqual(lp_default, lp_explicit)
+
+    def test_start_beyond_prompt_skips_generated_tokens(self):
+        """A start inside the generated region skips the leading steps."""
+        prompt_len = len(self.prompt[0])
+        _, log_probs = self._run(logprob_start_len=prompt_len + 1)
+        self.assertEqual(len(log_probs[0]), self.max_new_tokens - 1)
+
+    def test_generated_tail_is_shared_across_starts(self):
+        """Widening the window only prepends; the generated tail is stable."""
+        _, lp_default = self._run()
+        _, lp_full = self._run(logprob_start_len=0)
+        self.assertEqual(lp_full[0][-self.max_new_tokens :], lp_default[0])
+
+    # -- shape / type -----------------------------------------------------
+
+    def test_single_flat_list_per_batch_element(self):
+        """Prompt and generated scores share one flat list of floats."""
+        _, log_probs = self._run(batch_size=2, logprob_start_len=0)
+        expected = (len(self.prompt[0]) - 1) + self.max_new_tokens
+        self.assertEqual(len(log_probs), 2)
+        for per_seq in log_probs:
+            self.assertIsInstance(per_seq, list)
+            self.assertEqual(len(per_seq), expected)
+            for lp in per_seq:
+                self.assertIsInstance(lp, float)
+                self.assertLessEqual(lp, 0.0)
+
+    def test_return_type_is_two_tuple(self):
+        """Both paths return ``(generated, log_probs)`` -- never a 3-tuple."""
+        out = self._run(logprob_start_len=0)
+        self.assertIsInstance(out, tuple)
+        self.assertEqual(len(out), 2)
+        self.assertIsInstance(out[0], paddle.Tensor)
+        self.assertIsInstance(out[1], list)
+
+    def test_ignored_without_return_log_probs(self):
+        """logprob_start_len is inert when log-probs are not requested."""
+        input_ids = paddle.to_tensor(self.prompt, dtype="int64")
+        gen = self._make_generator([5, 6, 7])
+        out = gen.generate(
+            input_ids,
+            max_new_tokens=self.max_new_tokens,
+            logprob_start_len=0,
+            no_cache=self.no_cache,
+        )
+        self.assertIsInstance(out, paddle.Tensor)
+
+    def test_negative_start_raises(self):
+        input_ids = paddle.to_tensor(self.prompt, dtype="int64")
+        gen = self._make_generator([5, 6, 7])
+        with self.assertRaises(ValueError):
+            gen.generate(
+                input_ids,
+                max_new_tokens=self.max_new_tokens,
+                return_log_probs=True,
+                logprob_start_len=-1,
+                no_cache=self.no_cache,
+            )
+
+    def test_eos_truncation_still_applies(self):
+        """Prompt scores are kept while the generated part stops at eos."""
+        prompt_len = len(self.prompt[0])
+        input_ids = paddle.to_tensor(self.prompt, dtype="int64")
+        gen = self._make_generator([5, 3, 6, 7])
+        generated, log_probs = gen.generate(
+            input_ids,
+            max_new_tokens=10,
+            eos_token_id=3,
+            return_log_probs=True,
+            logprob_start_len=0,
+            no_cache=self.no_cache,
+        )
+        num_new = generated.shape[1] - prompt_len
+        self.assertEqual(num_new, 2)  # 5, 3(eos)
+        self.assertEqual(len(log_probs[0]), (prompt_len - 1) + 2)
+
+    # -- value / alignment ------------------------------------------------
+
+    def _make_positional_generator(self, table):
+        """Fake model whose logits are ``table[position_ids]``.
+
+        Position-dependent logits make the prompt-scoring alignment
+        observable: reading ``logits[p]`` instead of ``logits[p - 1]`` to score
+        position ``p`` produces a different number, so an off-by-one fails
+        instead of silently returning a plausible value.
+        """
+        from unittest.mock import MagicMock
+
+        from paddlefleet.generation.greedy_generator import (
+            DynamicKVCache,
+            GreedyGenerator,
+        )
+
+        def fake_forward(inputs):
+            bsz = inputs["input_ids"].shape[0]
+            positions = inputs["position_ids"][0].reshape([-1])
+            rows = paddle.index_select(table, positions, axis=0)
+            return rows.unsqueeze(0).expand(
+                [bsz, rows.shape[0], table.shape[1]]
+            )
+
+        model = MagicMock()
+        model.side_effect = fake_forward
+        model.config = MagicMock()
+        model.config.num_hidden_layers = 1
+        model.config.sequence_parallel = False
+        model.config.apply_rope_fusion = False
+        model.config.recompute_granularity = None
+        model.config.num_empty_layers_add_in_head = 0
+        model.config.num_empty_layers_add_in_tail = 0
+
+        gen = object.__new__(GreedyGenerator)
+        gen.model = model
+        gen.cache = DynamicKVCache(num_layers=1)
+        return gen
+
+    def test_prompt_log_prob_values_match_manual(self):
+        """Prompt scores equal ``log_softmax(logits[p - 1])[token_at_p]``."""
+        paddle.seed(20260818)
+        vocab_size = 16
+        table = paddle.randn([32, vocab_size], dtype="float32")
+        prompt_len = len(self.prompt[0])
+        input_ids = paddle.to_tensor(self.prompt, dtype="int64")
+
+        gen = self._make_positional_generator(table)
+        _, log_probs = gen.generate(
+            input_ids,
+            max_new_tokens=self.max_new_tokens,
+            return_log_probs=True,
+            logprob_start_len=0,
+            no_cache=self.no_cache,
+        )
+
+        for p in range(1, prompt_len):
+            row = paddle.nn.functional.log_softmax(table[p - 1], axis=-1)
+            expected = float(row[int(input_ids[0, p].item())].item())
+            self.assertAlmostEqual(log_probs[0][p - 1], expected, places=5)
+
+    def test_prompt_log_probs_are_not_off_by_one(self):
+        """Guard the alignment explicitly: ``logits[p]`` must not be used."""
+        paddle.seed(20260818)
+        vocab_size = 16
+        table = paddle.randn([32, vocab_size], dtype="float32")
+        prompt_len = len(self.prompt[0])
+        input_ids = paddle.to_tensor(self.prompt, dtype="int64")
+
+        gen = self._make_positional_generator(table)
+        _, log_probs = gen.generate(
+            input_ids,
+            max_new_tokens=self.max_new_tokens,
+            return_log_probs=True,
+            logprob_start_len=0,
+            no_cache=self.no_cache,
+        )
+
+        for p in range(1, prompt_len):
+            shifted = paddle.nn.functional.log_softmax(table[p], axis=-1)
+            wrong = float(shifted[int(input_ids[0, p].item())].item())
+            self.assertNotAlmostEqual(log_probs[0][p - 1], wrong, places=3)
+
+    def test_mid_prompt_start_is_a_suffix_of_full_prompt_scores(self):
+        """Slicing the window must not change the surviving prompt values."""
+        paddle.seed(20260818)
+        table = paddle.randn([32, 16], dtype="float32")
+        prompt_len = len(self.prompt[0])
+        input_ids = paddle.to_tensor(self.prompt, dtype="int64")
+
+        full = self._make_positional_generator(table).generate(
+            input_ids,
+            max_new_tokens=self.max_new_tokens,
+            return_log_probs=True,
+            logprob_start_len=0,
+            no_cache=self.no_cache,
+        )[1]
+        partial = self._make_positional_generator(table).generate(
+            input_ids,
+            max_new_tokens=self.max_new_tokens,
+            return_log_probs=True,
+            logprob_start_len=prompt_len - 1,
+            no_cache=self.no_cache,
+        )[1]
+        # full holds prompt positions 1..prompt_len-1, partial only the last
+        self.assertAlmostEqual(partial[0][0], full[0][prompt_len - 2], places=6)
+
+
+class TestLogprobStartLenCached(_LogprobStartLenMixin, unittest.TestCase):
+    """``logprob_start_len`` on the default KV-cache path."""
+
+    no_cache = False
+
+
+class TestLogprobStartLenNoCache(_LogprobStartLenMixin, unittest.TestCase):
+    """``logprob_start_len`` on the no_cache (full-recompute) path."""
+
+    no_cache = True
+
+
+class TestLogprobStartLenCacheParity(unittest.TestCase):
+    """The two generate paths must return the same prompt log-probs.
+
+    The fake model is deterministic given the position ids, and the prompt is
+    scored from the one full-length prefill both paths perform, so the prompt
+    portion must agree exactly rather than only up to bf16 noise.
+    """
+
+    prompt = [[1, 2, 3, 4, 5]]
+    max_new_tokens = 3
+
+    def test_prompt_scores_match_across_paths(self):
+        mixin = _LogprobStartLenMixin()
+        paddle.seed(7)
+        table = paddle.randn([32, 16], dtype="float32")
+        prompt_len = len(self.prompt[0])
+        input_ids = paddle.to_tensor(self.prompt, dtype="int64")
+
+        results = []
+        for no_cache in (False, True):
+            _, log_probs = mixin._make_positional_generator(table).generate(
+                input_ids,
+                max_new_tokens=self.max_new_tokens,
+                return_log_probs=True,
+                logprob_start_len=0,
+                no_cache=no_cache,
+            )
+            results.append(log_probs[0][: prompt_len - 1])
+
+        self.assertEqual(len(results[0]), prompt_len - 1)
+        for cached, full in zip(*results):
+            self.assertAlmostEqual(cached, full, places=6)
+
+
 if __name__ == "__main__":
     print("Running greedy generator unit tests...")
     unittest.main(verbosity=2)

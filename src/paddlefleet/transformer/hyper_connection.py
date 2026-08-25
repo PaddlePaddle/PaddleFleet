@@ -166,6 +166,57 @@ def native_proj_rms(
     return proj, r
 
 
+def native_compute_h(
+    proj: Tensor,
+    r: Tensor,
+    alpha_pre: Tensor,
+    alpha_post: Tensor,
+    alpha_res: Tensor,
+    bias: Tensor,
+    n: int,
+    eps: float,
+    *,
+    _fma_probe: bool = False,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Native mHC mapping head (Eq. 5 in the mHC paper).
+
+    Returns ``h_pre = sigma(u_pre) + eps``, ``h_post = 2 sigma(u_post)`` and the
+    unactivated ``h_res``, where ``u = r * proj * alpha + bias`` and ``alpha``
+    is the three learnable gates broadcast over their segments.
+
+    ``_fma_probe`` is for the unit tests only, and nothing in the model passes
+    it. It makes this function round once where it normally rounds twice, i.e.
+    compute what the fused kernel's FMA computes, which is what lets the tests
+    demand bitwise equality and so pin the residual difference on the
+    contraction alone. It costs an fp64 pass, so it must stay off in training.
+    """
+    alpha_ = paddle.concat(
+        [
+            alpha_pre.expand([n]),
+            alpha_post.expand([n]),
+            alpha_res.expand([n * n]),
+        ],
+        axis=-1,
+    )
+    if _fma_probe:
+        # The first multiply still rounds -- hardware contracts only one
+        # multiply-add -- then ``t1 * alpha + bias`` rounds once. fp64 holds
+        # ``t1 * alpha`` exactly: 24 + 24 mantissa bits against 53.
+        t1 = r * proj
+        h = (
+            t1.astype("float64") * alpha_.astype("float64")
+            + bias.astype("float64")
+        ).astype(proj.dtype)
+    else:
+        h = r * proj * alpha_ + bias
+    # H_pre = sigma(alpha_pre * (theta_pre @ x_tilde) + b_pre)
+    h_pre = h[..., :n].sigmoid() + eps
+    # H_post = 2 sigma(alpha_post * (theta_post @ x_tilde) + b_post)
+    h_post = h[..., n : 2 * n].sigmoid() * 2
+    h_res = h[..., 2 * n :]
+    return h_pre, h_post, h_res
+
+
 def native_h_aggregate(x_streams: Tensor, h_pre: Tensor) -> Tensor:
     """Native n-stream weighted aggregation: out = sum_j(h_pre_j * x_j)."""
     return (x_streams * h_pre.unsqueeze(-1)).sum(axis=-2)
@@ -224,7 +275,12 @@ class HyperConnectionModule(nn.Layer):
 
     Args:
         config: TransformerConfig with hyper-connection fields
-        layer_number: Current layer index for initialization
+        layer_number: mHC sub-layer index. Attention and MLP count as two
+            independent layers, so this is 2*decoder_index (+1 for the MLP
+            sub-layer). Only used to rotate the one-hot H_pre bias across the
+            n residual streams (``layer_number % n``), i.e. only when
+            ``config.mhc_single_stream_init`` is set; see
+            ``_single_stream_init_weights``.
     """
 
     def __init__(self, config: TransformerConfig, layer_number: int):
@@ -234,6 +290,7 @@ class HyperConnectionModule(nn.Layer):
         self.n = config.num_residual_streams
         self.hidden_size = config.hidden_size
         self.sinkhorn_iterations = config.mhc_sinkhorn_iterations
+        self.single_stream_init = config.mhc_single_stream_init
         self.compute_h_eps = _MHC_COMPUTE_H_EPS
 
         # Projection weights for dynamic mappings
@@ -241,33 +298,47 @@ class HyperConnectionModule(nn.Layer):
         # - H_pre: n values
         # - H_post: n values
         # - H_res: n^2 values (before Sinkhorn projection)
-        self.mapping_proj = nn.Linear(
-            self.n * self.hidden_size,
-            self.n * self.n + 2 * self.n,
-            bias_attr=False,
-        )
+        # The mHC mapping parameters are stored in FP32 (mirrors Megatron
+        # hyper_connection.py mark_keep_in_fp32 on mapping_proj.weight /
+        # alpha_* / bias, and the MoE gate fp32 storage in moe_router.py):
+        # they are tiny, and keeping them out of BF16 removes the parameter
+        # rounding error from the mHC gating computation.
+        param_dtype = "float32"
+        default_dtype = paddle.get_default_dtype()
+        try:
+            paddle.set_default_dtype(param_dtype)
+            self.mapping_proj = nn.Linear(
+                self.n * self.hidden_size,
+                self.n * self.n + 2 * self.n,
+                bias_attr=False,
+            )
+        finally:
+            paddle.set_default_dtype(default_dtype)
 
         init_alpha = config.mhc_init_gating_factor
         # Learnable scaling factors (Eq. 5 in paper)
         self.alpha_pre = self.create_parameter(
             shape=[1],
-            dtype=self.config.params_dtype,
+            dtype=param_dtype,
             default_initializer=nn.initializer.Constant(init_alpha),
         )
         self.alpha_post = self.create_parameter(
             shape=[1],
-            dtype=self.config.params_dtype,
+            dtype=param_dtype,
             default_initializer=nn.initializer.Constant(init_alpha),
         )
         self.alpha_res = self.create_parameter(
             shape=[1],
-            dtype=self.config.params_dtype,
+            dtype=param_dtype,
             default_initializer=nn.initializer.Constant(init_alpha),
         )
 
-        # Static bias terms
+        # Static bias terms. Stay zero unless ``mhc_single_stream_init``
+        # replaces them with the paper's A.6 values in
+        # ``_single_stream_init_weights``.
         self.bias = self.create_parameter(
             shape=[self.n * self.n + 2 * self.n],
+            dtype=param_dtype,
             default_initializer=nn.initializer.Constant(0.0),
         )
 
@@ -276,6 +347,7 @@ class HyperConnectionModule(nn.Layer):
         # Choose implementation: fused kernels vs native reference.
         if config.use_fused_mhc:
             from paddlefleet.fusions.fused_mhc_kernels import (
+                fused_compute_h,
                 fused_h_aggregate,
                 fused_h_post_bda,
                 fused_proj_rms,
@@ -286,24 +358,51 @@ class HyperConnectionModule(nn.Layer):
             self._h_aggregate_op = fused_h_aggregate
             self._h_post_bda_op = fused_h_post_bda
             self._proj_rms_op = fused_proj_rms
+            # Unlike the cast fusion this one trades launches, not dtypes -- the
+            # mapping head is only n*n + 2*n wide per token -- so it applies at
+            # either high_precision_mhc setting. The accuracy-compatible kernel
+            # is a separate matter: it is a Megatron-alignment contract, and the
+            # fused head's FMA contraction and staged cross-token reductions
+            # break it, so that mode keeps the reference composition, exactly as
+            # the projection / aggregate / BDA sites already do.
+            self._compute_h_op = (
+                native_compute_h
+                if _use_accuracy_compatible_kernel()
+                else fused_compute_h
+            )
+            # The mHC input, the residual and the layer output stay in their
+            # incoming dtype; the kernels widen them in-register instead of the
+            # block materializing fp32 copies. Gated on high_precision_mhc:
+            # that is the only mode with a widening to absorb -- without it the
+            # reference keeps the arithmetic in the incoming dtype and so must
+            # the kernel. The BDA site opts out again when a bias is present.
+            self._widen_in_kernel = config.high_precision_mhc
         else:
             self._sinkhorn_op = native_sinkhorn
             self._h_aggregate_op = native_h_aggregate
             self._h_post_bda_op = native_h_post_bda
             self._proj_rms_op = native_proj_rms
+            self._compute_h_op = native_compute_h
+            # The native reference is a plain op composition: it cannot absorb a
+            # widening, so its operands are still pre-widened in Python.
+            self._widen_in_kernel = False
 
         self._init_weights()
 
     def _init_weights(self) -> None:
         """Initialize weights for stable training."""
-        # Xavier uniform for mapping projection.
-        # Use model-parallel RNG tracker to keep initialization deterministic
-        # regardless of layer_index shifts.
-        if paddle.distributed.get_world_size() <= 1:
-            nn.initializer.XavierUniform()(self.mapping_proj.weight)
+        if self.single_stream_init:
+            self._single_stream_init_weights()
         else:
-            with get_cuda_rng_tracker().fork():
+            # Xavier uniform for the mapping projection; the bias keeps the
+            # zero from ``__init__``.
+            # Use model-parallel RNG tracker to keep initialization
+            # deterministic regardless of layer_index shifts.
+            if paddle.distributed.get_world_size() <= 1:
                 nn.initializer.XavierUniform()(self.mapping_proj.weight)
+            else:
+                with get_cuda_rng_tracker().fork():
+                    nn.initializer.XavierUniform()(self.mapping_proj.weight)
 
         # Set sequence_parallel attribute on parameters for gradient synchronization
         if self.config.sequence_parallel:
@@ -312,6 +411,51 @@ class HyperConnectionModule(nn.Layer):
             self.alpha_post.is_distributed = False
             self.alpha_res.is_distributed = False
             self.bias.is_distributed = False
+
+    def _single_stream_init_weights(self) -> None:
+        """Paper mapping-head init (``mhc_single_stream_init``)."""
+        # Zero-init the fused mapping projection, following the paper: "we
+        # initialize all linear projections for the dynamic mappings to zero"
+        # (Sec. 2.2 / p.7; A.6 uses ``torch.zeros`` for ``self.weight``).
+        # ``_compute_h`` computes h = r*proj*alpha + bias, so a zero weight
+        # makes h == bias at step 0: H_pre / H_post / H_res are then exactly the
+        # static mappings encoded in ``bias`` below -- token-independent and free
+        # of the ~0.014 std logit perturbation XavierUniform adds on top of the
+        # +-3 bias. Gradients still flow (dh/dW = r*alpha*x != 0), so the
+        # projection is not pinned at zero.
+        # Deterministic, hence no model-parallel RNG tracker fork is needed.
+        self.mapping_proj.weight.set_value(
+            paddle.zeros_like(self.mapping_proj.weight)
+        )
+
+        # Static bias terms, following the paper's A.6 pseudo implementation.
+        # ``_compute_h`` computes h = r*proj*alpha + bias and slices it as
+        # [0:n] -> H_pre, [n:2n] -> H_post, [2n:] -> H_res, so:
+        #   b_pre  = -3 for every stream, except the "home stream" of this
+        #            sub-layer which is +3. H_pre = sigmoid(b_pre) is then
+        #            one-hot-ish (0.953 vs 0.047), i.e. the layer reads
+        #            essentially a single stream.
+        #   b_post = 0  =>  H_post = 2*sigmoid(0) = 1 (all-ones).
+        #   b_res  = 6*I - 3  =>  the row softmax inside Sinkhorn yields a
+        #            diagonal of e^3/(e^3+(n-1)e^-3) ~= 0.993, so H_res ~= I.
+        # Together these make the initial state equivalent to a standard
+        # residual connection while keeping the n streams distinguishable.
+        #
+        # The +3 rotates with the mHC sub-layer index: attention and MLP count
+        # as two independent layers (paper Fig. 3, see how
+        # HyperConnectionTransformerLayer numbers them), so consecutive
+        # sub-layers read stream 0, 1, ..., n-1, 0, ... Without the rotation a
+        # one-hot H_pre would leave n-1 streams write-only.
+        n = self.n
+        bias_init = paddle.concat(
+            [
+                paddle.full([n], -3.0, dtype="float32"),
+                paddle.zeros([n], dtype="float32"),
+                (6.0 * paddle.eye(n, dtype="float32") - 3.0).flatten(),
+            ]
+        )
+        bias_init[self.layer_number % n] = 3.0
+        self.bias.set_value(bias_init.astype(self.bias.dtype))
 
     def _projection_and_get_norm(self, x: Tensor) -> tuple[Tensor, Tensor]:
         """
@@ -334,9 +478,17 @@ class HyperConnectionModule(nn.Layer):
             proj = proj_2d.reshape([*x.shape[:-1], weight.shape[-1]])
         else:
             ori_dtype = x.dtype
-            proj, r = self._proj_rms_op(
-                x, self.mapping_proj.weight.astype(ori_dtype), self.norm_eps
-            )
+            if self._widen_in_kernel:
+                # x is still narrow here, so the weight needs no matching cast
+                # either; the kernel widens what it has to and returns proj/r
+                # in fp32.
+                proj, r = self._proj_rms_op(
+                    x, self.mapping_proj.weight, self.norm_eps, fuse_cast=True
+                )
+            else:
+                proj, r = self._proj_rms_op(
+                    x, self.mapping_proj.weight.astype(ori_dtype), self.norm_eps
+                )
             if not self.config.high_precision_mhc:
                 r = r.astype(ori_dtype)
 
@@ -357,20 +509,16 @@ class HyperConnectionModule(nn.Layer):
             h_post: [..., n] - expansion weights
             h_res: [..., n^2] - residual mixing logits
         """
-        alpha_ = paddle.concat(
-            [
-                self.alpha_pre.expand([self.n]),
-                self.alpha_post.expand([self.n]),
-                self.alpha_res.expand([self.n * self.n]),
-            ],
-            axis=-1,
+        h_pre, h_post, h_res = self._compute_h_op(
+            proj,
+            r,
+            self.alpha_pre,
+            self.alpha_post,
+            self.alpha_res,
+            self.bias,
+            self.n,
+            self.compute_h_eps,
         )
-        h = r * proj * alpha_ + self.bias
-        # H_pre = σ(α_pre * (θ_pre @ x̃) + b_pre)
-        h_pre = h[..., : self.n].sigmoid() + self.compute_h_eps  # [..., n]
-        # H_post = 2σ(α_post * (θ_post @ x̃) + b_post)
-        h_post = h[..., self.n : 2 * self.n].sigmoid() * 2  # [..., n]
-        h_res = h[..., 2 * self.n :]
         if _use_accuracy_compatible_kernel():
             h_pre = h_pre.astype(proj.dtype)
             h_post = h_post.astype(proj.dtype)
@@ -427,7 +575,12 @@ class HyperConnectionModule(nn.Layer):
                 aggregated = aggregated.astype(x.dtype)
             return aggregated
         else:
-            aggregated = self._h_aggregate_op(x_streams, h_pre)
+            if self._widen_in_kernel:
+                aggregated = self._h_aggregate_op(
+                    x_streams, h_pre, fuse_cast=True
+                )
+            else:
+                aggregated = self._h_aggregate_op(x_streams, h_pre)
             if aggregated.dtype != x.dtype:
                 aggregated = aggregated.astype(x.dtype)
             return aggregated
@@ -544,6 +697,7 @@ class HyperConnectionModule(nn.Layer):
             if (
                 not _use_accuracy_compatible_kernel()
                 and self.config.high_precision_mhc
+                and not self._widen_in_kernel
             ):
                 hidden_states = hidden_states.astype("float32")
             h_pre, h_post, h_res = self.compute_mappings(hidden_states)
@@ -654,6 +808,31 @@ class HyperConnectionModule(nn.Layer):
 
     # ==================== Fused kernel placeholder ====================
 
+    def bda_span_pays_off(self, dropout_prob: float, training: bool) -> bool:
+        """Whether wrapping ``fused_h_res_h_post_bda`` in a recompute span saves.
+
+        Two things are worth hiding from the live set:
+
+        * the dropout mask the sequential path keeps whenever dropout is active
+          -- one byte per element of the ``[..., n*C]`` output, independent of
+          ``high_precision_mhc`` and of the accuracy-compatible kernel, since
+          all three of those configurations take the same sequential path;
+        * the fp32 up-casts the fast path pins through ``save_for_backward`` --
+          only under ``high_precision_mhc``, and only while the
+          accuracy-compatible kernel is off, since that switch keeps the mHC
+          input in the incoming dtype.
+
+        With neither, the call saves only tensors that are live anyway and a
+        span would cost a replay plus the caller's ``h_res``/``h_post`` clones.
+        An already-fp32 residual makes the fast-path up-cast a no-op, i.e. a
+        wash rather than a loss, and is not special-cased here.
+        """
+        if dropout_prob > 0.0 and training:
+            return True
+        if not self.config.high_precision_mhc:
+            return False
+        return not _use_accuracy_compatible_kernel()
+
     def fused_h_res_h_post_bda(
         self,
         h_res: Tensor,
@@ -701,14 +880,32 @@ class HyperConnectionModule(nn.Layer):
                 orig_reshaped = original_residual.reshape(
                     [*leading_shape, n, C]
                 )
-                if self.config.high_precision_mhc:
+                # ``fuse_cast`` hands the two large operands to the kernel in
+                # their incoming dtype instead; it widens them in-register and
+                # writes the result back in ``orig_reshaped``'s dtype.
+                # ``_widen_in_kernel`` already folds in ``high_precision_mhc``,
+                # the only mode that widens at all. A present bias opts out on
+                # top of that (the kernel declines it too): its gradient
+                # reduces over ``g_x``, which would then be narrow.
+                fuse_cast = self._widen_in_kernel and bias is None
+                if self.config.high_precision_mhc and not fuse_cast:
                     orig_reshaped = orig_reshaped.astype("float32")
                     x = x.astype("float32")
                     if bias is not None:
                         bias = bias.astype("float32")
-                output = self._h_post_bda_op(
-                    h_res, orig_reshaped, h_post, x, bias
-                )
+                if fuse_cast:
+                    output = self._h_post_bda_op(
+                        h_res,
+                        orig_reshaped,
+                        h_post,
+                        x,
+                        bias,
+                        fuse_cast=True,
+                    )
+                else:
+                    output = self._h_post_bda_op(
+                        h_res, orig_reshaped, h_post, x, bias
+                    )
                 return output.reshape([*leading_shape, n * C])
 
             # Sequential path: used when dropout required OR accuracy-compatible kernel is NOT enabled
@@ -771,23 +968,27 @@ class HyperConnectionContractLayer(FleetLayer):
 
         self.num_mtp = getattr(config, "num_nextn_predict_layers", 0) or 0
         self.magic_send = getattr(config, "enable_mtp_magic_send", False)
+        self.separate_mtp_input = getattr(config, "separate_mtp_input", False)
 
         # Learned contraction parameters (DSv4 style, always used)
         n = self.n
         hc_dim = config.hidden_size * n
+        # learned_output_contract() computes in fp32; store the parameters in
+        # fp32 as well (Megatron transformer_block.py marks hc_head_* keep_in_fp32).
+        hc_param_dtype = "float32"
         self.hc_head_fn = self.create_parameter(
             shape=[hc_dim, n],
-            dtype=self.config.params_dtype,
+            dtype=hc_param_dtype,
             default_initializer=nn.initializer.XavierUniform(),
         )
         self.hc_head_base = self.create_parameter(
             shape=[n],
-            dtype=self.config.params_dtype,
+            dtype=hc_param_dtype,
             default_initializer=nn.initializer.Constant(0.0),
         )
         self.hc_head_scale = self.create_parameter(
             shape=[1],
-            dtype=self.config.params_dtype,
+            dtype=hc_param_dtype,
             default_initializer=nn.initializer.Constant(1.0),
         )
 
@@ -807,7 +1008,9 @@ class HyperConnectionContractLayer(FleetLayer):
         ):
             dict_args["mhc_multistream"] = hidden_states
 
-            if self.magic_send:
+            if self.magic_send or self.separate_mtp_input:
+                # hidden_states is the pure backbone output in both cases, so the
+                # whole tensor is contracted (no MTP chunks to split off).
                 # Expand mhc_multistream to num_mtp+1 slots; zeros will be overwritten by MTP layers.
                 dict_args["mhc_multistream"] = paddle.concat(
                     [hidden_states]

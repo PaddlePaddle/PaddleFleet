@@ -277,12 +277,12 @@ class ModelParallelConfig:
         should only be set if the sequence length varies by microbatch within a global batch.
     """
 
-    overlap_p2p_comm: bool = False
+    overlap_p2p_comm: bool = True
     """When True some of the peer to peer communication for pipeline parallelism will overlap with
        computation. Must be False if batch_p2p_comm is true.
     """
 
-    batch_p2p_comm: bool = True
+    batch_p2p_comm: bool | None = None
     """Use batch_isend_irecv instead of individual isend/irecv calls. Must be False if
        overlap_p2p_comm is True.
     """

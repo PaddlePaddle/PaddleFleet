@@ -790,7 +790,11 @@ class DotProductAttention(FleetLayer):
 
             need_value_padding = (
                 not (
-                    fa_version == 4 and q_head_dim == 192 and v_head_dim == 128
+                    fa_version == 4
+                    and (
+                        (q_head_dim == 192 and v_head_dim == 128)
+                        or (q_head_dim == 576 and v_head_dim == 512)
+                    )
                 )
             ) and q_head_dim != v_head_dim
 

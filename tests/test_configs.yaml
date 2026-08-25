@@ -22,10 +22,27 @@ tests:
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe.py]
     products:
       - num_gpus: 8
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_with_mtp_alltoall.py]
+    products:
+      - num_gpus: 8
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_with_mtp.py]
     products:
       - num_gpus: 8
+  # PP>1 + use_erndata=True: exercises GPTLMHead._stash_cu_seqlens_q
+  # delivering cu_seqlens_q to the loss stage under PP (PP=2, TP=1, dense).
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_megatron.py]
+    products:
+      - num_gpus: 2
+  # PP>1 + separate_mtp_headloss + megatron: GPTMTPLMHead stash + Main/MTP
+  # LanguageLoss megatron label roll end-to-end (PP=4, VPP=1, TP=1, dense).
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_megatron_separate_headloss.py]
+    products:
+      - num_gpus: 4
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_with_mtp_with_overlap.py]
+    products:
+      - num_gpus: 8
+  # separate_mtp_headloss PP layout regression: PP=4 * MP=2 -> 8 GPUs (EP=2 orthogonal)
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_separate_mtp_headloss_pp.py]
     products:
       - num_gpus: 8
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_recompute.py]
@@ -49,6 +66,11 @@ tests:
   - test_case: [tests/multi_card_tests/moe/test_allgather_dispatcher_ep.py]
     products:
       - num_gpus: 2
+  # moe: QB callback histogram all-reduce. The topology (mp=2 sharding=4 cp=2
+  # ep=8) requires exactly 8 GPUs, so pin it rather than rely on the default.
+  - test_case: [tests/multi_card_tests/moe/test_qb_callback_cp_sharding.py]
+    products:
+      - num_gpus: 8
   # ai_edited_test: tensor_parallel (Pattern A/B, TP=4 sharding=2 -> 8 GPUs)
   - test_case: [tests/multi_card_tests/ai_edited_test/tensor_parallel/test_ai_mappings.py]
     products:
@@ -150,8 +172,16 @@ tests:
   - test_case: [tests/multi_card_tests/transformer/test_flash_mask_cp_a2a.py]
     products:
       - num_gpus: 2
+  # transformer: latent-MQA indexer dual-chunk row rebalance (CP=2)
+  - test_case: [tests/multi_card_tests/transformer/test_mqa_indexer_dualchunk_cp.py]
+    products:
+      - num_gpus: 2
   # transformer: CSA context-parallel, including cuDNN indexer docmask path (CP=2)
   - test_case: [tests/multi_card_tests/transformer/test_csa_attention_cp.py]
+    products:
+      - num_gpus: 2
+  # transformer: HCA context-parallel optimizations (CP=2)
+  - test_case: [tests/multi_card_tests/transformer/test_hca_cp_optim.py]
     products:
       - num_gpus: 2
   # transformer: KDA context-parallel (packed varlen split across CP=4 ranks)
@@ -177,6 +207,15 @@ tests:
   # transformer: _indexer_top_k_unfused column mask -- no-op for CSA, load-bearing
   # for hybrid MLA latent MQA + DSA (CP=2)
   - test_case: [tests/multi_card_tests/transformer/test_indexer_topk_col_mask_cp.py]
+    products:
+      - num_gpus: 2
+  # separate_mtp_input: bitwise fwd/bwd equivalence vs concat/split baseline (CP=2)
+  - test_case: [tests/multi_card_tests/test_separate_mtp_input_cp.py]
+    products:
+      - num_gpus: 2
+  # use_erndata=True + CP=2: the RoPE tables must follow the same
+  # zigzag layout the megatron MTP branch slices the embeddings with.
+  - test_case: [tests/multi_card_tests/test_gpt_mtp_megatron_cp.py]
     products:
       - num_gpus: 2
   # default fallback for remaining multi_card_tests

@@ -909,6 +909,15 @@ class MultiLatentAttention(Attention):
             "MLA does not support Flash Decoding"
         )
 
+        # Extract inference kwargs early: ``is_decode`` is needed both by
+        # ``get_query_key_value_tensors`` (RoPE apply) and by core_attention.
+        past_key_values = kwargs.get("past_key_values")
+        layer_idx = kwargs.get("layer_idx")
+        use_cache = kwargs.get("use_cache", False)
+        is_decode = _is_incremental_decode(
+            past_key_values, layer_idx, use_cache
+        )
+
         # =====================
         # Query, Key, and Value
         # =====================
@@ -920,6 +929,7 @@ class MultiLatentAttention(Attention):
                 key_value_states,
                 position_ids,
                 packed_seq_params,
+                is_decode=is_decode,
             )
         )
 
@@ -948,14 +958,6 @@ class MultiLatentAttention(Attention):
             key = key.transpose([1, 0, 2, 3]).contiguous()
             value = value.transpose([1, 0, 2, 3]).contiguous()
 
-        # Extract inference kwargs to pass through to core_attention
-        past_key_values = kwargs.get("past_key_values")
-        layer_idx = kwargs.get("layer_idx")
-        use_cache = kwargs.get("use_cache", False)
-        is_decode = _is_incremental_decode(
-            past_key_values, layer_idx, use_cache
-        )
-
         # The indexer-loss row mask needs ``input_ids``: the packed sequence's
         # trailing padding is invisible to ``attn_mask_startend_row_indices``.
         # Only the non-absorbed-MQA core attention accepts it (and only that one
@@ -963,6 +965,14 @@ class MultiLatentAttention(Attention):
         core_attn_extra = {}
         if self.mqa_latent and kwargs.get("input_ids") is not None:
             core_attn_extra["input_ids"] = kwargs["input_ids"]
+        # Micro-batch slot for the shared document-mask metadata. Decided in
+        # ``TransformerLayer.forward`` (outside every recompute wrapper) and only
+        # read downstream, so it survives both the recompute below and the
+        # layer-level one. It has to be a declared parameter of the core
+        # attention's ``forward``, because ``recompute`` flattens non-empty kwargs
+        # against the callee's signature.
+        if self.mqa_latent and kwargs.get("docmask_mb_idx") is not None:
+            core_attn_extra["docmask_mb_idx"] = kwargs["docmask_mb_idx"]
 
         if self.mqa_latent:
             # Query is already absorbed; the core attention only needs the V-side
@@ -1671,6 +1681,7 @@ class MLASelfAttention(MultiLatentAttention):
         key_value_states=None,
         position_ids=None,
         packed_seq_params=None,
+        is_decode=False,
     ):
         """
         Derives `query`, `key` and `value` tensors from `hidden_states`.
@@ -1967,6 +1978,10 @@ class MLASelfAttention(MultiLatentAttention):
                 )
                 key = paddle.cat([k_no_pe, k_pos_emb], axis=-1)
             elif bool(self.config.apply_rope_fusion) and not self.mqa_latent:
+                if is_decode:
+                    raise NotImplementedError(
+                        "apply_rope_fusion does not support incremental decode in MLA yet."
+                    )
                 from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
                     fused_apply_mla_rope_for_kv,
                     fused_apply_mla_rope_for_q,
@@ -2024,12 +2039,6 @@ class MLASelfAttention(MultiLatentAttention):
                     cp_rank,
                     cp_size,
                 )
-
-                # dynamic_inference not supported for now
-                if not self.training:
-                    raise NotImplementedError(
-                        "apply_rope_fusion does not support dynamic inference yet."
-                    )
 
                 k_pe = None
             else:
@@ -2609,6 +2618,7 @@ class MQASelfAttention(MLASelfAttention):
                 key_value_states,
                 position_ids,
                 packed_seq_params,
+                is_decode=is_decode,
             )
         )
 
@@ -2900,6 +2910,7 @@ class MQASelfAttention(MLASelfAttention):
         key_value_states=None,
         position_ids=None,
         packed_seq_params=None,
+        is_decode=False,
     ):
         """
         Derives `query`, `key` and `value` tensors from `hidden_states`.
@@ -2910,6 +2921,7 @@ class MQASelfAttention(MLASelfAttention):
                 key_value_states=key_value_states,
                 position_ids=position_ids,
                 packed_seq_params=packed_seq_params,
+                is_decode=is_decode,
             )
 
         # b = batch size, s = sequence length, h = hidden size, n = num attention heads

@@ -551,6 +551,14 @@ class TransformerLayer(nn.Layer):
         Each block spans ``attn_res_block_size`` transformer layers, and the
         layer whose index is a multiple of that span closes the previous
         block. This matches Kimi K3's ``layer_idx % attn_res_block_size == 0``.
+
+        ``self.layer_number`` is the *physical* index, which the spec builders
+        shift by ``num_empty_layers_add_in_head`` so the empty head layers
+        occupy the leading slots (see
+        ``gpt_layer_specs.get_gpt_decoder_layers_spec``). The schedule is
+        defined on the logical decoder index, so undo that shift here --
+        otherwise the whole block layout slides by the offset and logical
+        layer 0 never opens a block.
         """
         block_span = self.attn_res_block_size
         if block_span <= 0:
@@ -558,7 +566,10 @@ class TransformerLayer(nn.Layer):
                 "attn_res_block_size must be at least 1 when "
                 "block_attention_residuals is enabled."
             )
-        return self.layer_number % block_span == 0
+        head_offset = (
+            getattr(self.config, "num_empty_layers_add_in_head", 0) or 0
+        )
+        return (self.layer_number - head_offset) % block_span == 0
 
     def _forward_impl_block_attn_res_split_recompute(
         self,
@@ -714,6 +725,16 @@ class TransformerLayer(nn.Layer):
     def transformer_layer_weights(self):
         return self.named_parameters()
 
+    def _docmask_meta_kwargs(self):
+        """Hook for the shared CSA document-mask metadata; opted out by default.
+
+        Overridden by ``HyperConnectionTransformerLayer``, which is the layer
+        class the DSv4-hybrid models use. Returning ``{}`` means ``_forward_impl``
+        is called with exactly the arguments it was called with before, so every
+        other layer class keeps building its own ``CSADocMaskMetadata``.
+        """
+        return {}
+
     def forward(
         self,
         dict_args: dict,
@@ -737,12 +758,21 @@ class TransformerLayer(nn.Layer):
         )
         mtp_input = None
         mtp_ids = None
+        # Under use_erndata the data pipeline emits length-L
+        # tensors (input_ids / labels / position_ids / attn_mask) and
+        # GPTEmbedding produces mtp_emb_res as (K+1) length-L blocks — the
+        # per-depth left-shift is performed inline via roll_tensor. That means
+        # the main decoder here runs at seq_len = L (not L-K), so the ernie5
+        # L+K path below must be skipped for position_ids / input_ids / mask
+        # trims.
+        _mtp_is_megatron = getattr(self.config, "use_erndata", False)
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
             and not is_mtp
             and not self.config.mtp_load_weight_only
             and not self.config.enable_mtp_magic_send
+            and not self.config.separate_mtp_input
         ):
             # process hidden_states
             hidden_states_concat = dict_args["hidden_states"]
@@ -754,7 +784,12 @@ class TransformerLayer(nn.Layer):
             dict_args["hidden_states"] = hidden_states
 
             # process position_ids
-            if not self.config.gpt_model_use_experimental_version:
+            # Under use_erndata position_ids is [B, L] already
+            # (roll happens inside MTP layer), so DO NOT strip K positions.
+            if (
+                not self.config.gpt_model_use_experimental_version
+                and not _mtp_is_megatron
+            ):
                 if "position_ids" in dict_args.keys():
                     position_ids = dict_args["position_ids"]
                     # Slice the sequence axis, which is the last one for both
@@ -838,9 +873,12 @@ class TransformerLayer(nn.Layer):
                     dict_args["input_ids"] = decoder_input_ids
             if (
                 not self.config.experimental_dataflow
+                and not _mtp_is_megatron
                 and "attn_mask_startend_row_indices" in dict_args.keys()
             ):
-                # Old dataflow: main mask contains mtp parts appended along seq dim, need to split
+                # Old dataflow (ernie5 L+K path): main mask contains mtp parts
+                # appended along seq dim (total length L+K), split into main
+                # [B,1,L,1] + mtp [B,1,K,1] and hand main to the backbone.
                 attn_mask_startend_row_indices = dict_args[
                     "attn_mask_startend_row_indices"
                 ]
@@ -859,7 +897,9 @@ class TransformerLayer(nn.Layer):
                 )
             else:
                 # New dataflow (experimental_dataflow=True): main mask is already main-seq only,
-                # mtp masks are in mtp_startend_row_indices_all and will be used by MTP layer directly
+                # mtp masks are in mtp_startend_row_indices_all and will be used by MTP layer directly.
+                # Megatron style: mask is already length-L; MTP layer will derive per-depth mask
+                # from cu_seqlens_q, so leave main mask untouched here.
                 attn_mask_startend_row_indices_mtp = None
 
         if self.config.block_attention_residuals and "blocks" not in dict_args:
@@ -877,6 +917,12 @@ class TransformerLayer(nn.Layer):
             # Remove blocks from dict_args so that _forward_impl does not
             # receive unused tensors that cause backward errors.
             dict_args.pop("blocks", None)
+        # Shared CSA document-mask metadata (see _docmask_meta_kwargs). Taken HERE,
+        # outside the recompute wrapper below: `forward` runs exactly once per
+        # (layer, micro-batch) whatever the recompute granularity is, while
+        # `_forward_impl` may be replayed. Empty dict for every layer class that
+        # does not opt in.
+        docmask_meta_kwargs = self._docmask_meta_kwargs()
 
         if self.full_recompute or (not has_recovered()):
             hidden_states = dict_args["hidden_states"]
@@ -973,10 +1019,11 @@ class TransformerLayer(nn.Layer):
                     input_ids=input_ids,
                     origin_input_ids=origin_input_ids,
                     **cu_seqlens_kwargs,
+                    **docmask_meta_kwargs,
                     **offload_kwargs,
                 )
         else:
-            outputs = self._forward_impl(**dict_args)
+            outputs = self._forward_impl(**dict_args, **docmask_meta_kwargs)
 
         if isinstance(outputs, tuple):
             output, context = outputs[0], outputs[1]
@@ -991,11 +1038,17 @@ class TransformerLayer(nn.Layer):
             and not is_mtp
             and not self.config.mtp_load_weight_only
             and not self.config.enable_mtp_magic_send
+            and not self.config.separate_mtp_input
         ):
             hidden_states_concat = paddle.concat([output, *mtp_input])
             rst["hidden_states"] = hidden_states_concat
-            if not self.config.gpt_model_use_experimental_version:
-                if "position_ids" in dict_args.keys():
+            # Under use_erndata the L+K position-ids split was
+            # skipped up front, so there is nothing to concat back either.
+            if (
+                not self.config.gpt_model_use_experimental_version
+                and not _mtp_is_megatron
+            ):
+                if "position_ids" in dict_args.keys() and mtp_ids is not None:
                     position_ids = paddle.concat(
                         [dict_args["position_ids"], mtp_ids], axis=-1
                     )
@@ -1063,6 +1116,7 @@ class TransformerLayer(nn.Layer):
         origin_input_ids: Tensor | None = None,
         blocks: list | tuple | None = None,
         cu_seqlens: Tensor | None = None,
+        docmask_mb_idx: int = -1,
         **kwargs,
     ):
         def need_do_attention():
@@ -1134,6 +1188,7 @@ class TransformerLayer(nn.Layer):
                         in_recompute=self.full_recompute,
                         input_ids=input_ids,
                         cu_seqlens=cu_seqlens,
+                        docmask_mb_idx=docmask_mb_idx,
                         **kwargs,
                     )
 
@@ -1187,6 +1242,7 @@ class TransformerLayer(nn.Layer):
                         in_recompute=self.full_recompute,
                         input_ids=input_ids,
                         cu_seqlens=cu_seqlens,
+                        docmask_mb_idx=docmask_mb_idx,
                         **kwargs,
                     )
             self._log_md5(
@@ -1613,15 +1669,44 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             "HyperConnectionTransformerLayer does not support block_attention_residuals."
         )
 
+        # mHC treats attention and MLP as two independent layers (paper Fig. 3).
+        # HyperConnectionModule uses this index to rotate the one-hot H_pre bias
+        # across the n residual streams (mhc_single_stream_init only), so the two
+        # sub-layers must get distinct numbers or half of the streams would
+        # never be a "home stream".
+        #
+        # The rotation runs over the layer's logical position in the stack, which
+        # is not ``self.layer_number``:
+        #  - decoder layers are numbered index + num_empty_layers_add_in_head
+        #    (get_gpt_decoder_layers_spec), so the offset is subtracted to keep
+        #    the phase independent of the empty-head-layer count;
+        #  - MTP layers are numbered by their own 0-based index and carry no such
+        #    offset (get_gpt_mtp_layers_spec), so subtracting it would shift
+        #    their phase and, with empty head layers, make the index negative.
+        #    They keep reading and writing the n streams the backbone wrote, so
+        #    they continue the decoder's rotation rather than restarting it --
+        #    restarting would hand the first MTP sub-layer the same home stream
+        #    as the last decoder sub-layer whenever n is odd.
+        if self.is_mtp_layer:
+            mhc_logical_index = (
+                self.config.num_hidden_layers + self.layer_number
+            )
+        else:
+            head_offset = (
+                getattr(self.config, "num_empty_layers_add_in_head", 0) or 0
+            )
+            mhc_logical_index = self.layer_number - head_offset
+        mhc_sublayer_base = 2 * mhc_logical_index
+
         self.self_attention_hyper_connection = build_spec_layer(
             sublayers_spec.self_attention_hyper_connection,
             config=self.config,
-            layer_number=self.layer_number,
+            layer_number=mhc_sublayer_base,
         )
         self.mlp_hyper_connection = build_spec_layer(
             sublayers_spec.mlp_hyper_connection,
             config=self.config,
-            layer_number=self.layer_number,
+            layer_number=mhc_sublayer_base + 1,
         )
 
         # The hyper-connection submodules are created after super().__init__()
@@ -1631,6 +1716,19 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         # aliased into the MTP layer, so re-run the no-hook coloring now. It is
         # idempotent: already-colored base params are skipped.
         self._mark_shared_no_hook_params()
+
+        # Consumer identity for the shared CSA document-mask metadata
+        # (config.csa_share_docmask_meta): one forward counter per consumer, so
+        # virtual-pipeline interleaving across chunks cannot mix them up.
+        self._docmask_meta_key = (int(layer_number), bool(is_mtp_layer))
+        if getattr(config, "csa_share_docmask_meta", False) or getattr(
+            config, "mqa_share_docmask_meta", False
+        ):
+            from paddlefleet.transformer.doc_mask_meta_registry import (
+                doc_mask_meta_registry,
+            )
+
+            doc_mask_meta_registry.register(self._docmask_meta_key)
 
         # mHC forward recompute config
         self.recompute_mhc_forward = False
@@ -1673,6 +1771,147 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                             config.recompute_modules["mhc_forward"],
                         )
                     )
+
+    def _fused_h_res_h_post_bda(
+        self,
+        hyper_connection,
+        h_res,
+        original_residual,
+        h_post,
+        layer_output_with_bias,
+        enable_recompute,
+    ):
+        """Run fused_h_res_h_post_bda, optionally in a RecomputeWithoutOutput span.
+
+        On the fp32 fast path the span keeps the up-casts that
+        ``FusedHPostBDA.save_for_backward`` would otherwise pin -- the [..., n, C]
+        residual and the [..., C] layer output, i.e. two more activation-sized
+        buffers per half-layer -- out of the live set. On the sequential path
+        (active dropout) it hides that path's dropout mask instead, which is a
+        byte per element of the [..., n*C] output. Either way the span body runs
+        under ``no_grad``, where an inner PyLayer's ``save_for_backward`` retains
+        nothing, and backward re-runs the kernel from the low-precision inputs.
+
+        ``hyper_connection.bda_span_pays_off`` vetoes the configurations where
+        neither applies; ``enable_recompute`` is the caller's own switch on top
+        of that.
+
+        Returns ``(output, span)``. ``output`` is the [..., n*C] result; when
+        ``span`` is not None the caller MUST hand it to
+        ``_cast_and_discard_fused_bda`` -- see there for why the discard is not
+        optional.
+        """
+        bda_kwargs = {
+            "dropout_prob": self.hidden_dropout_prob,
+            "training": self.training,
+            "fused": self.config.bias_dropout_fusion,
+        }
+        # Only wrap when the call actually retains something the span can hide;
+        # ``bda_span_pays_off`` owns that predicate because it depends on which
+        # path ``fused_h_res_h_post_bda`` takes.
+        if not hyper_connection.bda_span_pays_off(
+            self.hidden_dropout_prob, self.training
+        ):
+            enable_recompute = False
+        if not enable_recompute:
+            output = hyper_connection.fused_h_res_h_post_bda(
+                h_res=h_res,
+                original_residual=original_residual,
+                h_post=h_post,
+                layer_output_with_bias=layer_output_with_bias,
+                **bda_kwargs,
+            )
+            return output, None
+
+        x, bias = layer_output_with_bias
+
+        def _fused(h_res, original_residual, h_post, x, bias):
+            return hyper_connection.fused_h_res_h_post_bda(
+                h_res=h_res,
+                original_residual=original_residual,
+                h_post=h_post,
+                layer_output_with_bias=(x, bias),
+                **bda_kwargs,
+            )
+
+        span = RecomputeWithoutOutput()
+        output = span.recompute(
+            _fused,
+            # h_res/h_post are outputs of the mHC-aggregate span, which clears
+            # them with Tensor._clear_data(). detach() shares the holder, so the
+            # alias that save_for_backward keeps would be emptied too and the
+            # replay would read a dangling tensor. They are [..., n, n] and
+            # [..., n], i.e. smaller than the residual by a factor of C, so clone
+            # instead of depending on the hook registration order of the two
+            # spans.
+            h_res.clone(),
+            original_residual,
+            h_post.clone(),
+            x,
+            bias,
+            # No dropout on the fast path, so the replay is deterministic
+            # without paying for an RNG-state snapshot.
+            preserve_rng_state=self.hidden_dropout_prob > 0.0 and self.training,
+            share_grad_holder=True,
+        )
+        return output, span
+
+    @staticmethod
+    def _cast_and_discard_fused_bda(output, ori_dtype, span):
+        """Cast the BDA result back to ``ori_dtype`` and close ``span``.
+
+        The fp32 [..., n*C] BDA result is dead the moment it is cast: cast
+        backward only needs the grad, not the input data. But the span pins it
+        through ``self.outputs``, so without the discard the span would trade the
+        two ``save_for_backward`` up-casts for a retained fp32 output and give
+        most of the saving back. The discard is also what registers
+        ``_recompute``, and ``_recompute`` is the only place that sets
+        ``ctx.inputs``/``ctx.outputs`` for
+        ``RecomputeWithoutOutputFunction.backward`` -- so it is mandatory, not an
+        optimization. The hook goes on the cast result because that is the first
+        tensor whose grad is produced after the fp32 data is dead; the cast
+        result itself must stay live for the whole half-layer, so the span cannot
+        be extended to swallow the cast.
+        """
+        casted = output.to(ori_dtype)
+        if span is None:
+            return casted
+        if casted is output:
+            # Tensor.to() is an identity when the dtype already matches, so the
+            # span output and the tensor the rest of the layer holds would be the
+            # same object and the discard would clear live data. Reachable when
+            # the residual is already fp32 (fp32 training); give the caller its
+            # own copy so the span still owns something discardable.
+            casted = output.clone()
+        span.discard_output_and_register_recompute(casted)
+        return casted
+
+    def _docmask_meta_kwargs(self):
+        """Micro-batch slot for the shared CSA document-mask metadata, or ``{}``.
+
+        Overrides the base opt-out hook: the DSv4-hybrid models run on this layer
+        class, so this is where the sharing is enabled. Returns ``{}`` when
+        ``config.csa_share_docmask_meta`` is off, so the switched-off path calls
+        ``_forward_impl`` with exactly the arguments it did before.
+
+        Called from ``TransformerLayer.forward``, i.e. outside the recompute
+        wrapper: the counter must advance exactly once per (layer, micro-batch),
+        whereas ``_forward_impl`` may be replayed by recompute.
+        """
+        if not (
+            getattr(self.config, "csa_share_docmask_meta", False)
+            or getattr(self.config, "mqa_share_docmask_meta", False)
+        ):
+            return {}
+        from paddlefleet.transformer.doc_mask_meta_registry import (
+            doc_mask_meta_registry,
+        )
+
+        return {
+            "docmask_mb_idx": doc_mask_meta_registry.advance(
+                self._docmask_meta_key, self.training
+            )
+        }
 
     def _forward_attention(
         self,
@@ -1734,6 +1973,16 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         if isinstance(self.self_attn, KimiDeltaAttention):
             # Built once per step by the embedding; None makes KDA build its own.
             extra_kwargs["cu_seqlens"] = kwargs.get("cu_seqlens")
+        # Micro-batch slot for the shared document-mask metadata, decided in
+        # ``forward`` (outside recompute) and only read here. This override is
+        # the ``_forward_attention`` that runs whenever enable_hyper_connections
+        # is set, which is the case for the DSv4-hybrid models. Both attention
+        # classes derive their own mask group, so an MTP layer simply misses the
+        # lookup (the trainer prebuilds no MTP group) and builds privately.
+        if isinstance(
+            self.self_attn, (DSv4HybridAttention, MultiLatentAttention)
+        ):
+            extra_kwargs["docmask_mb_idx"] = kwargs.get("docmask_mb_idx", -1)
 
         if isinstance(self.self_attn, MultiLatentAttention):
             attention_output_with_bias = self.self_attn(
@@ -1785,16 +2034,13 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             )
 
         # mHC: fused H_res + H_post + bias-dropout-add
-        hidden_states = (
-            self.self_attention_hyper_connection.fused_h_res_h_post_bda(
-                h_res=h_res,
-                original_residual=original_residual,
-                h_post=h_post,
-                layer_output_with_bias=attention_output_with_bias,
-                dropout_prob=self.hidden_dropout_prob,
-                training=self.training,
-                fused=self.config.bias_dropout_fusion,
-            )
+        hidden_states, fused_span = self._fused_h_res_h_post_bda(
+            self.self_attention_hyper_connection,
+            h_res,
+            original_residual,
+            h_post,
+            attention_output_with_bias,
+            self.recompute_mhc_forward and self.training,
         )
         # Discard mhc.forward outputs (aggregated, h_res, h_post) after fused_bda consumed them
         if self.recompute_mhc_forward and self.training:
@@ -1802,7 +2048,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 hidden_states
             )
             self._attn_mhc_recompute = None
-        hidden_states = hidden_states.to(ori_dtype)
+        hidden_states = self._cast_and_discard_fused_bda(
+            hidden_states, ori_dtype, fused_span
+        )
 
         # Cross attention (unchanged)
         residual = hidden_states
@@ -1908,14 +2156,13 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
 
         # mHC: fused H_res + H_post + bias-dropout-add
-        hidden_states = self.mlp_hyper_connection.fused_h_res_h_post_bda(
-            h_res=h_res,
-            original_residual=original_residual,
-            h_post=h_post,
-            layer_output_with_bias=mlp_output_with_bias,
-            dropout_prob=self.hidden_dropout_prob,
-            training=self.training,
-            fused=self.config.bias_dropout_fusion,
+        hidden_states, fused_span = self._fused_h_res_h_post_bda(
+            self.mlp_hyper_connection,
+            h_res,
+            original_residual,
+            h_post,
+            mlp_output_with_bias,
+            self.recompute_mhc_forward and self.training,
         )
         # Discard mhc.forward outputs (aggregated, h_res, h_post) after fused_bda consumed them
         if self.recompute_mhc_forward and self.training:
@@ -1923,7 +2170,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 hidden_states
             )
             self._mlp_mhc_recompute = None
-        hidden_states = hidden_states.to(ori_dtype)
+        hidden_states = self._cast_and_discard_fused_bda(
+            hidden_states, ori_dtype, fused_span
+        )
 
         if is_first_fwd:
             hidden_states.stop_gradient = False
@@ -1941,6 +2190,7 @@ class HySparseTransformerLayer(TransformerLayer):
             and not is_mtp
             and not self.config.mtp_load_weight_only
             and not self.config.enable_mtp_magic_send
+            and not self.config.separate_mtp_input
         )
 
     def _mtp_split(self, dict_args, is_mtp):
@@ -1957,6 +2207,12 @@ class HySparseTransformerLayer(TransformerLayer):
         if not self._mtp_enabled(is_mtp):
             return None
         n = self.config.num_nextn_predict_layers
+        # Under use_erndata position_ids / masks are already
+        # main-decoder length L (per-doc shifting happens inside the MTP layer
+        # via roll_tensor), so the L+K -> L seq-dim trims below must be
+        # skipped. Mirrors the ``_mtp_is_megatron`` guards in
+        # ``TransformerLayer.forward``.
+        _mtp_is_megatron = getattr(self.config, "use_erndata", False)
         ctx = {
             "mtp_ids": None,
             "mtp_input_ids": None,
@@ -1972,8 +2228,11 @@ class HySparseTransformerLayer(TransformerLayer):
         ctx["mtp_input"] = tuple(tensor_list[1:])
         dict_args["hidden_states"] = hidden_states
 
-        # position_ids: split along seq dim
-        if not self.config.gpt_model_use_experimental_version:
+        # position_ids: split along seq dim (ernie5 L+K path only)
+        if (
+            not self.config.gpt_model_use_experimental_version
+            and not _mtp_is_megatron
+        ):
             if (
                 "position_ids" in dict_args
                 and dict_args["position_ids"] is not None
@@ -2031,9 +2290,11 @@ class HySparseTransformerLayer(TransformerLayer):
                 dict_args["input_ids"] = full_input_ids[:, :-n].contiguous()
                 ctx["mtp_input_ids"] = full_input_ids[:, -n:].contiguous()
 
-        # attn_mask_startend_row_indices: split along seq dim (old dataflow)
+        # attn_mask_startend_row_indices: split along seq dim (old dataflow,
+        # ernie5 L+K path only -- under megatron the mask is already length L)
         if (
             not self.config.experimental_dataflow
+            and not _mtp_is_megatron
             and "attn_mask_startend_row_indices" in dict_args
             and dict_args["attn_mask_startend_row_indices"] is not None
         ):

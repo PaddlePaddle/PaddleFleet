@@ -100,10 +100,14 @@ from .hybrid_mla_utils import (
     _check_index_invariants,
     _create_mqa_config,
     _dense_reference,
+    _fa4_module_hooks,
+    _full_causal_indices,
     _make_inputs,
     _rel,
     _row_end,
 )
+
+setUpModule, tearDownModule = _fa4_module_hooks()
 
 # Adversarial document layouts: shorter than / equal to / longer than the
 # forced window, single-token documents, and a document overrunning the buffer.
@@ -122,14 +126,16 @@ _LAYOUTS = [
 
 
 def _full_causal_table(layout, seqlen):
-    """The per-document full-causal ``[1, s, s]`` table, from the production
-    builder itself -- it is a pure integer function of the document bounds.
+    """The per-document full-causal ``[1, s, s]`` table.
+
+    A pure integer function of the document bounds, shared with the CP suites
+    (``hybrid_mla_utils._full_causal_indices``). Production never materialises
+    it -- the dense FA4 backend gets the same column set as an ``O(s)`` row
+    bound -- so this is an independent derivation of what that mask must be.
     """
     row_end = _row_end(layout, seqlen)
     doc_start, _, is_valid, _, _ = _derive_csa_doc_boundaries(row_end, seqlen)
-    table = MQALatentAttention._build_full_causal_indices(
-        1, seqlen, doc_start, is_valid
-    )
+    table = _full_causal_indices(1, seqlen, doc_start, is_valid)
     return table.numpy()
 
 
@@ -774,13 +780,6 @@ class TestHybridMLAConfig(unittest.TestCase):
 class TestMQAEquivalence(unittest.TestCase):
     """The indexer-less full-causal path is mathematically identical to MHA."""
 
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
-
     def setUp(self):
         _CAPTURED.clear()
         self.module = _build_module(_create_mqa_config("mqa"))
@@ -825,8 +824,12 @@ class TestMQAEquivalence(unittest.TestCase):
         """The learnable sink is one extra value-less softmax column."""
         seqlen, layout = 256, [40, 88, 128]
         sink = np.linspace(1.0, 3.0, H)
-        module = _build_module(_create_mqa_config("mqa"), sink=sink)
-        self.assertEqual(module.softmax_offset.dtype, paddle.float32)
+        module = _build_module(_create_mqa_config("mqa"), bf16=True, sink=sink)
+        # The dense FA4 backend takes the sink as ``learnable_sink`` and asserts
+        # bf16 on it (``flash_mask/cute/interface.py:598``), which is what
+        # ``build_softmax_offset``'s ``params_dtype`` gives in production. An
+        # fp32 sink here would be testing a configuration the phase cannot run.
+        self.assertEqual(module.softmax_offset.dtype, paddle.bfloat16)
         self.assertEqual(list(module.softmax_offset.shape), [H])
         query, key, w_v = _make_inputs(seqlen)
         row_end = _row_end(layout, seqlen)
@@ -850,13 +853,6 @@ class TestMQAEquivalence(unittest.TestCase):
 @_GPU
 class TestMQADSA(unittest.TestCase):
     """The DSA (indexer) path: forced window + Lightning-indexer top-k."""
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
 
     def setUp(self):
         _CAPTURED.clear()
@@ -969,6 +965,88 @@ class TestMQADSA(unittest.TestCase):
             )
         self.assertIn("values", DSAIndexerLossLoggingHelper.tracker)
 
+    def test_deterministic_sparse_backward_runs_at_the_fixture_head_count(self):
+        # ``mqa_sparse_attn_backward_backend="tilelang"`` must be usable on the
+        # same layers as the default: this fixture has H=8 heads per rank, well
+        # below the 32-wide head group the tilelang backward prefers, and the
+        # cuDNN backward it replaces accepts any ``h <= 64``. Two runs must also
+        # give bitwise identical gradients -- that is the whole point of the
+        # switch (cuDNN's dkv scatter-add is not reproducible).
+        config = _create_mqa_config("mqa_dsa", loss_coeff=0.01)
+        config.mqa_sparse_attn_backward_backend = "tilelang"
+        module = _build_module(config, bf16=True)
+        self.assertEqual(module.sparse_attn_backward_backend, "tilelang")
+        module.train()
+        seqlen = WINDOW + INDEX_TOPK
+
+        def once():
+            # Fresh input leaves each time (the module and its weights are
+            # shared, so only the inputs' own gradients are compared).
+            query, key, w_v, x, qr = self._inputs(seqlen)
+            for tensor in (query, key, x, qr):
+                tensor.stop_gradient = False
+            out = module(
+                query,
+                key,
+                None,
+                None,
+                _row_end([seqlen], seqlen),
+                v_b_proj_weight=w_v,
+                x=x,
+                qr=qr,
+            )
+            out.cast("float32").sum().backward()
+            return (
+                query.grad.cast("float32").numpy().copy(),
+                key.grad.cast("float32").numpy().copy(),
+            )
+
+        dq1, dkv1 = once()
+        for name, grad in (("query", dq1), ("key", dkv1)):
+            self.assertTrue(
+                bool(np.isfinite(grad).all()), f"{name} grad is not finite"
+            )
+        dq2, dkv2 = once()
+        self.assertTrue(np.array_equal(dq1, dq2), "dq is not reproducible")
+        self.assertTrue(np.array_equal(dkv1, dkv2), "dkv is not reproducible")
+
+    def test_unfused_indexer_backend_survives_the_sparse_backward(self):
+        # ``csa_indexer_backend="unfused"`` is accepted by the config validation
+        # and used by several hybrid-MLA fixtures, but the loss scaler
+        # (``TileLangCSAIndexerLossAutoScaler.backward``) implements only
+        # "cudnn" and "tilelang". Forwarding the name verbatim made a legal
+        # configuration raise ``NotImplementedError`` on the *first* sparse
+        # backward, so the layer maps it onto tilelang -- the same substitution
+        # the warmup KL makes. This runs the real backward to prove it.
+        config = _create_mqa_config("mqa_dsa", loss_coeff=0.01)
+        config.csa_indexer_backend = "unfused"
+        module = _build_module(config, bf16=True)
+        self.assertEqual(module.indexer_backend, "tilelang")
+
+        seqlen = WINDOW + INDEX_TOPK
+        query, key, w_v, x, qr = self._inputs(seqlen)
+        for tensor in (query, key, x, qr):
+            tensor.stop_gradient = False
+        module.train()
+        out = module(
+            query,
+            key,
+            None,
+            None,
+            _row_end([seqlen], seqlen),
+            v_b_proj_weight=w_v,
+            x=x,
+            qr=qr,
+        )
+        out.cast("float32").sum().backward()
+        for name in ("wq_b", "wk", "weights_proj"):
+            grad = getattr(module.indexer, name).linear.weight.grad
+            self.assertIsNotNone(grad, f"indexer.{name} has no gradient")
+            self.assertTrue(
+                bool(paddle.isfinite(grad.cast("float32")).all()),
+                f"indexer.{name} gradient is not finite",
+            )
+
     def test_indexer_loss_mask_comes_from_input_ids(self):
         """Padding rows must not dilute the KL loss, and only ``input_ids`` sees them.
 
@@ -1041,10 +1119,13 @@ class TestMQADSA(unittest.TestCase):
           ``window + index_topk`` and the KL is restricted to that same set, so
           ``_attn_target`` is called once per step at exactly ``index_topk``.
 
-        Both column sets are asserted. The ``False`` attention table is *exactly*
-        assertable: it is ``_build_full_causal_indices``, a pure integer function
-        of the document bounds with no floating-point scoring in it, so it is
-        reproducible and equal to the builder's own output element for element.
+        Both column sets are asserted. The ``False`` branch has no column table
+        of its own -- dense FA4 is its only backend and carries the mask as an
+        ``O(s)`` row bound -- so ``RecordingMQA`` writes that bound out as the
+        ``[b, s, s]`` set it denotes (``_row_end_column_table``). That decoding is
+        a pure integer function of the document bounds with no floating-point
+        scoring in it, so it is reproducible and *exactly* assertable, element for
+        element, against ``_full_causal_table``.
 
         The ``True`` path stays statistical, which is the pre-existing measured
         fact this test still records: on a single full-length document neither
@@ -1301,13 +1382,6 @@ class TestMQADSAWarmupPhase(unittest.TestCase):
     # candidate range is non-empty on the late rows yet still excludes them.
     LAYOUT = [40, 216]
 
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
-
     def setUp(self):
         _CAPTURED.clear()
         DSAIndexerLossLoggingHelper.tracker.clear()
@@ -1347,13 +1421,15 @@ class TestMQADSAWarmupPhase(unittest.TestCase):
     def test_attention_output_equals_the_indexer_less_full_causal_path(self):
         """The core invariant: the indexer's *existence* must not move a bit.
 
-        Both paths call the same ``_build_full_causal_indices`` and then the
-        same sparse kernel, so the outputs must be bit-identical, not merely
-        close. Nothing needs weight copying: on this path attention consumes no
-        module parameter at all -- the query/key/``v_b_proj_weight`` are inputs
-        and ``softmax_offset`` is ``None`` in both -- so the only thing that
-        could differ is the index table. Asserted in both modes, so the
-        ``:495`` early exit and the full ``:600`` branch are each covered.
+        Both paths reach the same ``_forward_full_causal`` -- phase 1 directly
+        (``:500``), the warmup through it (``:629``) -- and so the same dense FA4
+        kernel with the same caller row bound, so the outputs must be
+        bit-identical, not merely close. Nothing needs weight copying: on this
+        path attention consumes no module parameter at all -- the
+        query/key/``v_b_proj_weight`` are inputs and ``softmax_offset`` is
+        ``None`` in both -- so the only thing that could differ is the mask.
+        Asserted in both modes, so the warmup's ``:636`` eval early exit and its
+        full indexer-loss branch are each covered.
         """
         query, key, w_v, x, qr = self._inputs()
         reference = _build_module(_create_mqa_config("mqa"), bf16=True)
@@ -1721,13 +1797,6 @@ class TestMQADSACudnnTarget(unittest.TestCase):
 
     TOPK = 512
     SEQLEN = 768  # > WINDOW + TOPK, so the table stays genuinely sparse
-
-    @classmethod
-    def setUpClass(cls):
-        try:
-            paddle.set_flags({"FLAGS_cudnn_deterministic": True})
-        except Exception:
-            pass
 
     def _build(self, topk):
         config = _create_mqa_config("mqa_dsa", loss_coeff=0.01)
@@ -2149,6 +2218,51 @@ class TestSparseAttnPlumbingMocked(unittest.TestCase):
         # "sinkless softmax", it is not an omitted argument.
         self.assertIsNone(kwargs["attn_sink"])
         self.assertIn("attn_sink", kwargs)
+
+    def _call(self, module, calls):
+        with self._patched(calls):
+            module._sparse_attn(
+                paddle.zeros([1, 2, H, DK], dtype="bfloat16"),
+                paddle.zeros([1, 2, DK], dtype="bfloat16"),
+                paddle.zeros([1, 2, 4], dtype="int32"),
+                module.softmax_scale,
+                DV,
+            )
+
+    def test_backward_backend_is_read_from_the_config(self):
+        # ``mqa_sparse_attn_backward_backend`` picks the dkv backward: "cudnn"
+        # (fast, atomics, non-reproducible) or "tilelang" (deterministic, ~14x
+        # slower). The layer only forwards it, but it must forward the
+        # *configured* value -- a silent default here would make the
+        # determinism switch a no-op.
+        calls = []
+        self._call(self.module, calls)
+        self.assertEqual(calls[0][2]["backward_backend"], "cudnn")
+
+        config = _create_mqa_config("mqa_dsa")
+        config.mqa_sparse_attn_backward_backend = "tilelang"
+        calls = []
+        self._call(_build_module(config, bf16=True), calls)
+        self.assertEqual(calls[0][2]["backward_backend"], "tilelang")
+
+    def test_indexer_backend_is_read_from_the_config(self):
+        # The indexer-loss scaler shares the CSA layers' ``csa_indexer_backend``
+        # switch; cuDNN's ``d_index_k`` scatter is the non-reproducible half.
+        module = _build_module(_create_mqa_config("mqa_dsa"), bf16=True)
+        self.assertEqual(module.indexer_backend, "tilelang")
+        config = _create_mqa_config("mqa_dsa")
+        config.csa_indexer_backend = "cudnn"
+        self.assertEqual(
+            _build_module(config, bf16=True).indexer_backend, "cudnn"
+        )
+        # "unfused" has no scaler backward of its own, so it is served by
+        # tilelang instead of reaching the scaler's NotImplementedError. The
+        # real backward is exercised in ``TestMQADSA``.
+        config = _create_mqa_config("mqa_dsa")
+        config.csa_indexer_backend = "unfused"
+        self.assertEqual(
+            _build_module(config, bf16=True).indexer_backend, "tilelang"
+        )
 
 
 class TestForwardDsaFusedDispatchMocked(unittest.TestCase):

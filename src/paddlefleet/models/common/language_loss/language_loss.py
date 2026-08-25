@@ -202,6 +202,22 @@ class LanguageLoss(FleetLayer):
     # Class-level tracker for MTP loss, read by trainer for logging.
     mtp_loss_tracker: dict[str, float] = {}
 
+    # Class-level stash for cu_seqlens_q under use_erndata=True.
+    # Populated on every rank by the dataloader (ernie5
+    # dist_data_loader.py — right after the three broadcast_data_obj calls),
+    # and additionally by gpt_embedding.forward on the embedding stage as a
+    # PP=1 safety net. Consumed here to drive strict per-doc `paddle.roll`
+    # in the MTP label-rolling loop so EOS positions are zero-masked
+    # correctly and match the embedding-side per-doc roll bit-exactly.
+    #
+    # PP=1: each micro-batch runs embedding→loss end-to-end before the next
+    #   arrives, so the stash is race-free even without thread-locals.
+    # PP>1: the last stage never runs embedding; the dataloader stash on every
+    #   rank is what enables the loss stage to see cu_seqlens_q. cu_seqlens_q
+    #   travels alongside `mtp_startend_row_indices_all` in every
+    #   `broadcast_data_obj` tuple (shuffle / main / pp_data).
+    _cu_seqlens_q_stash: "paddle.Tensor | None" = None
+
     def __init__(
         self,
         config: TransformerConfig,
@@ -471,6 +487,58 @@ class LanguageLoss(FleetLayer):
             return recompute(self.forward_impl, logits, labels)
         return self.forward_impl(logits, labels)
 
+    def _megatron_label_for_depth(self, labels_ori, depth):
+        """Megatron-style per-MTP-depth labels.
+
+        Under use_erndata=True labels arrive length-L (no L+K append).
+        ``depth < 0`` returns the main labels unchanged (length L); ``depth >= 0``
+        rolls labels_ori left ``depth + 1`` times, filling ``ignored_index`` at
+        every packed-document boundary (via the stashed cu_seqlens_q) so the
+        boundary token is excluded from the loss. Under CP>1 this rank's local
+        zigzag chunk is extracted so the label shape matches the local logits.
+
+        Mirrors the megatron branch of ``LanguageLoss.forward`` so the separate
+        Main/MTP head-loss path stays consistent with the fused path.
+        """
+        if depth < 0:
+            _lbl = labels_ori
+        else:
+            _cu = LanguageLoss._cu_seqlens_q_stash
+            if _cu is None:
+                raise RuntimeError(
+                    "use_erndata=True requires cu_seqlens_q to be "
+                    "stashed on LanguageLoss._cu_seqlens_q_stash before the loss "
+                    "stage, but it is None on this rank. It should be set by "
+                    "GPTEmbedding.forward (PP=1) or the LM head on the last PP "
+                    "stage (GPTLMHead / GPTMainLMHead / GPTMTPLMHead)."
+                )
+            from paddlefleet.transformer.multi_token_prediction import (
+                _roll_tensor_packed_seq,
+            )
+
+            _lbl = labels_ori
+            for _ in range(depth + 1):
+                _lbl, _ = _roll_tensor_packed_seq(
+                    _lbl,
+                    shifts=-1,
+                    dims=1,
+                    cu_seqlens_q=_cu,
+                    pad_value=self.ignored_index,
+                )
+        if get_context_parallel_world_size() > 1:
+            from paddlefleet.parallel_state import get_context_parallel_rank
+            from paddlefleet.transformer.multi_token_prediction import (
+                extract_local_zigzag_chunks,
+            )
+
+            _lbl = extract_local_zigzag_chunks(
+                _lbl,
+                get_context_parallel_rank(),
+                get_context_parallel_world_size(),
+                axis=1,
+            )
+        return _lbl
+
     def forward(self, logits: Tensor | list, labels: Tensor) -> Tensor:
         if isinstance(logits, list):
             assert (
@@ -480,8 +548,45 @@ class LanguageLoss(FleetLayer):
             )
             assert len(logits) == self.config.num_nextn_predict_layers + 1
             labels_ori = labels
-            lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
-            seq_length = lm_labels.shape[1]
+            # Under use_erndata=True labels are already [B, L]
+            # (no L+K trailing padding). The main-decoder logits also live
+            # at length L (no L→L-K slicing was performed upstream), so
+            # skip the L+K→L trim; likewise per-depth MTP labels come from
+            # a per-depth roll — approximated here by shifting labels_ori
+            # left by (depth+1) positions with -100 fill at the tail.
+            _mtp_is_megatron = getattr(self.config, "use_erndata", False)
+            # Under CP>1 the megatron path keeps labels_ori full-length on
+            # every rank. Local zigzag chunks must be extracted here so that
+            # shape matches the local logits produced by the embedding branch.
+            _cp_size_for_extract = (
+                get_context_parallel_world_size() if _mtp_is_megatron else 1
+            )
+            if _cp_size_for_extract > 1:
+                from paddlefleet.parallel_state import (
+                    get_context_parallel_rank as _get_cp_rank,
+                )
+                from paddlefleet.transformer.multi_token_prediction import (
+                    extract_local_zigzag_chunks as _extract_cp,
+                )
+
+                _cp_rank_for_extract = _get_cp_rank()
+            else:
+                _extract_cp = None
+                _cp_rank_for_extract = 0
+            if _mtp_is_megatron:
+                lm_labels = labels_ori
+                if _cp_size_for_extract > 1:
+                    # Extract this rank's local zigzag chunks from full-length labels.
+                    lm_labels = _extract_cp(
+                        lm_labels,
+                        _cp_rank_for_extract,
+                        _cp_size_for_extract,
+                        axis=1,
+                    )
+                seq_length = lm_labels.shape[1]
+            else:
+                lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
+                seq_length = lm_labels.shape[1]
 
             mtp_loss = []
             mtp_logits = logits[1:]
@@ -494,17 +599,81 @@ class LanguageLoss(FleetLayer):
 
                 for depth in range(self.config.num_nextn_predict_layers):
                     logits_cur_depth = mtp_logits[depth]
-                    labels_cur_depth = labels_ori[
-                        :, (depth + 1) : (depth + 1 + seq_length)
-                    ]
+                    if _mtp_is_megatron:
+                        # Under use_erndata=True labels_ori is [B, L]
+                        # (no L+K padding). MTP depth k predicts x[i+k+2],
+                        # i.e. labels rolled left (k+1) times with per-doc
+                        # boundary fill via cu_seqlens_q. For labels the
+                        # boundary MUST be filled with ignored_index (not 0),
+                        # otherwise the cross-doc position would train token 0.
+                        #
+                        # Strict per-doc parity: when cu_seqlens_q is
+                        # available, use `_roll_tensor_packed_seq` with
+                        # pad_value=ignored_index — same helper the embedding
+                        # side uses (pad_value=0 there), so the EOS boundaries
+                        # line up bit-exactly. When unavailable, fall back to
+                        # plain `paddle.roll` + ignored_index tail.
+                        _cu = LanguageLoss._cu_seqlens_q_stash
+                        if _cu is not None:
+                            from paddlefleet.transformer.multi_token_prediction import (
+                                _roll_tensor_packed_seq,
+                            )
+
+                            _lbl = labels_ori
+                            for _ in range(depth + 1):
+                                _lbl, _ = _roll_tensor_packed_seq(
+                                    _lbl,
+                                    shifts=-1,
+                                    dims=1,
+                                    cu_seqlens_q=_cu,
+                                    pad_value=self.ignored_index,
+                                )
+                        else:
+                            # No cu_seqlens_q on this rank. A plain
+                            # paddle.roll cannot respect packed-doc
+                            # boundaries, so it would leak labels across
+                            # documents (train the first token of doc N+1 as
+                            # the target at the last position of doc N). Fail
+                            # loudly instead of silently corrupting.
+                            # cu_seqlens_q is normally stashed by
+                            # GPTEmbedding.forward (PP=1 / first stage) and by
+                            # GPTLMHead.forward on the last PP stage; reaching
+                            # here means neither ran on this rank.
+                            raise RuntimeError(
+                                "use_erndata=True requires cu_seqlens_q "
+                                "to be stashed on LanguageLoss._cu_seqlens_q_stash "
+                                "before the loss stage, but it is None on this "
+                                "rank. It should be set by GPTEmbedding.forward "
+                                "(PP=1) or GPTLMHead.forward (last PP stage)."
+                            )
+                        if _cp_size_for_extract > 1:
+                            # Match local logits shape by extracting this
+                            # rank's zigzag chunks.
+                            _lbl = _extract_cp(
+                                _lbl,
+                                _cp_rank_for_extract,
+                                _cp_size_for_extract,
+                                axis=1,
+                            )
+                        labels_cur_depth = _lbl
+                    else:
+                        labels_cur_depth = labels_ori[
+                            :, (depth + 1) : (depth + 1 + seq_length)
+                        ]
                     if self.config.gpt_model_use_experimental_version:
                         # Align with EB: compute per-token loss matrix and reduce
                         # with global sum/count instead of going through forward_impl
                         # which applies line-wise loss.
 
-                        if get_context_parallel_world_size() > 1:
+                        if (
+                            get_context_parallel_world_size() > 1
+                            and not _mtp_is_megatron
+                        ):
                             # In EB data flow and CP size > 1, since we do not use _forward
                             # we need to scatter labels to cp local here.
+                            # Under use_erndata=True labels_cur_depth is
+                            # already local zigzag chunks (extract_local_zigzag_chunks
+                            # above), so skip the scatter to avoid double-scatter.
                             labels_cur_depth = ContextParallelScatterOp.apply(
                                 labels_cur_depth,
                                 axis=1,
@@ -533,8 +702,15 @@ class LanguageLoss(FleetLayer):
                                 labels_cur_depth,
                             )
 
-                        if get_context_parallel_world_size() > 1:
+                        if (
+                            get_context_parallel_world_size() > 1
+                            and not _mtp_is_megatron
+                        ):
                             # In EB data flow and CP size > 1, loss and labels need to be gathered back.
+                            # Under use_erndata=True labels stay local — the
+                            # subsequent lossmask/sum reduction is per-rank (allreduce
+                            # happens implicitly via DP grad-averaging), so skip the
+                            # gather to keep the length-L/cp local view.
                             loss_matrix_cur_depth = (
                                 ContextParallelGatherOp.apply(
                                     loss_matrix_cur_depth,
@@ -604,9 +780,54 @@ class LanguageLoss(FleetLayer):
                 ):
                     for depth in range(len(mtp_logits)):
                         prediction_scores_cur_depth = mtp_logits[depth]
-                        labels_cur_depth = labels_ori[
-                            :, (depth + 1) : (depth + 1 + seq_length)
-                        ]
+                        if _mtp_is_megatron:
+                            # Strict per-doc parity (mirror of the
+                            # mtp_distillation_loss=False path above): use
+                            # _roll_tensor_packed_seq with the cu_seqlens_q
+                            # stashed by the dataloader / GPTEmbedding.forward,
+                            # filling doc boundaries with ignored_index. If the
+                            # stash is missing, raise instead of silently
+                            # leaking labels across packed docs.
+                            _cu = LanguageLoss._cu_seqlens_q_stash
+                            if _cu is not None:
+                                from paddlefleet.transformer.multi_token_prediction import (
+                                    _roll_tensor_packed_seq,
+                                )
+
+                                _lbl = labels_ori
+                                for _ in range(depth + 1):
+                                    _lbl, _ = _roll_tensor_packed_seq(
+                                        _lbl,
+                                        shifts=-1,
+                                        dims=1,
+                                        cu_seqlens_q=_cu,
+                                        pad_value=self.ignored_index,
+                                    )
+                            else:
+                                # See the mtp_distillation_loss=False branch:
+                                # without cu_seqlens_q a plain roll leaks
+                                # labels across packed docs, so fail loudly
+                                # rather than corrupt the loss silently.
+                                raise RuntimeError(
+                                    "use_erndata=True requires "
+                                    "cu_seqlens_q to be stashed on "
+                                    "LanguageLoss._cu_seqlens_q_stash before the "
+                                    "loss stage, but it is None on this rank. "
+                                    "It should be set by GPTEmbedding.forward "
+                                    "(PP=1) or GPTLMHead.forward (last PP stage)."
+                                )
+                            if _cp_size_for_extract > 1:
+                                _lbl = _extract_cp(
+                                    _lbl,
+                                    _cp_rank_for_extract,
+                                    _cp_size_for_extract,
+                                    axis=1,
+                                )
+                            labels_cur_depth = _lbl
+                        else:
+                            labels_cur_depth = labels_ori[
+                                :, (depth + 1) : (depth + 1 + seq_length)
+                            ]
                         lossmask = (
                             labels_cur_depth != self.ignored_index
                         ).cast(paddle.float32)
@@ -764,7 +985,12 @@ class MainLanguageLoss(LanguageLoss):
             and not self.config.mtp_load_weight_only
         )
         labels_ori = labels
-        lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
+        if getattr(self.config, "use_erndata", False):
+            # erndata: labels are length-L already; main logits are length-L
+            # too, so keep the full labels (no L+K trim) and CP-extract to match.
+            lm_labels = self._megatron_label_for_depth(labels_ori, -1)
+        else:
+            lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
         seq_length = lm_labels.shape[1]
 
         mtp_loss = dict_args["mtp_loss"]
@@ -845,8 +1071,15 @@ class MTPLanguageLoss(LanguageLoss):
             and not self.config.mtp_load_weight_only
         )
         labels_ori = labels
-        lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
-        seq_length = lm_labels.shape[1]
+        _mtp_is_megatron = getattr(self.config, "use_erndata", False)
+        if _mtp_is_megatron:
+            # erndata: labels are length-L; per-depth labels come from a
+            # per-doc roll (ignored_index at boundaries), NOT the ernie5 L+K
+            # slice. seq_length is only used by the ernie5 slice path below.
+            seq_length = labels_ori.shape[1]
+        else:
+            lm_labels = labels[:, : -self.config.num_nextn_predict_layers]
+            seq_length = lm_labels.shape[1]
 
         mtp_loss = []
 
@@ -856,9 +1089,14 @@ class MTPLanguageLoss(LanguageLoss):
 
         for depth in range(self.config.num_nextn_predict_layers):
             logits_cur_depth = mtp_logits[depth]
-            labels_cur_depth = labels_ori[
-                :, (depth + 1) : (depth + 1 + seq_length)
-            ]
+            if _mtp_is_megatron:
+                labels_cur_depth = self._megatron_label_for_depth(
+                    labels_ori, depth
+                )
+            else:
+                labels_cur_depth = labels_ori[
+                    :, (depth + 1) : (depth + 1 + seq_length)
+                ]
             loss_cur_depth = self._forward(
                 logits_cur_depth,
                 labels_cur_depth,

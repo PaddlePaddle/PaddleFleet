@@ -226,6 +226,13 @@ def get_context_parallel_world_size():
         return get_context_parallel_group().world_size
 
 
+def get_context_parallel_rank():
+    """Return this rank's index within the context-parallel group (0 if CP is disabled)."""
+    if get_context_parallel_group() is None:
+        return 0
+    return get_context_parallel_group().rank
+
+
 def get_pipeline_model_parallel_world_size():
     """Return world size for the pipeline-model-parallel group."""
     # TODO: Support get_pipeline_model_parallel_world_size
