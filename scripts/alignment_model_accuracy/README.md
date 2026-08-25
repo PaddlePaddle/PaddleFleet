@@ -32,6 +32,8 @@ bash run_alignment_test.sh
 ```bash
 export PADDLEFLEET_WHEEL_PATH=/path/to/paddlefleet-xxx.whl
 export PADDLEFLEET_OPS_WHEEL_PATH=/path/to/paddlefleet_ops-xxx.whl
+export MEGATRON_CORE_WHEEL=/path/to/megatron_core.whl
+export MS_SWIFT_WHEEL=/path/to/ms_swift.whl
 bash setup_venvs.sh
 ```
 
