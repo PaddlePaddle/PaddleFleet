@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import paddle
 import paddle.nn.functional as F
-from paddle import Tensor, nn
+from paddle import Tensor, framework, nn
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
 from paddlefleet.models.common.embeddings.rope_utils import (
@@ -2149,6 +2149,113 @@ class CSAIndexer(nn.Layer):
 
 
 # ---------------------------------------------------------------------------
+# CompressOrSkip
+# ---------------------------------------------------------------------------
+
+
+class CompressOrSkip(paddle.autograd.PyLayer):
+    """Run-or-skip the compressor behind a single autograd node.
+
+    The compressor is skipped when ``actual_n_compressed == 0``, i.e. when no
+    document in the packed sequence reaches ``compress_ratio`` tokens. That is
+    data-dependent, so it happens on some ranks and not others. Two invariants
+    of sharding stage1 comm-overlap break if the two cases are plain Python
+    branches:
+
+    1. A ``FusedCommBuffer`` only launches its collective once every param it
+       owns has checked in via ``add_grad``. On a rank that skips, the
+       compressor's params get no grad, never check in, and that rank silently
+       omits the collective while its peers block in NCCL forever.
+    2. Paddle's eager backward is a deterministic topological traversal, so a
+       structurally different graph yields a different collective launch order.
+       NCCL requires every rank of a communicator to enqueue in the same order.
+
+    Putting both cases behind one node fixes both: ``manual_backward`` runs the
+    compressor's real backward inside this node's ``backward`` (no hand-written
+    gradients), so the compressor subgraph is not part of the engine's node
+    list and both branches present an identical topology. The skip branch
+    checks the params in from the same position.
+
+    Mirrors the ``DeepEPCombineAsync`` pattern in
+    ``paddlefleet/transformer/moe/fused_a2a.py``.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        kv,
+        x,
+        *,
+        compressor,
+        docmask_meta,
+        ran,
+        sq,
+        is_first_fwd,
+    ):
+        """Return ``concat([kv, compressed_kv])`` when running, else ``kv``."""
+        ctx.ran = ran
+        ctx.sq = sq
+        ctx.params = [p for p in compressor.parameters() if not p.stop_gradient]
+
+        if not ran:
+            ctx.bwf = None
+            # Returning an input unchanged makes PyLayer treat this as an
+            # inplace op and reject it, so hand back a copy. That also keeps
+            # this branch symmetric with the concat below.
+            return kv.clone()
+
+        # Lazy import: moe_utils pulls in a lot and is only needed here.
+        from paddlefleet.transformer.moe.moe_utils import manual_backward
+
+        def _compress(_x):
+            return compressor(_x, docmask_meta=docmask_meta)
+
+        ctx.bwf, out = manual_backward(_compress, is_first_fwd, x)
+        compressed_kv = out[0]
+        assert compressed_kv is not None, (
+            "compressor returned None while actual_n_compressed > 0; the "
+            "caller's gate should have made this unreachable"
+        )
+        return paddle.concat([kv, compressed_kv], axis=1)
+
+    @staticmethod
+    def backward(ctx, dout):
+        """Grads for (kv, x). ``x`` may be None, meaning zero contribution."""
+        if ctx.ran:
+            assert ctx.bwf is not None, (
+                "backward reached with bwf=None; is_first_fwd was True but a "
+                "grad node was still recorded"
+            )
+            dkv = dout[:, : ctx.sq]
+            grads = ctx.bwf(dout[:, ctx.sq :])
+            return dkv, (grads[0] if grads else None)
+
+        # Skipped: the compressor contributed nothing, so its grads are zero,
+        # but the params must still check in to their comm buffers or the
+        # sharding overlap collective is never issued on this rank. Doing it
+        # here keeps the position identical to the running branch, and
+        # PyLayer.backward runs exactly once per backward pass so this cannot
+        # double-fire the way a forward-registered hook would under recompute.
+        for p in ctx.params:
+            hook = getattr(p, "_apply_backward_hook", None)
+            if hook is None:
+                continue
+            if getattr(p, "main_grad", None) is None and p.grad is None:
+                # Firing now would trip the grad-address check in
+                # FusedCommBuffer.add_grad. Warn instead of deadlocking.
+                warnings.warn(
+                    f"{p.name} has neither main_grad nor grad, so it cannot be "
+                    "checked into its sharding comm buffer. The collective for "
+                    "that buffer will not be issued on this rank and the job "
+                    "will hang.",
+                    stacklevel=2,
+                )
+                continue
+            hook()
+        return dout, None
+
+
+# ---------------------------------------------------------------------------
 # CompressedSparseAttention (core attention)
 # ---------------------------------------------------------------------------
 
@@ -2783,21 +2890,33 @@ class CompressedSparseAttention(FleetLayer):
         kv = key.squeeze(2)  # [b, sq, v_head_dim]
 
         # Step 2: Compression
-        if (
+        # Both cases go through one autograd node so that the graph topology --
+        # and therefore the sharding stage1 comm-overlap collective launch
+        # order -- is identical on every rank. See CompressOrSkip.
+        run_compressor = bool(
             self.compressor is not None
             and self.compress_ratio > 1
             and actual_n_compressed > 0
-        ):
-            compressed_kv = self.compressor(
+        )
+        if self.compressor is not None:
+            kv_full = CompressOrSkip.apply(
+                kv,
                 x,
+                compressor=self.compressor,
                 docmask_meta=docmask_meta,
-            )  # [b, n_compressed, v_head_dim]
-            if compressed_kv is not None:
-                kv_full = paddle.concat([kv, compressed_kv], axis=1)
-                n_compressed = compressed_kv.shape[1]
-            else:
-                kv_full = kv
-                n_compressed = 0
+                ran=run_compressor,
+                sq=sq,
+                is_first_fwd=not framework._dygraph_tracer()._has_grad,
+            )
+            # Read both back off kv_full rather than recomputing them: the
+            # compressor zero-pads its output up to `seqlen // ratio` (see
+            # Compressor.forward), so the number of compressed slots is NOT
+            # actual_n_compressed whenever the document mask truncates.
+            # compressed_kv is only read under `compress_ratio > 1`, which is
+            # exactly the condition under which self.compressor is not None,
+            # so the else branch below does not need to bind it.
+            n_compressed = kv_full.shape[1] - sq
+            compressed_kv = kv_full[:, sq:] if n_compressed > 0 else None
         else:
             kv_full = kv
             n_compressed = 0

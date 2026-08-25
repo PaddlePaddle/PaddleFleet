@@ -224,19 +224,15 @@ class TestOperatorDispatch(unittest.TestCase):
         self.assertIs(m._compute_h_op, fused_compute_h)
 
     def test_widen_in_kernel_follows_high_precision_mhc(self):
-        """Only high_precision_mhc has a widening for the kernel to absorb.
+        """``high_precision_mhc`` is what gives the kernel a widening to absorb.
 
-        With it off the reference keeps the arithmetic in the incoming dtype,
-        so the kernel must too, or the fusion would silently promote it.
+        Only the enabled case is exercised: ``TransformerConfig`` now rejects
+        ``high_precision_mhc=False`` together with ``enable_hyper_connections``,
+        so a module with the widening switched off can no longer be built.
         """
         self.assertTrue(
             _module(
                 use_fused_mhc=True, high_precision_mhc=True
-            )._widen_in_kernel
-        )
-        self.assertFalse(
-            _module(
-                use_fused_mhc=True, high_precision_mhc=False
             )._widen_in_kernel
         )
 
@@ -267,23 +263,19 @@ class TestBdaSpanPaysOff(unittest.TestCase):
 
     It decides whether ``_fused_h_res_h_post_bda`` is wrapped in a
     ``RecomputeWithoutOutput`` span, so a wrong answer either wastes memory or
-    pays for a replay that saves nothing. Each branch is pinned separately.
+    pays for a replay that saves nothing. Only the ``high_precision_mhc=True``
+    branches are reachable now that the config rejects the low-precision mHC
+    combination.
     """
-
-    def test_dropout_alone_is_enough(self):
-        """The mask is one byte per element of the [..., n*C] output."""
-        m = _module(use_fused_mhc=True, high_precision_mhc=False)
-        self.assertTrue(m.bda_span_pays_off(0.1, training=True))
-        # not in eval: no mask is kept
-        self.assertFalse(m.bda_span_pays_off(0.1, training=False))
-
-    def test_without_high_precision_nothing_to_hide(self):
-        m = _module(use_fused_mhc=True, high_precision_mhc=False)
-        self.assertFalse(m.bda_span_pays_off(0.0, training=True))
 
     def test_high_precision_pays(self):
         m = _module(use_fused_mhc=True, high_precision_mhc=True)
         self.assertTrue(m.bda_span_pays_off(0.0, training=True))
+
+    def test_dropout_pays_too(self):
+        """The mask is one byte per element of the [..., n*C] output."""
+        m = _module(use_fused_mhc=True, high_precision_mhc=True)
+        self.assertTrue(m.bda_span_pays_off(0.1, training=True))
 
 
 class TestSingleStreamInit(unittest.TestCase):

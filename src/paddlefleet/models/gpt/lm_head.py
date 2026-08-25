@@ -303,7 +303,30 @@ class GPTLMHead(ColumnParallelLinear):
 
         return logits
 
+    def _stash_cu_seqlens_q(self, dict_args):
+        """Deliver cu_seqlens_q to the loss stage under use_erndata.
+
+        ``LanguageLoss.forward`` only receives ``(logits, labels)`` and cannot
+        see the pipeline dict. ``cu_seqlens_q`` (packed-doc boundaries) travels
+        down the pipeline dict to this LM head, which runs on the LAST pipeline
+        stage immediately before the loss. Stash it here — on the loss rank,
+        per micro-batch — so ``LanguageLoss`` can roll labels per-doc even under
+        PP>1 (GPTEmbedding.forward writes the same stash on the PP=1 / first
+        stage). No external dataloader broadcast is required.
+
+        Non-erndata runs never populate ``cu_seqlens_q`` (it is stripped from
+        the dict in GPTEmbedding.forward), so this is a no-op there.
+        """
+        cu_seqlens_q = dict_args.get("cu_seqlens_q", None)
+        if cu_seqlens_q is not None:
+            from paddlefleet.models.common.language_loss.language_loss import (
+                LanguageLoss as _LangLoss,
+            )
+
+            _LangLoss._cu_seqlens_q_stash = cu_seqlens_q
+
     def forward(self, dict_args: dict):
+        self._stash_cu_seqlens_q(dict_args)
         hidden_states = dict_args["hidden_states"]
 
         if (
@@ -358,6 +381,7 @@ class GPTMainLMHead(GPTLMHead):
         return ScheduleNode(self.forward, name="GPTMainLMHead")
 
     def forward(self, dict_args: dict):
+        self._stash_cu_seqlens_q(dict_args)
         hidden_states = dict_args["hidden_states"]
         mtp_loss = dict_args.get("mtp_loss", None)
 
@@ -401,6 +425,10 @@ class GPTMTPLMHead(GPTLMHead):
         return ScheduleNode(self.forward, name="GPTMTPLMHead")
 
     def forward(self, dict_args: dict):
+        # Under separate_mtp_headloss this head runs on the last stage BEFORE
+        # MTPLanguageLoss, which needs cu_seqlens_q to roll per-depth labels
+        # under use_erndata; stash it here on the loss rank.
+        self._stash_cu_seqlens_q(dict_args)
         hidden_states = dict_args["hidden_states"]
         num_mtp = self.config.num_nextn_predict_layers
         tensor_list = paddle.split(hidden_states, num_mtp + 1)

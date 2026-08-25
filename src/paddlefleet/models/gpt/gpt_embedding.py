@@ -33,6 +33,7 @@ from paddlefleet.context_parallel_utils import (
 )
 from paddlefleet.models.gpt.utils import fill_feature
 from paddlefleet.parallel_state import (
+    get_context_parallel_rank,
     get_context_parallel_world_size,
 )
 from paddlefleet.tensor_parallel.mappings import (
@@ -332,6 +333,39 @@ class GPTEmbedding(FleetLayer):
         deepstack_visual_embeds = None
         visual_pos_mask = None
         mtp_emb_res = None
+        # CP zigzag context of the use_erndata MTP branch below.
+        # The branch slices the embeddings itself (no ContextParallelScatterOp,
+        # which is gated on experimental_dataflow and therefore never runs for
+        # this style), so the RoPE tables have to be sliced with the very same
+        # layout further down. cp_size == 1 means "nothing to slice".
+        mtp_megatron_cp_size = 1
+        mtp_megatron_cp_rank = 0
+
+        # Ingest cu_seqlens_q (raw int32 tensor) from the batch dict if the
+        # dataloader put it there (use_erndata path). We keep
+        # it as a raw tensor throughout — no PackedSeqParams wrapper — to
+        # avoid triggering the attention-kernel THD path (qkv_format="thd")
+        # which the ernie5 flashmask stack does not use. Downstream
+        # consumers (MultiTokenPredictionLayer._forward_megatron_style)
+        # derive per-depth attn_mask_startend_row_indices from this tensor.
+        cu_seqlens_q = dict_args.get("cu_seqlens_q", None)
+        if cu_seqlens_q is not None and not cu_seqlens_q.place.is_gpu_place():
+            cu_seqlens_q = cu_seqlens_q.cuda()
+
+        # Stash cu_seqlens_q for the loss layer (use_erndata
+        # per-doc parity path). LanguageLoss.forward reads this class-level
+        # slot to drive per-doc `paddle.roll` with EOS zero-masking, matching
+        # the boundary semantics of the embedding-side rolls above. Under PP>1
+        # the dataloader broadcasts cu_seqlens_q to every rank and stashes it
+        # here after broadcast completes, so the loss stage on the last PP rank
+        # uses the same boundaries as the embedding stage.
+        if cu_seqlens_q is not None:
+            from paddlefleet.models.common.language_loss.language_loss import (
+                LanguageLoss as _LangLoss,
+            )
+
+            _LangLoss._cu_seqlens_q_stash = cu_seqlens_q
+
         if input_ids is None and decoder_input is None:
             assert dict_args["decoder_input"] is not None, (
                 "input_ids or decoder_input must be provided"
@@ -388,140 +422,271 @@ class GPTEmbedding(FleetLayer):
                 and self.config.num_nextn_predict_layers > 0
                 and not self.config.mtp_load_weight_only
             ):
-                # Split input_ids for MoE mask: main part for backbone, per-depth for MTP
-                if input_ids_for_moe_mask is not None:
-                    # Main backbone input_ids: [B, max_seq]
-                    # Use .contiguous() because slices are non-contiguous and PP P2P send requires contiguous tensors.
-                    input_ids_for_moe_mask = input_ids[
-                        :, : -self.config.num_nextn_predict_layers
-                    ].contiguous()
-                    # Construct per-depth MTP input_ids: for depth k, use
-                    # input_ids[:, (k+1):(k+1+max_seq)] matching embedding shift
-                    seq_length = (
-                        input_ids.shape[1]
-                        - self.config.num_nextn_predict_layers
+                # ------------------------------------------------------------
+                # erndata branch: input_ids is [B, L] (no L+K append);
+                # produce K shifted embeddings by rolling decoder_input in
+                # place with per-doc boundary zero-fill via cu_seqlens_q.
+                # Under CP>1, each rank holds the full-length embedding (per
+                # PaddleFleet dataloader broadcast) and slices its own
+                # zigzag chunks via extract_local_zigzag_chunks — no
+                # ContextParallelScatterOp needed.
+                # The ernie5 (default) path in the ``else`` below retains
+                # upstream develop's full logic, including multimodal + MTP.
+                # ------------------------------------------------------------
+                if getattr(self.config, "use_erndata", False):
+                    assert not self.multimodal_embedding, (
+                        "erndata MTP path does not support multimodal for now."
                     )
-                    mtp_ids_list = []
-                    for depth in range(self.config.num_nextn_predict_layers):
-                        mtp_ids_list.append(
-                            input_ids[:, (depth + 1) : (depth + 1 + seq_length)]
-                        )
-                    # [B, num_mtp, max_seq] - paddle.stack creates a new contiguous tensor
-                    mtp_input_ids_for_moe_mask = paddle.stack(
-                        mtp_ids_list, axis=1
+                    from paddlefleet.transformer.multi_token_prediction import (
+                        build_startend_row_indices_from_cu_seqlens,
+                        extract_local_zigzag_chunks,
+                        roll_tensor,
                     )
 
-                if self.config.enable_mtp_magic_send:
-                    # Magic send: only truncate, skip shifted embedding pre-computation.
-                    # input_ids will be broadcast to the last stage for re-embedding.
-                    decoder_input = decoder_input[
-                        :, : -self.config.num_nextn_predict_layers, :
-                    ]
+                    # The erndata contract only guarantees length-L tensors plus
+                    # cu_seqlens_q; the main flashmask boundaries are optional
+                    # (erndata emits them only when pack_by_cu_seqlen=True and
+                    # the sample has documents). Without a mask the CP branch of
+                    # DotProductAttention synthesizes an all-visible one and
+                    # calls flashmask with causal=False, silently dropping both
+                    # causality and doc boundaries from the backbone. Derive the
+                    # mask from cu_seqlens_q here so the backbone sees the same
+                    # per-doc boundaries the MTP depths do.
+                    if (
+                        attn_mask_startend_row_indices is None
+                        and cu_seqlens_q is not None
+                    ):
+                        attn_mask_startend_row_indices = build_startend_row_indices_from_cu_seqlens(
+                            cu_seqlens_q,
+                            decoder_input.shape[0],
+                            include_position_axis=self.config.gpt_model_use_experimental_version,
+                        )
 
-                    # Apply the same SP scatter as the non-magic-send path to ensure
-                    # bit-for-bit identical main embedding output.
-                    if (
-                        get_context_parallel_world_size() > 1
-                        and self.config.experimental_dataflow
-                    ):
-                        decoder_input = ContextParallelScatterOp.apply(
-                            decoder_input,
-                            axis=1,
-                            mode=self.config.cp_balance_mode,
+                    # decoder_input: [B, L, H] full-length embedding (already
+                    # computed above from the length-L input_ids in this branch).
+                    if input_ids_for_moe_mask is not None:
+                        # Megatron path keeps a single canonical input_ids [B, L].
+                        input_ids_for_moe_mask = input_ids.contiguous()
+                        mtp_input_ids_for_moe_mask = None
+
+                    inputs_embeds_ori = decoder_input
+                    batch_size, seq_length, hidden_size = decoder_input.shape
+
+                    # CP context (world size / rank). CP=1 turns extract into no-op.
+                    _cp_size = get_context_parallel_world_size()
+                    _cp_rank = (
+                        get_context_parallel_rank() if _cp_size > 1 else 0
+                    )
+                    # Publish it so the RoPE tables below get the same slicing.
+                    mtp_megatron_cp_size = _cp_size
+                    mtp_megatron_cp_rank = _cp_rank
+
+                    # Main embedding: [B, L, H] → [B, L/cp_size, H] via zigzag.
+                    if _cp_size > 1:
+                        inputs_embeds = extract_local_zigzag_chunks(
+                            inputs_embeds_ori, _cp_rank, _cp_size, axis=1
                         )
-                    if (
-                        self.config.gpt_model_use_experimental_version
-                        and self.config.sequence_parallel
-                    ):
-                        decoder_input = decoder_input.astype(
-                            self.embedding.embed_tokens.weight.dtype
-                        )
+                    else:
+                        inputs_embeds = inputs_embeds_ori
+
                     if self.sequence_parallel:
-                        batch_size, seq_length, hidden_size = (
-                            decoder_input.shape
+                        _sp_local_bs, _sp_local_sl, _sp_local_h = (
+                            inputs_embeds.shape
                         )
-                        decoder_input = decoder_input.reshape(
-                            [-1, decoder_input.shape[-1]]
+                        inputs_embeds = inputs_embeds.reshape([-1, _sp_local_h])
+                        inputs_embeds = ScatterOp.apply(inputs_embeds)
+                        inputs_embeds = (
+                            inputs_embeds.reshape(
+                                [_sp_local_bs, -1, _sp_local_h]
+                            )
+                            .permute(1, 0, 2)
+                            .contiguous()
                         )
-                        decoder_input = ScatterOp.apply(decoder_input)
-                        if not (
+
+                    mtp_emb_res = [inputs_embeds]
+
+                    # Cumulative rolls: depth k uses decoder_input rolled by
+                    # (k+1) positions. Roll on the full-length float embedding
+                    # (identical on every CP rank), then extract this rank's
+                    # zigzag chunks — avoids a ContextParallelScatterOp per depth.
+                    rolled_embed = inputs_embeds_ori
+                    for depth in range(self.config.num_nextn_predict_layers):
+                        rolled_embed, _ = roll_tensor(
+                            rolled_embed,
+                            shifts=-1,
+                            dims=1,
+                            cp_group=None,  # full-length semantics; see docstring
+                            cu_seqlens_q=cu_seqlens_q,
+                        )
+
+                        if _cp_size > 1:
+                            inputs_embeds_mtp = extract_local_zigzag_chunks(
+                                rolled_embed, _cp_rank, _cp_size, axis=1
+                            )
+                        else:
+                            inputs_embeds_mtp = rolled_embed
+
+                        if self.sequence_parallel:
+                            _sp_bs, _sp_sl, _sp_h = inputs_embeds_mtp.shape
+                            inputs_embeds_mtp = inputs_embeds_mtp.reshape(
+                                [-1, _sp_h]
+                            )
+                            inputs_embeds_mtp = ScatterOp.apply(
+                                inputs_embeds_mtp
+                            )
+                            inputs_embeds_mtp = (
+                                inputs_embeds_mtp.reshape([_sp_bs, -1, _sp_h])
+                                .permute(1, 0, 2)
+                                .contiguous()
+                            )
+                        mtp_emb_res.append(inputs_embeds_mtp)
+                else:
+                    # Split input_ids for MoE mask: main part for backbone, per-depth for MTP
+                    if input_ids_for_moe_mask is not None:
+                        # Main backbone input_ids: [B, max_seq]
+                        # Use .contiguous() because slices are non-contiguous and PP P2P send requires contiguous tensors.
+                        input_ids_for_moe_mask = input_ids[
+                            :, : -self.config.num_nextn_predict_layers
+                        ].contiguous()
+                        # Construct per-depth MTP input_ids: for depth k, use
+                        # input_ids[:, (k+1):(k+1+max_seq)] matching embedding shift
+                        seq_length = (
+                            input_ids.shape[1]
+                            - self.config.num_nextn_predict_layers
+                        )
+                        mtp_ids_list = []
+                        for depth in range(
+                            self.config.num_nextn_predict_layers
+                        ):
+                            mtp_ids_list.append(
+                                input_ids[
+                                    :, (depth + 1) : (depth + 1 + seq_length)
+                                ]
+                            )
+                        # [B, num_mtp, max_seq] - paddle.stack creates a new contiguous tensor
+                        mtp_input_ids_for_moe_mask = paddle.stack(
+                            mtp_ids_list, axis=1
+                        )
+
+                    if self.config.enable_mtp_magic_send:
+                        # Magic send: only truncate, skip shifted embedding pre-computation.
+                        # input_ids will be broadcast to the last stage for re-embedding.
+                        decoder_input = decoder_input[
+                            :, : -self.config.num_nextn_predict_layers, :
+                        ]
+
+                        # Apply the same SP scatter as the non-magic-send path to ensure
+                        # bit-for-bit identical main embedding output.
+                        if (
+                            get_context_parallel_world_size() > 1
+                            and self.config.experimental_dataflow
+                        ):
+                            decoder_input = ContextParallelScatterOp.apply(
+                                decoder_input,
+                                axis=1,
+                                mode=self.config.cp_balance_mode,
+                            )
+                        if (
                             self.config.gpt_model_use_experimental_version
                             and self.config.sequence_parallel
                         ):
-                            decoder_input = (
-                                decoder_input.reshape(
-                                    [batch_size, -1, hidden_size]
-                                )
-                                .permute(1, 0, 2)
-                                .contiguous()
-                            )  # change to [S/tp, B, H]
-                else:
-                    inputs_embeds_extra = decoder_input[
-                        :, -self.config.num_nextn_predict_layers :, :
-                    ]  # [B, S, H]
-                    inputs_embeds = decoder_input[
-                        :, : -self.config.num_nextn_predict_layers, :
-                    ]
-                    inputs_embeds_ori = inputs_embeds
-                    batch_size, seq_length, hidden_size = inputs_embeds.shape
-
-                    if (
-                        get_context_parallel_world_size() > 1
-                        and self.config.experimental_dataflow
-                    ):
-                        # In EB data flow, main input embed apply CP scatter here
-                        inputs_embeds = ContextParallelScatterOp.apply(
-                            inputs_embeds,
-                            axis=1,
-                            mode=self.config.cp_balance_mode,
-                        )
-
-                    if self.sequence_parallel:
-                        inputs_embeds = inputs_embeds.reshape(
-                            [-1, inputs_embeds.shape[-1]]
-                        )
-                        inputs_embeds = ScatterOp.apply(inputs_embeds)
-                        inputs_embeds = (
-                            inputs_embeds.reshape([batch_size, -1, hidden_size])
-                            .permute(1, 0, 2)
-                            .contiguous()
-                        )  # change to [S, B, H]
-                    mtp_emb_res = [inputs_embeds]
-                    for depth in range(self.config.num_nextn_predict_layers):
-                        inputs_embeds_mtp = paddle.concat(
-                            [
-                                inputs_embeds_ori[:, (depth + 1) :, :],
-                                inputs_embeds_extra[:, : (depth + 1), :],
-                            ],
-                            axis=1,
+                            decoder_input = decoder_input.astype(
+                                self.embedding.embed_tokens.weight.dtype
+                            )
+                        if self.sequence_parallel:
+                            batch_size, seq_length, hidden_size = (
+                                decoder_input.shape
+                            )
+                            decoder_input = decoder_input.reshape(
+                                [-1, decoder_input.shape[-1]]
+                            )
+                            decoder_input = ScatterOp.apply(decoder_input)
+                            if not (
+                                self.config.gpt_model_use_experimental_version
+                                and self.config.sequence_parallel
+                            ):
+                                decoder_input = (
+                                    decoder_input.reshape(
+                                        [batch_size, -1, hidden_size]
+                                    )
+                                    .permute(1, 0, 2)
+                                    .contiguous()
+                                )  # change to [S/tp, B, H]
+                    else:
+                        inputs_embeds_extra = decoder_input[
+                            :, -self.config.num_nextn_predict_layers :, :
+                        ]  # [B, S, H]
+                        inputs_embeds = decoder_input[
+                            :, : -self.config.num_nextn_predict_layers, :
+                        ]
+                        inputs_embeds_ori = inputs_embeds
+                        batch_size, seq_length, hidden_size = (
+                            inputs_embeds.shape
                         )
 
                         if (
                             get_context_parallel_world_size() > 1
                             and self.config.experimental_dataflow
                         ):
-                            # In EB data flow, mtp input embed apply CP scatter here
-                            inputs_embeds_mtp = ContextParallelScatterOp.apply(
-                                inputs_embeds_mtp,
+                            # In EB data flow, main input embed apply CP scatter here
+                            inputs_embeds = ContextParallelScatterOp.apply(
+                                inputs_embeds,
                                 axis=1,
                                 mode=self.config.cp_balance_mode,
                             )
 
                         if self.sequence_parallel:
-                            inputs_embeds_mtp = inputs_embeds_mtp.reshape(
-                                [-1, inputs_embeds_mtp.shape[-1]]
+                            inputs_embeds = inputs_embeds.reshape(
+                                [-1, inputs_embeds.shape[-1]]
                             )
-                            inputs_embeds_mtp = ScatterOp.apply(
-                                inputs_embeds_mtp
-                            )
-                            inputs_embeds_mtp = (
-                                inputs_embeds_mtp.reshape(
+                            inputs_embeds = ScatterOp.apply(inputs_embeds)
+                            inputs_embeds = (
+                                inputs_embeds.reshape(
                                     [batch_size, -1, hidden_size]
                                 )
                                 .permute(1, 0, 2)
                                 .contiguous()
                             )  # change to [S, B, H]
-                        mtp_emb_res.append(inputs_embeds_mtp)
+                        mtp_emb_res = [inputs_embeds]
+                        for depth in range(
+                            self.config.num_nextn_predict_layers
+                        ):
+                            inputs_embeds_mtp = paddle.concat(
+                                [
+                                    inputs_embeds_ori[:, (depth + 1) :, :],
+                                    inputs_embeds_extra[:, : (depth + 1), :],
+                                ],
+                                axis=1,
+                            )
+
+                            if (
+                                get_context_parallel_world_size() > 1
+                                and self.config.experimental_dataflow
+                            ):
+                                # In EB data flow, mtp input embed apply CP scatter here
+                                inputs_embeds_mtp = (
+                                    ContextParallelScatterOp.apply(
+                                        inputs_embeds_mtp,
+                                        axis=1,
+                                        mode=self.config.cp_balance_mode,
+                                    )
+                                )
+
+                            if self.sequence_parallel:
+                                inputs_embeds_mtp = inputs_embeds_mtp.reshape(
+                                    [-1, inputs_embeds_mtp.shape[-1]]
+                                )
+                                inputs_embeds_mtp = ScatterOp.apply(
+                                    inputs_embeds_mtp
+                                )
+                                inputs_embeds_mtp = (
+                                    inputs_embeds_mtp.reshape(
+                                        [batch_size, -1, hidden_size]
+                                    )
+                                    .permute(1, 0, 2)
+                                    .contiguous()
+                                )  # change to [S, B, H]
+                            mtp_emb_res.append(inputs_embeds_mtp)
 
             if self.multimodal_embedding:
                 if mtp_emb_res is None:
@@ -586,6 +751,31 @@ class GPTEmbedding(FleetLayer):
         swa_rotary_pos_cos = None
         swa_rotary_pos_sin = None
 
+        def _slice_rope_for_mtp_megatron_cp(rope_table):
+            """Zigzag-slice a RoPE table for use_erndata + CP > 1.
+
+            ``RotaryEmbedding.get_rotary_seq_len`` scales the rank-local input
+            length back up by ``cp_group.world_size``, so the tables below are
+            always built for the FULL sequence length L while the hidden states
+            this rank carries are its two zigzag chunks. The generic
+            ``ContextParallelScatterOp`` further down only runs for
+            ``experimental_dataflow``, which megatron style forbids, so the
+            slicing has to happen here -- with exactly the layout the megatron
+            MTP branch used for the embeddings.
+            """
+            if mtp_megatron_cp_size == 1 or rope_table is None:
+                return rope_table
+            from paddlefleet.transformer.multi_token_prediction import (
+                extract_local_zigzag_chunks,
+            )
+
+            return extract_local_zigzag_chunks(
+                rope_table,
+                mtp_megatron_cp_rank,
+                mtp_megatron_cp_size,
+                axis=1,
+            )
+
         # For MTP mode: truncate position_ids to match the actual sequence length
         # MTP reduces sequence length by num_nextn_predict_layers
         mtp_position_ids = position_ids
@@ -594,6 +784,12 @@ class GPTEmbedding(FleetLayer):
             and position_ids is not None
             and self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
+            # erndata keeps the main decoder at the full length L (the
+            # per-doc shift happens inside the MTP layer), so position_ids
+            # already matches. Under CP mtp_emb_res[0] is the rank-local
+            # zigzag slice, whose length must not be mistaken for L - K: a
+            # contiguous prefix of position_ids is not this rank's chunk.
+            and not getattr(self.config, "use_erndata", False)
         ):
             # mtp_emb_res[0] has shape [B, seq_len - num_nextn_predict_layers, H]
             actual_seq_len = mtp_emb_res[0].shape[1]
@@ -624,6 +820,7 @@ class GPTEmbedding(FleetLayer):
             )
 
         if rotary_pos_emb is not None:
+            rotary_pos_emb = _slice_rope_for_mtp_megatron_cp(rotary_pos_emb)
             if self.config.apply_rope_fusion:
                 rotary_pos_cos = paddle.cos(rotary_pos_emb)
                 rotary_pos_sin = paddle.sin(rotary_pos_emb)
@@ -663,6 +860,9 @@ class GPTEmbedding(FleetLayer):
             )
 
         if swa_rotary_pos_emb is not None:
+            swa_rotary_pos_emb = _slice_rope_for_mtp_megatron_cp(
+                swa_rotary_pos_emb
+            )
             if self.config.apply_rope_fusion:
                 swa_rotary_pos_cos = paddle.cos(swa_rotary_pos_emb)
                 swa_rotary_pos_sin = paddle.sin(swa_rotary_pos_emb)
@@ -740,6 +940,12 @@ class GPTEmbedding(FleetLayer):
                 if self.config.gpt_model_use_experimental_version
                 else None
             ),
+            # Under use_erndata cu_seqlens_q travels down the
+            # pipeline dict as a raw int32 tensor. MultiTokenPredictionLayer
+            # derives per-depth attn_mask_startend_row_indices from it via
+            # build_startend_row_indices_from_cu_seqlens. Under "ernie5"
+            # this is None (stripped by the None-cleanup loop below).
+            "cu_seqlens_q": cu_seqlens_q,
         }
         # New dataflow: pass mtp_startend_row_indices_all and mtp_hidden_inputs_mask_all
         # through dict_args to MTP layer. They must both be present or both be absent.

@@ -758,6 +758,14 @@ class TransformerLayer(nn.Layer):
         )
         mtp_input = None
         mtp_ids = None
+        # Under use_erndata the data pipeline emits length-L
+        # tensors (input_ids / labels / position_ids / attn_mask) and
+        # GPTEmbedding produces mtp_emb_res as (K+1) length-L blocks — the
+        # per-depth left-shift is performed inline via roll_tensor. That means
+        # the main decoder here runs at seq_len = L (not L-K), so the ernie5
+        # L+K path below must be skipped for position_ids / input_ids / mask
+        # trims.
+        _mtp_is_megatron = getattr(self.config, "use_erndata", False)
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
@@ -776,7 +784,12 @@ class TransformerLayer(nn.Layer):
             dict_args["hidden_states"] = hidden_states
 
             # process position_ids
-            if not self.config.gpt_model_use_experimental_version:
+            # Under use_erndata position_ids is [B, L] already
+            # (roll happens inside MTP layer), so DO NOT strip K positions.
+            if (
+                not self.config.gpt_model_use_experimental_version
+                and not _mtp_is_megatron
+            ):
                 if "position_ids" in dict_args.keys():
                     position_ids = dict_args["position_ids"]
                     # Slice the sequence axis, which is the last one for both
@@ -860,9 +873,12 @@ class TransformerLayer(nn.Layer):
                     dict_args["input_ids"] = decoder_input_ids
             if (
                 not self.config.experimental_dataflow
+                and not _mtp_is_megatron
                 and "attn_mask_startend_row_indices" in dict_args.keys()
             ):
-                # Old dataflow: main mask contains mtp parts appended along seq dim, need to split
+                # Old dataflow (ernie5 L+K path): main mask contains mtp parts
+                # appended along seq dim (total length L+K), split into main
+                # [B,1,L,1] + mtp [B,1,K,1] and hand main to the backbone.
                 attn_mask_startend_row_indices = dict_args[
                     "attn_mask_startend_row_indices"
                 ]
@@ -881,7 +897,9 @@ class TransformerLayer(nn.Layer):
                 )
             else:
                 # New dataflow (experimental_dataflow=True): main mask is already main-seq only,
-                # mtp masks are in mtp_startend_row_indices_all and will be used by MTP layer directly
+                # mtp masks are in mtp_startend_row_indices_all and will be used by MTP layer directly.
+                # Megatron style: mask is already length-L; MTP layer will derive per-depth mask
+                # from cu_seqlens_q, so leave main mask untouched here.
                 attn_mask_startend_row_indices_mtp = None
 
         if self.config.block_attention_residuals and "blocks" not in dict_args:
@@ -1024,8 +1042,13 @@ class TransformerLayer(nn.Layer):
         ):
             hidden_states_concat = paddle.concat([output, *mtp_input])
             rst["hidden_states"] = hidden_states_concat
-            if not self.config.gpt_model_use_experimental_version:
-                if "position_ids" in dict_args.keys():
+            # Under use_erndata the L+K position-ids split was
+            # skipped up front, so there is nothing to concat back either.
+            if (
+                not self.config.gpt_model_use_experimental_version
+                and not _mtp_is_megatron
+            ):
+                if "position_ids" in dict_args.keys() and mtp_ids is not None:
                     position_ids = paddle.concat(
                         [dict_args["position_ids"], mtp_ids], axis=-1
                     )
@@ -2184,6 +2207,12 @@ class HySparseTransformerLayer(TransformerLayer):
         if not self._mtp_enabled(is_mtp):
             return None
         n = self.config.num_nextn_predict_layers
+        # Under use_erndata position_ids / masks are already
+        # main-decoder length L (per-doc shifting happens inside the MTP layer
+        # via roll_tensor), so the L+K -> L seq-dim trims below must be
+        # skipped. Mirrors the ``_mtp_is_megatron`` guards in
+        # ``TransformerLayer.forward``.
+        _mtp_is_megatron = getattr(self.config, "use_erndata", False)
         ctx = {
             "mtp_ids": None,
             "mtp_input_ids": None,
@@ -2199,8 +2228,11 @@ class HySparseTransformerLayer(TransformerLayer):
         ctx["mtp_input"] = tuple(tensor_list[1:])
         dict_args["hidden_states"] = hidden_states
 
-        # position_ids: split along seq dim
-        if not self.config.gpt_model_use_experimental_version:
+        # position_ids: split along seq dim (ernie5 L+K path only)
+        if (
+            not self.config.gpt_model_use_experimental_version
+            and not _mtp_is_megatron
+        ):
             if (
                 "position_ids" in dict_args
                 and dict_args["position_ids"] is not None
@@ -2258,9 +2290,11 @@ class HySparseTransformerLayer(TransformerLayer):
                 dict_args["input_ids"] = full_input_ids[:, :-n].contiguous()
                 ctx["mtp_input_ids"] = full_input_ids[:, -n:].contiguous()
 
-        # attn_mask_startend_row_indices: split along seq dim (old dataflow)
+        # attn_mask_startend_row_indices: split along seq dim (old dataflow,
+        # ernie5 L+K path only -- under megatron the mask is already length L)
         if (
             not self.config.experimental_dataflow
+            and not _mtp_is_megatron
             and "attn_mask_startend_row_indices" in dict_args
             and dict_args["attn_mask_startend_row_indices"] is not None
         ):

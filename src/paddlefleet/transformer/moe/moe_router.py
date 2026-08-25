@@ -49,6 +49,7 @@ from paddlefleet.context_parallel_utils import (
     ContextParallelScatterOp,
 )
 from paddlefleet.parallel_state import (
+    get_context_parallel_rank,
     get_context_parallel_world_size,
     get_tensor_model_parallel_group,
 )
@@ -1495,6 +1496,28 @@ class TopKRouter(StandardMoERouter):
                 # so we need to scatter input_ids here to avid the assertion below
                 input_ids = ContextParallelScatterOp.apply(
                     input_ids, axis=1, mode=self.config.cp_balance_mode
+                )
+            elif (
+                get_context_parallel_world_size() > 1
+                and getattr(self.config, "use_erndata", False)
+                and input_ids is not None
+                and input_ids.shape[1] != seq_len
+            ):
+                # erndata MTP path: PaddleFleet dataloader broadcasts
+                # input_ids full-length [B, L] to every CP rank (unlike
+                # experimental_dataflow which pre-scatters). Embedding was
+                # already zigzag-sliced to [B, L/cp, H] via
+                # extract_local_zigzag_chunks (see gpt_embedding.py). Slice
+                # input_ids to the matching zigzag chunks here — no comm
+                # needed since every rank holds the same [B, L] tensor.
+                from paddlefleet.transformer.multi_token_prediction import (
+                    extract_local_zigzag_chunks,
+                )
+
+                _cp_size = get_context_parallel_world_size()
+                _cp_rank = get_context_parallel_rank()
+                input_ids = extract_local_zigzag_chunks(
+                    input_ids, _cp_rank, _cp_size, axis=1
                 )
             if input_ids is not None:
                 pad_token_id = getattr(self.config, "pad_token_id", 0)

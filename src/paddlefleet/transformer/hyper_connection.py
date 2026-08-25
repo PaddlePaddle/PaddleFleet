@@ -298,27 +298,38 @@ class HyperConnectionModule(nn.Layer):
         # - H_pre: n values
         # - H_post: n values
         # - H_res: n^2 values (before Sinkhorn projection)
-        self.mapping_proj = nn.Linear(
-            self.n * self.hidden_size,
-            self.n * self.n + 2 * self.n,
-            bias_attr=False,
-        )
+        # The mHC mapping parameters are stored in FP32 (mirrors Megatron
+        # hyper_connection.py mark_keep_in_fp32 on mapping_proj.weight /
+        # alpha_* / bias, and the MoE gate fp32 storage in moe_router.py):
+        # they are tiny, and keeping them out of BF16 removes the parameter
+        # rounding error from the mHC gating computation.
+        param_dtype = "float32"
+        default_dtype = paddle.get_default_dtype()
+        try:
+            paddle.set_default_dtype(param_dtype)
+            self.mapping_proj = nn.Linear(
+                self.n * self.hidden_size,
+                self.n * self.n + 2 * self.n,
+                bias_attr=False,
+            )
+        finally:
+            paddle.set_default_dtype(default_dtype)
 
         init_alpha = config.mhc_init_gating_factor
         # Learnable scaling factors (Eq. 5 in paper)
         self.alpha_pre = self.create_parameter(
             shape=[1],
-            dtype=self.config.params_dtype,
+            dtype=param_dtype,
             default_initializer=nn.initializer.Constant(init_alpha),
         )
         self.alpha_post = self.create_parameter(
             shape=[1],
-            dtype=self.config.params_dtype,
+            dtype=param_dtype,
             default_initializer=nn.initializer.Constant(init_alpha),
         )
         self.alpha_res = self.create_parameter(
             shape=[1],
-            dtype=self.config.params_dtype,
+            dtype=param_dtype,
             default_initializer=nn.initializer.Constant(init_alpha),
         )
 
@@ -327,6 +338,7 @@ class HyperConnectionModule(nn.Layer):
         # ``_single_stream_init_weights``.
         self.bias = self.create_parameter(
             shape=[self.n * self.n + 2 * self.n],
+            dtype=param_dtype,
             default_initializer=nn.initializer.Constant(0.0),
         )
 
@@ -961,19 +973,22 @@ class HyperConnectionContractLayer(FleetLayer):
         # Learned contraction parameters (DSv4 style, always used)
         n = self.n
         hc_dim = config.hidden_size * n
+        # learned_output_contract() computes in fp32; store the parameters in
+        # fp32 as well (Megatron transformer_block.py marks hc_head_* keep_in_fp32).
+        hc_param_dtype = "float32"
         self.hc_head_fn = self.create_parameter(
             shape=[hc_dim, n],
-            dtype=self.config.params_dtype,
+            dtype=hc_param_dtype,
             default_initializer=nn.initializer.XavierUniform(),
         )
         self.hc_head_base = self.create_parameter(
             shape=[n],
-            dtype=self.config.params_dtype,
+            dtype=hc_param_dtype,
             default_initializer=nn.initializer.Constant(0.0),
         )
         self.hc_head_scale = self.create_parameter(
             shape=[1],
-            dtype=self.config.params_dtype,
+            dtype=hc_param_dtype,
             default_initializer=nn.initializer.Constant(1.0),
         )
 

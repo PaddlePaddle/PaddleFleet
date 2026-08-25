@@ -2355,6 +2355,17 @@ class ExpertsGroupGemmContiguousNode:
                                 shape=expert.up_gate_proj.weight.shape,
                                 dtype=paddle.float32,
                             )
+
+                    # [FIX-719] see the comment in the fused branch below.
+                    for w in (
+                        expert.down_proj.weight,
+                        expert.up_gate_proj.weight,
+                    ):
+                        if (
+                            hasattr(w, "_apply_backward_hook")
+                            and not w.stop_gradient
+                        ):
+                            w._apply_backward_hook()
             else:
                 for weight in (
                     self.grouped_gemm_experts.weight1,
@@ -2375,6 +2386,24 @@ class ExpertsGroupGemmContiguousNode:
                         weight.grad = paddle.zeros(
                             shape=weight.shape, dtype=paddle.float32
                         )
+
+                    # [FIX-719] Check the weight in to its sharding comm buffer
+                    # even though this rank got zero tokens. Allocating main_grad
+                    # is not enough: under sharding stage1 comm-overlap a
+                    # FusedCommBuffer only launches its collective once *every*
+                    # param it owns has checked in, so a rank that skips this
+                    # silently omits the collective while its peers block in
+                    # NCCL forever -- and it races ahead into the next DeepEP
+                    # barrier alone, which traps after ~100s and surfaces as
+                    # CUDA 719 on its peers.
+                    # This fires at the same graph position as the non-zero-token
+                    # path below (both inside FusionMoePyLayer.backward), so the
+                    # collective launch order stays identical across ranks.
+                    if (
+                        hasattr(weight, "_apply_backward_hook")
+                        and not weight.stop_gradient
+                    ):
+                        weight._apply_backward_hook()
 
             if a2a_async_fn:
                 dx, task = a2a_async_fn(dx)

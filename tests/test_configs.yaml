@@ -28,6 +28,16 @@ tests:
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_with_mtp.py]
     products:
       - num_gpus: 8
+  # PP>1 + use_erndata=True: exercises GPTLMHead._stash_cu_seqlens_q
+  # delivering cu_seqlens_q to the loss stage under PP (PP=2, TP=1, dense).
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_megatron.py]
+    products:
+      - num_gpus: 2
+  # PP>1 + separate_mtp_headloss + megatron: GPTMTPLMHead stash + Main/MTP
+  # LanguageLoss megatron label roll end-to-end (PP=4, VPP=1, TP=1, dense).
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_megatron_separate_headloss.py]
+    products:
+      - num_gpus: 4
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_with_mtp_with_overlap.py]
     products:
       - num_gpus: 8
@@ -201,6 +211,11 @@ tests:
       - num_gpus: 2
   # separate_mtp_input: bitwise fwd/bwd equivalence vs concat/split baseline (CP=2)
   - test_case: [tests/multi_card_tests/test_separate_mtp_input_cp.py]
+    products:
+      - num_gpus: 2
+  # use_erndata=True + CP=2: the RoPE tables must follow the same
+  # zigzag layout the megatron MTP branch slices the embeddings with.
+  - test_case: [tests/multi_card_tests/test_gpt_mtp_megatron_cp.py]
     products:
       - num_gpus: 2
   # default fallback for remaining multi_card_tests
