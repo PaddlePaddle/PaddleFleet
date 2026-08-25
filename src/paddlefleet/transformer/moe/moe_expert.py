@@ -291,10 +291,15 @@ class GroupedMLPExpert(FleetLayer):
         The 'allgather' dispatcher shards the experts along their intermediate
         dim instead of along the expert dim, so a rank holds every expert.
         ``sharded_state_dict`` keys off the same condition; keep the two in sync.
+
+        'ringmoe' uses the identical sharding (it only reorganizes the
+        collectives) and must match here too: ``MoELayer.__init__`` normalizes
+        its own config to "allgather", but that happens *after* it deepcopies
+        the expert config, so the first MoE layer's experts still see "ringmoe".
         """
         return (
             getattr(self.config, "moe_token_dispatcher_type", None)
-            == "allgather"
+            in ("allgather", "ringmoe")
             and self.expert_parallel
         )
 
