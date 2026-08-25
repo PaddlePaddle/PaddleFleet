@@ -695,6 +695,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 dtype=hc_param_dtype,
                 default_initializer=nn.initializer.Constant(1.0),
             )
+            self._cast_to_low_precision = False
             if self.sequence_parallel:
                 self.hc_head_fn.is_distributed = False
                 self.hc_head_base.is_distributed = False
