@@ -379,23 +379,15 @@ static void CheckFusedSwiGLUXShape(const std::vector<int64_t>& x_shape,
            ": the last dimension of X must be divisible by 2");
 }
 
-static std::vector<int64_t> InferFusedSwiGLUOutputShape(
-    const std::vector<int64_t>& x_shape, const char* op_name) {
-  CheckFusedSwiGLUXShape(x_shape, op_name);
-  // Preserve -1 for unknown hidden dimensions during static shape inference.
-  const int64_t hidden_size = x_shape[1] < 0 ? -1 : x_shape[1] / 2;
-  return {x_shape[0], hidden_size};
-}
-
 static void CheckFusedSwiGLUInputs(const paddle::Tensor& x,
                                    const paddle::Tensor& scale,
                                    const paddle::Tensor* d_out,
                                    const char* op_name,
                                    const char* scale_name) {
-  PD_CHECK(x.is_gpu() && scale.is_gpu() &&
-               (d_out == nullptr || d_out->is_gpu()),
-           op_name,
-           " expects GPU inputs");
+  PD_CHECK(
+      x.is_gpu() && scale.is_gpu() && (d_out == nullptr || d_out->is_gpu()),
+      op_name,
+      " expects GPU inputs");
   PD_CHECK(x.place() == scale.place() &&
                (d_out == nullptr || x.place() == d_out->place()),
            op_name,
@@ -413,7 +405,10 @@ static void CheckFusedSwiGLUInputs(const paddle::Tensor& x,
            op_name,
            ": ",
            scale_name,
-           " must have shape [rows] or [rows, 1]");
+           " must have shape [rows] or [rows, 1], got rank=",
+           scale_shape.size(),
+           ", numel=",
+           scale.numel());
 
   const int64_t rows = x_shape[0];
   const int64_t hidden_size = x_shape[1] / 2;
@@ -421,16 +416,29 @@ static void CheckFusedSwiGLUInputs(const paddle::Tensor& x,
            op_name,
            ": ",
            scale_name,
-           " must contain exactly one value per X row");
+           " must contain exactly one value per X row, got numel=",
+           scale.numel(),
+           ", expected ",
+           rows);
 
   if (d_out != nullptr) {
     const auto d_out_shape = d_out->shape();
     PD_CHECK(d_out_shape.size() == 2,
              op_name,
-             ": DOut must have shape [rows, hidden_size]");
+             ": DOut must have shape [rows, hidden_size], got rank=",
+             d_out_shape.size(),
+             ", numel=",
+             d_out->numel());
     PD_CHECK(d_out_shape[0] == rows && d_out_shape[1] == hidden_size,
              op_name,
-             ": DOut must have shape [X.shape[0], X.shape[1] / 2]");
+             ": DOut must have shape [X.shape[0], X.shape[1] / 2], got rows=",
+             d_out_shape[0],
+             ", hidden_size=",
+             d_out_shape[1],
+             ", expected rows=",
+             rows,
+             ", hidden_size=",
+             hidden_size);
     PD_CHECK(d_out->dtype() == x.dtype(),
              op_name,
              ": DOut dtype must match X dtype");
@@ -438,9 +446,7 @@ static void CheckFusedSwiGLUInputs(const paddle::Tensor& x,
 
   const bool x_is_bf16 = x.dtype() == paddle::DataType::BFLOAT16;
   const bool x_is_fp32 = x.dtype() == paddle::DataType::FLOAT32;
-  PD_CHECK(x_is_bf16 || x_is_fp32,
-           op_name,
-           ": X must be bfloat16 or float32");
+  PD_CHECK(x_is_bf16 || x_is_fp32, op_name, ": X must be bfloat16 or float32");
   PD_CHECK(scale.dtype() == paddle::DataType::BFLOAT16 ||
                scale.dtype() == paddle::DataType::FLOAT32,
            op_name,
@@ -462,8 +468,8 @@ static void CheckFusedSwiGLUInputs(const paddle::Tensor& x,
 template <bool kHasClamp>
 static std::vector<paddle::Tensor> FusedSwiGLUScaleForwardImpl(
     const paddle::Tensor& x, const paddle::Tensor& scale, double clamp_value) {
-  const char* op_name = kHasClamp ? "fused_swiglu_scale_clamp"
-                                  : "fused_swiglu_scale";
+  const char* op_name =
+      kHasClamp ? "fused_swiglu_scale_clamp" : "fused_swiglu_scale";
   CheckFusedSwiGLUInputs(x, scale, nullptr, op_name, "Scale");
   if constexpr (kHasClamp) {
     PD_CHECK(std::isfinite(clamp_value) && clamp_value > 0.0,
@@ -535,8 +541,8 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleBackwardImpl(
     const paddle::Tensor& scale,
     const paddle::Tensor& d_out,
     double clamp_value) {
-  const char* op_name = kHasClamp ? "fused_swiglu_scale_clamp_bwd"
-                                  : "fused_swiglu_scale_bwd";
+  const char* op_name =
+      kHasClamp ? "fused_swiglu_scale_clamp_bwd" : "fused_swiglu_scale_bwd";
   CheckFusedSwiGLUInputs(x, scale, &d_out, op_name, "Scale");
   if constexpr (kHasClamp) {
     PD_CHECK(std::isfinite(clamp_value) && clamp_value > 0.0,
@@ -559,8 +565,7 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleBackwardImpl(
   auto d_scale = paddle::empty(d_scale_shape, scale.dtype(), scale.place());
   // DOut may be strided because it is framework-produced; materialize it
   // before the kernel.
-  const auto kernel_d_out =
-      d_out.is_contiguous() ? d_out : d_out.contiguous();
+  const auto kernel_d_out = d_out.is_contiguous() ? d_out : d_out.contiguous();
 
   // Paddle extension gridDim is int. The kernel uses a grid-stride loop
   // over rows, so we cap grid_size at kMaxSwiGLUGridSize and let the kernel
@@ -646,13 +651,12 @@ static std::vector<paddle::Tensor> FusedSwiGLUWeightedBackwardImpl(
       kHasClamp ? std::vector<int64_t>{rows, 1} : probs.shape();
 
   if (rows == 0 || hidden_size == 0) {
-    return {d_x, paddle::zeros(d_probs_shape, probs.dtype(), probs.place()), out};
+    return {
+        d_x, paddle::zeros(d_probs_shape, probs.dtype(), probs.place()), out};
   }
 
-  auto d_probs =
-      paddle::empty(d_probs_shape, probs.dtype(), probs.place());
-  const auto kernel_d_out =
-      d_out.is_contiguous() ? d_out : d_out.contiguous();
+  auto d_probs = paddle::empty(d_probs_shape, probs.dtype(), probs.place());
+  const auto kernel_d_out = d_out.is_contiguous() ? d_out : d_out.contiguous();
 
   // Paddle extension gridDim is int. The kernel uses a grid-stride loop
   // over rows, so we cap grid_size at kMaxSwiGLUGridSize and let the kernel
@@ -755,29 +759,11 @@ std::vector<paddle::Tensor> FusedSwiGLUWeightedClampBackward(
 // Op Registration
 // ==========================================================================
 
-static std::vector<std::vector<int64_t>> FusedGradInferShapeImpl(
-    const std::vector<int64_t>& x_shape,
-    const std::vector<int64_t>& scale_shape,
-    const std::vector<int64_t>& dout_shape,
-    const char* op_name) {
-  CheckFusedSwiGLUXShape(x_shape, op_name);
-  return {x_shape, scale_shape};
-}
-
 std::vector<std::vector<int64_t>> FusedGradInferShape(
     std::vector<int64_t> x_shape,
     std::vector<int64_t> scale_shape,
     std::vector<int64_t> dout_shape) {
-  return FusedGradInferShapeImpl(
-      x_shape, scale_shape, dout_shape, "fused_swiglu_scale_bwd");
-}
-
-std::vector<std::vector<int64_t>> FusedScaleGradInferShape(
-    std::vector<int64_t> x_shape,
-    std::vector<int64_t> scale_shape,
-    std::vector<int64_t> dout_shape) {
-  return FusedGradInferShapeImpl(
-      x_shape, scale_shape, dout_shape, "fused_swiglu_scale_grad");
+  return {x_shape, scale_shape};
 }
 
 std::vector<paddle::DataType> FusedGradInferDtype(paddle::DataType x_dtype,
@@ -786,23 +772,17 @@ std::vector<paddle::DataType> FusedGradInferDtype(paddle::DataType x_dtype,
   return {x_dtype, scale_dtype};
 }
 
-// Forward: output is SwiGLU(x) * scale with shape {rows, hidden_size/2}
-static std::vector<std::vector<int64_t>> FusedFwdInferShapeImpl(
-    const std::vector<int64_t>& x_shape,
-    const std::vector<int64_t>& scale_shape,
-    const char* op_name) {
-  return {InferFusedSwiGLUOutputShape(x_shape, op_name)};
+static std::vector<int64_t> InferFusedSwiGLUOutputShape(
+    const std::vector<int64_t>& x_shape, const char* op_name) {
+  CheckFusedSwiGLUXShape(x_shape, op_name);
+  const int64_t hidden_size = x_shape[1] < 0 ? -1 : x_shape[1] / 2;
+  return {x_shape[0], hidden_size};
 }
 
+// Forward: output is SwiGLU(x) * scale with shape {rows, hidden_size/2}
 std::vector<std::vector<int64_t>> FusedFwdInferShape(
     std::vector<int64_t> x_shape, std::vector<int64_t> scale_shape) {
-  return FusedFwdInferShapeImpl(x_shape, scale_shape, "fused_swiglu_scale");
-}
-
-std::vector<std::vector<int64_t>> FusedClampFwdInferShape(
-    std::vector<int64_t> x_shape, std::vector<int64_t> scale_shape) {
-  return FusedFwdInferShapeImpl(
-      x_shape, scale_shape, "fused_swiglu_scale_clamp");
+  return {InferFusedSwiGLUOutputShape(x_shape, "fused_swiglu_scale_clamp")};
 }
 
 std::vector<paddle::DataType> FusedFwdInferDtype(paddle::DataType x_dtype,
@@ -821,40 +801,22 @@ PD_BUILD_OP(fused_swiglu_scale)
     .Inputs({"X", "Scale"})
     .Outputs({"Out"})
     .SetKernelFn(PD_KERNEL(FusedSwiGLUScaleForward))
-    .SetInferShapeFn(PD_INFER_SHAPE(FusedFwdInferShape))
-    .SetInferDtypeFn(PD_INFER_DTYPE(FusedFwdInferDtype));
+    .SetInferShapeFn(
+        PD_INFER_SHAPE(FusedGradInferShape))  // Reuse infer shape logic
+    .SetInferDtypeFn(PD_INFER_DTYPE(FusedGradInferDtype));
 
 PD_BUILD_GRAD_OP(fused_swiglu_scale)
     .Inputs({"X", "Scale", paddle::Grad("Out")})
     .Outputs({paddle::Grad("X"), paddle::Grad("Scale")})
-    .SetKernelFn(PD_KERNEL(FusedSwiGLUScaleBackward))
-    .SetInferShapeFn(PD_INFER_SHAPE(FusedScaleGradInferShape));
+    .SetKernelFn(PD_KERNEL(FusedSwiGLUScaleBackward));
 
 // Clamp InferShape: d_scale always [rows, 1] matching Megatron keepdim
 // semantics.
-static std::vector<std::vector<int64_t>> FusedGradClampInferShapeImpl(
-    const std::vector<int64_t>& x_shape,
-    const std::vector<int64_t>& scale_shape,
-    const std::vector<int64_t>& dout_shape,
-    const char* op_name) {
-  CheckFusedSwiGLUXShape(x_shape, op_name);
-  return {x_shape, {x_shape[0], 1}};
-}
-
 std::vector<std::vector<int64_t>> FusedGradClampInferShape(
     std::vector<int64_t> x_shape,
     std::vector<int64_t> scale_shape,
     std::vector<int64_t> dout_shape) {
-  return FusedGradClampInferShapeImpl(
-      x_shape, scale_shape, dout_shape, "fused_swiglu_scale_clamp_bwd");
-}
-
-std::vector<std::vector<int64_t>> FusedScaleClampGradInferShape(
-    std::vector<int64_t> x_shape,
-    std::vector<int64_t> scale_shape,
-    std::vector<int64_t> dout_shape) {
-  return FusedGradClampInferShapeImpl(
-      x_shape, scale_shape, dout_shape, "fused_swiglu_scale_clamp_grad");
+  return {x_shape, {x_shape[0], 1}};
 }
 
 PD_BUILD_OP(fused_swiglu_scale_clamp_bwd)
@@ -870,7 +832,7 @@ PD_BUILD_OP(fused_swiglu_scale_clamp)
     .Outputs({"Out"})
     .Attrs({"clamp_value: double"})
     .SetKernelFn(PD_KERNEL(FusedSwiGLUScaleClampForward))
-    .SetInferShapeFn(PD_INFER_SHAPE(FusedClampFwdInferShape))
+    .SetInferShapeFn(PD_INFER_SHAPE(FusedFwdInferShape))
     .SetInferDtypeFn(PD_INFER_DTYPE(FusedFwdInferDtype));
 
 PD_BUILD_GRAD_OP(fused_swiglu_scale_clamp)
@@ -878,9 +840,17 @@ PD_BUILD_GRAD_OP(fused_swiglu_scale_clamp)
     .Outputs({paddle::Grad("X"), paddle::Grad("Scale")})
     .Attrs({"clamp_value: double"})
     .SetKernelFn(PD_KERNEL(FusedSwiGLUScaleClampBackward))
-    .SetInferShapeFn(PD_INFER_SHAPE(FusedScaleClampGradInferShape));
+    .SetInferShapeFn(PD_INFER_SHAPE(FusedGradClampInferShape));
 
 // ---- Weighted backward (fused forward + backward in one launch) ----
+
+std::vector<std::vector<int64_t>> WeightedBwdInferShape(
+    std::vector<int64_t> x_shape,
+    std::vector<int64_t> probs_shape,
+    std::vector<int64_t> dout_shape) {
+  return {
+      x_shape, probs_shape, {x_shape[0], x_shape[1] / 2}};  // dx, dprobs, out
+}
 
 std::vector<paddle::DataType> WeightedBwdInferDtype(
     paddle::DataType x_dtype,
@@ -889,15 +859,16 @@ std::vector<paddle::DataType> WeightedBwdInferDtype(
   return {x_dtype, probs_dtype, x_dtype};
 }
 
-// Clamp gradients use the [rows, 1] keepdim contract.
+// Clamp InferShape: d_probs always [rows, 1] matching Megatron keepdim
+// semantics.
 std::vector<std::vector<int64_t>> WeightedBwdClampInferShape(
     std::vector<int64_t> x_shape,
     std::vector<int64_t> probs_shape,
     std::vector<int64_t> dout_shape) {
-  return {x_shape,
-          {x_shape[0], 1},
-          InferFusedSwiGLUOutputShape(
-              x_shape, "fused_swiglu_weighted_clamp_bwd")};
+  return {
+      x_shape,
+      {x_shape[0], 1},
+      InferFusedSwiGLUOutputShape(x_shape, "fused_swiglu_weighted_clamp_bwd")};
 }
 
 PD_BUILD_OP(fused_swiglu_weighted_clamp_bwd)

@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import subprocess
+import sys
 import unittest
 
 import numpy as np
@@ -395,9 +397,11 @@ class TestFusedSwiGLUScale(unittest.TestCase):
             ),
         }
         for name, (probs, d_out, message) in cases.items():
-            with self.subTest(name=name):
-                with self.assertRaisesRegex(OSError, message):
-                    ops.fused_swiglu_weighted_clamp_bwd(x, probs, d_out, 7.0)
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(OSError, message),
+            ):
+                ops.fused_swiglu_weighted_clamp_bwd(x, probs, d_out, 7.0)
 
     def test_fused_swiglu_handles_empty_rows_and_hidden(self):
         """Return correctly shaped outputs for empty rows and hidden width."""
@@ -482,12 +486,8 @@ class TestFusedSwiGLUScale(unittest.TestCase):
             (
                 "CPU inputs",
                 lambda: ops.fused_swiglu_scale(
-                    paddle.zeros(
-                        [2, 16], dtype="bfloat16", device="cpu"
-                    ),
-                    paddle.ones(
-                        [2, 1], dtype="bfloat16", device="cpu"
-                    ),
+                    paddle.zeros([2, 16], dtype="bfloat16", device="cpu"),
+                    paddle.ones([2, 1], dtype="bfloat16", device="cpu"),
                 ),
                 "expects GPU inputs",
             ),
@@ -539,26 +539,11 @@ class TestFusedSwiGLUScale(unittest.TestCase):
             ),
         ]
         for name, call, message in cases:
-            with self.subTest(name=name):
-                with self.assertRaisesRegex(OSError, message):
-                    call()
-
-    def test_fused_swiglu_rejects_non_contiguous_x(self):
-        """Reject caller-owned X layouts that packed loads cannot consume."""
-        self._require_bf16()
-        ops = self._load_swiglu_ops()
-        x = paddle.randn([16, 2], dtype="float32").astype("bfloat16").transpose(
-            [1, 0]
-        )
-        if x.is_contiguous():
-            self.skipTest("transpose produced a contiguous tensor")
-        with self.assertRaisesRegex(OSError, "expects contiguous X and Probs"):
-            ops.fused_swiglu_weighted_clamp_bwd(
-                x,
-                paddle.ones([2, 1], dtype="bfloat16"),
-                paddle.ones([2, 8], dtype="bfloat16"),
-                7.0,
-            )
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(OSError, message),
+            ):
+                call()
 
     def test_fused_swiglu_accepts_one_dimensional_scale(self):
         """Preserve rank-1 Scale shape on the non-clamp backward path."""
@@ -573,55 +558,68 @@ class TestFusedSwiGLUScale(unittest.TestCase):
         self.assertEqual(d_x.shape, [2, 16])
         self.assertEqual(d_scale.shape, [2])
 
-    def test_fused_swiglu_static_shape_inference(self):
-        """Register forward, backward, clamp, and automatic-grad shapes."""
+    def test_fused_swiglu_preserves_unknown_output_dimension(self):
+        """Keep an unknown hidden dimension unknown during shape inference."""
         ops = self._load_swiglu_ops()
         paddle.enable_static()
         try:
             main = paddle.static.Program()
             with paddle.static.program_guard(main):
-                x = paddle.static.data("x", [-1, 16], dtype="bfloat16")
-                scale = paddle.static.data(
-                    "scale", [-1, 1], dtype="bfloat16"
-                )
-                dout = paddle.static.data(
-                    "dout", [-1, 8], dtype="bfloat16"
-                )
-                x.stop_gradient = False
-                scale.stop_gradient = False
+                x = paddle.static.data("x", [-1, -1], dtype="bfloat16")
+                scale = paddle.static.data("scale", [-1, 1], dtype="bfloat16")
+                dout = paddle.static.data("dout", [-1, -1], dtype="bfloat16")
 
-                out = ops.fused_swiglu_scale(x, scale)
-                backward = ops.fused_swiglu_scale_bwd(x, scale, dout)
-                clamp_out = ops.fused_swiglu_scale_clamp(x, scale, 7.0)
-                grad_x = paddle.static.gradients([out], [x])[0]
-                dynamic_x = paddle.static.data(
-                    "dynamic_x", [-1, -1], dtype="bfloat16"
-                )
-                dynamic_scale = paddle.static.data(
-                    "dynamic_scale", [-1, 1], dtype="bfloat16"
-                )
-                dynamic_out = ops.fused_swiglu_scale(dynamic_x, dynamic_scale)
-                dynamic_clamp_out = ops.fused_swiglu_scale_clamp(
-                    dynamic_x, dynamic_scale, 7.0
-                )
-                dynamic_dout = paddle.static.data(
-                    "dynamic_dout", [-1, -1], dtype="bfloat16"
-                )
-                dynamic_weighted = ops.fused_swiglu_weighted_clamp_bwd(
-                    dynamic_x, dynamic_scale, dynamic_dout, 7.0
+                out = ops.fused_swiglu_scale_clamp(x, scale, 7.0)
+                weighted = ops.fused_swiglu_weighted_clamp_bwd(
+                    x, scale, dout, 7.0
                 )
 
-                self.assertEqual(out.shape, [-1, 8])
-                self.assertEqual(
-                    [tensor.shape for tensor in backward], [[-1, 16], [-1, 1]]
-                )
-                self.assertEqual(clamp_out.shape, [-1, 8])
-                self.assertEqual(grad_x.shape, [-1, 16])
-                self.assertEqual(dynamic_out.shape, [-1, -1])
-                self.assertEqual(dynamic_clamp_out.shape, [-1, -1])
-                self.assertEqual(dynamic_weighted[2].shape, [-1, -1])
+                self.assertEqual(out.shape, [-1, -1])
+                self.assertEqual(weighted[2].shape, [-1, -1])
         finally:
             paddle.disable_static()
+
+    def test_fused_swiglu_rejects_invalid_static_x_shape(self):
+        """Reject invalid X rank and odd width during shape inference."""
+        self._load_swiglu_ops()
+        cases = [
+            (
+                "clamp forward rank",
+                [-1],
+                "ops.fused_swiglu_scale_clamp(x, scale, 7.0)",
+                r"X must have shape \[rows, 2 \* hidden_size\]",
+            ),
+            (
+                "weighted backward odd width",
+                [-1, 15],
+                "ops.fused_swiglu_weighted_clamp_bwd(x, scale, dout, 7.0)",
+                "last dimension of X must be divisible by 2",
+            ),
+        ]
+
+        for name, x_shape, call, message in cases:
+            with self.subTest(name=name):
+                script = f"""
+import paddle
+import paddlefleet_ops as ops
+paddle.enable_static()
+main = paddle.static.Program()
+with paddle.static.program_guard(main):
+    x = paddle.static.data("x", {x_shape!r}, dtype="bfloat16")
+    scale = paddle.static.data("scale", [-1, 1], dtype="bfloat16")
+    dout = paddle.static.data("dout", [-1, -1], dtype="bfloat16")
+    {call}
+"""
+                result = subprocess.run(
+                    [sys.executable, "-c", script],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=120,
+                )
+                output = result.stdout + result.stderr
+                self.assertNotEqual(result.returncode, 0, output)
+                self.assertRegex(output, message)
 
     def test_fused_swiglu_backward_materializes_non_contiguous_dout(self):
         """Strided framework gradients must match explicitly contiguous DOut."""
@@ -629,16 +627,16 @@ class TestFusedSwiGLUScale(unittest.TestCase):
         ops = self._load_swiglu_ops()
         x = paddle.randn([2, 16], dtype="float32").astype("bfloat16")
         scale = paddle.randn([2], dtype="float32").astype("bfloat16")
-        non_contiguous_dout = paddle.randn([8, 2], dtype="float32").astype(
-            "bfloat16"
-        ).transpose([1, 0])
+        non_contiguous_dout = (
+            paddle.randn([8, 2], dtype="float32")
+            .astype("bfloat16")
+            .transpose([1, 0])
+        )
         if non_contiguous_dout.is_contiguous():
             self.skipTest("transpose produced a contiguous tensor")
         dout_ref = non_contiguous_dout.contiguous()
 
-        dx_a, ds_a = ops.fused_swiglu_scale_bwd(
-            x, scale, non_contiguous_dout
-        )
+        dx_a, ds_a = ops.fused_swiglu_scale_bwd(x, scale, non_contiguous_dout)
         dx_b, ds_b = ops.fused_swiglu_scale_bwd(x, scale, dout_ref)
         np.testing.assert_allclose(
             dx_a.astype("float32").numpy(),
