@@ -172,13 +172,6 @@ class ConfigAdapter:
         model_config, model_dir, json_path, json_error = self._load_json(
             config, input_path
         )
-        # TransformerConfig rejects the removed `mtp_num_layers` key outright,
-        # so a JSON that still sets it cannot start training. Refuse to rewrite
-        # it rather than emitting an adapted config the framework will reject.
-        try:
-            reject_stale_mtp_key(model_config)
-        except StaleMtpKeyError as exc:
-            return False, f"{input_path.name}: {exc}"
         if self.json_overrides:
             if model_config is None:
                 return False, f"--set json: 无法应用：{json_error}"
@@ -191,6 +184,18 @@ class ConfigAdapter:
             )
 
         self._apply_auto_overrides(config, model_config, log)
+
+        # TransformerConfig rejects the removed `mtp_num_layers` key outright,
+        # so a config that still carries it cannot start training. Check *after*
+        # every override has been applied: `--set json:mtp_num_layers=2` (and the
+        # prefix-less form routed by `_apply_auto_overrides`) would otherwise
+        # re-insert the key past an earlier check, and the raise that
+        # `effective_mtp_layers` performs during PP planning escapes as a
+        # traceback rather than a clean `(False, message)`.
+        try:
+            reject_stale_mtp_key(model_config)
+        except StaleMtpKeyError as exc:
+            return False, f"{input_path.name}: {exc}"
 
         plan, err = plan_parallelism(
             config,

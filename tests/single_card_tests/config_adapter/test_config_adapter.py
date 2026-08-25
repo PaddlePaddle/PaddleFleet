@@ -1688,6 +1688,47 @@ class TestLayerFields(ConfigAdapterTestBase):
                 self.assertIn("mtp_num_layers", message)
                 self.assertIn("num_nextn_predict_layers", message)
 
+    def test_stale_mtp_key_via_json_override_is_refused(self):
+        # `--set json:mtp_num_layers=...` re-inserts the key into an otherwise
+        # clean JSON, so the check has to run *after* the overrides are applied.
+        # Otherwise the adapted config would carry a key TransformerConfig
+        # rejects, and the raise inside effective_mtp_layers would surface as a
+        # traceback during PP planning rather than a clean (False, message).
+        for stale_value in (2, 0):
+            with self.subTest(mtp_num_layers=stale_value):
+                self.write_json(dict(MODEL_CONFIG))
+                ok, message = self.adapt(
+                    target_nodes=1,
+                    json_overrides={"mtp_num_layers": stale_value},
+                )
+                self.assertFalse(ok)
+                self.assertIn("mtp_num_layers", message)
+                self.assertIn("num_nextn_predict_layers", message)
+                # Nothing may be emitted: the source JSON is clean, so a
+                # rewritten copy would be the only place the key could appear.
+                self.assertFalse(
+                    (
+                        self.output_dir
+                        / "model_config_separated"
+                        / "model_dir_adapted_8cards"
+                        / "model_config.json"
+                    ).exists(),
+                    "no adapted model_config.json may be written",
+                )
+
+    def test_stale_mtp_key_via_auto_override_is_refused(self):
+        # The prefix-less `--set mtp_num_layers=...` form is routed to the JSON
+        # by _apply_auto_overrides when the key is present there, which is a
+        # second way past a check placed before the overrides.
+        self.write_json(
+            {**MODEL_CONFIG, "num_nextn_predict_layers": 0, "mtp_num_layers": 0}
+        )
+        ok, message = self.adapt(
+            target_nodes=1, auto_overrides={"mtp_num_layers": 2}
+        )
+        self.assertFalse(ok)
+        self.assertIn("mtp_num_layers", message)
+
 
 class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):
     """Nothing is written until every check has passed."""
