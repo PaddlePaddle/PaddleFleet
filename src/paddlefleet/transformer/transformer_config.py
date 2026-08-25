@@ -747,10 +747,6 @@ class TransformerConfig(ModelParallelConfig):
     moe_latent_size: int | None = None
     """The latent dimension size for latent MoE. Positive values enable latent MoE."""
 
-    latent_moe_use_norm: bool = False
-    """Apply RMSNorm to routed latent-MoE output before projecting it back to
-    the model hidden size."""
-
     ##################
     # Context Parallel
     ##################
