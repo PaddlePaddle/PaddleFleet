@@ -366,7 +366,7 @@ __global__ void VectorizedFusedSwiGLUWeightedBwd(
 }
 
 // ==========================================================================
-// SwiGLU host wrappers.
+// Host Wrappers (templated on kHasClamp; non-clamp wrappers forward 0.0)
 // ==========================================================================
 
 static void CheckFusedSwiGLUXShape(const std::vector<int64_t>& x_shape,
@@ -621,29 +621,34 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleBackwardImpl(
 // ==========================================================================
 // Weighted Backward Host Wrapper (combines forward+backward in one launch)
 // ==========================================================================
+template <bool kHasClamp>
 static std::vector<paddle::Tensor> FusedSwiGLUWeightedBackwardImpl(
     const paddle::Tensor& x,
     const paddle::Tensor& probs,
     const paddle::Tensor& d_out,
     double clamp_value) {
-  const char* op_name = "fused_swiglu_weighted_clamp_bwd";
+  const char* op_name = kHasClamp ? "fused_swiglu_weighted_clamp_bwd"
+                                  : "fused_swiglu_weighted_bwd";
   CheckFusedSwiGLUInputs(x, probs, &d_out, op_name, "Probs");
-  PD_CHECK(std::isfinite(clamp_value) && clamp_value > 0.0,
-           op_name,
-           ": clamp_value must be finite and greater than zero");
+  if constexpr (kHasClamp) {
+    PD_CHECK(std::isfinite(clamp_value) && clamp_value > 0.0,
+             op_name,
+             ": clamp_value must be finite and greater than zero");
+  }
 
   int64_t rows = x.shape()[0];
   int64_t hidden2 = x.shape()[1];
   int64_t hidden_size = hidden2 / 2;
   auto d_x = paddle::empty_like(x);
   auto out = paddle::empty({rows, hidden_size}, x.dtype(), x.place());
-  const std::vector<int64_t> d_probs_shape{rows, 1};
+  // Clamp gradients use [rows, 1]; non-clamp gradients match Probs.
+  const std::vector<int64_t> d_probs_shape =
+      kHasClamp ? std::vector<int64_t>{rows, 1} : probs.shape();
 
   if (rows == 0 || hidden_size == 0) {
     return {d_x, paddle::zeros(d_probs_shape, probs.dtype(), probs.place()), out};
   }
 
-  // DProbs follows Megatron's [rows, 1] keepdim contract.
   auto d_probs =
       paddle::empty(d_probs_shape, probs.dtype(), probs.place());
   const auto kernel_d_out =
@@ -660,7 +665,7 @@ static std::vector<paddle::Tensor> FusedSwiGLUWeightedBackwardImpl(
     using paddle_bf16 = paddle::bfloat16;
     using cuda_bf16 = __nv_bfloat16;
     if (probs.dtype() == paddle::DataType::FLOAT32) {
-      VectorizedFusedSwiGLUWeightedBwd<cuda_bf16, float, 8, true>
+      VectorizedFusedSwiGLUWeightedBwd<cuda_bf16, float, 8, kHasClamp>
           <<<grid_size, block_size, 0, stream>>>(
               reinterpret_cast<const cuda_bf16*>(x.data<paddle_bf16>()),
               probs.data<float>(),
@@ -674,7 +679,7 @@ static std::vector<paddle::Tensor> FusedSwiGLUWeightedBackwardImpl(
               hidden2,
               clamp_value);
     } else if (probs.dtype() == paddle::DataType::BFLOAT16) {
-      VectorizedFusedSwiGLUWeightedBwd<cuda_bf16, cuda_bf16, 8, true>
+      VectorizedFusedSwiGLUWeightedBwd<cuda_bf16, cuda_bf16, 8, kHasClamp>
           <<<grid_size, block_size, 0, stream>>>(
               reinterpret_cast<const cuda_bf16*>(x.data<paddle_bf16>()),
               reinterpret_cast<const cuda_bf16*>(probs.data<paddle_bf16>()),
@@ -691,7 +696,7 @@ static std::vector<paddle::Tensor> FusedSwiGLUWeightedBackwardImpl(
       PD_THROW(op_name, " does not support Probs dtype");
     }
   } else if (x.dtype() == paddle::DataType::FLOAT32) {
-    VectorizedFusedSwiGLUWeightedBwd<float, float, 4, true>
+    VectorizedFusedSwiGLUWeightedBwd<float, float, 4, kHasClamp>
         <<<grid_size, block_size, 0, stream>>>(x.data<float>(),
                                                probs.data<float>(),
                                                kernel_d_out.data<float>(),
@@ -742,7 +747,8 @@ std::vector<paddle::Tensor> FusedSwiGLUWeightedClampBackward(
     const paddle::Tensor& probs,
     const paddle::Tensor& d_out,
     double clamp_value) {
-  return FusedSwiGLUWeightedBackwardImpl(x, probs, d_out, clamp_value);
+  return FusedSwiGLUWeightedBackwardImpl</*kHasClamp=*/true>(
+      x, probs, d_out, clamp_value);
 }
 
 // ==========================================================================
