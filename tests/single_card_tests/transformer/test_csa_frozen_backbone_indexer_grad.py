@@ -192,9 +192,15 @@ class TestCSAZeroLossCoeffSkipsLossPath(unittest.TestCase):
         },
         # TileLang indexer backend would otherwise build a
         # TilelangIndexerLossState and TileLangCSAIndexerLossAutoScaler.
+        # The TileLang kernels constrain the shapes: the indexer top-k kernel
+        # tiles over indexer heads (needs <= 64 and divisible by 8, the
+        # _make_config default is 4) and the sparse-MQA kernel's MMA warp
+        # partition needs a head dim of at least 64 (default is 32).
         {
             "csa_indexer_backend": "tilelang",
             "csa_sparse_attn_backend": "tilelang",
+            "dsa_index_n_heads": 16,
+            "v_head_dim": 128,
         },
     )
 
