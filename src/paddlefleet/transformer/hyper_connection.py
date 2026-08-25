@@ -303,6 +303,7 @@ class HyperConnectionModule(nn.Layer):
         # alpha_* / bias, and the MoE gate fp32 storage in moe_router.py):
         # they are tiny, and keeping them out of BF16 removes the parameter
         # rounding error from the mHC gating computation.
+        self._cast_to_low_precision = False
         param_dtype = "float32"
         default_dtype = paddle.get_default_dtype()
         try:
@@ -314,6 +315,7 @@ class HyperConnectionModule(nn.Layer):
             )
         finally:
             paddle.set_default_dtype(default_dtype)
+        self.mapping_proj._cast_to_low_precision = False
 
         init_alpha = config.mhc_init_gating_factor
         # Learnable scaling factors (Eq. 5 in paper)
@@ -994,6 +996,7 @@ class HyperConnectionContractLayer(FleetLayer):
             dtype=hc_param_dtype,
             default_initializer=nn.initializer.Constant(1.0),
         )
+        self._cast_to_low_precision = False
 
         if config.sequence_parallel:
             self.hc_head_fn.is_distributed = False
