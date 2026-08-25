@@ -461,32 +461,6 @@ static void CheckFusedSwiGLUInputs(const paddle::Tensor& x,
            ": hidden_size must be divisible by the vector width");
 }
 
-static void CheckFusedSwiGLUClampValue(double clamp_value,
-                                       const char* op_name) {
-  PD_CHECK(std::isfinite(clamp_value) && clamp_value > 0.0,
-           op_name,
-           ": clamp_value must be finite and greater than zero");
-}
-
-static void CheckFusedSwiGLUPreLaunch(const char* op_name) {
-  // Peek without clearing so an unrelated upstream error keeps its original
-  // owner instead of being attributed to this op.
-  const cudaError_t error = cudaPeekAtLastError();
-  PD_CHECK(error == cudaSuccess,
-           op_name,
-           " observed a CUDA error before its kernel launch: ",
-           cudaGetErrorString(error));
-}
-
-static void CheckFusedSwiGLULaunch(const char* op_name) {
-  // This reports launch/API errors, not asynchronous execution failures.
-  const cudaError_t error = cudaGetLastError();
-  PD_CHECK(error == cudaSuccess,
-           op_name,
-           " CUDA launch/API check failed: ",
-           cudaGetErrorString(error));
-}
-
 template <bool kHasClamp>
 static std::vector<paddle::Tensor> FusedSwiGLUScaleForwardImpl(
     const paddle::Tensor& x, const paddle::Tensor& scale, double clamp_value) {
@@ -494,7 +468,9 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleForwardImpl(
                                   : "fused_swiglu_scale";
   CheckFusedSwiGLUInputs(x, scale, nullptr, op_name, "Scale");
   if constexpr (kHasClamp) {
-    CheckFusedSwiGLUClampValue(clamp_value, op_name);
+    PD_CHECK(std::isfinite(clamp_value) && clamp_value > 0.0,
+             op_name,
+             ": clamp_value must be finite and greater than zero");
   }
 
   auto rows = x.shape()[0];
@@ -514,7 +490,6 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleForwardImpl(
   int grid_size = GetSwiGLURowGridSize(rows);
   int block_size = kSwiGLUBlockSize;
   auto stream = x.stream();
-  CheckFusedSwiGLUPreLaunch(op_name);
 
   // The checks above make the fallback branches unreachable for the current
   // dtype set; keep them explicit so a future dtype cannot skip the launch.
@@ -556,7 +531,6 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleForwardImpl(
   } else {
     PD_THROW(op_name, " does not support X dtype");
   }
-  CheckFusedSwiGLULaunch(op_name);
   return {out};
 }
 
@@ -570,7 +544,9 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleBackwardImpl(
                                   : "fused_swiglu_scale_bwd";
   CheckFusedSwiGLUInputs(x, scale, &d_out, op_name, "Scale");
   if constexpr (kHasClamp) {
-    CheckFusedSwiGLUClampValue(clamp_value, op_name);
+    PD_CHECK(std::isfinite(clamp_value) && clamp_value > 0.0,
+             op_name,
+             ": clamp_value must be finite and greater than zero");
   }
 
   auto rows = x.shape()[0];
@@ -599,7 +575,6 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleBackwardImpl(
   int grid_size = GetSwiGLURowGridSize(rows);
   int block_size = kSwiGLUBlockSize;
   auto stream = x.stream();
-  CheckFusedSwiGLUPreLaunch(op_name);
 
   // Keep explicit fallback errors even though input validation currently
   // makes these branches unreachable.
@@ -649,7 +624,6 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleBackwardImpl(
   } else {
     PD_THROW(op_name, " does not support X dtype");
   }
-  CheckFusedSwiGLULaunch(op_name);
   return {d_x, d_scale};
 }
 
@@ -663,7 +637,9 @@ static std::vector<paddle::Tensor> FusedSwiGLUWeightedBackwardImpl(
     double clamp_value) {
   const char* op_name = "fused_swiglu_weighted_clamp_bwd";
   CheckFusedSwiGLUInputs(x, probs, &d_out, op_name, "Probs");
-  CheckFusedSwiGLUClampValue(clamp_value, op_name);
+  PD_CHECK(std::isfinite(clamp_value) && clamp_value > 0.0,
+           op_name,
+           ": clamp_value must be finite and greater than zero");
 
   int64_t rows = x.shape()[0];
   int64_t hidden2 = x.shape()[1];
@@ -689,7 +665,6 @@ static std::vector<paddle::Tensor> FusedSwiGLUWeightedBackwardImpl(
   int grid_size = GetSwiGLURowGridSize(rows);
   int block_size = kSwiGLUBlockSize;
   auto stream = x.stream();
-  CheckFusedSwiGLUPreLaunch(op_name);
 
   // Keep explicit fallback errors even though input validation currently
   // makes these branches unreachable.
@@ -742,7 +717,6 @@ static std::vector<paddle::Tensor> FusedSwiGLUWeightedBackwardImpl(
   } else {
     PD_THROW(op_name, " does not support X dtype");
   }
-  CheckFusedSwiGLULaunch(op_name);
   return {d_x, d_probs, out};
 }
 
