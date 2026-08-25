@@ -308,7 +308,7 @@ def is_fast_hadamard_transform_available():
 
 
 def is_moonep_available():
-    return _MOON_EP_AVAILABLE
+    return _MOON_EP_AVAILABLE and os.environ.get("ENABLE_MOONEP", "0") == "1"
 
 
 def _try_load_nvshmem(ops_dir: Path):
