@@ -1617,6 +1617,14 @@ class TransformerConfig(ModelParallelConfig):
         ),
         "csa_train_indexer_only": "Use train_indexer_only instead.",
         "csa_indexer_init_from_scratch": "Use indexer_init_from_scratch instead.",
+        "mtp_num_layers": (
+            "Use num_nextn_predict_layers instead: it is the only field every "
+            "MTP consumer reads (GPTEmbedding's K+1 embedding chunks, the MTP "
+            "forward's hidden_states split, LanguageLoss's per-depth labels). "
+            "Set num_nextn_predict_layers to the value mtp_num_layers used to "
+            "carry, and drop mtp_num_layers -- including mtp_num_layers=0, "
+            "which is now a no-op key."
+        ),
     }
 
     @classmethod

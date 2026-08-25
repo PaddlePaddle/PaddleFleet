@@ -41,6 +41,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .io_writers import JsonWriter, YamlWriter
+from .layer_fields import StaleMtpKeyError, reject_stale_mtp_key
 from .model_config_resolver import (
     ModelConfigResolveError,
     build_adapted_dir,
@@ -171,6 +172,13 @@ class ConfigAdapter:
         model_config, model_dir, json_path, json_error = self._load_json(
             config, input_path
         )
+        # TransformerConfig rejects the removed `mtp_num_layers` key outright,
+        # so a JSON that still sets it cannot start training. Refuse to rewrite
+        # it rather than emitting an adapted config the framework will reject.
+        try:
+            reject_stale_mtp_key(model_config)
+        except StaleMtpKeyError as exc:
+            return False, f"{input_path.name}: {exc}"
         if self.json_overrides:
             if model_config is None:
                 return False, f"--set json: 无法应用：{json_error}"

@@ -57,6 +57,7 @@ from paddlefleet.config_adapter.io_writers import (
     detect_map_indent,
 )
 from paddlefleet.config_adapter.layer_fields import (
+    StaleMtpKeyError,
     effective_mtp_layers,
     plan_layer_field_shrink,
 )
@@ -920,14 +921,25 @@ class TestLayerFieldPlanning(unittest.TestCase):
         self.assertEqual(
             effective_mtp_layers({"num_nextn_predict_layers": 3}), 3
         )
-        self.assertEqual(
-            effective_mtp_layers(
-                {"mtp_num_layers": 2, "num_nextn_predict_layers": 0}
-            ),
-            0,
-        )
         self.assertEqual(effective_mtp_layers({}), 0)
         self.assertEqual(effective_mtp_layers(None), 0)
+
+    def test_effective_mtp_rejects_the_stale_key(self):
+        # TransformerConfig refuses the removed key, so a JSON that still sets
+        # it cannot start training. Fail here rather than silently reading K=0
+        # and handing back a config the framework will reject. Both a non-zero
+        # and a zero value must be refused -- `mtp_num_layers: 0` is now a
+        # no-op key that has to be deleted.
+        for stale_value in (2, 0):
+            with self.subTest(mtp_num_layers=stale_value):
+                with self.assertRaises(StaleMtpKeyError) as ctx:
+                    effective_mtp_layers(
+                        {
+                            "num_nextn_predict_layers": 0,
+                            "mtp_num_layers": stale_value,
+                        }
+                    )
+                self.assertIn("num_nextn_predict_layers", str(ctx.exception))
 
     def test_truncates_layer_part_and_keeps_the_mtp_tail(self):
         changes, err = plan_layer_field_shrink(self._config(), 64, 16, 1)
@@ -1656,6 +1668,25 @@ class TestLayerFields(ConfigAdapterTestBase):
         # 32 layers + the 2 MTP entries.
         self.assertEqual(len(model_config["csa_compress_ratios"]), 34)
         self.assertEqual(len(model_config["layer_types"]), 32)
+
+    def test_stale_mtp_key_aborts_the_whole_adaptation(self):
+        # End-to-end: a JSON that still carries the removed key must make
+        # `adapt` fail with a migration hint instead of rewriting the config.
+        # TransformerConfig would refuse such a JSON anyway, so producing an
+        # adapted copy of it is worse than useless.
+        for stale_value in (2, 0):
+            with self.subTest(mtp_num_layers=stale_value):
+                self.write_json(
+                    {
+                        **MODEL_CONFIG,
+                        "num_nextn_predict_layers": 0,
+                        "mtp_num_layers": stale_value,
+                    }
+                )
+                ok, message = self.adapt(target_nodes=1)
+                self.assertFalse(ok)
+                self.assertIn("mtp_num_layers", message)
+                self.assertIn("num_nextn_predict_layers", message)
 
 
 class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):

@@ -21,6 +21,7 @@ historical ernie5 L+K layout. Guards checked here:
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
@@ -71,6 +72,30 @@ class TestUseErndataValidation(unittest.TestCase):
                     mtp_num_layers=2,
                 )
             )
+
+    def test_mtp_num_layers_is_rejected_via_from_config(self) -> None:
+        # The path a model_config.json actually takes. Without a
+        # renamed_config_keys entry _process_attribute's setattr fallback would
+        # absorb the key as a dead attribute and leave MTP silently off.
+        # Both a non-zero and a zero value must be refused: `mtp_num_layers: 0`
+        # is now a no-op key that has to be deleted, not tolerated.
+        for stale_value in (2, 0):
+            with self.subTest(mtp_num_layers=stale_value):
+                cfg_in = SimpleNamespace(
+                    num_hidden_layers=2,
+                    hidden_size=64,
+                    num_attention_heads=4,
+                    num_nextn_predict_layers=0,
+                    mtp_num_layers=stale_value,
+                )
+                with self.assertRaisesRegex(
+                    ValueError, r"num_nextn_predict_layers"
+                ) as ctx:
+                    TransformerConfig.from_config(cfg_in)
+                self.assertIn("mtp_num_layers", str(ctx.exception))
+
+    def test_mtp_num_layers_registered_as_renamed(self) -> None:
+        self.assertIn("mtp_num_layers", TransformerConfig.renamed_config_keys)
 
     def test_erndata_incompat_with_magic_send(self) -> None:
         # enable_mtp_magic_send also requires PP>1 (checked earlier in
