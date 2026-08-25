@@ -60,6 +60,7 @@ from paddlefleet.config_adapter.layer_fields import (
     StaleMtpKeyError,
     effective_mtp_layers,
     plan_layer_field_shrink,
+    reject_stale_mtp_key,
 )
 from paddlefleet.config_adapter.model_config_resolver import (
     ModelConfigResolveError,
@@ -923,6 +924,9 @@ class TestLayerFieldPlanning(unittest.TestCase):
         )
         self.assertEqual(effective_mtp_layers({}), 0)
         self.assertEqual(effective_mtp_layers(None), 0)
+
+    def test_reject_stale_mtp_key_accepts_missing_config(self):
+        reject_stale_mtp_key(None)
 
     def test_effective_mtp_rejects_the_stale_key(self):
         # TransformerConfig refuses a non-zero `mtp_num_layers`, so a JSON that
