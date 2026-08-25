@@ -2472,7 +2472,24 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             return weights
         return _RouterAllGather.apply(weights, group)
 
-    def _node_slice(self, tok, cur_idx, cur_w, expert_fn):
+    def global_tokens_per_expert(self, topk_indices):
+        """EP-wide tokens-per-expert histogram, for MoE balance logging.
+
+        The ring never materializes the flat global index list that
+        :meth:`AllGatherTokenDispatcher.get_dispatched_routing` histograms, so
+        sum the per-rank histograms over the EP group instead — numerically
+        identical to histogramming the AllGathered indices.
+        """
+        counts = _tokens_per_expert_histogram(
+            topk_indices.detach().cast("int32"), self.num_experts
+        )
+        if self.moe_group is not None and self.moe_group.nranks > 1:
+            paddle.distributed.all_reduce(counts, group=self.moe_group)
+        return counts
+
+    def _node_slice(
+        self, tok, cur_idx, cur_w, expert_fn, recompute_moe_gate_up=False
+    ):
         """One node's mid-slice contribution for the currently-held tokens:
         intra AllGather -> SonicMoE partial-I GEMM -> intra ReduceScatter-SUM.
         Returns [T, d_l]."""
@@ -2488,11 +2505,20 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             False,  # use_fp8 (bf16 only)
             tokens_per_expert=tokens_per_expert,
             fp8_scale=None,
+            recompute_moe_gate_up=recompute_moe_gate_up,
             fp8_combine_grad_handle=None,
         )
         return self._rs(part, self.intra_group)
 
-    def ring_forward(self, x_l, topk_weights, topk_indices, expert_fn, probs_dtype):
+    def ring_forward(
+        self,
+        x_l,
+        topk_weights,
+        topk_indices,
+        expert_fn,
+        probs_dtype,
+        recompute_moe_gate_up=False,
+    ):
         """RingMoE scheme-1 ring (bf16 + SonicMoE, serial; overlap-ready).
 
         Memory-lean: only the token/routing tensors rotate around the N nodes
@@ -2518,7 +2544,9 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
 
         n = self.N
         if n == 1:  # single node: intra-only, no inter routing needed.
-            return self._node_slice(tok, cur_idx, cur_w, expert_fn)
+            return self._node_slice(
+                tok, cur_idx, cur_w, expert_fn, recompute_moe_gate_up
+            )
 
         r0 = self.inter_group.rank
         dst = (r0 + 1) % n  # send my rows to the next node
@@ -2540,7 +2568,9 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
                 )
             # Tokens held at this step originate from home node (r0 - step) % n,
             # so this node's slice for them is destined to that home.
-            node_part = self._node_slice(tok, cur_idx, cur_w, expert_fn)
+            node_part = self._node_slice(
+                tok, cur_idx, cur_w, expert_fn, recompute_moe_gate_up
+            )
             partials[(r0 - step) % n] = node_part
             if step < n - 1:
                 # Wait for the in-flight rotation before consuming it next round.
