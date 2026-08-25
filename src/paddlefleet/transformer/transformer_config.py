@@ -1617,13 +1617,28 @@ class TransformerConfig(ModelParallelConfig):
         ),
         "csa_train_indexer_only": "Use train_indexer_only instead.",
         "csa_indexer_init_from_scratch": "Use indexer_init_from_scratch instead.",
+    }
+
+    # Same intent as ``renamed_config_keys``, but only rejected when the stale
+    # key carries a value that would change behaviour. A falsy value means the
+    # feature is off in both spellings, so nothing is lost by absorbing it.
+    #
+    # ``mtp_num_layers`` needs this weaker form because PaddleFormers still owns
+    # a field of that name: ``LlmMetaConfig.mtp_attributes`` and
+    # ``TrainingArguments`` both declare it (default 0), so *every* PaddleFormers
+    # config hands it to ``register_attributes`` whether or not MTP is used.
+    # Rejecting it outright would make every Fleet-provider model in that repo
+    # fail to build. Its ">1 means autoregressive MTP" semantics there also mean
+    # ``sft/workflow.py`` swaps the value into ``num_nextn_predict_layers``
+    # before the provider is constructed, so a legitimate MTP run arrives here
+    # with ``mtp_num_layers == 0`` already.
+    renamed_config_keys_when_set = {
         "mtp_num_layers": (
             "Use num_nextn_predict_layers instead: it is the only field every "
             "MTP consumer reads (GPTEmbedding's K+1 embedding chunks, the MTP "
             "forward's hidden_states split, LanguageLoss's per-depth labels). "
             "Set num_nextn_predict_layers to the value mtp_num_layers used to "
-            "carry, and drop mtp_num_layers -- including mtp_num_layers=0, "
-            "which is now a no-op key."
+            "carry, and drop mtp_num_layers."
         ),
     }
 
@@ -1677,6 +1692,13 @@ class TransformerConfig(ModelParallelConfig):
                 f"{key} was renamed and is no longer supported. "
                 f"{self.renamed_config_keys[key]} Update the config that still "
                 f"sets {key}; it would otherwise be silently ignored."
+            )
+        elif key in self.renamed_config_keys_when_set and value:
+            raise ValueError(
+                f"{key} was renamed and is no longer supported. "
+                f"{self.renamed_config_keys_when_set[key]} Update the config "
+                f"that still sets {key}={value!r}; it would otherwise be "
+                f"silently ignored."
             )
         else:
             setattr(self, key, value)

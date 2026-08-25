@@ -61,24 +61,29 @@ class StaleMtpKeyError(ValueError):
 
 
 def reject_stale_mtp_key(model_config):
-    """Fail loudly when the removed ``mtp_num_layers`` key is still present.
+    """Fail loudly when a *meaningful* ``mtp_num_layers`` is still present.
 
-    ``TransformerConfig`` rejects the key via ``renamed_config_keys``, so a JSON
-    that still sets it cannot start training. The adapter reads the same JSON and
-    would otherwise happily rewrite it while silently treating K as 0 -- handing
-    back a config the framework then refuses. Surface it here instead.
+    ``TransformerConfig`` rejects the key via ``renamed_config_keys_when_set``
+    whenever it is non-zero, so a JSON that still carries a real value cannot
+    start training. The adapter reads the same JSON and would otherwise happily
+    rewrite it while silently treating K as 0 -- handing back a config the
+    framework then refuses. Surface it here instead.
+
+    ``mtp_num_layers: 0`` is tolerated for the same reason the framework
+    tolerates it: it means "MTP off", which is exactly what the key's absence
+    means, and PaddleFormers stamps that default onto every config it produces.
     """
     if model_config is None:
         return
-    if "mtp_num_layers" not in model_config:
+    if not model_config.get("mtp_num_layers"):
         return
     raise StaleMtpKeyError(
         "model_config.json still sets the removed `mtp_num_layers` "
         f"(={model_config.get('mtp_num_layers')!r}). Use "
         "`num_nextn_predict_layers` instead: it is the only field the MTP "
-        "consumers read. TransformerConfig rejects `mtp_num_layers` outright, "
-        "so this config cannot start training until the key is removed -- "
-        "including `mtp_num_layers: 0`, which is now a no-op key."
+        "consumers read. TransformerConfig rejects a non-zero "
+        "`mtp_num_layers` outright, so this config cannot start training "
+        "until the key is migrated."
     )
 
 

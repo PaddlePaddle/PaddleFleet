@@ -185,8 +185,8 @@ class ConfigAdapter:
 
         self._apply_auto_overrides(config, model_config, log)
 
-        # TransformerConfig rejects the removed `mtp_num_layers` key outright,
-        # so a config that still carries it cannot start training. Check *after*
+        # TransformerConfig rejects a non-zero `mtp_num_layers` outright, so a
+        # config that still carries one cannot start training. Check *after*
         # every override has been applied: `--set json:mtp_num_layers=2` (and the
         # prefix-less form routed by `_apply_auto_overrides`) would otherwise
         # re-insert the key past an earlier check, and the raise that
