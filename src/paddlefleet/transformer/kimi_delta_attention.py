@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -234,6 +235,8 @@ class KimiDeltaAttention(FleetLayer):
         conv_init: float | None = None,
         use_qk_l2norm: bool = True,
         A_init_range: tuple[float, float] = (1, 16),
+        dt_init_range: tuple[float, float] = (0.001, 0.1),
+        dt_init_floor: float = 1e-4,
         pg_collection: ProcessGroupCollection = None,
         conv_kernel_dim: int = 4,
         key_head_dim: int = 128,
@@ -253,7 +256,14 @@ class KimiDeltaAttention(FleetLayer):
             conv_bias: Whether to use bias in the causal convolution.
             conv_init: The initialization range for the causal convolution weights.
             use_qk_l2norm: Whether to use L2 normalization on query and key.
-            A_init_range: The initialization range for the A parameter.
+            A_init_range: The initialization range for the A parameter. Only used
+                by the softplus gate form (gate_lower_bound=None); the bounded
+                form starts from A_log=0, see reset_parameters().
+            dt_init_range: (dt_min, dt_max) of the log-uniform dt draw that
+                dt_bias is the inverse softplus of. Mamba's dt init, kept
+                identical to fla's KDA layer.
+            dt_init_floor: Lower clamp on that dt draw before the inverse
+                softplus.
             pg_collection: The required process groups for tensor model parallel.
             conv_kernel_dim: Kernel size for the causal convolution.
             key_head_dim: Dimension of each query/key head.
@@ -281,6 +291,15 @@ class KimiDeltaAttention(FleetLayer):
         self.conv_init = conv_init
         assert A_init_range[0] >= 0 and A_init_range[1] >= A_init_range[0]
         self.A_init_range = A_init_range
+        # dt is drawn log-uniformly, so both ends have to be strictly positive.
+        assert 0 < dt_init_range[0] <= dt_init_range[1], (
+            f"dt_init_range must be 0 < dt_min <= dt_max, got {dt_init_range}"
+        )
+        assert dt_init_floor > 0, (
+            f"dt_init_floor must be positive, got {dt_init_floor}"
+        )
+        self.dt_init_range = dt_init_range
+        self.dt_init_floor = dt_init_floor
         self.use_qk_l2norm = use_qk_l2norm
         self.use_full_rank_gate = use_full_rank_gate
         self.gate_lower_bound = gate_lower_bound
@@ -423,7 +442,10 @@ class KimiDeltaAttention(FleetLayer):
         self.num_v_heads_local_tp = self.num_value_heads // self.tp_size
         self.v_dim_local_tp = self.v_dim // self.tp_size
 
-        # dt_bias is per-channel for KDA (GDN has it per-head) — fp32 for softplus
+        # dt_bias is per-channel for KDA (GDN has it per-head) — fp32 for softplus.
+        # The 0 here is only the placeholder for the perform_initialization=False
+        # path (weights come from a checkpoint); reset_parameters() below writes
+        # the real inverse-softplus init.
         self.dt_bias = self.create_parameter(
             shape=[self.v_dim_local_tp],
             dtype="float32",
@@ -431,7 +453,8 @@ class KimiDeltaAttention(FleetLayer):
         )
         self.dt_bias.is_distributed = True if self.tp_size > 1 else False
 
-        # A_log parameter — fp32 to avoid exp() overflow in bf16
+        # A_log parameter — fp32 to avoid exp() overflow in bf16. Same placeholder
+        # story as dt_bias; reset_parameters() picks the value per gate form.
         self.A_log = self.create_parameter(
             shape=[self.num_v_heads_local_tp],
             dtype="float32",
@@ -544,16 +567,48 @@ class KimiDeltaAttention(FleetLayer):
         return a_proj, b_proj
 
     def reset_parameters(self):
-        """Reset the parameters."""
-        if self.config.perform_initialization:
-            if self.conv_init is not None:
-                nn.initializer.Uniform(
-                    low=-self.conv_init, high=self.conv_init
-                )(self.conv1d.weight)
+        """Reset the parameters, mirroring fla's KDA init.
 
-            # dt_bias: 0 keeps the gate at its neutral point for both gate forms
-            nn.initializer.Constant(0.0)(self.dt_bias)
+        Reference: ``fla/layers/kda.py::KimiDeltaAttention.__init__`` and
+        ``fla/models/kda/modeling_kda.py::KDAPreTrainedModel._init_weights``.
 
+        * ``A_log``: zeros under the bounded ("safe") gate, ``log(uniform(
+          A_init_range))`` under the softplus gate. In the bounded form
+          ``exp(A_log)`` is only the slope of the sigmoid, so 1 is its neutral
+          start; the uniform draw belongs to the softplus form, where
+          ``exp(A_log)`` is the decay rate itself.
+        * ``dt_bias``: inverse softplus of a log-uniform ``dt`` (Mamba's dt
+          init) instead of 0. This matters: with ``dt_bias = 0`` the bounded
+          gate starts at ``lower_bound * sigmoid(0) = -2.5``, i.e. a per-step
+          decay of ``exp(-2.5) ~ 0.08`` that wipes the recurrent state almost
+          every token, whereas fla's init lands near ``lower_bound * 0.01``
+          (decay ~ 0.95).
+
+        Both parameters are sharded along axis 0 under TP, so each rank draws
+        its own local slice (same as GDN's A_log).
+        """
+        if not self.config.perform_initialization:
+            return
+
+        if self.conv_init is not None:
+            nn.initializer.Uniform(low=-self.conv_init, high=self.conv_init)(
+                self.conv1d.weight
+            )
+
+        # dt_bias = softplus^{-1}(dt), dt log-uniform over dt_init_range.
+        # softplus^{-1}(dt) = dt + log(-expm1(-dt)); expm1 keeps the small-dt end
+        # accurate (dt_min=1e-3 gives log(-expm1(-dt)) ~ -6.9).
+        dt = paddle.empty([self.v_dim_local_tp], dtype="float32")
+        nn.initializer.Uniform(
+            low=math.log(self.dt_init_range[0]),
+            high=math.log(self.dt_init_range[1]),
+        )(dt)
+        dt = paddle.clip(dt.exp(), min=self.dt_init_floor)
+        paddle.assign(dt + paddle.log(-paddle.expm1(-dt)), self.dt_bias)
+
+        if self.gate_lower_bound is not None:
+            nn.initializer.Constant(0.0)(self.A_log)
+        else:
             # A_log: initialize to log(uniform(A_init_range))
             A = paddle.empty([self.num_v_heads_local_tp], dtype="float32")
             nn.initializer.Uniform(
