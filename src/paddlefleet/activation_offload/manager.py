@@ -634,16 +634,21 @@ class OffloadManager:
         numel = 1
         for s in t.shape:
             numel *= s
+        is_param = isinstance(t, EagerParamBase)
         if (
             not self.enabled
-            or isinstance(t, EagerParamBase)  # parameters are not activations
+            or is_param  # parameters are not activations
             or not t.place.is_gpu_place()
             or numel < self.min_offload_numel
             or not t.is_contiguous()
             or t._offset() != 0  # see the module docstring
         ):
             self.stats["skipped"] += 1
-            self._note_skipped(t, numel)
+            if not is_param:
+                # A parameter was never a candidate, so reporting one as the
+                # largest activation left behind only sends the reader looking
+                # for memory that offloading could not have saved anyway.
+                self._note_skipped(t, numel)
             return t
 
         nbytes = numel * (t.element_size() if hasattr(t, "element_size") else 2)

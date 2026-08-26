@@ -67,7 +67,6 @@ from .manager import (
     offload_region,
     reset_offload_manager,
 )
-from .numa_bind import bind as numa_bind
 from .pinned_pool import PinnedPool
 from .pylayer_shim import install as install_pylayer_shim
 
@@ -79,7 +78,6 @@ __all__ = [
     "get_offload_manager",
     "install_pylayer_shim",
     "manager_from_config",
-    "numa_bind",
     "offload_enabled",
     "offload_groups",
     "offload_kwargs_from_config",

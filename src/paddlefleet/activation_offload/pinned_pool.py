@@ -295,10 +295,10 @@ class PinnedPool:
     def release_all(self):
         """Drop every idle bucket and give the pinned memory back to the host.
 
-        Only idle buffers are dropped. Those still handed out stay alive through
-        their holder, but the pool forgets them, so a later ``free()`` of one
-        counts as ``n_free_unknown``. Call this at an iteration boundary or at
-        teardown.
+        Only idle buffers are dropped. Buffers still handed out stay alive
+        through their holder and stay registered, so returning one afterwards
+        still works and puts it back into a bucket. Call this at an iteration
+        boundary or at teardown.
         """
         for key, bucket in self._free.items():
             for base, _ev in bucket:
