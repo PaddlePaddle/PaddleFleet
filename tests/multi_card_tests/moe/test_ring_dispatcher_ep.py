@@ -64,8 +64,28 @@ def _ensure_fleet():
             "mp",
         ],
     }
-    initialize_fleet(strategy=strategy)
+    # fleet is process-global, and this module does not always own the process:
+    # a runner can batch several test files together, or load this file twice
+    # (as ``__main__`` and as a package module), in which case the guard above
+    # sits in one module copy while fleet is already up. A second
+    # initialize_fleet then trips ``args is already initialized`` in
+    # set_global_variables. Probe the hybrid-communicate-group singleton (unset
+    # before fleet.init) rather than catching a broad exception, so a genuine
+    # comm-group failure still surfaces. Same approach as test_router.py.
+    if getattr(fleet.fleet, "_hcg", None) is None:
+        initialize_fleet(strategy=strategy)
     _pg_collection = ProcessGroupCollection.use_mpu_process_groups()
+    ep = _pg_collection.ep
+    if ep is None or ep.nranks != 2:
+        # Reusing someone else's topology would silently test the wrong ring
+        # (G/N assertions assume EP==2), so fail loudly instead of skipping --
+        # a skipped ring suite would go unnoticed.
+        raise RuntimeError(
+            "RingMoE EP tests need ep_degree=2, but the process was already "
+            f"initialised with ep={None if ep is None else ep.nranks}. Launch "
+            "this file on its own: python -m paddle.distributed.launch "
+            "--gpus=0,1 tests/multi_card_tests/moe/test_ring_dispatcher_ep.py"
+        )
     _fleet_initialised = True
     return _pg_collection
 
