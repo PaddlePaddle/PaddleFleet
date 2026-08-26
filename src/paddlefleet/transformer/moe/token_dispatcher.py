@@ -2469,6 +2469,10 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
                 "RingMoE (scheme-1) supports bf16 + SonicMoE only; fp8_dispatch "
                 "is not implemented (mid split by EP breaks 128-alignment)."
             )
+        # Round-0 intra token AllGather pre-issued by MoELayer before the gate;
+        # consumed by _node_slice. Separate from the inherited _pre_ag_handle,
+        # which belongs to the flat EP AllGather path the ring never takes.
+        self._pre_intra_ag: dict | None = None
         # Build the 2-level ring topology. Degenerate cases collapse to a single
         # level (N=1 -> intra-only == flat allgather; G=1 -> inter-only).
         if moe_group is None or moe_group.nranks == 1:
@@ -2553,8 +2557,85 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             paddle.distributed.all_reduce(counts, group=self.moe_group)
         return counts
 
+    def pre_intra_allgather(self, x_l):
+        """Issue round 0's intra-node token AllGather on the comm stream.
+
+        Ring analogue of :meth:`AllGatherTokenDispatcher.pre_allgather`: called
+        from ``MoELayer._maybe_pre_allgather_overlap`` before the gate so the
+        collective overlaps with the gate MLP on the calc stream. Only round 0
+        can be prefetched (later rounds consume the inter shift's output) and
+        only the tokens can be -- ``cur_idx`` / ``cur_w`` come from the gate.
+        Result is consumed by :meth:`_node_slice` via ``_PreAllGatherResult``,
+        whose backward ReduceScatter is the same dual as ``_RingAllGather``'s.
+        """
+        group = self.intra_group
+        # Drain a leftover handle from a forward that never reached the ring.
+        if self._pre_intra_ag is not None:
+            try:
+                self._pre_intra_ag["task"].wait()
+            except (RuntimeError, OSError) as _e:
+                logger.warning(
+                    "pre_intra_allgather: leftover async task wait failed "
+                    "(%s), discarding handle.",
+                    _e,
+                )
+            self._pre_intra_ag = None
+        if group is None or group.nranks == 1:
+            return
+
+        tok = x_l.reshape([-1, x_l.shape[-1]]).contiguous()
+        out_shape = list(tok.shape)
+        out_shape[0] *= group.nranks
+        out = paddle.empty(shape=out_shape, dtype=tok.dtype)
+        task = paddle.distributed.stream.all_gather(
+            out,
+            tok,
+            group=group,
+            sync_op=False,
+            use_calc_stream=False,
+        )
+        self._pre_intra_ag = {
+            "shape": list(tok.shape),
+            "dtype": tok.dtype,
+            "output": out,
+            "task": task,
+            "group": group,
+        }
+
+    def _take_pre_intra_ag(self, tok):
+        """Pop the prefetch handle if it matches ``tok``, else drain it.
+
+        The gradient flows through whatever tensor ``_PreAllGatherResult`` is
+        applied to, so only the values have to agree -- but with
+        ``variable_seq_lengths`` a shape mismatch would mean the buffer was
+        gathered for different tokens, so fall back to the inline AllGather
+        rather than return wrong data.
+        """
+        handle = self._pre_intra_ag
+        self._pre_intra_ag = None
+        if handle is None:
+            return None
+        if handle["shape"] != list(tok.shape) or handle["dtype"] != tok.dtype:
+            logger.warning(
+                "pre_intra_allgather: prefetched %s/%s does not match tok "
+                "%s/%s; falling back to the inline AllGather.",
+                handle["shape"],
+                handle["dtype"],
+                list(tok.shape),
+                tok.dtype,
+            )
+            handle["task"].wait()
+            return None
+        return handle
+
     def _node_slice(
-        self, tok, cur_idx, cur_w, expert_fn, recompute_moe_gate_up=False
+        self,
+        tok,
+        cur_idx,
+        cur_w,
+        expert_fn,
+        recompute_moe_gate_up=False,
+        prefetched=None,
     ):
         """One node's mid-slice contribution for the currently-held tokens:
         intra AllGather -> SonicMoE partial-I GEMM -> intra ReduceScatter-SUM.
@@ -2566,9 +2647,16 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         registered timer name, so these show up in the ``[Profile global_step]``
         line without further wiring. They are cuda-event timers, so they do not
         sync the host the way a barrier would.
+
+        ``prefetched`` is round 0's pre-issued token AllGather handle (see
+        ``pre_intra_allgather``); waiting on it here instead of issuing the
+        collective is what hides it behind the gate MLP.
         """
         with profile("ring-intra-ag"):
-            g_tok = self._ag(tok, self.intra_group)
+            if prefetched is not None:
+                g_tok = _PreAllGatherResult.apply(tok, prefetched)
+            else:
+                g_tok = self._ag(tok, self.intra_group)
             g_idx = self._ag_indices(cur_idx, self.intra_group)
             g_w = self._ag_router(cur_w, self.intra_group)
             g_w = paddle.where(g_idx < 0, paddle.zeros_like(g_w), g_w)
@@ -2660,12 +2748,20 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         tok = x_l
         cur_idx = topk_indices.detach().cast("int32").contiguous()
         cur_w = topk_weights.cast(probs_dtype).contiguous()
+        # Round 0's intra AllGather may already be in flight from before the
+        # gate; every later round has to issue its own.
+        pre_ag = self._take_pre_intra_ag(tok)
 
         n = self.N
         if n == 1:  # single node: intra-only, no inter routing needed.
             return self._inter_combine(
                 self._node_slice(
-                    tok, cur_idx, cur_w, expert_fn, recompute_moe_gate_up
+                    tok,
+                    cur_idx,
+                    cur_w,
+                    expert_fn,
+                    recompute_moe_gate_up,
+                    prefetched=pre_ag,
                 ),
                 None,
                 combine_overlap_handle,
@@ -2695,7 +2791,12 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             # Tokens held at this step originate from home node (r0 - step) % n,
             # so this node's slice for them is destined to that home.
             node_part = self._node_slice(
-                tok, cur_idx, cur_w, expert_fn, recompute_moe_gate_up
+                tok,
+                cur_idx,
+                cur_w,
+                expert_fn,
+                recompute_moe_gate_up,
+                prefetched=pre_ag if step == 0 else None,
             )
             partials[(r0 - step) % n] = node_part
             if step < n - 1:
