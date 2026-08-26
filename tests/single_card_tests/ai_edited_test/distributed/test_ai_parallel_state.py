@@ -235,7 +235,7 @@ class TestParallelState(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_get_pipeline_model_parallel_world_size(self):
-        """Test pipeline model parallel world size always returns 1."""
+        """Test pipeline model parallel world size without a pipeline group."""
         import paddlefleet.parallel_state as ps
 
         size = ps.get_pipeline_model_parallel_world_size()
@@ -245,18 +245,17 @@ class TestParallelState(unittest.TestCase):
         """Test setting pipeline model parallel world size."""
         import paddlefleet.parallel_state as ps
 
+        original = ps._PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+        self.addCleanup(ps.set_pipeline_model_parallel_world_size, original)
         ps.set_pipeline_model_parallel_world_size(4)
         self.assertEqual(ps._PIPELINE_MODEL_PARALLEL_WORLD_SIZE, 4)
+        self.assertEqual(ps.get_pipeline_model_parallel_world_size(), 4)
 
     def test_get_pipeline_model_parallel_rank(self):
-        """Test pipeline model parallel rank always returns 0 with warning."""
+        """Test pipeline model parallel rank without a pipeline group."""
         import paddlefleet.parallel_state as ps
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            rank = ps.get_pipeline_model_parallel_rank()
-            self.assertEqual(rank, 0)
-            self.assertTrue(len(w) > 0)
+        self.assertEqual(ps.get_pipeline_model_parallel_rank(), 0)
 
     def test_is_pipeline_first_stage(self):
         """Test is_pipeline_first_stage."""
