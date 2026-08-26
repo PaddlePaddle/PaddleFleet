@@ -545,6 +545,48 @@ class TestFusedSwiGLUScale(unittest.TestCase):
             ):
                 call()
 
+    def test_fused_swiglu_rejects_non_contiguous_x(self):
+        """Reject caller-owned X layouts that packed loads cannot consume."""
+        self._require_bf16()
+        ops = self._load_swiglu_ops()
+        x = (
+            paddle.randn([16, 2], dtype="float32")
+            .astype("bfloat16")
+            .transpose([1, 0])
+        )
+        if x.is_contiguous():
+            self.skipTest("transpose produced a contiguous tensor")
+        with self.assertRaisesRegex(OSError, "expects contiguous X and Probs"):
+            ops.fused_swiglu_weighted_clamp_bwd(
+                x,
+                paddle.ones([2, 1], dtype="bfloat16"),
+                paddle.ones([2, 8], dtype="bfloat16"),
+                7.0,
+            )
+
+    def test_fused_swiglu_rejects_non_contiguous_scale(self):
+        """Reject non-contiguous Scale layouts used by packed kernels."""
+        self._require_bf16()
+        ops = self._load_swiglu_ops()
+        x = paddle.ones([2, 16], dtype="bfloat16")
+        scale = paddle.ones([2, 2], dtype="bfloat16")[:, :1]
+        if scale.is_contiguous():
+            self.skipTest("column slice produced a contiguous Scale")
+        with self.assertRaisesRegex(OSError, "expects contiguous X and Scale"):
+            ops.fused_swiglu_scale(x, scale)
+
+    def test_fused_swiglu_rejects_non_contiguous_probs(self):
+        """Reject non-contiguous Probs layouts used by packed kernels."""
+        self._require_bf16()
+        ops = self._load_swiglu_ops()
+        x = paddle.ones([2, 16], dtype="bfloat16")
+        dout = paddle.ones([2, 8], dtype="bfloat16")
+        probs = paddle.ones([2, 2], dtype="bfloat16")[:, :1]
+        if probs.is_contiguous():
+            self.skipTest("column slice produced a contiguous Probs")
+        with self.assertRaisesRegex(OSError, "expects contiguous X and Probs"):
+            ops.fused_swiglu_weighted_clamp_bwd(x, probs, dout, 7.0)
+
     def test_fused_swiglu_accepts_one_dimensional_scale(self):
         """Preserve rank-1 Scale shape on the non-clamp backward path."""
         self._require_bf16()
@@ -650,6 +692,21 @@ with paddle.static.program_guard(main):
             rtol=0,
             atol=0,
         )
+
+        probs = paddle.randn([2, 1], dtype="float32").astype("bfloat16")
+        weighted_a = ops.fused_swiglu_weighted_clamp_bwd(
+            x, probs, non_contiguous_dout, 7.0
+        )
+        weighted_b = ops.fused_swiglu_weighted_clamp_bwd(
+            x, probs, dout_ref, 7.0
+        )
+        for result_a, result_b in zip(weighted_a, weighted_b):
+            np.testing.assert_allclose(
+                result_a.astype("float32").numpy(),
+                result_b.astype("float32").numpy(),
+                rtol=0,
+                atol=0,
+            )
 
         dx_a, ds_a = ops.fused_swiglu_scale_clamp_bwd(
             x, scale, non_contiguous_dout, 7.0
