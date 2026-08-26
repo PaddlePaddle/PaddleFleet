@@ -458,6 +458,16 @@ class TestRingForward(_RingTestBase):
         np.testing.assert_array_equal(baseline.numpy(), pre.numpy())
         self.assertIsNone(disp._pre_intra_ag)
 
+    def test_equal_token_check_runs_once_per_dispatcher(self):
+        disp = _make_dispatcher(1, self.ep_group)
+        idx, w = self._routing()
+        self.assertFalse(disp._equal_tokens_checked)
+        self._run(disp, self._tokens(), idx, w)
+        self.assertTrue(disp._equal_tokens_checked)
+        with mock.patch.object(disp, "_check_equal_tokens") as checked:
+            self._run(disp, self._tokens(), idx, w)
+        checked.assert_not_called()
+
     def test_check_equal_tokens(self):
         disp = _make_dispatcher(1, self.ep_group)
         # Same count on both ranks: passes and returns nothing.

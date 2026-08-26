@@ -2274,15 +2274,6 @@ class AllGatherTokenDispatcher(nn.Layer):
 
 _RING_SUBGROUP_CACHE: dict = {}
 
-# RingMoE's inter-node shift assumes every rank in the inter group holds the
-# same token count T (see _InterRingShift / ring_forward). Violating it produces
-# a NCCL size mismatch, i.e. a hang or silently wrong data with no usable error.
-# Off by default because the check itself costs a collective per layer; turn it
-# on when bringing up a new data/parallelism config.
-_RING_CHECK_EQUAL_TOKENS = (
-    os.environ.get("FLAGS_ringmoe_check_equal_tokens", "0") == "1"
-)
-
 
 def _detect_gpus_per_node() -> int:
     """Intra-node GPU count (G). Mirrors HybridEP's env priority."""
@@ -2512,6 +2503,8 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         # consumed by _node_slice. Separate from the inherited _pre_ag_handle,
         # which belongs to the flat EP AllGather path the ring never takes.
         self._pre_intra_ag: dict | None = None
+        # ring_forward validates the inter-node token layout on its first step.
+        self._equal_tokens_checked = False
         # Build the 2-level ring topology. Degenerate cases collapse to a single
         # level (N=1 -> intra-only == flat allgather; G=1 -> inter-only).
         if moe_group is None or moe_group.nranks == 1:
@@ -2562,9 +2555,8 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         ``x.shape[0]``, so sender and receiver disagree the moment token counts
         diverge (e.g. unbalanced DP, or variable_seq_lengths without packing to
         a fixed length). NCCL then mismatches sizes, which surfaces as a hang or
-        corrupted data rather than an exception. Gated by
-        ``FLAGS_ringmoe_check_equal_tokens`` since it costs one all_gather per
-        layer.
+        corrupted data rather than an exception. ``ring_forward`` runs this once
+        per dispatcher, on the first step, since it costs an all_gather.
         """
         counts = paddle.full([1], local_tokens, dtype="int64")
         gathered = paddle.empty([self.inter_group.nranks], dtype="int64")
@@ -2789,7 +2781,11 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             )
 
         r0 = self.inter_group.rank
-        if _RING_CHECK_EQUAL_TOKENS:
+        if not self._equal_tokens_checked:
+            # Once per dispatcher: catches a misconfigured token layout at the
+            # first step instead of hanging inside NCCL, without paying for a
+            # collective on every later step.
+            self._equal_tokens_checked = True
             self._check_equal_tokens(tok.shape[0])
         dst = (r0 + 1) % n  # send my rows to the next node
         src = (r0 - 1) % n  # receive from the previous node
