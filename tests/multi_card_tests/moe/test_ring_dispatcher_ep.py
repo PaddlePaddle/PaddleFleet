@@ -789,5 +789,74 @@ class TestMoELayerRingBranches(unittest.TestCase):
         layer.token_dispatcher.global_tokens_per_expert.assert_called_once()
 
 
+class TestRingSubgroupInit(_RingTestBase):
+    """``init_ring_subgroups`` is the one place allowed to build the groups."""
+
+    def test_init_populates_the_cache_dispatchers_then_reuse(self):
+        from paddlefleet.transformer.moe import token_dispatcher as td
+
+        _, _, intra, inter = td.init_ring_subgroups(self.ep_group)
+        disp = td.RingMoETokenDispatcher(
+            self.ep_group, self.ep_size, num_experts=self.num_experts
+        )
+        # Same objects: the dispatcher hit the cache, so it ran no collective.
+        self.assertIs(disp.intra_group, intra)
+        self.assertIs(disp.inter_group, inter)
+
+    def test_init_defaults_to_the_parallel_state_ep_group(self):
+        from paddlefleet.transformer.moe import token_dispatcher as td
+
+        self.assertIsNotNone(td.init_ring_subgroups())
+
+    def test_init_is_a_noop_when_ep_is_degenerate(self):
+        from types import SimpleNamespace
+
+        from paddlefleet.transformer.moe import token_dispatcher as td
+
+        # EP==1 builds nothing, so it must not enter the world collective --
+        # otherwise an EP-less rank would block the ranks that do build groups.
+        self.assertIsNone(
+            td.init_ring_subgroups(SimpleNamespace(nranks=1, ranks=[0]))
+        )
+
+
+class TestBuilderInitialisesRingSubgroups(unittest.TestCase):
+    """Regression: PP stages without MoE layers must still create the groups.
+
+    Sub-group creation is a *world* collective while a dispatcher only exists on
+    stages that own a MoE layer, so ``pipeline_model_parallel_size > 1`` plus a
+    sparse ``moe_layer_freq`` (or a dense prefix) used to hang: the MoE stages
+    waited in ``all_gather_object`` for ranks that never arrived. The builder
+    runs on every rank, so the call has to live there.
+    """
+
+    def _build(self, dispatcher_type):
+        import paddlefleet.gpt_builders as gb
+
+        config = mock.MagicMock()
+        config.moe_token_dispatcher_type = dispatcher_type
+        config.num_empty_layers_add_in_head = 0
+        config.num_empty_layers_add_in_tail = 0
+        config.separate_mtp_headloss = False
+        with (
+            mock.patch.object(gb, "init_ring_subgroups") as init,
+            mock.patch.object(
+                gb, "get_gpt_decoder_layers_spec", return_value=[]
+            ),
+            mock.patch.object(gb, "_get_effective_mtp_layers", return_value=0),
+            mock.patch.object(gb, "get_gpt_spec"),
+            mock.patch.object(gb, "build_spec_layer"),
+            mock.patch.object(gb, "LanguageLoss"),
+        ):
+            gb.gpt_builder(config)
+        return init
+
+    def test_ringmoe_build_initialises_subgroups(self):
+        self._build("ringmoe").assert_called_once_with()
+
+    def test_other_dispatchers_do_not_create_ring_groups(self):
+        self._build("allgather").assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

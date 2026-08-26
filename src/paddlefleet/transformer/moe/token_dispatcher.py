@@ -2291,11 +2291,16 @@ def _build_ring_subgroups(moe_group, gpus_per_node: int = _RING_GPUS_PER_NODE):
     Returns ``(G, N, intra_group, inter_group)``; a level's group is None when
     degenerate (size 1).
 
-    ``new_group`` is collective, so all world ranks must reach this in the same
-    order. Every rank contributes its own EP group's partition via
+    ``new_group`` and the ``all_gather_object`` below are world collectives, so
+    every world rank must reach this in the same order. Repeated MoE layers on
+    one rank collapse into one call (the cache key is per EP group, not per
+    layer), but a rank owning *no* MoE layer never gets here at all -- which is
+    why production pre-creates the groups via ``init_ring_subgroups`` at
+    model-build time instead of relying on MoE layer construction.
+
+    Every rank contributes its own EP group's partition via
     ``all_gather_object``; the merged set is deduplicated and sorted so all
-    ranks create identical groups in identical order. Cached by a
-    globally-identical key so repeated MoE layers hit/miss together.
+    ranks create identical groups in identical order.
     """
     ep_ranks = list(moe_group.ranks)
     ep_size = len(ep_ranks)
@@ -2351,6 +2356,34 @@ def _build_ring_subgroups(moe_group, gpus_per_node: int = _RING_GPUS_PER_NODE):
     result = (G, N, intra_group, inter_group)
     _RING_SUBGROUP_CACHE[key] = result
     return result
+
+
+def init_ring_subgroups(moe_group=None, gpus_per_node: int | None = None):
+    """Pre-create the RingMoE sub-groups on every rank, once, at build time.
+
+    Creating them lazily inside ``RingMoETokenDispatcher.__init__`` deadlocks:
+    the creation path is a *world* collective, but a dispatcher only exists on
+    ranks whose pipeline stage owns a MoE layer. With
+    ``pipeline_model_parallel_size > 1`` and a sparse ``moe_layer_freq`` (or a
+    dense prefix), a whole stage can be MoE-free; its ranks would skip the
+    collective while the MoE-bearing stages block in it forever.
+
+    So the model builder calls this instead -- every rank runs the builder
+    exactly once with the same config, so the sub-groups are already cached by
+    the time any dispatcher is constructed. Idempotent, and a no-op when EP is
+    degenerate (nothing to build, hence no collective to join).
+    """
+    if gpus_per_node is None:
+        gpus_per_node = _RING_GPUS_PER_NODE
+    if moe_group is None:
+        from paddlefleet import parallel_state
+
+        moe_group = parallel_state.get_expert_model_parallel_group(
+            check_initialized=False
+        )
+    if moe_group is None or moe_group.nranks == 1:
+        return None
+    return _build_ring_subgroups(moe_group, gpus_per_node)
 
 
 class _InterRingShift(paddle.autograd.PyLayer):
