@@ -182,9 +182,11 @@ class TestMoELayerLightweightMethods(unittest.TestCase):
         self.assertTrue(MoELayer.use_fp8(model))
 
         model.gate = Gate()
-        # set_layer_number now colors expert params; MinimalMoE is not a
-        # MoELayer subclass, so stub the coloring hook out (not under test here).
+        # MinimalMoE is not a MoELayer subclass, so stub out the hooks
+        # set_layer_number calls but that are not under test here: expert param
+        # coloring and the layer-scoped recompute re-resolve.
         model._color_expert_params = lambda: None
+        model._update_layer_aware_recompute = lambda: None
         MoELayer.set_layer_number(model, 11)
         self.assertEqual(model.layer_number, 11)
         self.assertEqual(model.gate.layer_number, 11)

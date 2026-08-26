@@ -177,6 +177,291 @@ def need_recompute_in_first_n(layer_number, config, recompute_num_layers):
     return False
 
 
+RECOMPUTE_ALL_LAYERS = "all"
+"""Dict value meaning "every layer" (``-1`` also works)."""
+
+LAYER_AGNOSTIC_RECOMPUTE_MODULES = frozenset({"lm_head", "loss_fn"})
+"""Single-instance modules: no layer number, so a layer list is rejected."""
+
+REFINED_RECOMPUTE_MODULES = frozenset({"flash_attn", "moe_combine"})
+"""RR modules: count-based selectors always use ``first_n``."""
+
+
+def _get_module_recompute_config(module_name, config):
+    """Return whether ``module_name`` is configured, and its layer selector.
+
+    The selector is the dict value in dict mode, or the shared
+    ``config.recompute_num_layers`` in list mode.
+    """
+    recompute_modules = config.recompute_modules
+    if recompute_modules is None:
+        return False, None
+    if isinstance(recompute_modules, dict):
+        if module_name not in recompute_modules:
+            return False, None
+        return True, recompute_modules[module_name]
+    if isinstance(recompute_modules, (list, tuple, set, frozenset)):
+        if module_name not in recompute_modules:
+            return False, None
+        return True, config.recompute_num_layers
+    raise ValueError(
+        "recompute_modules must be a sequence or dict, got "
+        f"{type(recompute_modules).__name__}"
+    )
+
+
+def normalize_recompute_layer_ids(layer_selector, module_name):
+    """Validate an explicit layer-id selector and return it as a frozenset."""
+    layer_ids = set()
+    for layer_id in layer_selector:
+        if isinstance(layer_id, bool) or not isinstance(layer_id, int):
+            raise ValueError(
+                f"recompute_modules['{module_name}'] layer ids must be ints, "
+                f"got {layer_id!r}"
+            )
+        if layer_id < 0:
+            raise ValueError(
+                f"recompute_modules['{module_name}'] layer ids must be "
+                f"non-negative, got {layer_id}"
+            )
+        layer_ids.add(layer_id)
+    return frozenset(layer_ids)
+
+
+def _selector_matches_layer(
+    layer_selector,
+    layer_number,
+    config,
+    module_name,
+    defer_if_layer_unknown=False,
+):
+    """Whether ``layer_selector`` selects ``layer_number``.
+
+    Selectors: ``None`` / ``"all"`` / negative int mean every layer; a list of
+    ints means those global 0-based layer ids; a non-negative int is a layer
+    count resolved through ``config.recompute_method``.
+
+    ``layer_number`` is ``None`` for layer-agnostic modules and for MoE
+    submodules before ``set_layer_number()``. A count then means every layer.
+    A layer list raises, unless ``defer_if_layer_unknown`` says the caller will
+    ask again with a real layer number.
+    """
+    if layer_selector is None or layer_selector == RECOMPUTE_ALL_LAYERS:
+        return True
+
+    if isinstance(layer_selector, (list, tuple, set, frozenset)):
+        layer_ids = normalize_recompute_layer_ids(layer_selector, module_name)
+        if layer_number is None:
+            if defer_if_layer_unknown:
+                return False
+            raise ValueError(
+                f"recompute_modules['{module_name}'] was given an explicit "
+                f"layer list {sorted(layer_ids)}, but '{module_name}' has no "
+                "layer number to filter on. Use "
+                f"'{RECOMPUTE_ALL_LAYERS}' to enable it everywhere."
+            )
+        return layer_number in layer_ids
+
+    if isinstance(layer_selector, bool) or not isinstance(layer_selector, int):
+        raise ValueError(
+            f"recompute_modules['{module_name}'] must be an int, a list of "
+            f"layer ids, or '{RECOMPUTE_ALL_LAYERS}', got "
+            f"{layer_selector!r}"
+        )
+
+    if layer_selector < 0:
+        return True
+    if layer_number is None:
+        return True
+    if config.recompute_method == "block":
+        return need_recompute_in_block(layer_number, config, layer_selector)
+    if config.recompute_method in ("first_n", None):
+        return need_recompute_in_first_n(layer_number, config, layer_selector)
+    raise ValueError(
+        f"recompute_modules['{module_name}']={layer_selector} needs recompute_method to "
+        f"be 'first_n' or 'block', got {config.recompute_method!r}"
+    )
+
+
+_logged_recompute_decisions = set()
+
+
+def _log_recompute_decision(kind, module_name, layer_number, enabled):
+    """Log one decision, deduped: MoE resolves its flags twice."""
+    key = (kind, module_name, layer_number)
+    if key in _logged_recompute_decisions:
+        return
+    _logged_recompute_decisions.add(key)
+    layer_text = "n/a" if layer_number is None else str(layer_number)
+    logger.info(
+        f"[RECOMPUTE-DECISION] kind={kind} module={module_name} "
+        f"layer={layer_text} enabled={enabled}"
+    )
+
+
+def module_needs_recompute(
+    module_name, layer_number, config, defer_if_layer_unknown=False
+):
+    """Whether ``module_name`` should be recomputed on layer ``layer_number``.
+
+    Single entry point for every ``recompute_modules`` lookup. Only meaningful
+    under ``recompute_granularity == "selective"``; ``lm_head`` and ``loss_fn``
+    keep ignoring the granularity, as they always did.
+
+    Pass ``defer_if_layer_unknown=True`` when ``layer_number=None`` just means
+    "not yet known" and the caller will ask again: a layer list then resolves to
+    False instead of raising. MoE submodules need this.
+    """
+    module_configured, layer_selector = _get_module_recompute_config(
+        module_name, config
+    )
+    if not module_configured:
+        # Queried on every layer, so logging these would bury the real ones.
+        return False
+    if module_name in LAYER_AGNOSTIC_RECOMPUTE_MODULES:
+        # No layer to filter on; a layer list is rejected during validation.
+        _log_recompute_decision("plain", module_name, layer_number, True)
+        return True
+    enabled = _selector_matches_layer(
+        layer_selector,
+        layer_number,
+        config,
+        module_name,
+        defer_if_layer_unknown=defer_if_layer_unknown,
+    )
+    _log_recompute_decision("plain", module_name, layer_number, enabled)
+    return enabled
+
+
+def module_needs_refined_recompute(module_name, layer_number, config):
+    """Whether ``module_name`` should use refined recompute (RR) on this layer.
+
+    RR inverts the selector: selected layers keep the plain recompute path, RR
+    runs on the rest. So ``"all"`` / ``None`` / a negative count disable RR,
+    while ``0`` selects nothing and enables it everywhere; a list-mode entry
+    carries no layer info and also enables it everywhere.
+
+    Count-based selectors always resolve with ``first_n``; only ``moe_combine``
+    rejects a different ``recompute_method``, and it does so itself.
+    """
+    module_configured, layer_selector = _get_module_recompute_config(
+        module_name, config
+    )
+    if not module_configured:
+        return False
+    if not isinstance(config.recompute_modules, dict):
+        _log_recompute_decision("rr", module_name, layer_number, True)
+        return True
+    if layer_selector is None or layer_selector == RECOMPUTE_ALL_LAYERS:
+        _log_recompute_decision("rr", module_name, layer_number, False)
+        return False
+    if isinstance(layer_selector, (list, tuple, set, frozenset)):
+        layer_ids = normalize_recompute_layer_ids(layer_selector, module_name)
+        if layer_number is None:
+            raise ValueError(
+                f"recompute_modules['{module_name}'] was given an explicit "
+                f"layer list but no layer number is available"
+            )
+        enabled = layer_number not in layer_ids
+        _log_recompute_decision("rr", module_name, layer_number, enabled)
+        return enabled
+    if isinstance(layer_selector, bool) or not isinstance(layer_selector, int):
+        raise ValueError(
+            f"recompute_modules['{module_name}'] must be an int, a list of "
+            f"layer ids, or '{RECOMPUTE_ALL_LAYERS}', got {layer_selector!r}"
+        )
+    if layer_selector < 0:
+        # Same as "all"/None. Handled here because need_recompute_in_first_n
+        # selects no layer for a negative count, which would invert into "RR
+        # everywhere" -- the exact opposite.
+        _log_recompute_decision("rr", module_name, layer_number, False)
+        return False
+    enabled = not need_recompute_in_first_n(
+        layer_number, config, layer_selector
+    )
+    _log_recompute_decision("rr", module_name, layer_number, enabled)
+    return enabled
+
+
+def validate_recompute_modules(config):
+    """Structural check of ``config.recompute_modules``, run from config init.
+
+    Fails on malformed selectors and out-of-range layer ids at startup rather
+    than deep inside a layer constructor.
+    """
+    recompute_modules = config.recompute_modules
+    if recompute_modules is None:
+        return
+    if isinstance(recompute_modules, (list, tuple, set, frozenset)):
+        for module_name in recompute_modules:
+            if not isinstance(module_name, str):
+                raise ValueError(
+                    "recompute_modules entries must be str, got "
+                    f"{module_name!r}"
+                )
+        return
+    if not isinstance(recompute_modules, dict):
+        raise ValueError(
+            "recompute_modules must be a sequence or dict, got "
+            f"{type(recompute_modules).__name__}"
+        )
+
+    total_num_hidden_layers = (
+        config.num_empty_layers_add_in_head
+        + config.num_hidden_layers
+        + config.num_empty_layers_add_in_tail
+    )
+    for module_name, layer_selector in recompute_modules.items():
+        if not isinstance(module_name, str):
+            raise ValueError(
+                f"recompute_modules keys must be str, got {module_name!r}"
+            )
+        if layer_selector is None or layer_selector == RECOMPUTE_ALL_LAYERS:
+            continue
+        if isinstance(layer_selector, (list, tuple, set, frozenset)):
+            layer_ids = normalize_recompute_layer_ids(
+                layer_selector, module_name
+            )
+            if module_name in LAYER_AGNOSTIC_RECOMPUTE_MODULES:
+                raise ValueError(
+                    f"recompute_modules['{module_name}'] does not support a "
+                    f"layer list: '{module_name}' is not a per-layer module. "
+                    f"Use '{RECOMPUTE_ALL_LAYERS}'."
+                )
+            out_of_range_layer_ids = [
+                layer_id
+                for layer_id in sorted(layer_ids)
+                if layer_id >= total_num_hidden_layers
+            ]
+            if out_of_range_layer_ids:
+                raise ValueError(
+                    f"recompute_modules['{module_name}'] layer ids "
+                    f"{out_of_range_layer_ids} are "
+                    f"out of range for {total_num_hidden_layers} layers "
+                    "(global, 0-based, including empty head/tail layers)"
+                )
+            continue
+        if isinstance(layer_selector, bool) or not isinstance(
+            layer_selector, int
+        ):
+            raise ValueError(
+                f"recompute_modules['{module_name}'] must be an int, a list "
+                f"of layer ids, or '{RECOMPUTE_ALL_LAYERS}', got "
+                f"{layer_selector!r}"
+            )
+        if layer_selector >= 0 and (
+            module_name not in REFINED_RECOMPUTE_MODULES
+            and config.recompute_method not in ("first_n", "block")
+        ):
+            raise ValueError(
+                f"recompute_modules['{module_name}']={layer_selector} is a "
+                "layer count and "
+                "needs recompute_method to be 'first_n' or 'block', got "
+                f"{config.recompute_method!r}. Use a layer list to select "
+                "layers explicitly."
+            )
+
+
 def need_full_recompute(layer_number, config):
     if config.recompute_granularity == "full":
         if config.recompute_method == "uniform":

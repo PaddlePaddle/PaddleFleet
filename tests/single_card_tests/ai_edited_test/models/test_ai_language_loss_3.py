@@ -204,6 +204,8 @@ class TestLanguageLossForwardWithListLogits(unittest.TestCase):
         # the erndata packed-doc MTP branch is taken and the L+K label trim is
         # skipped.
         mock_config.use_erndata = False
+        # recompute_modules is type-checked now, so a MagicMock is rejected.
+        mock_config.recompute_modules = None
 
         loss_fn = LanguageLoss(config=mock_config)
         vocab_size = 128
@@ -245,6 +247,8 @@ class TestLanguageLossForwardWithListLogits(unittest.TestCase):
         # the erndata packed-doc MTP branch is taken and the loss demands a
         # cu_seqlens_q stash this test never provides.
         mock_config.use_erndata = False
+        # recompute_modules is type-checked now, so a MagicMock is rejected.
+        mock_config.recompute_modules = None
 
         loss_fn = LanguageLoss(config=mock_config)
         vocab_size = 128

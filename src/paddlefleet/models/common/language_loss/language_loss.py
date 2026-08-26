@@ -38,6 +38,7 @@ from paddlefleet.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.recompute_utils import module_needs_recompute
 from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -480,10 +481,7 @@ class LanguageLoss(FleetLayer):
             labels = ContextParallelScatterOp.apply(
                 labels, axis=1, mode=self.config.cp_balance_mode
             )
-        if (
-            self.config.recompute_modules is not None
-            and "loss_fn" in self.config.recompute_modules
-        ):
+        if module_needs_recompute("loss_fn", None, self.config):
             return recompute(self.forward_impl, logits, labels)
         return self.forward_impl(logits, labels)
 

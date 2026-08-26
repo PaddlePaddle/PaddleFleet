@@ -28,6 +28,7 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
 
 from paddlefleet import utils
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.recompute_utils import module_needs_recompute
 from paddlefleet.tensor_parallel.random import (
     get_cuda_rng_tracker,
     get_expert_parallel_rng_tracker_name,
@@ -229,14 +230,7 @@ class GroupedMLPExpert(FleetLayer):
             self.activation_func = glu
         else:
             self.activation_func = self.config.hidden_act
-        self.activation_recompute = (
-            self.config.recompute_granularity == "selective"
-            and "moe_act" in self.config.recompute_modules
-        )
-        if self.activation_recompute and self.config.fp8:
-            raise ValueError(
-                "moe_act recompute for fp8 cannot work with the legacy GroupedMLP."
-            )
+        self.update_activation_recompute(None)
 
         # No tensor parallel - full sizes
         fc1_output_size = self.intermediate_size_per_partition
@@ -283,6 +277,26 @@ class GroupedMLPExpert(FleetLayer):
                 self.config.output_layer_init_method(self.weight2)
         self.weight1.is_distributed = self.expert_parallel
         self.weight2.is_distributed = self.expert_parallel
+
+    def update_activation_recompute(self, layer_number):
+        """Resolve the ``moe_act`` flag; re-called once the layer id is known.
+
+        ``layer_number=None`` (construction time) means a count-based selector
+        resolves to every layer and a layer list to False.
+        """
+        self.activation_recompute = (
+            self.config.recompute_granularity == "selective"
+            and module_needs_recompute(
+                "moe_act",
+                layer_number,
+                self.config,
+                defer_if_layer_unknown=True,
+            )
+        )
+        if self.activation_recompute and self.config.fp8:
+            raise ValueError(
+                "moe_act recompute for fp8 cannot work with the legacy GroupedMLP."
+            )
 
     @property
     def intermediate_ep_sharded(self):

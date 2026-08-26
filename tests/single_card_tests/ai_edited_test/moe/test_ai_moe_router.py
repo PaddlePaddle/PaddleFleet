@@ -2104,6 +2104,9 @@ class TestMoELayerSetLayerNumberForwardsIsMtp(unittest.TestCase):
         cfg_overrides.setdefault("actual_vocab_size", 128)
         config = _make_router_config(**cfg_overrides)
         moe = MoELayer.__new__(MoELayer)
+        # set_layer_number re-resolves the layer-scoped recompute flags, which
+        # reads config.
+        moe.config = config
         moe.gate = MagicMock()
         moe.layer_number = None
         # set_layer_number now colors expert params; EP=1 makes that a no-op.
