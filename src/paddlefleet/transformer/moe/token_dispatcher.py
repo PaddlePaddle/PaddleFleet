@@ -92,7 +92,7 @@ def is_hybrid_ep_backend_selected(
         "deepep",
         "hybridep",
         "moonep",
-        "ringmoe"
+        "ringmoe",
     ):
         raise ValueError(
             "moe_token_dispatcher_type must be one of: "
