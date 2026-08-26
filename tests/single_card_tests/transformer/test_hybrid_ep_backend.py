@@ -225,7 +225,7 @@ class TestHybridEPBackendSelection(unittest.TestCase):
 
     def test_dispatcher_type_selects_hybrid_ep_only_when_requested(self):
         self.assertFalse(is_hybrid_ep_backend_selected())
-        for dispatcher_type in ("allgather", "alltoall", "deepep"):
+        for dispatcher_type in ("allgather", "alltoall", "deepep", "ringmoe"):
             with self.subTest(dispatcher_type=dispatcher_type):
                 self.assertFalse(is_hybrid_ep_backend_selected(dispatcher_type))
         self.assertTrue(is_hybrid_ep_backend_selected("hybridep"))
@@ -236,6 +236,50 @@ class TestHybridEPBackendSelection(unittest.TestCase):
                 self.assertRaisesRegex(ValueError, "moe_token_dispatcher_type"),
             ):
                 is_hybrid_ep_backend_selected(dispatcher_type)
+
+    def test_config_default_and_every_documented_dispatcher_type(self):
+        """The config schema and its consumers must list the same options.
+
+        ``TransformerConfig.moe_token_dispatcher_type``'s docstring is the only
+        place the accepted values are written down, so pin the default and check
+        every documented value against the validator that consumes it.
+        """
+        import inspect
+        import re
+
+        from paddlefleet.transformer.transformer_config import TransformerConfig
+
+        field = TransformerConfig.__dataclass_fields__[
+            "moe_token_dispatcher_type"
+        ]
+        self.assertEqual(field.default, "alltoall")
+        self.assertEqual(
+            TransformerConfig().moe_token_dispatcher_type, "alltoall"
+        )
+
+        # Field docstrings are not kept at runtime, so read them from the source.
+        source = inspect.getsource(TransformerConfig)
+        doc = re.search(
+            r'moe_token_dispatcher_type: str = "alltoall"\s*"""(.*?)"""',
+            source,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(doc, "field docstring not found")
+        doc = doc.group(1)
+
+        documented = ("allgather", "alltoall", "deepep", "hybridep", "ringmoe")
+        for dispatcher_type in documented:
+            with self.subTest(dispatcher_type=dispatcher_type):
+                self.assertIn(f"'{dispatcher_type}'", doc)
+                config = TransformerConfig(
+                    moe_token_dispatcher_type=dispatcher_type
+                )
+                self.assertEqual(
+                    config.moe_token_dispatcher_type, dispatcher_type
+                )
+                # Non-default values must survive the validator every MoE layer
+                # runs them through.
+                is_hybrid_ep_backend_selected(config.moe_token_dispatcher_type)
 
     def test_flex_dispatcher_uses_hybrid_ep_manager(self):
         group = _HybridEPGroup(nranks=2)
