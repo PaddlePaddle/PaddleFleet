@@ -1265,6 +1265,11 @@ class MoELayer(nn.Layer):
                 is_mtp_layer=self.is_mtp_layer,
             )
 
+        # One scope for the whole ring: it interleaves the rounds' collectives
+        # with their GEMMs, so there is no point where dispatch ends and combine
+        # begins. Compare against dispatch + fusion_mlp + combine on the other
+        # dispatchers. ``fusion_mlp`` is timed inside (see _node_slice), so
+        # ringmoe - fusion_mlp is the ring's exposed communication.
         with profile("ringmoe"):
             hidden_states = self.token_dispatcher.ring_forward(
                 hidden_states,

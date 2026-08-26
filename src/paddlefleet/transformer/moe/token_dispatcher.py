@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+from paddlefleet.transformer.utils import profile
+
 from .fp8_utils import FP8_ALIGN
 from .fused_a2a import (
     HYBRIDEP_TOKEN_ALIGNMENT,
@@ -2671,16 +2673,20 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         tokens_per_expert = _tokens_per_expert_histogram(
             g_idx, self.num_experts
         )
-        part = expert_fn(
-            g_tok,
-            g_idx,
-            g_w,
-            False,  # use_fp8 (bf16 only)
-            tokens_per_expert=tokens_per_expert,
-            fp8_scale=None,
-            recompute_moe_gate_up=recompute_moe_gate_up,
-            fp8_combine_grad_handle=None,
-        )
+        # Same timer name as the flat path's expert GEMM, so the two dispatchers
+        # report comparable compute time. Accumulates over the N rounds: the
+        # collectives around it are outside the scope, so this is compute only.
+        with profile("fusion_mlp"):
+            part = expert_fn(
+                g_tok,
+                g_idx,
+                g_w,
+                False,  # use_fp8 (bf16 only)
+                tokens_per_expert=tokens_per_expert,
+                fp8_scale=None,
+                recompute_moe_gate_up=recompute_moe_gate_up,
+                fp8_combine_grad_handle=None,
+            )
         return self._rs(part, self.intra_group)
 
     def _inter_combine(self, x, group, combine_overlap_handle):
