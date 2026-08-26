@@ -23,6 +23,7 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+import paddle
 import paddle.nn.functional as F
 
 from ..model_parallel_config import ModelParallelConfig
@@ -936,6 +937,24 @@ class TransformerConfig(ModelParallelConfig):
     """Quantization format for quantizing weights, options are 32x32 and 1x32. Currently only used in SonicMoE."""
 
     ####################
+    # TeraMoE
+    ####################
+    using_teramoe: bool = False
+    """When enabled, MoE layer uses TeraMoE fused persistent kernel (dispatch+compute+combine in one kernel)."""
+
+    teramoe_dispatch_sms: int = 48
+    """Number of SMs allocated for TeraMoE dispatch phase."""
+
+    teramoe_combine_sms: int = 48
+    """Number of SMs allocated for TeraMoE combine phase."""
+
+    teramoe_compute_batch_size: int = 4096
+    """Batch size for TeraMoE compute phase. Must be one of (1024, 2048, 4096)."""
+
+    teramoe_combine_start_percent: int = 70
+    """Percentage threshold at which TeraMoE starts the combine phase. Range [0, 100]."""
+
+    ####################
     # MLA
     ####################
     """Configuration object for paddlefleet Multi-Latent Attention (MLA) transformers.
@@ -1712,6 +1731,22 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        if self.using_teramoe:
+            # TeraMoE's fused persistent kernel only accepts BF16. Reject
+            # FP16/FP32/FP8 at config time (survives `python -O`, unlike an
+            # assert) instead of constructing and failing deep inside the
+            # custom autograd/kernel with a lost error message.
+            if (
+                self.fp8 is not None
+                or self.fp16
+                or self.params_dtype != paddle.bfloat16
+            ):
+                raise ValueError(
+                    "TeraMoE only supports BF16: require "
+                    "params_dtype=paddle.bfloat16, fp16=False, fp8=None, but "
+                    f"got params_dtype={self.params_dtype}, fp16={self.fp16}, "
+                    f"fp8={self.fp8}."
+                )
         if self.mtp_shared_last_layer:
             # When MTP reuses the last backbone TransformerLayer's parameters,
             # the MTP transformer block must have an identical structure to the

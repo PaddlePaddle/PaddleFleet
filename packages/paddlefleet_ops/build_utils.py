@@ -200,6 +200,7 @@ def check_submodule_updated():
             "HybridEP",
             "quack",
             "sonic-moe",
+            "TeraMoE",
             "flash-attention",
             "flash-linear-attention",
             "FlashMLA",
@@ -482,6 +483,15 @@ def get_libs():
                 source_rel_path="third_party/sonic-moe",
                 artifacts=[
                     Artifact("sonicmoe", "sonicmoe"),
+                ],
+            )
+        )
+        LIBRARIES.append(
+            EcosystemLibrary(
+                name="TeraMoE",
+                source_rel_path="third_party/TeraMoE",
+                artifacts=[
+                    Artifact("teramoe", "teramoe"),
                 ],
             )
         )
