@@ -108,6 +108,18 @@ def _make_config(**overrides):
     return config
 
 
+def _force_fuse_flag(config):
+    """Turn the flag on behind ``__post_init__``'s back.
+
+    The config validation rejects the combinations below outright, because a flag
+    that can never fire is a configuration mistake rather than a mode. The
+    layer-level fallback is the second line of defence and is still worth
+    pinning, so it is reached by setting the flag after validation.
+    """
+    config.fuse_inv_rope_into_vha_postmix = True
+    return config
+
+
 def _build(config, layer_number=0):
     """Build the layer with bf16 parameters (the fused RoPE path is bf16 only)."""
     model_parallel_cuda_manual_seed(_SEED)
@@ -230,10 +242,8 @@ class TestInvRopePostmixLayerBitwise(unittest.TestCase):
 
     def test_grouped_postmix_falls_back(self) -> None:
         """grouped=True has no [nh,nh] GEMM to split, so it must not fuse."""
-        config = _make_config(
-            fuse_inv_rope_into_vha_postmix=True,
-            vha_postmix_grouped=True,
-            vha_postmix_rank=1,
+        config = _force_fuse_flag(
+            _make_config(vha_postmix_grouped=True, vha_postmix_rank=1)
         )
         attn = _build(config)
         self.assertFalse(attn._can_fuse_inv_rope_postmix(False))
@@ -244,11 +254,62 @@ class TestInvRopePostmixLayerBitwise(unittest.TestCase):
         self.assertEqual(out.shape, [1, 32, HIDDEN])
 
     def test_high_precision_rope_falls_back(self) -> None:
-        config = _make_config(
-            fuse_inv_rope_into_vha_postmix=True, high_precision_rope=True
-        )
+        config = _force_fuse_flag(_make_config(high_precision_rope=True))
         attn = _build(config)
         self.assertFalse(attn._can_fuse_inv_rope_postmix(False))
+
+    def test_the_config_rejects_a_flag_that_can_never_fire(self) -> None:
+        """The fallback is bitwise identical, so nothing else would report it."""
+        for overrides, expected in (
+            ({"vha_postmix_grouped": True, "vha_postmix_rank": 1}, "grouped"),
+            ({"high_precision_rope": True}, "high_precision_rope"),
+            ({"apply_rope_fusion": False}, "apply_rope_fusion"),
+            ({"use_vha_attention": False}, "use_vha_attention"),
+            ({"qk_pos_emb_head_dim": 0}, "qk_pos_emb_head_dim"),
+            # No DSv4HybridAttention is built at all in these two, so there is
+            # no postmix to fuse into rather than a postmix of the wrong shape.
+            (
+                {"experimental_attention_variant": None},
+                "experimental_attention_variant",
+            ),
+            ({"csa_compress_ratios": [-2] * 4}, "csa_compress_ratios"),
+        ):
+            with (
+                self.subTest(**overrides),
+                self.assertRaisesRegex(ValueError, expected),
+            ):
+                _make_config(fuse_inv_rope_into_vha_postmix=True, **overrides)
+
+    def test_selective_postmix_recompute_only_warns(self) -> None:
+        """It disables the fusion per layer, so it is a choice, not a mistake."""
+        with self.assertLogs(
+            "paddlefleet.transformer.transformer_config", level="WARNING"
+        ) as caught:
+            config = _make_config(
+                fuse_inv_rope_into_vha_postmix=True,
+                recompute_granularity="selective",
+                recompute_modules=["vha_postmix"],
+            )
+        self.assertTrue(config.fuse_inv_rope_into_vha_postmix)
+        joined = "\n".join(caught.output)
+        self.assertIn("fuse_inv_rope_into_vha_postmix", joined)
+        self.assertIn("every layer", joined)
+
+    def test_a_bounded_recompute_window_is_named_in_the_warning(self) -> None:
+        """Only the covered layers lose the fusion; the message must say which."""
+        with self.assertLogs(
+            "paddlefleet.transformer.transformer_config", level="WARNING"
+        ) as caught:
+            _make_config(
+                fuse_inv_rope_into_vha_postmix=True,
+                recompute_granularity="selective",
+                recompute_modules=["vha_postmix"],
+                recompute_num_layers=2,
+                recompute_method="block",
+            )
+        joined = "\n".join(caught.output)
+        self.assertIn("block", joined)
+        self.assertIn("2 layers", joined)
 
 
 if __name__ == "__main__":
