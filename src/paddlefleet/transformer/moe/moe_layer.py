@@ -860,23 +860,20 @@ class MoELayer(nn.Layer):
         hidden_states: paddle.Tensor,
         dispatcher_hidden_states: paddle.Tensor | None = None,
     ):
-        """Pre-issue async AllGather on comm stream to overlap with gate MLP.
+        """Pre-issue the token AllGather on the comm stream, before the gate MLP.
 
-        Two shapes of this, both gated on ``moe_allgather_gate_overlap`` and
-        EP>1. For ``allgather``: one flat EP AllGather, consumed in
-        dispatch_preprocess. For ``ringmoe``: the round-0 intra-node token
-        AllGather, consumed in ``_node_slice`` -- RingMoE drives its own 2-level
-        collectives and never calls dispatch_preprocess, so a flat EP prefetch
-        would be pure waste and would leave the cached result unconsumed.
+        Needs ``moe_allgather_gate_overlap`` and EP>1. 'allgather' prefetches the
+        flat EP AllGather that ``dispatch_preprocess`` consumes; 'ringmoe'
+        prefetches round 0's intra-node one that ``_node_slice`` consumes -- it
+        never calls ``dispatch_preprocess``, so a flat prefetch would go unused.
+        Only the tokens can be prefetched; the routing idx/weight AllGathers need
+        the gate output.
 
-        Only the token AllGather is prefetchable: the routing idx/w AllGathers
-        depend on the gate output. ``dispatcher_hidden_states`` is the tensor the
-        expert path actually consumes (it differs from ``hidden_states`` under
-        the three-path accuracy-compatible clone), so the ring prefetches from
-        that one to keep the gradient on the intended path.
-
-        For latent MoE, fc1_latent_proj is hoisted here so AllGather targets the
-        latent-space tensor; ``_project_to_latent`` picks the result back up.
+        The ring reads ``dispatcher_hidden_states``, the tensor the expert path
+        consumes, which under the three-path accuracy-compatible clone is not
+        ``hidden_states``. For latent MoE, ``fc1_latent_proj`` is hoisted here so
+        the AllGather runs in latent space; ``_project_to_latent`` reuses the
+        result via ``self._latent_hidden``.
         """
         if not (
             self.expert_model_parallel_size > 1
