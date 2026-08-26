@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -1999,30 +1998,21 @@ class AllGatherTokenDispatcher(nn.Layer):
 
 _RING_SUBGROUP_CACHE: dict = {}
 
-
-def _detect_gpus_per_node() -> int:
-    """Intra-node GPU count (G). Mirrors HybridEP's env priority."""
-    for env in (
-        "NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN",
-        "PADDLE_LOCAL_SIZE",
-    ):
-        val = os.getenv(env)
-        if val:
-            return int(val)
-    visible = os.getenv("CUDA_VISIBLE_DEVICES")
-    if visible:
-        n = len([d for d in visible.split(",") if d.strip()])
-        if n > 0:
-            return n
-    return 1
+# Intra-node GPU count (G) the ring splits on. Fixed rather than detected: the
+# split has to match the real NVLink domain, and over-estimating it silently
+# routes inter-node traffic as if it were intra-node, which shows up as an
+# unexplained slowdown instead of an error. Every target machine has 8.
+_RING_GPUS_PER_NODE = 8
 
 
-def _build_ring_subgroups(moe_group, gpus_per_node: int):
+def _build_ring_subgroups(moe_group, gpus_per_node: int = _RING_GPUS_PER_NODE):
     """Split the EP group into intra-node and inter-node sub-groups.
 
     Assumes EP ranks are node-contiguous: the first G EP ranks live on one
-    machine, the next G on the next, etc. Returns ``(G, N, intra_group,
-    inter_group)``; a level's group is None when degenerate (size 1).
+    machine, the next G on the next, etc. ``G = min(gpus_per_node, EP)``, so an
+    EP group that fits inside one machine collapses to the intra level only.
+    Returns ``(G, N, intra_group, inter_group)``; a level's group is None when
+    degenerate (size 1).
 
     ``new_group`` is collective, so all world ranks must reach this in the same
     order. Every rank contributes its own EP group's partition via
@@ -2035,9 +2025,9 @@ def _build_ring_subgroups(moe_group, gpus_per_node: int):
     G = min(gpus_per_node, ep_size)
     if ep_size % G != 0:
         raise ValueError(
-            f"RingMoE requires EP size ({ep_size}) divisible by gpus-per-node "
-            f"({G}). Set NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN / "
-            f"PADDLE_LOCAL_SIZE so that EP == N*G."
+            f"RingMoE requires EP size ({ep_size}) to be a multiple of the "
+            f"per-node GPU count ({G}), so that EP == N*G. Pick an EP degree "
+            f"that divides evenly across whole machines."
         )
     N = ep_size // G
 
@@ -2230,8 +2220,9 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         self._pre_intra_ag: dict | None = None
         # ring_forward validates the inter-node token layout on its first step.
         self._equal_tokens_checked = False
-        # Build the 2-level ring topology. Degenerate cases collapse to a single
-        # level (N=1 -> intra-only == flat allgather; G=1 -> inter-only).
+        # Build the 2-level ring topology on a fixed 8 GPUs per node. Degenerate
+        # cases collapse to a single level (EP <= 8 -> N=1, intra-only == flat
+        # allgather; G=1 -> inter-only).
         if moe_group is None or moe_group.nranks == 1:
             self.G, self.N = 1, 1
             self.intra_group = self.inter_group = None
@@ -2241,7 +2232,7 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
                 self.N,
                 self.intra_group,
                 self.inter_group,
-            ) = _build_ring_subgroups(moe_group, _detect_gpus_per_node())
+            ) = _build_ring_subgroups(moe_group, _RING_GPUS_PER_NODE)
 
     def _ag(self, t, group):
         """Autograd-safe AllGather over a sub-group (backward = ReduceScatter)."""
