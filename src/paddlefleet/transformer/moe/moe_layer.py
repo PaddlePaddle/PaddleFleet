@@ -857,28 +857,61 @@ class MoELayer(nn.Layer):
         )
         return self.unpermute(expert_outs)
 
-    def _maybe_pre_allgather_overlap(self, hidden_states: paddle.Tensor):
+    def _maybe_pre_allgather_overlap(
+        self,
+        hidden_states: paddle.Tensor,
+        dispatcher_hidden_states: paddle.Tensor | None = None,
+    ):
         """Pre-issue async AllGather on comm stream to overlap with gate MLP.
 
-        allgather + EP>1 + moe_allgather_gate_overlap only. Result consumed
-        in dispatch_preprocess. For latent MoE, fc1_latent_proj is hoisted
-        here so AllGather targets latent-space tensor.
+        Two shapes of this, both gated on ``moe_allgather_gate_overlap`` and
+        EP>1. For ``allgather``: one flat EP AllGather, consumed in
+        dispatch_preprocess. For ``ringmoe``: the round-0 intra-node token
+        AllGather, consumed in ``_node_slice`` -- RingMoE drives its own 2-level
+        collectives and never calls dispatch_preprocess, so a flat EP prefetch
+        would be pure waste and would leave the cached result unconsumed.
+
+        Only the token AllGather is prefetchable: the routing idx/w AllGathers
+        depend on the gate output. ``dispatcher_hidden_states`` is the tensor the
+        expert path actually consumes (it differs from ``hidden_states`` under
+        the three-path accuracy-compatible clone), so the ring prefetches from
+        that one to keep the gradient on the intended path.
+
+        For latent MoE, fc1_latent_proj is hoisted here so AllGather targets the
+        latent-space tensor; ``_project_to_latent`` picks the result back up.
         """
-        if (
-            # Deliberately not use_intermediate_ep_sharding: RingMoE drives its own
-            # 2-level collectives and never calls dispatch_preprocess, so a
-            # prefetched flat EP AllGather would be pure waste and would leave
-            # the dispatcher's cached result unconsumed.
-            self.moe_token_dispatcher_type == "allgather"
-            and self.expert_model_parallel_size > 1
+        if not (
+            self.expert_model_parallel_size > 1
             and self.moe_allgather_gate_overlap
         ):
+            self._latent_hidden = None
+            return
+        if self.moe_token_dispatcher_type == "allgather":
             if self.use_latent_moe:
                 self._latent_hidden = self.fc1_latent_proj(hidden_states)
                 self.token_dispatcher.pre_allgather(self._latent_hidden)
             else:
                 self._latent_hidden = None
                 self.token_dispatcher.pre_allgather(hidden_states)
+        elif self.use_ring_moe:
+            if not self._supports_three_path_clone():
+                # A subclass overriding _prepare_expert_input feeds the experts
+                # something other than hidden_states, so a prefetch issued here
+                # would gather the wrong tensor -- and the shape guard in
+                # _take_pre_intra_ag would not necessarily catch it.
+                self._latent_hidden = None
+                return
+            src = (
+                hidden_states
+                if dispatcher_hidden_states is None
+                else dispatcher_hidden_states
+            )
+            if self.use_latent_moe:
+                self._latent_hidden = self.fc1_latent_proj(src)
+                self.token_dispatcher.pre_intra_allgather(self._latent_hidden)
+            else:
+                self._latent_hidden = None
+                self.token_dispatcher.pre_intra_allgather(src)
         else:
             self._latent_hidden = None
 
@@ -1422,7 +1455,7 @@ class MoELayer(nn.Layer):
             _hs_router_path = _hs_dispatcher_path = hidden_states
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
 
-        self._maybe_pre_allgather_overlap(hidden_states)
+        self._maybe_pre_allgather_overlap(hidden_states, _hs_dispatcher_path)
         gate_input = self._prepare_gate_input(_hs_router_path, residual)
 
         (
