@@ -28,8 +28,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-from paddlefleet.transformer.utils import profile
-
 from .fp8_utils import FP8_ALIGN
 from .fused_a2a import (
     HYBRIDEP_TOKEN_ALIGNMENT,
@@ -1311,6 +1309,30 @@ class _RouterAllGather(paddle.autograd.PyLayer):
         return out
 
 
+def _drain_async_handle(handle: dict | None, where: str) -> None:
+    """Wait out a leftover pre-issued collective and discard its handle.
+
+    A prefetch whose consumer was never reached -- an exception between issuing
+    and consuming -- leaves an in-flight NCCL task owning an output buffer.
+    Waiting before the slot is overwritten keeps the next prefetch from racing
+    it. A failed wait is logged rather than raised: there is nothing left to
+    recover, and raising here would mask whatever aborted the previous forward.
+
+    Always returns None, so callers can write ``self._h = _drain(self._h, ...)``.
+    """
+    if handle is None:
+        return None
+    try:
+        handle["task"].wait()
+    except (RuntimeError, OSError) as exc:
+        logger.warning(
+            "%s: leftover async task wait failed (%s), discarding handle.",
+            where,
+            exc,
+        )
+    return None
+
+
 class _PreAllGatherResult(paddle.autograd.PyLayer):
     """Consume a pre-issued async AllGather of hidden_states.
 
@@ -1701,16 +1723,9 @@ class AllGatherTokenDispatcher(nn.Layer):
             return
 
         # Drain leftover handle from a possibly-aborted previous forward.
-        if self._pre_ag_handle is not None:
-            try:
-                self._pre_ag_handle["task"].wait()
-            except (RuntimeError, OSError) as _e:
-                logger.warning(
-                    "pre_allgather: leftover async task wait failed (%s), "
-                    "discarding handle.",
-                    _e,
-                )
-            self._pre_ag_handle = None
+        self._pre_ag_handle = _drain_async_handle(
+            self._pre_ag_handle, "pre_allgather"
+        )
 
         if len(hidden_states.shape) == 3:
             _, _, d_model = hidden_states.shape
@@ -2154,6 +2169,34 @@ class _RingAllGather(paddle.autograd.PyLayer):
         return reduce_scatter_group(grad.contiguous(), group=ctx.group)
 
 
+class _RingPreAllGatherResult(paddle.autograd.PyLayer):
+    """Consume a pre-issued async intra AllGather (see ``pre_intra_allgather``).
+
+    Forward waits for the async NCCL task and returns the filled buffer, so the
+    collective ends up hidden behind whatever ran on the calc stream since it was
+    issued. Backward is :class:`_RingAllGather`'s, verbatim: ReduceScatter-SUM on
+    the contiguous grad, no barrier. ``AllGatherTokenDispatcher`` has a
+    ``_PreAllGatherResult`` doing the same job for the flat EP path, but its
+    backward omits the ``contiguous()`` and reduce-scatters through
+    ``ReduceScatterGroupOp`` (which barriers); the ring's grad comes straight out
+    of the SonicMoE GEMM backward and its sub-groups own their buffers, so it
+    needs this variant rather than that one.
+
+    The ``handle`` is a plain dict, not a tensor, so Paddle does not expect a
+    gradient for it -- backward returns a single value.
+    """
+
+    @staticmethod
+    def forward(ctx, tok, handle):
+        handle["task"].wait()
+        ctx.group = handle["group"]
+        return handle["output"]
+
+    @staticmethod
+    def backward(ctx, grad):
+        return reduce_scatter_group(grad.contiguous(), group=ctx.group)
+
+
 class RingMoETokenDispatcher(AllGatherTokenDispatcher):
     """RingMoE scheme-1 dispatcher (bf16 + SonicMoE).
 
@@ -2290,21 +2333,15 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         collective overlaps with the gate MLP on the calc stream. Only round 0
         can be prefetched (later rounds consume the inter shift's output) and
         only the tokens can be -- ``cur_idx`` / ``cur_w`` come from the gate.
-        Result is consumed by :meth:`_node_slice` via ``_PreAllGatherResult``,
-        whose backward ReduceScatter is the same dual as ``_RingAllGather``'s.
+        Result is consumed by :meth:`_node_slice` via
+        ``_RingPreAllGatherResult``, whose backward ReduceScatter is the same
+        dual as ``_RingAllGather``'s.
         """
         group = self.intra_group
         # Drain a leftover handle from a forward that never reached the ring.
-        if self._pre_intra_ag is not None:
-            try:
-                self._pre_intra_ag["task"].wait()
-            except (RuntimeError, OSError) as _e:
-                logger.warning(
-                    "pre_intra_allgather: leftover async task wait failed "
-                    "(%s), discarding handle.",
-                    _e,
-                )
-            self._pre_intra_ag = None
+        self._pre_intra_ag = _drain_async_handle(
+            self._pre_intra_ag, "pre_intra_allgather"
+        )
         if group is None or group.nranks == 1:
             return
 
@@ -2328,29 +2365,34 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         }
 
     def _take_pre_intra_ag(self, tok):
-        """Pop the prefetch handle if it matches ``tok``, else drain it.
+        """Pop the prefetch handle and check it really belongs to ``tok``.
 
-        The gradient flows through whatever tensor ``_PreAllGatherResult`` is
-        applied to, so only the values have to agree -- but with
-        ``variable_seq_lengths`` a shape mismatch would mean the buffer was
-        gathered for different tokens, so fall back to the inline AllGather
-        rather than return wrong data.
+        The gradient flows through whatever tensor ``_RingPreAllGatherResult`` is
+        applied to, so only the values have to agree. A mismatch means the
+        prefetch was issued for different tokens than the ring is about to
+        consume, which is a bug rather than a runtime condition: the prefetch and
+        the consumption happen in the same forward, on the same tensor.
+
+        It raises instead of falling back to the inline AllGather, because
+        "consume the prefetch or issue a collective instead" is a *local*
+        decision while ``_ag`` is rank-collective. One rank taking the fallback
+        while the others consume their prefetch makes the ranks disagree on how
+        many collectives to run, which hangs inside NCCL with no diagnostic. A
+        raise aborts with a readable message instead.
         """
         handle = self._pre_intra_ag
         self._pre_intra_ag = None
         if handle is None:
             return None
         if handle["shape"] != list(tok.shape) or handle["dtype"] != tok.dtype:
-            logger.warning(
-                "pre_intra_allgather: prefetched %s/%s does not match tok "
-                "%s/%s; falling back to the inline AllGather.",
-                handle["shape"],
-                handle["dtype"],
-                list(tok.shape),
-                tok.dtype,
-            )
             handle["task"].wait()
-            return None
+            raise RuntimeError(
+                "pre_intra_allgather prefetched "
+                f"{handle['shape']}/{handle['dtype']} but the ring is "
+                f"consuming {list(tok.shape)}/{tok.dtype}. The prefetch must "
+                "be issued from the same tensor the expert path consumes (see "
+                "MoELayer._maybe_pre_allgather_overlap)."
+            )
         return handle
 
     def _node_slice(
@@ -2366,41 +2408,31 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         intra AllGather -> SonicMoE partial-I GEMM -> intra ReduceScatter-SUM.
         Returns [T, d_l].
 
-        The three stages are timed separately (``ring-intra-ag`` /
-        ``ring-gemm`` / ``ring-intra-rs``) so a run can tell which one the ring
-        actually spends its time in; ``Trainer._print_timer`` logs every
-        registered timer name, so these show up in the ``[Profile global_step]``
-        line without further wiring. They are cuda-event timers, so they do not
-        sync the host the way a barrier would.
-
         ``prefetched`` is round 0's pre-issued token AllGather handle (see
         ``pre_intra_allgather``); waiting on it here instead of issuing the
         collective is what hides it behind the gate MLP.
         """
-        with profile("ring-intra-ag"):
-            if prefetched is not None:
-                g_tok = _PreAllGatherResult.apply(tok, prefetched)
-            else:
-                g_tok = self._ag(tok, self.intra_group)
-            g_idx = self._ag_indices(cur_idx, self.intra_group)
-            g_w = self._ag_router(cur_w, self.intra_group)
-            g_w = paddle.where(g_idx < 0, paddle.zeros_like(g_w), g_w)
-            tokens_per_expert = _tokens_per_expert_histogram(
-                g_idx, self.num_experts
-            )
-        with profile("ring-gemm"):
-            part = expert_fn(
-                g_tok,
-                g_idx,
-                g_w,
-                False,  # use_fp8 (bf16 only)
-                tokens_per_expert=tokens_per_expert,
-                fp8_scale=None,
-                recompute_moe_gate_up=recompute_moe_gate_up,
-                fp8_combine_grad_handle=None,
-            )
-        with profile("ring-intra-rs"):
-            return self._rs(part, self.intra_group)
+        if prefetched is not None:
+            g_tok = _RingPreAllGatherResult.apply(tok, prefetched)
+        else:
+            g_tok = self._ag(tok, self.intra_group)
+        g_idx = self._ag_indices(cur_idx, self.intra_group)
+        g_w = self._ag_router(cur_w, self.intra_group)
+        g_w = paddle.where(g_idx < 0, paddle.zeros_like(g_w), g_w)
+        tokens_per_expert = _tokens_per_expert_histogram(
+            g_idx, self.num_experts
+        )
+        part = expert_fn(
+            g_tok,
+            g_idx,
+            g_w,
+            False,  # use_fp8 (bf16 only)
+            tokens_per_expert=tokens_per_expert,
+            fp8_scale=None,
+            recompute_moe_gate_up=recompute_moe_gate_up,
+            fp8_combine_grad_handle=None,
+        )
+        return self._rs(part, self.intra_group)
 
     def _inter_combine(self, x, group, combine_overlap_handle):
         """Final inter-node combine, optionally overlapped with shared experts.
@@ -2468,6 +2500,13 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         only T·d_l per hop in the low latent dim) and the overlap headroom, not
         footprint. Getting the smaller footprint would require dropping ``g_tok``
         and re-gathering it in backward.
+
+        Two optional overlaps feed in from ``MoELayer``, both no-ops when absent:
+        ``combine_overlap_handle`` runs the shared-expert subgraph while the final
+        inter ReduceScatter is in flight (consumed in :meth:`_inter_combine`,
+        which writes the subgraph's output back as ``fn_out``), and a handle left
+        by :meth:`pre_intra_allgather` supplies round 0's intra AllGather already
+        in flight from before the gate.
         """
         x_l = x_l.reshape([-1, x_l.shape[-1]]).contiguous()
         tok = x_l
@@ -2503,16 +2542,15 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             # so it overlaps with this round's intra AllGather/GEMM/ReduceScatter.
             if step < n - 1:
                 h_tok, h_idx, h_w = {}, {}, {}
-                with profile("ring-inter-launch"):
-                    nxt_tok = _InterRingShift.apply(
-                        tok, self.inter_group, dst, src, h_tok
-                    )
-                    nxt_idx = _InterRingShift.apply(
-                        cur_idx, self.inter_group, dst, src, h_idx
-                    )
-                    nxt_w = _InterRingShift.apply(
-                        cur_w, self.inter_group, dst, src, h_w
-                    )
+                nxt_tok = _InterRingShift.apply(
+                    tok, self.inter_group, dst, src, h_tok
+                )
+                nxt_idx = _InterRingShift.apply(
+                    cur_idx, self.inter_group, dst, src, h_idx
+                )
+                nxt_w = _InterRingShift.apply(
+                    cur_w, self.inter_group, dst, src, h_w
+                )
             # Tokens held at this step originate from home node (r0 - step) % n,
             # so this node's slice for them is destined to that home.
             node_part = self._node_slice(
@@ -2526,25 +2564,16 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             partials[(r0 - step) % n] = node_part
             if step < n - 1:
                 # Wait for the in-flight rotation before consuming it next round.
-                # ``ring-inter-wait`` is the overlap probe: near-zero means the
-                # shift fully hid behind the intra GEMM, a large value means it
-                # did not and the prefetch is not paying off.
-                with profile("ring-inter-wait"):
-                    h_tok["task"].wait()
-                    h_idx["task"].wait()
-                    h_w["task"].wait()
+                h_tok["task"].wait()
+                h_idx["task"].wait()
+                h_w["task"].wait()
                 tok, cur_idx, cur_w = nxt_tok, nxt_idx, nxt_w
         # partials[d] = this node's contribution destined to home node d.
         # ReduceScatter over inter sums contributions from all nodes per home.
-        # Timed apart because the concat is a plain [n*T, d_l] copy while the
-        # ReduceScatter is bytes on the wire: only the split says whether the
-        # buffer is worth pre-allocating or whether the cost is the collective.
-        with profile("ring-partial-concat"):
-            buf = paddle.concat(partials, axis=0)  # [n*T, d_l]
-        with profile("ring-inter-rs"):
-            return self._inter_combine(
-                buf, self.inter_group, combine_overlap_handle
-            )
+        buf = paddle.concat(partials, axis=0)  # [n*T, d_l]
+        return self._inter_combine(
+            buf, self.inter_group, combine_overlap_handle
+        )
 
 
 
