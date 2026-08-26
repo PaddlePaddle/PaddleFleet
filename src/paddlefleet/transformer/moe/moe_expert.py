@@ -181,10 +181,10 @@ class GroupedMLPExpert(FleetLayer):
         self.config: TransformerConfig = config
         self.num_local_experts = num_local_experts
         self.moe_deep_gemm = moe_deep_gemm
-        # Intermediate size for the local shard of every expert. When using the
-        # 'allgather' MoE dispatcher every expert is sharded along its
-        # intermediate dim across the EP group, so this can be smaller than
-        # ``config.moe_intermediate_size``.
+        # Intermediate size for the local shard of every expert. Under the
+        # intermediate-EP-sharded dispatchers ('allgather' / 'ringmoe') every
+        # expert is sharded along its intermediate dim across the EP group, so
+        # this can be smaller than ``config.moe_intermediate_size``.
         self.intermediate_size_per_partition = (
             intermediate_size_per_partition
             if intermediate_size_per_partition is not None
@@ -288,14 +288,11 @@ class GroupedMLPExpert(FleetLayer):
     def intermediate_ep_sharded(self):
         """Whether this rank owns all experts but only ``I // EP`` of each.
 
-        The 'allgather' dispatcher shards the experts along their intermediate
-        dim instead of along the expert dim, so a rank holds every expert.
-        ``sharded_state_dict`` keys off the same condition; keep the two in sync.
-
-        'ringmoe' uses the identical sharding (it only reorganizes the
-        collectives) and must match here too: ``MoELayer.__init__`` normalizes
-        its own config to "allgather", but that happens *after* it deepcopies
-        the expert config, so the first MoE layer's experts still see "ringmoe".
+        Both the 'allgather' and 'ringmoe' dispatchers shard experts along their
+        intermediate dim instead of along the expert dim, so a rank holds every
+        expert; 'ringmoe' only reorganizes the collectives. ``sharded_state_dict``
+        and ``MoELayer.use_intermediate_ep_sharding`` key off the same condition;
+        keep the three in sync.
         """
         return (
             getattr(self.config, "moe_token_dispatcher_type", None)
@@ -311,10 +308,11 @@ class GroupedMLPExpert(FleetLayer):
         inherently a fused 3D expert tensor).
 
         When this rank only holds a slice of every expert's intermediate dim
-        (allgather dispatcher with EP > 1) both weights must first be
-        redistributed to the traditional EP layout, otherwise Newton-Schulz runs
-        on a slab instead of the real matrix. ``muon_ffn_split`` keeps
-        controlling whether gate and up are orthogonalised independently.
+        (intermediate-EP sharding, i.e. 'allgather' / 'ringmoe' with EP > 1) both
+        weights must first be redistributed to the traditional EP layout,
+        otherwise Newton-Schulz runs on a slab instead of the real matrix.
+        ``muon_ffn_split`` keeps controlling whether gate and up are
+        orthogonalised independently.
         """
         from paddlefleet.transformer.muon_utils import (
             ortho_ep_full_intermediate,
@@ -416,9 +414,10 @@ class GroupedMLPExpert(FleetLayer):
         structured_name_prefix: str = "",
     ):
         # standard:  shard on expert dim (axis=0), each rank owns disjoint experts.
-        # allgather: shard on intermediate dim, each rank owns all experts.
+        # allgather/ringmoe: shard on intermediate dim, each rank owns all
+        #            experts.
         # Cross-topology reshard is handled by the DCP resharder.
-        # See _get_intermediate_sharded_state_dict for allgather details.
+        # See _get_intermediate_sharded_state_dict for the intermediate layout.
         state_dict = self.state_dict(structured_name_prefix="")
 
         if self.intermediate_ep_sharded:
@@ -462,7 +461,9 @@ class GroupedMLPExpert(FleetLayer):
     def _get_intermediate_sharded_state_dict(
         self, state_dict, structured_name_prefix: str
     ):
-        """Build sharded state dict for the allgather EP layout.
+        """Build sharded state dict for the intermediate-EP-sharded layout.
+
+        Shared by the 'allgather' and 'ringmoe' dispatchers.
 
         weight1 [E, H, 2*I_local] is reshaped to [E, H, 2, I_local] and
         sharded on axis=3 → global [E, H, 2, I_full].
@@ -471,7 +472,7 @@ class GroupedMLPExpert(FleetLayer):
 
         weight2 [E, I_local, H] is sharded on axis=1 → global [E, I_full, H].
 
-        In allgather mode E = num_experts (all experts per rank); in deepep
+        In this layout E = num_experts (all experts per rank); in deepep
         mode E = num_experts // EP (disjoint experts per rank).  The DCP
         resharder handles this difference during cross-topology loading.
         """
