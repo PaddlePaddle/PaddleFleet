@@ -1301,6 +1301,112 @@ def _compute_attn_target_on_selected_set(
 # ---------------------------------------------------------------------------
 
 
+def compute_csa_indexer_grads(
+    index_q: Tensor,
+    weights: Tensor,
+    index_k_comp: Tensor,
+    target: Tensor,
+    topk_probs: Tensor,
+    topk_indices: Tensor,
+    loss_coeff: float,
+    indexer_backend: str = "tilelang",
+    num_rows: float | None = None,
+    loss_mask: Tensor | None = None,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """``(grad_index_q, grad_weights, grad_index_k)`` of the indexer KL.
+
+    The single implementation of the indexer-loss gradient, shared by
+    :class:`TileLangCSAIndexerLossAutoScaler` (the default, in-graph path) and
+    by ``indexer_loss_overlap.drain`` (the deferred path). It reads no autograd
+    state on purpose -- ``grad_output`` does not enter this gradient at all,
+    which is exactly what lets the deferred path run it during the forward.
+
+    ``num_rows`` defaults to ``target.shape[0] * target.shape[1]``, i.e. the
+    kernel's own ``1/(B*Sq)``. Passing the global valid-row count together with
+    ``loss_mask`` reproduces the masked reduction of the forward.
+    """
+    if num_rows is None:
+        num_rows = float(target.shape[0] * target.shape[1])
+
+    scale = DSAIndexerLossAutoScaler._main_loss_backward_scale
+
+    if indexer_backend == "cudnn":
+        from paddlefleet.cudnn_ops import csa_indexer_bwd
+
+        # cuDNN multiplies its internal score-grad by ``grad_loss`` in
+        # the GEMM kernel; pass the externally-set scaler as ``grad_loss``.
+        if scale is None:
+            grad_loss_arg = None
+        elif isinstance(scale, paddle.Tensor):
+            grad_loss_arg = scale
+        else:
+            grad_loss_arg = paddle.to_tensor(float(scale), dtype=paddle.float32)
+
+        # Apply loss_mask to mask out padding positions in backward
+        bwd_target = target
+        bwd_topk_probs = topk_probs
+        if loss_mask is not None:
+            lm = loss_mask.reshape(
+                [target.shape[0], target.shape[1], 1]
+            ).astype(target.dtype)
+            bwd_target = target * lm
+            bwd_topk_probs = topk_probs * lm
+
+        # cuDNN kernel internally divides by (B * S_q). When loss_mask is
+        # provided, we want 1/global_valid_count instead. Compensate by
+        # scaling loss_coeff so the kernel's internal division yields the
+        # correct normalization.
+        cudnn_loss_coeff = loss_coeff
+        if loss_mask is not None:
+            B_Sq = float(target.shape[0] * target.shape[1])
+            cudnn_loss_coeff = loss_coeff * B_Sq / max(num_rows, 1.0)
+
+        grad_q, grad_weights, grad_k = csa_indexer_bwd(
+            index_q,
+            weights,
+            index_k_comp,
+            bwd_target,
+            bwd_topk_probs,
+            topk_indices,
+            loss_coeff=cudnn_loss_coeff,
+            grad_loss=grad_loss_arg,
+        )
+    elif indexer_backend == "tilelang":
+        from paddlefleet.tilelang_ops import csa_indexer_bwd
+
+        grad_index_scores = (topk_probs - target) * (
+            loss_coeff / max(num_rows, 1.0)
+        )
+        # Apply loss_mask to zero out gradients for padding positions
+        if loss_mask is not None:
+            lm = loss_mask.reshape(
+                [grad_index_scores.shape[0], grad_index_scores.shape[1], 1]
+            ).astype(grad_index_scores.dtype)
+            grad_index_scores = grad_index_scores * lm
+        if scale is not None:
+            grad_index_scores = grad_index_scores * scale
+
+        grad_q, grad_weights, grad_k = csa_indexer_bwd(
+            index_q,
+            weights,
+            index_k_comp,
+            topk_indices,
+            grad_index_scores,
+        )
+    else:
+        raise NotImplementedError(
+            f"CSA indexer backend {indexer_backend!r} not implemented."
+        )
+
+    if grad_q.dtype != index_q.dtype:
+        grad_q = grad_q.cast(index_q.dtype)
+    if grad_weights.dtype != weights.dtype:
+        grad_weights = grad_weights.cast(weights.dtype)
+    if grad_k.dtype != index_k_comp.dtype:
+        grad_k = grad_k.cast(index_k_comp.dtype)
+    return grad_q, grad_weights, grad_k
+
+
 class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
     """Attach TileLang CSA indexer loss gradients to the main output.
 
@@ -1357,88 +1463,18 @@ class TileLangCSAIndexerLossAutoScaler(paddle.autograd.PyLayer):
             target,
         ) = ctx.saved_tensor()
 
-        scale = DSAIndexerLossAutoScaler._main_loss_backward_scale
-
-        if ctx.indexer_backend == "cudnn":
-            from paddlefleet.cudnn_ops import csa_indexer_bwd
-
-            # cuDNN multiplies its internal score-grad by ``grad_loss`` in
-            # the GEMM kernel; pass the externally-set scaler as ``grad_loss``.
-            if scale is None:
-                grad_loss_arg = None
-            elif isinstance(scale, paddle.Tensor):
-                grad_loss_arg = scale
-            else:
-                grad_loss_arg = paddle.to_tensor(
-                    float(scale), dtype=paddle.float32
-                )
-
-            # Apply loss_mask to mask out padding positions in backward
-            bwd_target = target
-            bwd_topk_probs = topk_probs
-            if getattr(ctx, "loss_mask", None) is not None:
-                lm = ctx.loss_mask.reshape(
-                    [target.shape[0], target.shape[1], 1]
-                ).astype(target.dtype)
-                bwd_target = target * lm
-                bwd_topk_probs = topk_probs * lm
-
-            # cuDNN kernel internally divides by (B * S_q). When loss_mask is
-            # provided, we want 1/global_valid_count instead. Compensate by
-            # scaling loss_coeff so the kernel's internal division yields the
-            # correct normalization.
-            cudnn_loss_coeff = ctx.loss_coeff
-            if getattr(ctx, "loss_mask", None) is not None:
-                B_Sq = float(target.shape[0] * target.shape[1])
-                cudnn_loss_coeff = (
-                    ctx.loss_coeff
-                    * B_Sq
-                    / max(getattr(ctx, "num_rows", 1.0), 1.0)
-                )
-
-            grad_q, grad_weights, grad_k = csa_indexer_bwd(
-                index_q,
-                weights,
-                index_k_comp,
-                bwd_target,
-                bwd_topk_probs,
-                topk_indices,
-                loss_coeff=cudnn_loss_coeff,
-                grad_loss=grad_loss_arg,
-            )
-        elif ctx.indexer_backend == "tilelang":
-            from paddlefleet.tilelang_ops import csa_indexer_bwd
-
-            grad_index_scores = (topk_probs - target) * (
-                ctx.loss_coeff / max(getattr(ctx, "num_rows", 1.0), 1.0)
-            )
-            # Apply loss_mask to zero out gradients for padding positions
-            if getattr(ctx, "loss_mask", None) is not None:
-                lm = ctx.loss_mask.reshape(
-                    [grad_index_scores.shape[0], grad_index_scores.shape[1], 1]
-                ).astype(grad_index_scores.dtype)
-                grad_index_scores = grad_index_scores * lm
-            if scale is not None:
-                grad_index_scores = grad_index_scores * scale
-
-            grad_q, grad_weights, grad_k = csa_indexer_bwd(
-                index_q,
-                weights,
-                index_k_comp,
-                topk_indices,
-                grad_index_scores,
-            )
-        else:
-            raise NotImplementedError(
-                f"CSA indexer backend {ctx.indexer_backend!r} not implemented."
-            )
-
-        if grad_q.dtype != index_q.dtype:
-            grad_q = grad_q.cast(index_q.dtype)
-        if grad_weights.dtype != weights.dtype:
-            grad_weights = grad_weights.cast(weights.dtype)
-        if grad_k.dtype != index_k_comp.dtype:
-            grad_k = grad_k.cast(index_k_comp.dtype)
+        grad_q, grad_weights, grad_k = compute_csa_indexer_grads(
+            index_q,
+            weights,
+            index_k_comp,
+            target,
+            topk_probs,
+            topk_indices,
+            loss_coeff=ctx.loss_coeff,
+            indexer_backend=ctx.indexer_backend,
+            num_rows=getattr(ctx, "num_rows", None),
+            loss_mask=getattr(ctx, "loss_mask", None),
+        )
 
         grad_main = grad_output if ctx.output_needs_grad else None
         grads = (grad_main, None, grad_q, grad_weights, grad_k, None, None)

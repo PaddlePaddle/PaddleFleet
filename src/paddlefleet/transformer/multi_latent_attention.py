@@ -973,6 +973,20 @@ class MultiLatentAttention(Attention):
         # against the callee's signature.
         if self.mqa_latent and kwargs.get("docmask_mb_idx") is not None:
             core_attn_extra["docmask_mb_idx"] = kwargs["docmask_mb_idx"]
+        # ``dsa_indexer_loss_bwd_p2p_overlap`` must tell the real forward pass
+        # from the recompute replay, and the two differ only in whether the layer
+        # body is wrapped at all -- a per-layer property
+        # (``need_full_recompute(layer_number, config)``) that cannot be
+        # re-derived from the config here. Declared on
+        # ``MQALatentAttention.forward`` for the same kwarg-flattening reason as
+        # ``docmask_mb_idx`` above. Passed through unchanged: the
+        # ``recompute(self.core_attention, ...)`` below is a *second*, independent
+        # wrapper, and folding it in here would double-enqueue whenever both are
+        # active (both replays would then look like a no-grad first pass). It only
+        # costs the overlap, which ``indexer_loss_overlap.validate_config`` warns
+        # about; see ``MQALatentAttention._needs_indexer_loss``.
+        if self.mqa_latent:
+            core_attn_extra["in_recompute"] = in_recompute
 
         if self.mqa_latent:
             # Query is already absorbed; the core attention only needs the V-side
@@ -1110,10 +1124,19 @@ class MultiLatentAttention(Attention):
 
         if self.recompute_qkv_up_porj_and_rope and self.training:
             assert getattr(self, "_qkv_recompute", None) is not None
-            self._qkv_recompute.discard_output_and_register_recompute(
-                core_attn_out
-            )
+            span = self._qkv_recompute
             self._qkv_recompute = None
+            # ``mla_qkv_recompute`` frees query / key / value here and restores
+            # them only in backward, but ``dsa_indexer_loss_bwd_p2p_overlap``
+            # still reads query and kv later in this same forward. With both on,
+            # the discard must follow the branch; see
+            # ``indexer_loss_overlap.defer_discard``.
+            from paddlefleet.transformer import indexer_loss_overlap
+
+            if not indexer_loss_overlap.defer_discard(
+                self.core_attention, span, core_attn_out
+            ):
+                span.discard_output_and_register_recompute(core_attn_out)
 
         _log(core_attn_out, "core_attn_out", layer_num)
 

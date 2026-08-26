@@ -729,6 +729,14 @@ class MQALatentAttention(FleetLayer):
         self.indexer_use_sparse_loss = bool(
             getattr(config, "dsa_indexer_use_sparse_loss", False)
         )
+        # Gated on the sparse phase rather than read straight from the config:
+        # only ``_forward_sparse`` has an enqueue path, and the warmup phase
+        # shares ``_needs_indexer_loss`` with it, so without this ``and`` a
+        # warmup run with the flag set would flip the predicate to the no-grad
+        # pass and lose its loss.
+        self.indexer_loss_overlap = self.indexer_use_sparse_loss and bool(
+            getattr(config, "dsa_indexer_loss_bwd_p2p_overlap", False)
+        )
         # ``dsa_indexer_use_sparse_loss=False`` is the phase-2 (warmup) mode:
         # the indexer is still being learned, so attention must not consume its
         # ranking yet -- it attends to the full per-document causal set, exactly
@@ -936,19 +944,56 @@ class MQALatentAttention(FleetLayer):
             ]
         return selected, scores_out
 
-    def _needs_indexer_loss(self) -> bool:
+    def _needs_indexer_loss(self, in_recompute: bool = False) -> bool:
         """Whether this forward should build and attach the indexer loss.
 
         Both DSA phases share this predicate. ``paddle.is_grad_enabled()`` is
         what makes the loss count exactly once under recompute: the first
         (no-grad) forward only materialises the attention columns, the second one
         attaches the loss.
+
+        ``dsa_indexer_loss_bwd_p2p_overlap`` needs the opposite -- the pass that
+        runs during the pipeline's *forward* phase, because that is when the drain
+        hook fires. Which pass that is depends on whether this layer body is
+        replayed, which is exactly what ``in_recompute`` says:
+
+        =================  ======================  ==========================
+        ``in_recompute``   passes per micro-batch  enqueue on
+        =================  ======================  ==========================
+        ``True``           no-grad, then grad      ``not is_grad_enabled()``
+        ``False``          grad only               ``is_grad_enabled()``
+        =================  ======================  ==========================
+
+        Both spellings fire exactly once per ``(layer, micro-batch)``, so the
+        flag is independent of ``recompute_granularity``. Keying off the config
+        instead would be wrong twice over: it cannot see ``recompute_method``
+        ``first_n`` / ``block`` leaving *some* layers unwrapped, and it would
+        reject configurations that do not recompute at all yet overlap perfectly
+        well.
+
+        ``in_recompute`` tracks the *layer body*'s wrapper only, and two other
+        wrappers can replay this forward without it being set: selective
+        recompute of ``core_attn``, which wraps ``core_attention`` itself
+        (``MultiLatentAttention.forward``), and the ``RECOVER_STEP`` recovery
+        window, which recomputes the layer body while ``full_recompute`` is
+        ``False``. Both then take the ``False`` row, i.e. enqueue on the
+        grad-enabled replay, which runs in backward: the branch is still executed
+        exactly once, by a later micro-step's callback or by
+        ``indexer_loss_overlap.drain_all()``, but too late to overlap anything.
+        Cost only, never correctness; ``indexer_loss_overlap.validate_config``
+        warns about the ``core_attn`` one (the recovery window is a step-dependent
+        environment variable and cannot be seen from a config).
+
+        ``in_recompute`` is ignored unless the overlap is on; the default path
+        wants the grad-enabled pass either way.
         """
-        return (
-            self.training
-            and paddle.is_grad_enabled()
-            and self.indexer_loss_coeff > 0
-        )
+        if not (self.training and self.indexer_loss_coeff > 0):
+            return False
+        if self.indexer_loss_overlap:
+            if in_recompute:
+                return not paddle.is_grad_enabled()
+            return paddle.is_grad_enabled()
+        return paddle.is_grad_enabled()
 
     def _phase(self) -> str:
         """Which of the three training phases this layer runs.
@@ -997,6 +1042,7 @@ class MQALatentAttention(FleetLayer):
         v_b_proj_weight: Tensor | None = None,
         input_ids: Tensor | None = None,
         docmask_mb_idx: int = -1,
+        in_recompute: bool = False,
     ) -> Tensor:
         """Absorbed-MQA forward.
 
@@ -1016,6 +1062,11 @@ class MQALatentAttention(FleetLayer):
             input_ids: ``[b, s]`` token ids, only used to build the indexer-loss
                 row mask (``!= pad_token_id``). ``None`` falls back to the plain
                 row mean, as CSA does at ``csa_attention.py:1306``.
+            in_recompute: whether the enclosing transformer layer's body is
+                wrapped in a recompute span, i.e. whether this ``forward`` is
+                replayed. Only ``dsa_indexer_loss_bwd_p2p_overlap`` reads it,
+                to tell the real forward pass from the backward replay -- see
+                :meth:`_needs_indexer_loss`.
 
         Returns:
             ``[b, s, h * v_head_dim]`` (this rank's query slice under CP)
@@ -1160,6 +1211,7 @@ class MQALatentAttention(FleetLayer):
             input_ids,
             position_offset,
             meta=meta,
+            in_recompute=in_recompute,
         )
 
     # ------------------------------------------------------------------
@@ -1729,9 +1781,18 @@ class MQALatentAttention(FleetLayer):
         if grad_enabled:
             x_det.stop_gradient = False
             qr_det.stop_gradient = False
-            return self.indexer.forward_before_topk(
-                x_det, qr_det, position_offset, self.cp_group
-            )
+            # ``stop_gradient=False`` alone builds no graph inside
+            # ``paddle.no_grad()``, and under
+            # ``dsa_indexer_loss_bwd_p2p_overlap`` a recompute-wrapped layer
+            # reaches here on the *no-grad* pass. Without ``enable_grad`` the
+            # projection subgraph would not exist and the drain's
+            # ``paddle.autograd.backward`` would silently leave ``wq_b`` / ``wk``
+            # / ``k_norm`` / ``weights_proj`` without a gradient. A no-op
+            # wherever grad is already enabled.
+            with paddle.enable_grad():
+                return self.indexer.forward_before_topk(
+                    x_det, qr_det, position_offset, self.cp_group
+                )
         with paddle.no_grad():
             return self.indexer.forward_before_topk(
                 x_det, qr_det, position_offset, self.cp_group
@@ -2031,6 +2092,7 @@ class MQALatentAttention(FleetLayer):
         input_ids=None,
         position_offset=0,
         meta=None,
+        in_recompute=False,
     ) -> Tensor:
         """Phase 3: attention consumes window + top-k, KL on that same set.
 
@@ -2045,7 +2107,9 @@ class MQALatentAttention(FleetLayer):
         not bit-stable in every shape -- one document spanning the whole sequence
         drifts by ~2% of the emitted slots between identical calls -- but the
         selected *set* is, and any residual drift would only change which columns
-        the backward differentiates.)
+        the backward differentiates.) Under ``dsa_indexer_loss_bwd_p2p_overlap``
+        the owning pass becomes the first one whenever ``in_recompute`` says
+        there are two; :meth:`_needs_indexer_loss` holds that table.
         """
         from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
             cudnn_indexer_topk_fwd,
@@ -2053,7 +2117,7 @@ class MQALatentAttention(FleetLayer):
 
         b, s = int(query.shape[0]), int(query.shape[1])
         s_global = s * self.cp_size
-        need_loss = self._needs_indexer_loss()
+        need_loss = self._needs_indexer_loss(in_recompute)
 
         with paddle.no_grad():
             if meta is not None:
@@ -2093,7 +2157,16 @@ class MQALatentAttention(FleetLayer):
         # ``DSAIndexer`` pre-bakes ``head_dim**-0.5`` into the weights, but both
         # cuDNN indexer kernels apply ``dim**-0.5`` themselves (the backward one
         # hardcodes it). Undo the pre-bake once so forward and backward agree.
-        w_idx = w_idx * (float(self.indexer.head_dim) ** 0.5)
+        #
+        # ``enable_grad`` for the same reason as in
+        # ``_indexer_projections``: under
+        # ``dsa_indexer_loss_bwd_p2p_overlap`` a recompute-wrapped layer runs
+        # this inside the wrapper's ``paddle.no_grad()``, where a bare multiply
+        # severs the subgraph just built. That cost ``weights_proj`` its gradient
+        # while ``wq_b`` / ``wk`` -- nothing rescales them -- kept theirs, i.e. an
+        # indexer that silently never learns its per-head importance.
+        with paddle.enable_grad():
+            w_idx = w_idx * (float(self.indexer.head_dim) ** 0.5)
 
         # The cuDNN top-k backward (``indexer_backward_sm100.__init__``) asserts
         # ``topk % block_I == 0`` with ``block_I = 128``, so keep the configured
@@ -2174,6 +2247,33 @@ class MQALatentAttention(FleetLayer):
             )
         output = self._deabsorb(core_out, v_b_proj_weight, self.split_kv_b)
         if not need_loss:
+            return output
+
+        if self.indexer_loss_overlap:
+            # Deferred path: hand the branch to the pipeline forward hook and
+            # return the output untouched. No PyLayer is applied, so the loss
+            # leaves no node in the backward graph at all -- which is why the
+            # ``target`` / ``topk_probs`` that the in-graph path keeps alive from
+            # the recompute until the backward are not retained here either.
+            from paddlefleet.transformer import indexer_loss_overlap
+
+            (topk_scores,) = scores_out
+            indexer_loss_overlap.enqueue(
+                indexer_loss_overlap._PendingWork(
+                    owner=self,
+                    query=query.detach(),
+                    kv=kv,
+                    lse_indexer=lse_indexer,
+                    topk_indices=topk_indices,
+                    topk_scores=topk_scores,
+                    index_q=q_idx,
+                    weights=w_idx,
+                    index_k=k_idx,
+                    input_ids=input_ids,
+                    batch=b,
+                    seqlen=s,
+                )
+            )
             return output
 
         with paddle.no_grad():
@@ -2265,6 +2365,108 @@ class MQALatentAttention(FleetLayer):
             # ``None`` (no ``input_ids``) leaves the kernel's own mean in place.
             valid_rows,
             loss_mask,
+        )
+
+    def _run_indexer_loss_branch(self, work) -> None:
+        """Run a deferred loss branch end to end (loss *and* its gradients).
+
+        Called by ``indexer_loss_overlap.drain`` from a pipeline hook. Mirrors
+        the inline tail of :meth:`_forward_sparse` term for term -- same target,
+        same reduction, same coefficient placement -- and then does what
+        ``TileLangCSAIndexerLossAutoScaler.backward`` would have done, via the
+        shared :func:`compute_csa_indexer_grads`.
+
+        The two halves are split by what they need:
+
+        * everything down to ``loss`` is pure forward arithmetic on detached
+          inputs, so it stays under ``no_grad`` exactly as the inline path does;
+        * ``paddle.autograd.backward`` then drives the indexer's own projection
+          subgraph (hadamard / RoPE / ``wq_b`` / ``wk`` / ``k_norm`` /
+          ``weights_proj``). It terminates at the five indexer weights because
+          ``_indexer_projections`` fed it detached leaves, so it cannot reach the
+          backbone no matter when it runs.
+
+        ``grad_output`` is absent from all of this on purpose: the indexer
+        gradient does not depend on it, which is precisely what makes running the
+        backward here -- during the *forward* pass -- legitimate.
+        """
+        from paddlefleet.transformer.csa_attention import (
+            compute_csa_indexer_grads,
+        )
+
+        with paddle.no_grad():
+            valid = work.topk_indices >= 0
+            scores = paddle.where(
+                valid,
+                work.topk_scores.cast("float32"),
+                paddle.full(work.topk_indices.shape, _NEG_INF, dtype="float32"),
+            )
+            topk_probs = F.softmax(scores, axis=-1)
+            topk_probs = paddle.where(
+                valid, topk_probs, paddle.zeros_like(topk_probs)
+            )
+            target = self._attn_target(
+                work.query, work.kv, work.topk_indices, work.lse_indexer
+            )
+            kl = target * (
+                paddle.log(target + _EPS) - paddle.log(topk_probs + _EPS)
+            )
+            loss_mask, valid_rows = self._indexer_loss_mask(
+                work.input_ids, work.batch, work.seqlen
+            )
+            loss_coeff = (
+                self.indexer_loss_coeff
+                if loss_mask is not None
+                else self.indexer_loss_coeff / self.cp_size
+            )
+            kl_per_pos = kl.sum(axis=-1)
+            if loss_mask is None:
+                loss = kl_per_pos.mean() * loss_coeff
+            else:
+                loss = (kl_per_pos * loss_mask).sum() / valid_rows * loss_coeff
+
+        grad_q, grad_weights, grad_k = compute_csa_indexer_grads(
+            work.index_q,
+            work.weights,
+            work.index_k,
+            target,
+            topk_probs,
+            work.topk_indices,
+            loss_coeff=loss_coeff,
+            indexer_backend=self.indexer_backend,
+            num_rows=valid_rows,
+            loss_mask=loss_mask,
+        )
+
+        outs, grads = [], []
+        for tensor, grad in (
+            (work.index_q, grad_q),
+            (work.index_k, grad_k),
+            (work.weights, grad_weights),
+        ):
+            # A frozen indexer (or a projection that tensor-parallelism turned
+            # into a no-grad view) leaves nothing to walk; skipping keeps
+            # ``paddle.autograd.backward`` from raising on it.
+            if not tensor.stop_gradient:
+                outs.append(tensor)
+                grads.append(grad)
+        if outs:
+            paddle.autograd.backward(outs, grads)
+
+        # Logging only -- ``loss`` is detached, so no data dependency on the
+        # gradients above -- but the *position* matters. The tracker update
+        # lowers to ``set_value_with_tensor_``, a device-to-device copy on the
+        # CUDA *legacy default* stream, i.e. a bidirectional full-device
+        # barrier. Ahead of the backward it makes the backward wait for the
+        # in-flight pipeline ``SendRecv``, which is the overlap this whole path
+        # exists to get. Last, the barrier coincides with the wait the schedule
+        # performs anyway.
+        DSAIndexerLossLoggingHelper.save_loss_to_tracker(
+            loss=loss,
+            layer_number=self.layer_number,
+            num_layers=DSAIndexerLossLoggingHelper.get_total_num_layers(
+                self.config
+            ),
         )
 
     def _indexer_loss_mask(self, input_ids, b, s):
