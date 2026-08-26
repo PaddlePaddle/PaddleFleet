@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import inspect
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -647,6 +648,118 @@ class TestKimiDeltaAttention(unittest.TestCase):
                     out_proj=NoBiasLinear,
                 )
             )
+
+
+class TestKdaParameterInitialization(unittest.TestCase):
+    """reset_parameters() must reproduce fla's KDA init, not the neutral zeros.
+
+    Locks the pieces the init rewrite introduced: the log-uniform dt draw behind
+    dt_bias, its inverse-softplus mapping and floor, the two A_log branches, the
+    perform_initialization=False escape hatch, and the new argument validation.
+    """
+
+    def _softplus_dt(self, kda):
+        """Recover the drawn dt from dt_bias (softplus is the exact inverse)."""
+        return F.softplus(kda.dt_bias.astype("float32")).numpy()
+
+    def test_dt_bias_is_inverse_softplus_of_log_uniform_dt(self):
+        dt_min, dt_max = 0.001, 0.1
+        kda = _build_kda(dt_init_range=(dt_min, dt_max), dt_init_floor=1e-4)
+        dt = self._softplus_dt(kda)
+
+        # dt_init_floor is below dt_min here, so the clamp is a no-op and the
+        # draw must land strictly inside the requested range.
+        self.assertTrue((dt >= dt_min - 1e-6).all(), dt.min())
+        self.assertTrue((dt <= dt_max + 1e-6).all(), dt.max())
+        # Not the old constant-0 init: softplus(0) = log(2) is far above dt_max.
+        self.assertGreater(float(np.abs(kda.dt_bias.numpy()).min()), 0.0)
+        # log-uniform, so the draw spans decades rather than clustering at one end
+        self.assertGreater(dt.max() / dt.min(), 2.0)
+
+    def test_dt_init_floor_clamps_the_draw(self):
+        """A range fully below the floor collapses dt onto the floor exactly."""
+        floor = 0.05
+        kda = _build_kda(dt_init_range=(1e-8, 2e-8), dt_init_floor=floor)
+        dt = self._softplus_dt(kda)
+        np.testing.assert_allclose(dt, np.full_like(dt, floor), rtol=1e-5)
+
+    def test_dt_bias_is_reproducible_under_a_fixed_seed(self):
+        paddle.seed(1234)
+        first = _build_kda().dt_bias.numpy().copy()
+        paddle.seed(1234)
+        second = _build_kda().dt_bias.numpy().copy()
+        np.testing.assert_allclose(first, second, rtol=0, atol=0)
+
+    def test_bounded_gate_starts_from_zero_a_log(self):
+        """exp(A_log) is only the sigmoid slope here, so 1 is the neutral start."""
+        kda = _build_kda(gate_lower_bound=GATE_LOWER_BOUND)
+        np.testing.assert_allclose(
+            kda.A_log.numpy(), np.zeros([NUM_VALUE_HEADS], dtype="float32")
+        )
+
+    def test_softplus_gate_draws_a_log_from_a_init_range(self):
+        """Without a lower bound exp(A_log) is the decay rate: uniform draw."""
+        low, high = 2.0, 16.0
+        kda = _build_kda(gate_lower_bound=None, A_init_range=(low, high))
+        A = np.exp(kda.A_log.numpy())
+        self.assertTrue((A >= low - 1e-4).all(), A.min())
+        self.assertTrue((A <= high + 1e-4).all(), A.max())
+
+    def test_initial_bounded_gate_keeps_the_recurrent_state(self):
+        """The point of the fix: dt_bias=0 decayed ~0.08/step, fla's init ~0.95."""
+        kda = _build_kda(gate_lower_bound=GATE_LOWER_BOUND)
+        g = paddle.zeros(
+            [1, 1, NUM_VALUE_HEADS, VALUE_HEAD_DIM], dtype="float32"
+        )
+        decay = kda_gate(
+            g,
+            kda.A_log,
+            kda.dt_bias,
+            safe_gate=True,
+            lower_bound=GATE_LOWER_BOUND,
+        ).exp()
+        self.assertGreater(float(decay.min()), 0.5)
+        self.assertLess(float(decay.max()), 1.0)
+
+    def test_no_initialization_when_perform_initialization_is_false(self):
+        """Checkpoint loading path: the placeholder zeros must survive."""
+        kda = _build_kda(
+            config_overrides={"perform_initialization": False},
+            gate_lower_bound=None,
+        )
+        v_dim = VALUE_HEAD_DIM * NUM_VALUE_HEADS
+        np.testing.assert_allclose(
+            kda.dt_bias.numpy(), np.zeros([v_dim], dtype="float32")
+        )
+        np.testing.assert_allclose(
+            kda.A_log.numpy(), np.zeros([NUM_VALUE_HEADS], dtype="float32")
+        )
+
+    def test_rejects_invalid_dt_init_arguments(self):
+        """Runtime ValueError, not assert: the checks must survive python -O."""
+        for overrides in (
+            {"dt_init_range": (0.0, 0.1)},  # dt_min must be > 0
+            {"dt_init_range": (-0.1, 0.1)},  # dt_min must be > 0
+            {"dt_init_range": (0.1, 0.001)},  # dt_min must be <= dt_max
+            {"dt_init_floor": 0.0},  # floor must be > 0
+            {"dt_init_floor": -1e-4},  # floor must be > 0
+        ):
+            with self.assertRaises(ValueError, msg=str(overrides)):
+                _build_kda(**overrides)
+
+    def test_dt_init_arguments_are_not_positional_before_pg_collection(self):
+        """The new kwargs are appended, so old positional calls still bind."""
+        params = list(inspect.signature(KimiDeltaAttention.__init__).parameters)
+        self.assertLess(
+            params.index("pg_collection"), params.index("dt_init_range")
+        )
+        self.assertLess(
+            params.index("gate_lower_bound"), params.index("dt_init_range")
+        )
+        self.assertLess(
+            params.index("dt_init_range"), params.index("dt_init_floor")
+        )
+        self.assertEqual(params[-1], "dt_init_floor")
 
 
 @unittest.skipUnless(HAVE_FLA, "paddlefleet_ops fla kernels are not available")

@@ -235,8 +235,6 @@ class KimiDeltaAttention(FleetLayer):
         conv_init: float | None = None,
         use_qk_l2norm: bool = True,
         A_init_range: tuple[float, float] = (1, 16),
-        dt_init_range: tuple[float, float] = (0.001, 0.1),
-        dt_init_floor: float = 1e-4,
         pg_collection: ProcessGroupCollection = None,
         conv_kernel_dim: int = 4,
         key_head_dim: int = 128,
@@ -246,6 +244,8 @@ class KimiDeltaAttention(FleetLayer):
         gate_lora_rank: int | None = None,
         use_full_rank_gate: bool = True,
         gate_lower_bound: float | None = -5.0,
+        dt_init_range: tuple[float, float] = (0.001, 0.1),
+        dt_init_floor: float = 1e-4,
     ):
         """
         Args:
@@ -259,11 +259,6 @@ class KimiDeltaAttention(FleetLayer):
             A_init_range: The initialization range for the A parameter. Only used
                 by the softplus gate form (gate_lower_bound=None); the bounded
                 form starts from A_log=0, see reset_parameters().
-            dt_init_range: (dt_min, dt_max) of the log-uniform dt draw that
-                dt_bias is the inverse softplus of. Mamba's dt init, kept
-                identical to fla's KDA layer.
-            dt_init_floor: Lower clamp on that dt draw before the inverse
-                softplus.
             pg_collection: The required process groups for tensor model parallel.
             conv_kernel_dim: Kernel size for the causal convolution.
             key_head_dim: Dimension of each query/key head.
@@ -278,6 +273,11 @@ class KimiDeltaAttention(FleetLayer):
                 the gate becomes lower_bound * sigmoid(exp(A_log) * (a + dt_bias)),
                 which is naturally clamped to [lower_bound, 0). Set to None to use
                 -exp(A_log) * softplus(a + dt_bias) instead.
+            dt_init_range: (dt_min, dt_max) of the log-uniform dt draw that
+                dt_bias is the inverse softplus of. Mamba's dt init, kept
+                identical to fla's KDA layer.
+            dt_init_floor: Lower clamp on that dt draw before the inverse
+                softplus.
         """
         super().__init__(config=config)
         # Keep the parent-owned FP32 gate parameters (A_log and dt_bias) in
@@ -292,12 +292,15 @@ class KimiDeltaAttention(FleetLayer):
         assert A_init_range[0] >= 0 and A_init_range[1] >= A_init_range[0]
         self.A_init_range = A_init_range
         # dt is drawn log-uniformly, so both ends have to be strictly positive.
-        assert 0 < dt_init_range[0] <= dt_init_range[1], (
-            f"dt_init_range must be 0 < dt_min <= dt_max, got {dt_init_range}"
-        )
-        assert dt_init_floor > 0, (
-            f"dt_init_floor must be positive, got {dt_init_floor}"
-        )
+        # Raise instead of assert: these bounds still have to hold under -O.
+        if not 0 < dt_init_range[0] <= dt_init_range[1]:
+            raise ValueError(
+                f"dt_init_range must be 0 < dt_min <= dt_max, got {dt_init_range}"
+            )
+        if dt_init_floor <= 0:
+            raise ValueError(
+                f"dt_init_floor must be positive, got {dt_init_floor}"
+            )
         self.dt_init_range = dt_init_range
         self.dt_init_floor = dt_init_floor
         self.use_qk_l2norm = use_qk_l2norm
