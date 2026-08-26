@@ -51,6 +51,8 @@ from __future__ import annotations
 import paddle
 from paddlefleet_ops import CUDNN_FRONTEND_HINT, is_cudnn_frontend_available
 
+from ._grad_loss_compat import patch_indexer_backward_api
+
 
 def _require_cudnn_frontend():
     if not is_cudnn_frontend_available():
@@ -198,6 +200,10 @@ def dense_indexer_kl_bwd(
     from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_backward.api import (
         dense_indexer_backward_wrapper,
     )
+
+    # See ``_grad_loss_compat``: the frontend's ``grad_loss`` guard barriers the
+    # whole device under Paddle's torch-compat proxy.
+    patch_indexer_backward_api()
 
     if grad_loss is None:
         grad_loss = paddle.ones([], dtype=paddle.float32)

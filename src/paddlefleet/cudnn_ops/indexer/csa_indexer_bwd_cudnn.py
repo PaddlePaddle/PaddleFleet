@@ -28,6 +28,8 @@ from __future__ import annotations
 import paddle
 from paddlefleet_ops import CUDNN_FRONTEND_HINT, is_cudnn_frontend_available
 
+from ._grad_loss_compat import patch_indexer_backward_api
+
 
 def _require_cudnn_frontend():
     if not is_cudnn_frontend_available():
@@ -109,6 +111,11 @@ def csa_indexer_bwd(
     from paddlefleet_ops.cudnn.deepseek_sparse_attention.indexer_backward.api import (
         indexer_backward_wrapper,
     )
+
+    # The frontend's ``grad_loss`` guard reads a scalar back to the host under
+    # Paddle's torch-compat proxy, which barriers the whole device. See
+    # ``_grad_loss_compat``.
+    patch_indexer_backward_api()
 
     out = indexer_backward_wrapper(
         index_q_bf,
