@@ -545,47 +545,66 @@ class TestFusedSwiGLUScale(unittest.TestCase):
             ):
                 call()
 
-    def test_fused_swiglu_rejects_non_contiguous_x(self):
-        """Reject caller-owned X layouts that packed loads cannot consume."""
+    def test_fused_swiglu_accepts_non_contiguous_x(self):
+        """Materialize non-contiguous X before packed kernel execution."""
         self._require_bf16()
         ops = self._load_swiglu_ops()
-        x = (
-            paddle.randn([16, 2], dtype="float32")
-            .astype("bfloat16")
-            .transpose([1, 0])
+        x = paddle.randn([2, 32], dtype="float32").astype("bfloat16")[:, ::2]
+        self.assertFalse(x.is_contiguous())
+        probs = paddle.ones([2, 1], dtype="bfloat16")
+        dout = paddle.ones([2, 8], dtype="bfloat16")
+
+        result = ops.fused_swiglu_weighted_clamp_bwd(x, probs, dout, 7.0)
+        expected = ops.fused_swiglu_weighted_clamp_bwd(
+            x.contiguous(), probs, dout, 7.0
         )
-        if x.is_contiguous():
-            self.skipTest("transpose produced a contiguous tensor")
-        with self.assertRaisesRegex(OSError, "expects contiguous X and Probs"):
-            ops.fused_swiglu_weighted_clamp_bwd(
-                x,
-                paddle.ones([2, 1], dtype="bfloat16"),
-                paddle.ones([2, 8], dtype="bfloat16"),
-                7.0,
+        for actual, reference in zip(result, expected):
+            np.testing.assert_array_equal(
+                actual.astype("float32").numpy(),
+                reference.astype("float32").numpy(),
             )
 
-    def test_fused_swiglu_rejects_non_contiguous_scale(self):
-        """Reject non-contiguous Scale layouts used by packed kernels."""
+    def test_fused_swiglu_accepts_non_contiguous_scale(self):
+        """Materialize non-contiguous Scale before packed kernel execution."""
         self._require_bf16()
         ops = self._load_swiglu_ops()
         x = paddle.ones([2, 16], dtype="bfloat16")
         scale = paddle.ones([2, 2], dtype="bfloat16")[:, :1]
-        if scale.is_contiguous():
-            self.skipTest("column slice produced a contiguous Scale")
-        with self.assertRaisesRegex(OSError, "expects contiguous X and Scale"):
-            ops.fused_swiglu_scale(x, scale)
+        self.assertFalse(scale.is_contiguous())
 
-    def test_fused_swiglu_rejects_non_contiguous_probs(self):
-        """Reject non-contiguous Probs layouts used by packed kernels."""
+        out = ops.fused_swiglu_scale(x, scale)
+        expected = ops.fused_swiglu_scale(x, scale.contiguous())
+        np.testing.assert_array_equal(
+            out.astype("float32").numpy(), expected.astype("float32").numpy()
+        )
+
+    def test_fused_swiglu_accepts_non_contiguous_probs(self):
+        """Materialize non-contiguous Probs before packed kernel execution."""
         self._require_bf16()
         ops = self._load_swiglu_ops()
         x = paddle.ones([2, 16], dtype="bfloat16")
         dout = paddle.ones([2, 8], dtype="bfloat16")
         probs = paddle.ones([2, 2], dtype="bfloat16")[:, :1]
-        if probs.is_contiguous():
-            self.skipTest("column slice produced a contiguous Probs")
-        with self.assertRaisesRegex(OSError, "expects contiguous X and Probs"):
-            ops.fused_swiglu_weighted_clamp_bwd(x, probs, dout, 7.0)
+        self.assertFalse(probs.is_contiguous())
+
+        result = ops.fused_swiglu_weighted_clamp_bwd(x, probs, dout, 7.0)
+        expected = ops.fused_swiglu_weighted_clamp_bwd(
+            x, probs.contiguous(), dout, 7.0
+        )
+        for actual, reference in zip(result, expected):
+            np.testing.assert_array_equal(
+                actual.astype("float32").numpy(),
+                reference.astype("float32").numpy(),
+            )
+
+    def test_fused_swiglu_accepts_empty_rows_with_unaligned_hidden(self):
+        """Skip packed vector-width checks when no rows reach the kernel."""
+        ops = self._load_swiglu_ops()
+        out = ops.fused_swiglu_scale(
+            paddle.zeros([0, 4], dtype="float32"),
+            paddle.zeros([0], dtype="float32"),
+        )
+        self.assertEqual(out.shape, [0, 2])
 
     def test_fused_swiglu_accepts_one_dimensional_scale(self):
         """Preserve rank-1 Scale shape on the non-clamp backward path."""

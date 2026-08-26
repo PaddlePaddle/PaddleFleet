@@ -458,9 +458,10 @@ static void CheckFusedSwiGLUInputs(const paddle::Tensor& x,
            ": float32 X requires float32 ",
            scale_name);
 
-  // Packed128 accesses require a complete vector; hidden_size == 0 is valid.
+  // Packed128 accesses require a complete vector for non-empty batches.
+  // Empty batches return before launching the packed kernel.
   const int64_t vec_size = x_is_bf16 ? 8 : 4;
-  PD_CHECK(hidden_size % vec_size == 0,
+  PD_CHECK(rows == 0 || hidden_size % vec_size == 0,
            op_name,
            ": hidden_size must be divisible by the vector width");
 }
