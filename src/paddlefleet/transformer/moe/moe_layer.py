@@ -428,8 +428,8 @@ class MoELayer(nn.Layer):
                 self.use_intermediate_ep_sharding
                 and self.expert_model_parallel_size > 1
             ):
-                # AllGather EP>1: every rank holds all experts, sharded
-                # along intermediate dim (I // EP per rank).
+                # Intermediate-EP sharding with EP>1: every rank holds all
+                # experts, sharded along intermediate dim (I // EP per rank).
                 self.grouped_gemm_experts = SonicMoEExpert(
                     self.num_experts,
                     self.num_experts_per_tok,
@@ -737,7 +737,8 @@ class MoELayer(nn.Layer):
             self.moe_rank = utils.get_pg_rank(self.moe_group)
             self.moe_rank = max(self.moe_rank, 0)
             if self.use_intermediate_ep_sharding:
-                # AllGather: every rank holds a shard of every expert.
+                # Intermediate-EP sharding: every rank holds a shard of every
+                # expert.
                 self.num_experts_per_device = self.num_experts
             else:
                 self.num_experts_per_device = _parse_moe_expert_parallel(
