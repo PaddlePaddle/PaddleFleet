@@ -121,6 +121,25 @@ def csa_indexer_bwd(
         loss_coeff=float(loss_coeff),
         grad_loss=grad_loss_paddle,
         block_I=int(block_I),
+        # dK is reduced with fp32 atomics whatever the buffer dtype, so the dtype
+        # only selects *how* the result lands. Left to allocate its own bf16
+        # buffer, the wrapper takes a branch ending in
+        # ``dIndexK.copy_(dIndexK_f32.astype(...))``, and Paddle's blocking
+        # ``copy_`` lowers to ``GpuMemcpySync`` on the CUDA *legacy default*
+        # stream -- a bidirectional full-device barrier, so every later kernel
+        # waits for whatever is in flight. Under
+        # ``dsa_indexer_loss_bwd_p2p_overlap`` that pushed the whole indexer
+        # projection backward out past the pipeline send/recv it was supposed to
+        # hide behind.
+        #
+        # A pre-zeroed fp32 buffer takes the wrapper's in-place path instead:
+        # same kernel, same fp32 atomicAdd, same single fp32 -> bf16 rounding,
+        # except the rounding is now the asynchronous ``grad_k.cast`` below and
+        # there is no barrier. ``zeros`` rather than ``empty`` is load-bearing --
+        # the kernel only accumulates, and on this sparse path nothing else
+        # zeroes the buffer. Same reason as the dense KL path
+        # (``dense_indexer_kl_cudnn.py``).
+        d_index_k=paddle.zeros(index_k_bf.shape, dtype=paddle.float32),
     )
 
     grad_q = out["d_index_q"]

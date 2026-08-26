@@ -972,8 +972,12 @@ def _stub_indexer_loss_leaves(module):
     target / loss-mask are replaced by shape-only zeros. The two remaining
     kernel patches (the indexer topk kernel and the tilelang autoscaler) stay
     at the call site so the with-block reads linearly.
+
+    The predicate takes an ``in_recompute`` argument at the sparse call site, so
+    the stand-in swallows arguments rather than naming them: what it stands for
+    is "this layer wants the loss", which is true of every phase.
     """
-    module._needs_indexer_loss = lambda: True
+    module._needs_indexer_loss = lambda *a, **k: True
     module._indexer_projections = lambda *a, **k: (
         paddle.zeros([1, 4, 8]),
         paddle.zeros([1, 4, 8]),

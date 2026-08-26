@@ -264,7 +264,14 @@ class TransformerConfig(ModelParallelConfig):
     ``tests/single_card_tests/test_inv_rope_vha_postmix_fusion.py``. Requires
     ``use_vha_attention`` and ``apply_rope_fusion``, and is skipped for
     ``vha_postmix_grouped``, ``high_precision_rope`` and when the postmix has its
-    own selective recompute wrapper."""
+    own selective recompute wrapper.
+
+    Because every skip falls back silently, ``__post_init__`` refuses to start
+    when no layer could ever take the fused path (wrong
+    ``experimental_attention_variant``, only ``-2`` layers, no VHA postmix, the
+    grouped topology, no ``apply_rope_fusion``, ``high_precision_rope``, or
+    ``qk_pos_emb_head_dim`` unset) and warns when ``'vha_postmix'`` is in
+    ``recompute_modules``, which disables it per layer rather than globally."""
 
     use_vha_premix: bool = False
     """If True (and use_vha_attention is also True), replaces the DSv4 hybrid Q up-projection
@@ -1195,6 +1202,50 @@ class TransformerConfig(ModelParallelConfig):
     by TransformerConfig.transform_rules.
     """
 
+    dsa_indexer_loss_bwd_p2p_overlap: bool = False
+    """Run the DSA indexer-loss branch inside the pipeline's forward send/recv.
+
+    ``False`` (default) leaves the in-place behaviour untouched: the KL target,
+    the KL and ``TileLangCSAIndexerLossAutoScaler`` all run in the grad-enabled
+    forward of the ``-2`` layer, and that PyLayer's backward produces the indexer
+    gradients.
+
+    ``True`` moves the branch out of the layer. It is sound because the branch is
+    a *leaf subgraph*: ``_indexer_projections`` detaches ``x`` / ``qr``, the loss
+    PyLayer is an identity on ``output``, and ``csa_indexer_bwd`` never reads
+    ``grad_output`` -- so nothing in the main backward waits on it and its only
+    effect is a gradient on the ``DSAIndexer`` weights. The layer enqueues its
+    inputs on whichever forward pass belongs to the pipeline's forward phase (the
+    no-grad one when the layer body is recompute-wrapped, the only one when it is
+    not), and Paddle's ``P2P_ISSUED`` callback drains the queue after the schedule
+    has issued that micro-step's p2p and before it waits on the handles, so the
+    branch runs on the compute stream while the transfer is in flight.
+    Independent of ``recompute_granularity``.
+
+    The callback must fire *after* the issue: ``isend`` / ``irecv`` gate the NCCL
+    kernel on an event recorded on the calculation stream at issue time, so
+    anything queued earlier -- as a ``FORWARD_END`` placement would be -- is
+    inside that event's reach and the send waits for it instead of running
+    alongside. ``FORWARD_END`` is still registered as a self-disarming fallback
+    for schedules that raise no ``P2P_ISSUED``.
+
+    Requires ``indexer_loss_overlap.register_pipeline_hooks(...)`` on the
+    pipeline-parallel model; without it only the ``drain_all()`` safety net drains
+    the queue and nothing is overlapped (the result is numerically identical
+    either way). The overlap also needs the p2p off the compute stream, which
+    ``overlap_p2p_comm=True`` arranges by forcing ``batch_p2p_comm`` off. The last
+    pipeline stage's steady-1F1B micro-steps have no window at all, because both
+    ``send_forward`` and ``recv_backward`` are no-ops there.
+
+    ``indexer_loss_overlap.validate_config`` refuses to start where the flag would
+    be dead or lossy: ``pipeline_model_parallel_size == 1``, a model that builds
+    no ``DSAIndexer``, ``dsa_indexer_loss_coeff <= 0``, and
+    ``dsa_indexer_use_sparse_loss=False`` (the warmup phase has no enqueue path,
+    so the loss would be dropped silently). ``overlap_p2p_comm=False`` /
+    ``batch_p2p_comm=True`` only warn: the maths is unchanged, there is just
+    nothing to overlap with.
+    """
+
     dsa_indexer_rope_fusion: bool = False
     """Whether to use the fused Triton RoPE for the DSA indexer's q/k.
 
@@ -1984,6 +2035,89 @@ class TransformerConfig(ModelParallelConfig):
                     " -2 layers. Under the default 'mha' those layers are dense "
                     "MLA and build no MQADocMeta, so the switch would be a silent "
                     "no-op. Use csa_share_docmask_meta for the HCA/CSA layers."
+                )
+        if self.fuse_inv_rope_into_vha_postmix:
+            # ``DSv4HybridAttention._can_fuse_inv_rope_postmix`` answers no by
+            # falling back to the unfused inverse-RoPE + postmix pair, which is
+            # bitwise identical. That is what makes a mis-set flag invisible:
+            # nothing fails, nothing warns, the run is simply as slow as it was
+            # before. So the conditions the predicate reads off the config are
+            # checked once here, where they can still be reported as a mistake.
+            unmet = []
+            if self.experimental_attention_variant != "dsv4_hybrid":
+                unmet.append(
+                    "experimental_attention_variant="
+                    f"{self.experimental_attention_variant!r}, but the fusion "
+                    "lives in DSv4HybridAttention, which no other variant "
+                    "builds"
+                )
+            elif all(int(r) == -2 for r in (self.csa_compress_ratios or [-2])):
+                # -2 is MLA, handled by MQALatentAttention; DSv4HybridAttention
+                # is never constructed for it, so no postmix exists to fuse into.
+                unmet.append(
+                    "every csa_compress_ratios entry is -2 (MLA), so no "
+                    "DSv4-hybrid layer is built: "
+                    f"csa_compress_ratios={self.csa_compress_ratios!r}"
+                )
+            if not self.use_vha_attention:
+                unmet.append(
+                    "use_vha_attention=False, so there is no VHA postmix GEMM "
+                    "to fold the inverse RoPE into"
+                )
+            if self.vha_postmix_grouped:
+                unmet.append(
+                    "vha_postmix_grouped=True mixes within each o_group via "
+                    "einsum; the fusion needs the ungrouped [nh, nh] GEMM it "
+                    "splits into a full-width and a pe-width part"
+                )
+            if not self.apply_rope_fusion:
+                unmet.append(
+                    "apply_rope_fusion=False keeps the eager RoPE, while the "
+                    "fusion is a Triton kernel"
+                )
+            if self.high_precision_rope:
+                unmet.append(
+                    "high_precision_rope=True computes the rotation in fp32, "
+                    "which the fused kernel does not implement"
+                )
+            if not (self.qk_pos_emb_head_dim or 0) > 0:
+                unmet.append(
+                    "qk_pos_emb_head_dim="
+                    f"{self.qk_pos_emb_head_dim!r} leaves no RoPE channels, so "
+                    "the whole inverse-RoPE step is skipped"
+                )
+            if unmet:
+                raise ValueError(
+                    "fuse_inv_rope_into_vha_postmix=True but the fusion can "
+                    "never trigger in this config, and the fallback is bitwise "
+                    "identical, so the flag would be a silent no-op: "
+                    + "; ".join(unmet)
+                    + ". Fix the listed fields or drop the flag."
+                )
+            if (
+                self.recompute_granularity == "selective"
+                and isinstance(self.recompute_modules, list)
+                and "vha_postmix" in self.recompute_modules
+            ):
+                # The postmix's own recompute wrapper would have to re-enter the
+                # fused PyLayer to save an intermediate the fusion never
+                # materialises, so those layers keep the unfused pair.
+                scope = (
+                    "every layer"
+                    if self.recompute_num_layers is None
+                    else f"the recompute_method={self.recompute_method!r} "
+                    f"window of {self.recompute_num_layers} layers"
+                )
+                logger.warning(
+                    "fuse_inv_rope_into_vha_postmix=True together with "
+                    "'vha_postmix' in recompute_modules: on the layers the "
+                    f"selective wrapper covers ({scope}) the inverse RoPE and "
+                    "the postmix stay unfused during training, because the "
+                    "fusion already avoids the intermediate that wrapper exists "
+                    "to free. Results are unaffected. Drop 'vha_postmix' from "
+                    "recompute_modules to fuse everywhere, or use "
+                    "recompute_granularity='full', under which the fusion runs "
+                    "inside the full-layer recompute."
                 )
 
         # DSv4 Hybrid Attention validation
