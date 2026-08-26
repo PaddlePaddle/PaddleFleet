@@ -191,17 +191,14 @@ class MoELayer(nn.Layer):
         self.sequence_parallel = config.sequence_parallel
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
         self.moe_token_dispatcher_type = config.moe_token_dispatcher_type
-        # 'allgather' and 'ringmoe' are two independent dispatchers, but they
-        # share one expert layout: every rank holds all experts, each sharded
-        # along its intermediate dim (I // EP). That layout -- not the dispatcher
-        # identity -- is what drives expert construction, the config validation,
-        # num_experts_per_device and the checkpoint shard declarations, so those
-        # branch on use_intermediate_ep_sharding. Mirrors
+        # 'allgather' and 'ringmoe' are independent dispatchers sharing one
+        # expert layout: every rank holds all experts, each sharded along its
+        # intermediate dim (I // EP). Expert construction, config validation,
+        # num_experts_per_device and the checkpoint shard declarations key off
+        # that layout, not the dispatcher identity. Mirrors
         # GroupedMLPExpert.intermediate_ep_sharded; keep the two in sync.
-        #
-        # moe_token_dispatcher_type is never rewritten -- neither here nor on the
-        # shared `config` -- so every layer and every checkpoint-layout decision
-        # sees exactly what was configured.
+        # moe_token_dispatcher_type itself is never rewritten, so every layer
+        # and checkpoint-layout decision still sees what was configured.
         self.use_ring_moe = self.moe_token_dispatcher_type == "ringmoe"
         self.use_intermediate_ep_sharding = self.moe_token_dispatcher_type in (
             "allgather",
@@ -1237,18 +1234,17 @@ class MoELayer(nn.Layer):
         topk_indices: paddle.Tensor | None = None,
         combine_overlap_handle: dict | None = None,
     ):
-        """RingMoE scheme-1 MoE forward (bf16 + SonicMoE).
+        """MoE forward on the two-level ring dispatcher (bf16 + SonicMoE).
 
-        Standalone path: instead of the flat dispatch/compute/combine pipeline,
-        it drives the 2-level ring collectives (RingMoETokenDispatcher.ring_forward)
-        around the SonicMoE expert GEMM. Latent projection is applied here (same
-        as fusion_moe_forward), the ring runs in latent space, then the output is
-        projected back.
+        Standalone path: instead of the flat dispatch/compute/combine pipeline it
+        drives ``RingMoETokenDispatcher.ring_forward`` around the SonicMoE expert
+        GEMM. The latent projection is applied here, as in ``fusion_moe_forward``,
+        so the ring runs in latent space; the output is projected back after.
 
         ``combine_overlap_handle``, when given, is consumed at the tail of
-        ``ring_forward``: the shared-expert subgraph runs on the calc stream
-        while the final inter-node ReduceScatter is in flight, and its result is
-        written back into the handle as ``fn_out`` for the caller to add in.
+        ``ring_forward``: the shared-expert subgraph runs on the calc stream while
+        the final inter-node ReduceScatter is in flight, and its result is written
+        back into the handle as ``fn_out`` for the caller to add in.
         """
         if not self.using_sonic_moe:
             raise ValueError(

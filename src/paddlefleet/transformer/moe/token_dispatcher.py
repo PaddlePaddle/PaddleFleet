@@ -1593,7 +1593,8 @@ def _drain_async_handle(handle: dict | None, where: str) -> None:
     it. A failed wait is logged rather than raised: there is nothing left to
     recover, and raising here would mask whatever aborted the previous forward.
 
-    Always returns None, so callers can write ``self._h = _drain(self._h, ...)``.
+    Always returns None, so the caller can assign the result back over the slot
+    it just drained.
     """
     if handle is None:
         return None
@@ -2285,7 +2286,10 @@ _RING_CHECK_EQUAL_TOKENS = (
 
 def _detect_gpus_per_node() -> int:
     """Intra-node GPU count (G). Mirrors HybridEP's env priority."""
-    for env in ("NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN", "PADDLE_LOCAL_SIZE"):
+    for env in (
+        "NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN",
+        "PADDLE_LOCAL_SIZE",
+    ):
         val = os.getenv(env)
         if val:
             return int(val)
@@ -2420,18 +2424,15 @@ class _InterRingShift(paddle.autograd.PyLayer):
 class _RingAllGather(paddle.autograd.PyLayer):
     """AllGather over a ring sub-group. Backward is ReduceScatter-SUM.
 
-    Same semantics as :class:`~.moe_utils.AllGatherGroupOp` but WITHOUT its
-    ``paddle.distributed.barrier``. The barrier there exists to protect state
-    shared across ranks between collectives; the ring owns its sub-groups
-    (``new_group``) and every output buffer, so it has nothing to protect.
-
-    Dropping it matters twice over. ``ProcessGroup.barrier()`` blocks the host
-    in ``cudaDeviceSynchronize`` (measured p50 0.75 ms, see the note in
-    ``fused_a2a._stream_ordered_fence_ep``), and this AllGather runs once per
-    ring round per MoE layer per micro-batch in both directions -- a few hundred
-    calls per step. Worse, a device-wide sync drains the in-flight
-    ``_InterRingShift`` and the pipeline's p2p sends too, so it defeats the
-    ring's own prefetch overlap and VPP's ``overlap_p2p_comm``.
+    Same semantics as :class:`~.moe_utils.AllGatherGroupOp` minus the
+    ``paddle.distributed.barrier`` it runs in both directions to protect state
+    shared across ranks between collectives; the ring owns its sub-groups and
+    every output buffer, so it has nothing to protect. Dropping it matters
+    because the barrier blocks the host in ``cudaDeviceSynchronize`` (p50
+    0.75 ms) on a call that runs once per ring round per layer per micro-batch in
+    both directions, and because a device-wide sync also drains the in-flight
+    ``_InterRingShift`` and the pipeline's p2p sends -- defeating both this ring's
+    overlap and VPP's ``overlap_p2p_comm``.
     """
 
     @staticmethod
@@ -2448,17 +2449,13 @@ class _RingPreAllGatherResult(paddle.autograd.PyLayer):
     """Consume a pre-issued async intra AllGather (see ``pre_intra_allgather``).
 
     Forward waits for the async NCCL task and returns the filled buffer, so the
-    collective ends up hidden behind whatever ran on the calc stream since it was
-    issued. Backward is :class:`_RingAllGather`'s, verbatim: ReduceScatter-SUM on
-    the contiguous grad, no barrier. ``AllGatherTokenDispatcher`` has a
-    ``_PreAllGatherResult`` doing the same job for the flat EP path, but its
-    backward omits the ``contiguous()`` and reduce-scatters through
-    ``ReduceScatterGroupOp`` (which barriers); the ring's grad comes straight out
-    of the SonicMoE GEMM backward and its sub-groups own their buffers, so it
-    needs this variant rather than that one.
+    collective ends up hidden behind whatever ran on the calc stream since it
+    was issued. Backward is :class:`_RingAllGather`'s, verbatim. The flat EP
+    path's ``_PreAllGatherResult`` reduce-scatters through
+    ``ReduceScatterGroupOp`` (barrier) and skips the ``contiguous()`` its grad
+    does not need; the ring needs both dropped, hence a separate PyLayer.
 
-    The ``handle`` is a plain dict, not a tensor, so Paddle does not expect a
-    gradient for it -- backward returns a single value.
+    ``handle`` is a dict, not a tensor, so backward returns a single value.
     """
 
     @staticmethod
@@ -2473,23 +2470,22 @@ class _RingPreAllGatherResult(paddle.autograd.PyLayer):
 
 
 class RingMoETokenDispatcher(AllGatherTokenDispatcher):
-    """RingMoE scheme-1 dispatcher (bf16 + SonicMoE).
+    """Two-level ring dispatcher for intermediate-sharded experts (bf16).
 
-    Mathematically identical to :class:`AllGatherTokenDispatcher` — every rank
-    holds all experts sharded along the intermediate dim (I_local = mid/EP), and
-    the final per-token output is the sum of every I-shard's down-proj
-    contribution.  The only difference is *how* the global gather/reduce is
-    organized: instead of one flat AllGather/ReduceScatter over the whole EP
-    group, RingMoE uses a 2-level ring — intra-node AllGather/ReduceScatter over
-    the G GPUs of a machine, plus inter-node AllToAll rotation over the N
-    machines — so communication stays in the low latent dim and (later) overlaps
-    with expert GEMM.
+    Mathematically identical to :class:`AllGatherTokenDispatcher`: every rank
+    holds all experts sharded along the intermediate dim (``I_local = mid/EP``),
+    and a token's output is the sum of every I-shard's down-proj contribution.
+    Only the shape of the global gather/reduce differs. Instead of one flat
+    AllGather/ReduceScatter over the whole EP group, tokens rotate through the N
+    nodes while each node applies its own I-shard via intra-node
+    AllGather/ReduceScatter over its G GPUs, so bulk traffic stays intra-node and
+    only ``[T, d_l]`` crosses the network per hop.
 
-    The ring schedule lives in :meth:`ring_forward`, which ``MoELayer`` drives
-    directly instead of the flat dispatch/compute/combine pipeline; the inherited
-    AllGather methods (checkpoint IO, ``token_combine``, ...) are what keep the
-    two paths interchangeable everywhere else. Numerical equivalence against the
-    ``allgather`` dispatcher is the intended correctness check.
+    ``MoELayer`` drives :meth:`ring_forward` directly instead of the flat
+    dispatch/compute/combine pipeline; the inherited AllGather methods
+    (checkpoint IO, ``token_combine``, ...) keep the two paths interchangeable
+    everywhere else. Numerical equivalence against the ``allgather`` dispatcher
+    is the intended correctness check.
     """
 
     def __init__(
@@ -2509,8 +2505,8 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         )
         if fp8_dispatch:
             raise NotImplementedError(
-                "RingMoE (scheme-1) supports bf16 + SonicMoE only; fp8_dispatch "
-                "is not implemented (mid split by EP breaks 128-alignment)."
+                "RingMoE supports bf16 + SonicMoE only; fp8_dispatch is not "
+                "implemented (mid split by EP breaks 128-alignment)."
             )
         # Round-0 intra token AllGather pre-issued by MoELayer before the gate;
         # consumed by _node_slice. Separate from the inherited _pre_ag_handle,
@@ -2548,7 +2544,9 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         out_shape = list(idx.shape)
         out_shape[0] *= group.nranks
         out = paddle.empty(shape=out_shape, dtype=idx.dtype)
-        paddle.distributed.stream.all_gather(out, idx, group=group, sync_op=True)
+        paddle.distributed.stream.all_gather(
+            out, idx, group=group, sync_op=True
+        )
         return out
 
     def _ag_router(self, weights, group):
@@ -2569,9 +2567,7 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         layer.
         """
         counts = paddle.full([1], local_tokens, dtype="int64")
-        gathered = paddle.empty(
-            [self.inter_group.nranks], dtype="int64"
-        )
+        gathered = paddle.empty([self.inter_group.nranks], dtype="int64")
         paddle.distributed.stream.all_gather(
             gathered, counts, group=self.inter_group, sync_op=True
         )
@@ -2642,18 +2638,13 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
     def _take_pre_intra_ag(self, tok):
         """Pop the prefetch handle and check it really belongs to ``tok``.
 
-        The gradient flows through whatever tensor ``_RingPreAllGatherResult`` is
-        applied to, so only the values have to agree. A mismatch means the
-        prefetch was issued for different tokens than the ring is about to
-        consume, which is a bug rather than a runtime condition: the prefetch and
-        the consumption happen in the same forward, on the same tensor.
-
-        It raises instead of falling back to the inline AllGather, because
-        "consume the prefetch or issue a collective instead" is a *local*
-        decision while ``_ag`` is rank-collective. One rank taking the fallback
-        while the others consume their prefetch makes the ranks disagree on how
-        many collectives to run, which hangs inside NCCL with no diagnostic. A
-        raise aborts with a readable message instead.
+        A mismatch means the prefetch was issued for different tokens than the
+        ring is about to consume. That is a bug, not a runtime condition -- both
+        happen in the same forward on the same tensor -- so it raises rather than
+        falling back to the inline AllGather: choosing the fallback is a *local*
+        decision while ``_ag`` is rank-collective, and one rank taking it would
+        leave the ranks disagreeing on how many collectives to run, hanging inside
+        NCCL with no diagnostic.
         """
         handle = self._pre_intra_ag
         self._pre_intra_ag = None
@@ -2748,33 +2739,24 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         recompute_moe_gate_up=False,
         combine_overlap_handle=None,
     ):
-        """RingMoE scheme-1 ring (bf16 + SonicMoE, serial; overlap-ready).
+        """Run the two-level ring and return this rank's combined output.
 
-        Only the token/routing tensors rotate around the N nodes one hop at a
-        time (async `_InterRingShift`, overlapped with the intra GEMM). At each
-        stop this node applies its own mid-slice (mid/N, split across its G
-        GPUs) to the currently-held tokens via ``_node_slice`` (intra AllGather
-        -> SonicMoE partial-I -> intra ReduceScatter-SUM), producing one partial
-        per round. The partials are placed in a per-destination buffer and a
-        single inter-node ReduceScatter sums every node's contribution back to
-        each home rank.
+        Only the token/routing tensors rotate around the N nodes, one hop at a
+        time via async ``_InterRingShift``. At each stop this node applies its
+        own mid-slice to the tokens it currently holds through
+        :meth:`_node_slice`, producing one partial per round. The partials are
+        laid out per destination node and a single inter-node ReduceScatter sums
+        every node's contribution back to each home rank. Keeping the shift
+        independent of the compute is what lets it overlap with the intra GEMM.
+        All collectives are autograd-safe PyLayers, so backward needs no extra
+        wiring. Requires an equal local token count across the inter group --
+        see :meth:`_check_equal_tokens`.
 
-        This matches the scheme-1 diagram (partials d_l·N + one inter
-        ReduceScatter) and keeps the token shift independent of the compute, so
-        the shift can later be overlapped with the intra GEMM. All collectives
-        are autograd-safe PyLayers (backward automatic); requires equal local
-        token count T across the inter group (balanced DP) -- see
-        ``_check_equal_tokens``.
-
-        NOTE on memory: the ring does NOT reduce peak activation versus the flat
-        AllGather path. Each round's intra-gathered ``g_tok`` ([G·T, d_l]) is
-        captured by the expert GEMM for its backward, and all N rounds stay
-        resident until backward runs, so the peak is N·G·T·d_l = EP·T·d_l --
-        exactly what one flat EP AllGather holds. The wins here are the
-        communication pattern (bulk traffic stays intra-node, inter-node moves
-        only T·d_l per hop in the low latent dim) and the overlap headroom, not
-        footprint. Getting the smaller footprint would require dropping ``g_tok``
-        and re-gathering it in backward.
+        Peak activation is *not* reduced versus the flat AllGather path: each
+        round's ``g_tok`` (``[G·T, d_l]``) is captured by the expert GEMM for its
+        backward and all N rounds stay resident, so the peak is
+        ``N·G·T·d_l = EP·T·d_l`` -- exactly what one flat EP AllGather holds. The
+        wins are the traffic pattern and the overlap headroom.
 
         Two optional overlaps feed in from ``MoELayer``, both no-ops when absent:
         ``combine_overlap_handle`` runs the shared-expert subgraph while the final
@@ -2849,7 +2831,3 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         return self._inter_combine(
             buf, self.inter_group, combine_overlap_handle
         )
-
-
-
-
