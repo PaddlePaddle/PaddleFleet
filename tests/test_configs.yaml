@@ -66,6 +66,11 @@ tests:
   - test_case: [tests/multi_card_tests/moe/test_allgather_dispatcher_ep.py]
     products:
       - num_gpus: 2
+  # moe: RingMoE dispatcher. hybrid_configs is sharding=2 ep=2, so the world
+  # must be exactly 2; the default of 8 makes fleet.init reject the topology.
+  - test_case: [tests/multi_card_tests/moe/test_ring_dispatcher_ep.py]
+    products:
+      - num_gpus: 2
   - test_case: [tests/multi_card_tests/moe/test_moonep.py]
     products:
       - num_gpus: 2
