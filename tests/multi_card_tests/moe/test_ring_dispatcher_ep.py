@@ -14,14 +14,13 @@
 """Multi-card (EP>1) tests for RingMoETokenDispatcher.
 
 Covers both ring topologies on two cards: G=2/N=1 (intra only) and G=1/N=2
-(inter only), selected through NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN.
+(inter only), selected by patching ``_RING_GPUS_PER_NODE``.
 
 Run with:
   python -m paddle.distributed.launch --gpus=0,1 \
       tests/multi_card_tests/moe/test_ring_dispatcher_ep.py
 """
 
-import os
 import random
 import unittest
 from unittest import mock
@@ -74,26 +73,17 @@ def _ensure_fleet():
 def _make_dispatcher(gpus_per_node, ep_group, num_experts=4):
     """Build a dispatcher with the ring topology forced to a known G.
 
-    ``_detect_gpus_per_node`` reads the env at construction time, so this is how
-    a two-card job gets to exercise both G=2/N=1 and G=1/N=2. Sub-group creation
-    is collective and cached per (ep_ranks, G), so every rank must call this in
-    the same order -- which unittest guarantees within a single test.
+    Production always splits on ``_RING_GPUS_PER_NODE`` (8); patching it is how a
+    two-card job gets to exercise both G=2/N=1 and G=1/N=2. Sub-group creation is
+    collective and cached per (ep_ranks, G), so every rank must call this in the
+    same order -- which unittest guarantees within a single test.
     """
-    from paddlefleet.transformer.moe.token_dispatcher import (
-        RingMoETokenDispatcher,
-    )
+    from paddlefleet.transformer.moe import token_dispatcher as td
 
-    prev = os.environ.get("NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN")
-    os.environ["NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN"] = str(gpus_per_node)
-    try:
-        return RingMoETokenDispatcher(
+    with mock.patch.object(td, "_RING_GPUS_PER_NODE", gpus_per_node):
+        return td.RingMoETokenDispatcher(
             ep_group, ep_group.nranks, num_experts=num_experts
         )
-    finally:
-        if prev is None:
-            os.environ.pop("NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN", None)
-        else:
-            os.environ["NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN"] = prev
 
 
 def _scale_expert_fn(scale):
@@ -158,31 +148,15 @@ class _RingTestBase(unittest.TestCase):
 
 
 class TestRingTopology(_RingTestBase):
-    def test_detect_gpus_per_node_env_priority(self):
+    def test_gpus_per_node_is_fixed_at_eight(self):
         from paddlefleet.transformer.moe import token_dispatcher as td
 
-        keys = (
-            "NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN",
-            "PADDLE_LOCAL_SIZE",
-            "CUDA_VISIBLE_DEVICES",
+        self.assertEqual(td._RING_GPUS_PER_NODE, 8)
+        # EP smaller than a machine collapses to the intra level only.
+        disp = td.RingMoETokenDispatcher(
+            self.ep_group, self.ep_size, num_experts=self.num_experts
         )
-        saved = {k: os.environ.get(k) for k in keys}
-        try:
-            for k in keys:
-                os.environ.pop(k, None)
-            self.assertEqual(td._detect_gpus_per_node(), 1)
-            os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2"
-            self.assertEqual(td._detect_gpus_per_node(), 3)
-            os.environ["PADDLE_LOCAL_SIZE"] = "4"
-            self.assertEqual(td._detect_gpus_per_node(), 4)
-            os.environ["NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN"] = "8"
-            self.assertEqual(td._detect_gpus_per_node(), 8)
-        finally:
-            for k, v in saved.items():
-                if v is None:
-                    os.environ.pop(k, None)
-                else:
-                    os.environ[k] = v
+        self.assertEqual((disp.G, disp.N), (self.ep_size, 1))
 
     def test_intra_only_topology(self):
         disp = _make_dispatcher(2, self.ep_group)
