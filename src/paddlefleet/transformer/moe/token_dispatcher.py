@@ -2411,11 +2411,11 @@ class _RingAllGather(paddle.autograd.PyLayer):
     ``paddle.distributed.barrier`` it runs in both directions to protect state
     shared across ranks between collectives; the ring owns its sub-groups and
     every output buffer, so it has nothing to protect. Dropping it matters
-    because the barrier blocks the host in ``cudaDeviceSynchronize`` (p50
-    0.75 ms) on a call that runs once per ring round per layer per micro-batch in
-    both directions, and because a device-wide sync also drains the in-flight
-    ``_InterRingShift`` and the pipeline's p2p sends -- defeating both this ring's
-    overlap and VPP's ``overlap_p2p_comm``.
+    because the barrier blocks the host in ``cudaDeviceSynchronize`` on a call
+    that runs once per ring round per layer per micro-batch in both directions,
+    and because a device-wide sync also drains the in-flight ``_InterRingShift``
+    and the pipeline's p2p sends -- defeating both this ring's overlap and VPP's
+    ``overlap_p2p_comm``.
     """
 
     @staticmethod
