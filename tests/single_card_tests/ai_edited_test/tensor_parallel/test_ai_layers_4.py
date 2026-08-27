@@ -29,9 +29,9 @@ model-parallel group. Megatron-Core does the same for
 ``deepseek_v3`` marks precisely its replicated ``q_a_proj`` /
 ``kv_a_proj_with_mqa`` this way.
 
-These tests pin the marking and its three guards. They are pure attribute
-assertions on a single card: no TP group is created, so nothing here depends on
-a distributed launch.
+These tests pin the marking, its use_accuracy_compatible gate, and the remaining
+guards. They are pure attribute assertions on a single card: no TP group is
+created, so nothing here depends on a distributed launch.
 """
 import os
 import sys
@@ -70,8 +70,13 @@ def _make_config(**kwargs):
         "wgrad_deferral_limit": 0,
         "expert_model_parallel_size": 1,
     }
+    use_accuracy_compatible = kwargs.pop("use_accuracy_compatible", False)
     defaults.update(kwargs)
-    return ModelParallelConfig(**defaults)
+    config = ModelParallelConfig(**defaults)
+    # ModelParallelConfig does not declare the alignment switch; Linear reads it
+    # with getattr, matching TransformerConfig.use_accuracy_compatible.
+    config.use_accuracy_compatible = use_accuracy_compatible
+    return config
 
 
 def _build(bias=False, **config_kwargs):
@@ -91,8 +96,12 @@ def _is_marked(parameter):
 class TestLinearMarksReplicatedGradForTPReduction(unittest.TestCase):
     """The mark is applied exactly when the partial-sum situation exists."""
 
-    def test_marked_when_sequence_parallel_and_tp_greater_than_one(self):
-        layer = _build(sequence_parallel=True, tensor_model_parallel_size=2)
+    def test_marked_when_accuracy_compatible_and_sequence_parallel(self):
+        layer = _build(
+            sequence_parallel=True,
+            tensor_model_parallel_size=2,
+            use_accuracy_compatible=True,
+        )
         self.assertTrue(
             _is_marked(layer.weight),
             "a replicated weight under SP+TP holds a partial sequence sum and "
@@ -100,20 +109,45 @@ class TestLinearMarksReplicatedGradForTPReduction(unittest.TestCase):
         )
 
     def test_bias_is_marked_too(self):
-        layer = _build(bias=True, sequence_parallel=True, tensor_model_parallel_size=2)
+        layer = _build(
+            bias=True,
+            sequence_parallel=True,
+            tensor_model_parallel_size=2,
+            use_accuracy_compatible=True,
+        )
         self.assertTrue(_is_marked(layer.bias))
+
+    def test_not_marked_without_accuracy_compatible(self):
+        layer = _build(
+            bias=True,
+            sequence_parallel=True,
+            tensor_model_parallel_size=2,
+            use_accuracy_compatible=False,
+        )
+        self.assertFalse(_is_marked(layer.weight))
+        self.assertFalse(_is_marked(layer.bias))
 
     def test_not_marked_without_sequence_parallel(self):
         # Without SP every rank sees the whole sequence, so the local gradient is
         # already complete and an extra all-reduce would multiply it by TP.
-        layer = _build(bias=True, sequence_parallel=False, tensor_model_parallel_size=2)
+        layer = _build(
+            bias=True,
+            sequence_parallel=False,
+            tensor_model_parallel_size=2,
+            use_accuracy_compatible=True,
+        )
         self.assertFalse(_is_marked(layer.weight))
         self.assertFalse(_is_marked(layer.bias))
 
     def test_not_marked_at_tp_one(self):
         # ModelParallelConfig.__post_init__ also forces sequence_parallel off
         # here; assert the outcome rather than the intermediate.
-        layer = _build(bias=True, sequence_parallel=True, tensor_model_parallel_size=1)
+        layer = _build(
+            bias=True,
+            sequence_parallel=True,
+            tensor_model_parallel_size=1,
+            use_accuracy_compatible=True,
+        )
         self.assertFalse(_is_marked(layer.weight))
         self.assertFalse(_is_marked(layer.bias))
 
@@ -124,7 +158,11 @@ class TestLinearMarksReplicatedGradForTPReduction(unittest.TestCase):
         layer = Linear(
             8,
             16,
-            config=_make_config(sequence_parallel=True, tensor_model_parallel_size=2),
+            config=_make_config(
+                sequence_parallel=True,
+                tensor_model_parallel_size=2,
+                use_accuracy_compatible=True,
+            ),
             init_method=paddle.nn.initializer.Constant(1.0),
             bias=True,
             is_expert=True,
@@ -133,7 +171,12 @@ class TestLinearMarksReplicatedGradForTPReduction(unittest.TestCase):
         self.assertFalse(_is_marked(layer.bias))
 
     def test_marking_does_not_disturb_the_replication_attributes(self):
-        layer = _build(bias=True, sequence_parallel=True, tensor_model_parallel_size=2)
+        layer = _build(
+            bias=True,
+            sequence_parallel=True,
+            tensor_model_parallel_size=2,
+            use_accuracy_compatible=True,
+        )
         # The weight is still replicated, still DP-reduced, and the layer still
         # reports TP=1 -- the mark adds the TP reduction, it does not turn the
         # layer into a sharded one.
@@ -143,7 +186,11 @@ class TestLinearMarksReplicatedGradForTPReduction(unittest.TestCase):
         self.assertIn("TP=1", repr(layer))
 
     def test_forward_still_works_when_marked(self):
-        layer = _build(sequence_parallel=True, tensor_model_parallel_size=2)
+        layer = _build(
+            sequence_parallel=True,
+            tensor_model_parallel_size=2,
+            use_accuracy_compatible=True,
+        )
         output, output_bias = layer(paddle.randn([2, 4, 8]))
         self.assertEqual(output.shape, [2, 4, 16])
         self.assertIsNone(output_bias)
@@ -152,7 +199,11 @@ class TestLinearMarksReplicatedGradForTPReduction(unittest.TestCase):
         layer = Linear(
             8,
             16,
-            config=_make_config(sequence_parallel=True, tensor_model_parallel_size=2),
+            config=_make_config(
+                sequence_parallel=True,
+                tensor_model_parallel_size=2,
+                use_accuracy_compatible=True,
+            ),
             init_method=paddle.nn.initializer.Constant(1.0),
             bias=False,
             skip_weight_param_allocation=True,
@@ -161,52 +212,70 @@ class TestLinearMarksReplicatedGradForTPReduction(unittest.TestCase):
 
 
 class TestMLADownProjectionsAreReplicated(unittest.TestCase):
-    """The MLA spec must not column-shard the two down-projections.
+    """MLA down-projections replicate only under use_accuracy_compatible.
 
     Sharding them produces a gradient that is validly but DIFFERENTLY reduced
-    from the reference implementations, which surfaces as a bit-level divergence
-    rather than a crash -- so a spec-level assertion is the cheap guard.
+    from the reference implementations. The default path keeps the historical
+    column-parallel spec.
     """
 
-    def _mla_spec(self):
-        from paddlefleet.models.backends import LocalSpecProvider
-        from paddlefleet.models.gpt.gpt_layer_specs import (
-            get_gpt_layer_local_spec,
+    def _mla_spec(self, *, use_accuracy_compatible):
+        from paddlefleet.models.gpt.gpt_layer_specs import get_attention_spec
+        from paddlefleet.transformer.enums import AttnMaskType
+        from paddlefleet.transformer.transformer_config import TransformerConfig
+
+        config = TransformerConfig(
+            num_hidden_layers=1,
+            hidden_size=16,
+            num_attention_heads=2,
+            multi_latent_attention=True,
+            q_lora_rank=8,
+            kv_lora_rank=8,
+            qk_nope_head_dim=4,
+            qk_rope_head_dim=4,
+            qk_pos_emb_head_dim=4,
+            v_head_dim=8,
+            use_qk_norm=False,
+            use_accuracy_compatible=use_accuracy_compatible,
+        )
+        return get_attention_spec(
+            config=config,
+            attention_layer_type="multi_latent_attention",
+            attn_mask_type=AttnMaskType.causal,
         )
 
-        del get_gpt_layer_local_spec  # imported only to prove the module loads
-        return LocalSpecProvider()
-
     def test_replicated_linear_and_column_parallel_are_distinct_classes(self):
-        backend = self._mla_spec()
+        from paddlefleet.models.backends import LocalSpecProvider
+
+        backend = LocalSpecProvider()
         self.assertIsNot(backend.linear(), backend.column_parallel_linear())
 
-    def test_spec_uses_replicated_linear_for_the_down_projections(self):
-        import inspect
+    def test_spec_uses_replicated_linear_under_accuracy_compatible(self):
+        from paddlefleet.models.backends import LocalSpecProvider
 
-        from paddlefleet.models import gpt as gpt_pkg
+        spec = self._mla_spec(use_accuracy_compatible=True)
+        backend = LocalSpecProvider()
+        self.assertIs(spec.sublayers_spec.q_a_proj, backend.linear())
+        self.assertIs(spec.sublayers_spec.kv_a_proj_with_mqa, backend.linear())
 
-        source = inspect.getsource(gpt_pkg.gpt_layer_specs)
-        # Read the constructed spec textually: building it for real needs a
-        # TransformerConfig plus process groups, which is a multi-card fixture.
-        self.assertIn("q_a_proj=backend.linear()", source)
-        self.assertIn("kv_a_proj_with_mqa=backend.linear()", source)
-        self.assertNotIn("q_a_proj=backend.column_parallel_linear()", source)
-        self.assertNotIn(
-            "kv_a_proj_with_mqa=backend.column_parallel_linear()", source
+    def test_spec_stays_column_parallel_by_default(self):
+        from paddlefleet.models.backends import LocalSpecProvider
+
+        spec = self._mla_spec(use_accuracy_compatible=False)
+        backend = LocalSpecProvider()
+        self.assertIs(spec.sublayers_spec.q_a_proj, backend.column_parallel_linear())
+        self.assertIs(
+            spec.sublayers_spec.kv_a_proj_with_mqa, backend.column_parallel_linear()
         )
 
     def test_the_neighbouring_projections_stay_tensor_parallel(self):
-        import inspect
+        from paddlefleet.models.backends import LocalSpecProvider
 
-        from paddlefleet.models import gpt as gpt_pkg
-
-        source = inspect.getsource(gpt_pkg.gpt_layer_specs)
-        # Only the two low-rank down-projections are replicated; the large
-        # projections around them must keep their sharding.
-        self.assertIn("q_b_proj=backend.column_parallel_linear()", source)
-        self.assertIn("kv_b_proj=backend.column_parallel_linear()", source)
-        self.assertIn("o_proj=backend.row_parallel_linear()", source)
+        spec = self._mla_spec(use_accuracy_compatible=True)
+        backend = LocalSpecProvider()
+        self.assertIs(spec.sublayers_spec.q_b_proj, backend.column_parallel_linear())
+        self.assertIs(spec.sublayers_spec.kv_b_proj, backend.column_parallel_linear())
+        self.assertIs(spec.sublayers_spec.o_proj, backend.row_parallel_linear())
 
 
 if __name__ == "__main__":

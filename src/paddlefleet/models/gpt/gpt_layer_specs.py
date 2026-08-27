@@ -436,12 +436,20 @@ def get_attention_spec(
             },
             sublayers_spec=MLASelfAttentionSublayersSpec(
                 q_proj=backend.column_parallel_linear(),
-                # Official glm_moe_dsa, mcore, and PaddleFormers deepseek_v3 all
-                # replicate these two down-projections. Column-sharding them
-                # yields a valid but different TP reduction tree (E-205).
-                q_a_proj=backend.linear(),
+                # Default keeps the historical column-sharded down-projections.
+                # Under use_accuracy_compatible, replicate them to match official
+                # glm_moe_dsa / mcore / PaddleFormers deepseek_v3 (E-205).
+                q_a_proj=(
+                    backend.linear()
+                    if getattr(config, "use_accuracy_compatible", False)
+                    else backend.column_parallel_linear()
+                ),
                 q_b_proj=backend.column_parallel_linear(),
-                kv_a_proj_with_mqa=backend.linear(),
+                kv_a_proj_with_mqa=(
+                    backend.linear()
+                    if getattr(config, "use_accuracy_compatible", False)
+                    else backend.column_parallel_linear()
+                ),
                 kv_b_proj=backend.column_parallel_linear(),
                 core_attention=core_attention,
                 o_proj=backend.row_parallel_linear(),

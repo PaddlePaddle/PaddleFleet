@@ -1471,9 +1471,12 @@ class Linear(paddle.nn.Layer):
         Under sequence parallelism each rank sees s/TP of the sequence, so the
         local wgrad is a partial sum. Linear.forward never gathers, so nothing
         else adds that term. SPGradSyncCallback all-reduces marked parameters
-        over the model-parallel group (E-205).
+        over the model-parallel group (E-205). Gated on use_accuracy_compatible
+        so the default Linear path is unchanged.
         """
         if self.is_expert:
+            return
+        if not getattr(self.config, "use_accuracy_compatible", False):
             return
         if not getattr(self.config, "sequence_parallel", False):
             return
