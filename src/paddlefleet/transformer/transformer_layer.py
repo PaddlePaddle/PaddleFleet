@@ -40,9 +40,8 @@ from paddlefleet.recompute_utils import (
     has_recovered,
     install_recompute_p2p_overlap,
     keep_indexer_grad_path,
+    module_needs_recompute,
     need_full_recompute,
-    need_recompute_in_block,
-    need_recompute_in_first_n,
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.dsv4_hybrid_attention import DSv4HybridAttention
@@ -360,92 +359,18 @@ class TransformerLayer(nn.Layer):
                 self.layer_number, self.config
             )
         elif self.config.recompute_granularity == "selective":
-            if isinstance(self.config.recompute_modules, list):
-                if self.config.recompute_num_layers is None:
-                    # selective all submodels to recompute
-                    if "norm" in self.config.recompute_modules:
-                        if not isinstance(self.input_layernorm, IdentityOp):
-                            self.recompute_input_layernorm = True
-
-                        if not isinstance(
-                            self.post_attention_layernorm, IdentityOp
-                        ):
-                            self.recompute_post_attention_layernorm = True
-                    if "mlp" in self.config.recompute_modules:
-                        self.recompute_mlp = True
-                else:
-                    # selective submodels in special layers to recompute
-                    assert self.config.recompute_method in ["first_n", "block"]
-                    if "norm" in self.config.recompute_modules:
-                        if not isinstance(self.input_layernorm, IdentityOp):
-                            self.recompute_input_layernorm = (
-                                need_recompute_in_block(
-                                    self.layer_number,
-                                    self.config,
-                                    self.config.recompute_num_layers,
-                                )
-                                if self.config.recompute_method == "block"
-                                else need_recompute_in_first_n(
-                                    self.layer_number,
-                                    self.config,
-                                    self.config.recompute_num_layers,
-                                )
-                            )
-                            self.recompute_post_attention_layernorm = (
-                                self.recompute_input_layernorm
-                            )
-
-                    if "mlp" in self.config.recompute_modules:
-                        self.recompute_mlp = (
-                            need_recompute_in_block(
-                                self.layer_number,
-                                self.config,
-                                self.config.recompute_num_layers,
-                            )
-                            if self.config.recompute_method == "block"
-                            else need_recompute_in_first_n(
-                                self.layer_number,
-                                self.config,
-                                self.config.recompute_num_layers,
-                            )
-                        )
-            elif isinstance(self.config.recompute_modules, dict):
-                assert self.config.recompute_method in ["first_n", "block"]
-                if "norm" in self.config.recompute_modules:
-                    if not isinstance(self.input_layernorm, IdentityOp):
-                        self.recompute_input_layernorm = (
-                            need_recompute_in_block(
-                                self.layer_number,
-                                self.config,
-                                self.config.recompute_modules["norm"],
-                            )
-                            if self.config.recompute_method == "block"
-                            else need_recompute_in_first_n(
-                                self.layer_number,
-                                self.config,
-                                self.config.recompute_modules["norm"],
-                            )
-                        )
-                        self.recompute_post_attention_layernorm = (
-                            self.recompute_input_layernorm
-                        )
-
-                if "mlp" in self.config.recompute_modules:
-                    self.recompute_mlp = (
-                        need_recompute_in_block(
-                            self.layer_number,
-                            self.config,
-                            self.config.recompute_modules["mlp"],
-                        )
-                        if self.config.recompute_method == "block"
-                        else need_recompute_in_first_n(
-                            self.layer_number,
-                            self.config,
-                            self.config.recompute_modules["mlp"],
-                        )
-                    )
-            else:
-                raise ValueError("recompute_modules must be list or dict")
+            if module_needs_recompute("norm", self.layer_number, self.config):
+                # Both norms share the "norm" entry; each is skipped when it has
+                # been specialised away to an IdentityOp.
+                self.recompute_input_layernorm = not isinstance(
+                    self.input_layernorm, IdentityOp
+                )
+                self.recompute_post_attention_layernorm = not isinstance(
+                    self.post_attention_layernorm, IdentityOp
+                )
+            self.recompute_mlp = module_needs_recompute(
+                "mlp", self.layer_number, self.config
+            )
 
         # [Layer 10: Block Attention Residuals] Optional
         self.attn_res_block_size = None
@@ -1402,46 +1327,10 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             doc_mask_meta_registry.register(self._docmask_meta_key)
 
         # mHC forward recompute config
-        self.recompute_mhc_forward = False
-        if (
+        self.recompute_mhc_forward = (
             config.recompute_granularity == "selective"
-            and config.recompute_modules is not None
-        ):
-            if isinstance(config.recompute_modules, list):
-                if "mhc_forward" in config.recompute_modules:
-                    if config.recompute_num_layers is None:
-                        self.recompute_mhc_forward = True
-                    else:
-                        assert config.recompute_method in ["first_n", "block"]
-                        self.recompute_mhc_forward = (
-                            need_recompute_in_block(
-                                self.layer_number,
-                                config,
-                                config.recompute_num_layers,
-                            )
-                            if config.recompute_method == "block"
-                            else need_recompute_in_first_n(
-                                self.layer_number,
-                                config,
-                                config.recompute_num_layers,
-                            )
-                        )
-            elif isinstance(config.recompute_modules, dict):
-                if "mhc_forward" in config.recompute_modules:
-                    assert config.recompute_method in ["first_n", "block"]
-                    self.recompute_mhc_forward = (
-                        need_recompute_in_block(
-                            self.layer_number,
-                            config,
-                            config.recompute_modules["mhc_forward"],
-                        )
-                        if config.recompute_method == "block"
-                        else need_recompute_in_first_n(
-                            self.layer_number,
-                            config,
-                            config.recompute_modules["mhc_forward"],
-                        )
-                    )
+            and module_needs_recompute("mhc_forward", self.layer_number, config)
+        )
 
     def _fused_h_res_h_post_bda(
         self,

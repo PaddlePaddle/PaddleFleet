@@ -45,8 +45,7 @@ from paddlefleet.parallel_state import (
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
     keep_indexer_grad_path,
-    need_recompute_in_block,
-    need_recompute_in_first_n,
+    module_needs_recompute,
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.tensor_parallel.mappings import (
@@ -620,43 +619,17 @@ class MultiLatentAttention(Attention):
 
         self.recompute_gated_attn = (
             self.config.recompute_granularity == "selective"
-            and self.config.recompute_modules is not None
-            and "gated_attn" in self.config.recompute_modules
+            and module_needs_recompute(
+                "gated_attn", self.layer_number, self.config
+            )
         )
 
-        self.recompute_qkv_up_porj_and_rope = False
-        if self.config.recompute_granularity == "selective":
-            modules = self.config.recompute_modules
-            if isinstance(modules, list) and "mla_qkv_recompute" in modules:
-                self.recompute_qkv_up_porj_and_rope = (
-                    True
-                    if self.config.recompute_num_layers is None
-                    else (
-                        need_recompute_in_block(
-                            self.layer_number,
-                            self.config,
-                            self.config.recompute_num_layers,
-                        )
-                        if self.config.recompute_method == "block"
-                        else need_recompute_in_first_n(
-                            self.layer_number,
-                            self.config,
-                            self.config.recompute_num_layers,
-                        )
-                    )
-                )
-            elif isinstance(modules, dict) and "mla_qkv_recompute" in modules:
-                assert self.config.recompute_method in ["first_n", "block"]
-                num_layers = modules["mla_qkv_recompute"]
-                self.recompute_qkv_up_porj_and_rope = (
-                    need_recompute_in_block(
-                        self.layer_number, self.config, num_layers
-                    )
-                    if self.config.recompute_method == "block"
-                    else need_recompute_in_first_n(
-                        self.layer_number, self.config, num_layers
-                    )
-                )
+        self.recompute_qkv_up_porj_and_rope = (
+            self.config.recompute_granularity == "selective"
+            and module_needs_recompute(
+                "mla_qkv_recompute", self.layer_number, self.config
+            )
+        )
 
         # VHA postmix: ungrouped low-rank cross-head mixing (I + U Vᵀ) on the head
         # axis, applied to the attention output (head space) before the output
@@ -693,36 +666,15 @@ class MultiLatentAttention(Attention):
                     0.0
                 ),  # identity at init
             )
-        # Selective recompute for the VHA postmix. Only list configuration is
-        # supported; honours recompute_num_layers + recompute_method
-        # (first_n / block) like the other selective modules.
-        modules = self.config.recompute_modules
-        self.recompute_vha_postmix = False
-        if (
+        # Selective recompute for the VHA postmix, configured like every other
+        # selective submodule (list entry, or dict entry with a layer count or
+        # an explicit layer list).
+        self.recompute_vha_postmix = (
             self.config.recompute_granularity == "selective"
-            and modules is not None
-        ):
-            if isinstance(modules, dict) and "vha_postmix" in modules:
-                raise ValueError(
-                    "recompute_modules['vha_postmix'] only supports list "
-                    "configuration"
-                )
-            if isinstance(modules, list) and "vha_postmix" in modules:
-                n = self.config.recompute_num_layers
-                if n is None:
-                    self.recompute_vha_postmix = True
-                elif self.config.recompute_method == "block":
-                    self.recompute_vha_postmix = need_recompute_in_block(
-                        self.layer_number, self.config, n
-                    )
-                elif self.config.recompute_method == "first_n":
-                    self.recompute_vha_postmix = need_recompute_in_first_n(
-                        self.layer_number, self.config, n
-                    )
-                else:
-                    raise ValueError(
-                        "recompute_method must be 'first_n' or 'block'"
-                    )
+            and module_needs_recompute(
+                "vha_postmix", self.layer_number, self.config
+            )
+        )
 
     def _apply_vha_postmix(self, attn_out, U=None, V=None):
         # attn_out: [b, sq, nh_pp * v_head_dim] (head space, pre-gate / pre output proj).

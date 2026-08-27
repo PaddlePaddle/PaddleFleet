@@ -40,7 +40,10 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 from paddlefleet import utils
-from paddlefleet.recompute_utils import need_recompute_in_first_n
+from paddlefleet.recompute_utils import (
+    module_needs_recompute,
+    module_needs_refined_recompute,
+)
 from paddlefleet.transformer.activations import situ
 from paddlefleet.transformer.dw_overlap import (
     deferrable_linear_bare,
@@ -545,20 +548,9 @@ class MoELayer(nn.Layer):
                     f"Unsupported moe_token_dispatcher_type {self.moe_token_dispatcher_type}"
                 )
 
-        self.recompute_moe_gate_up = getattr(
-            self.config, "recompute_moe_gate_up", False
-        ) or (
-            self.config.recompute_granularity == "selective"
-            and self.config.recompute_modules is not None
-            and "moe_gate_up" in self.config.recompute_modules
-        )
-        self.recompute_moe_premute = getattr(
-            self.config, "recompute_moe_premute", False
-        ) or (
-            self.config.recompute_granularity == "selective"
-            and self.config.recompute_modules is not None
-            and "moe_premute" in self.config.recompute_modules
-        )
+        self.recompute_moe_gate_up = False
+        self.recompute_moe_premute = False
+        self._update_layer_aware_recompute()
         self.use_auto_subbatch = getattr(
             self.config, "use_auto_subbatch", False
         )
@@ -619,6 +611,43 @@ class MoELayer(nn.Layer):
 
         self.use_rr_deepep_combine = False
 
+    def _update_layer_aware_recompute(self):
+        """(Re-)resolve the selective-recompute flags that depend on the layer id.
+
+        Runs twice: ``layer_number`` only arrives via ``set_layer_number()``.
+        While it is ``None`` a count-based selector means every layer and a layer
+        list resolves to False; the second call settles both.
+        """
+        layer_number = getattr(self, "layer_number", None)
+        selective = self.config.recompute_granularity == "selective"
+        self.recompute_moe_gate_up = getattr(
+            self.config, "recompute_moe_gate_up", False
+        ) or (
+            selective
+            and module_needs_recompute(
+                "moe_gate_up",
+                layer_number,
+                self.config,
+                defer_if_layer_unknown=True,
+            )
+        )
+        self.recompute_moe_premute = getattr(
+            self.config, "recompute_moe_premute", False
+        ) or (
+            selective
+            and module_needs_recompute(
+                "moe_premute",
+                layer_number,
+                self.config,
+                defer_if_layer_unknown=True,
+            )
+        )
+        experts = getattr(self, "grouped_gemm_experts", None)
+        if experts is not None and hasattr(
+            experts, "update_activation_recompute"
+        ):
+            experts.update_activation_recompute(layer_number)
+
     def rr_recompute_update(self, in_full_recompute, in_mlp_recompute):
         if (
             self.config.recompute_modules is not None
@@ -636,26 +665,24 @@ class MoELayer(nn.Layer):
                 raise ValueError(
                     "recompute_granularity must be set when moe_combine RR is enabled."
                 )
-            if isinstance(self.config.recompute_modules, list):
-                self.use_rr_deepep_combine = True
-            elif isinstance(self.config.recompute_modules, dict):
-                # dict mode only supports first_n: uniform applies recompute to all layers
-                # (use list mode instead), block is not yet implemented but can be extended.
-                if self.config.recompute_method != "first_n":
-                    raise ValueError(
-                        "recompute_modules dict mode for moe_combine RR requires "
-                        f"recompute_method='first_n', got '{self.config.recompute_method}'."
-                    )
+            if isinstance(self.config.recompute_modules, dict):
+                spec = self.config.recompute_modules["moe_combine"]
+                # A layer count still means first_n only; a layer list carries
+                # its own layers and needs no method.
+                if isinstance(spec, int) and not isinstance(spec, bool):
+                    if spec >= 0 and self.config.recompute_method != "first_n":
+                        raise ValueError(
+                            "recompute_modules dict mode for moe_combine RR requires "
+                            f"recompute_method='first_n', got '{self.config.recompute_method}'."
+                        )
                 if not hasattr(self, "layer_number"):
                     raise ValueError(
                         "layer_number must be set before rr_recompute_update is called in dict mode. "
                         "Ensure set_layer_number() is called first."
                     )
-                self.use_rr_deepep_combine = not need_recompute_in_first_n(
-                    self.layer_number,
-                    self.config,
-                    self.config.recompute_modules["moe_combine"],
-                )
+            self.use_rr_deepep_combine = module_needs_refined_recompute(
+                "moe_combine", getattr(self, "layer_number", None), self.config
+            )
         if (
             (not in_full_recompute)
             and (not in_mlp_recompute)
@@ -1678,6 +1705,8 @@ class MoELayer(nn.Layer):
     def set_layer_number(self, layer_number, is_mtp_layer: bool = False):
         self.layer_number = layer_number
         self.is_mtp_layer = is_mtp_layer
+        # Layer id is known now; re-resolve the layer-scoped recompute flags.
+        self._update_layer_aware_recompute()
         # Assign routed-expert 'color' now that the layer number is known. This
         # is the single place color is set for experts (Paddle forbids
         # reassigning it): the MTP-shared last layer uses the no-hook color.

@@ -240,6 +240,9 @@ class TestMoELayerSetLayerNumber(unittest.TestCase):
 
     def test_set_layer_number(self):
         layer = MoELayer.__new__(MoELayer)
+        # set_layer_number re-resolves the layer-scoped recompute flags, which
+        # reads config.
+        layer.config = _make_config()
         layer.gate = MagicMock()
         # set_layer_number now colors expert params; EP=1 makes that a no-op.
         layer.expert_model_parallel_size = 1
@@ -251,6 +254,7 @@ class TestMoELayerSetLayerNumber(unittest.TestCase):
 
     def test_set_layer_number_no_set_method(self):
         layer = MoELayer.__new__(MoELayer)
+        layer.config = _make_config()
         layer.gate = MagicMock()
         layer.expert_model_parallel_size = 1
         del layer.gate.set_layer_number

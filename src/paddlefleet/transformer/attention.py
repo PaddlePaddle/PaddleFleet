@@ -44,8 +44,8 @@ from paddlefleet.parallel_state import (
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
-    need_recompute_in_block,
-    need_recompute_in_first_n,
+    module_needs_recompute,
+    module_needs_refined_recompute,
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.tensor_parallel.mappings import (
@@ -354,44 +354,9 @@ class Attention(FleetLayer, ABC):
         self.use_rr_flash_attention = False
         self.recompute_core_attention = False
         if self.config.recompute_granularity == "selective":
-            if isinstance(self.config.recompute_modules, list):
-                if self.config.recompute_num_layers is None:
-                    # selective all submodels to recompute
-                    if "core_attn" in self.config.recompute_modules:
-                        self.recompute_core_attention = True
-                else:
-                    # selective submodels in special layers to recompute
-                    assert self.config.recompute_method in ["first_n", "block"]
-                    if "core_attn" in self.config.recompute_modules:
-                        self.recompute_core_attention = (
-                            need_recompute_in_block(
-                                self.layer_number,
-                                self.config,
-                                self.config.recompute_num_layers,
-                            )
-                            if self.config.recompute_method == "block"
-                            else need_recompute_in_first_n(
-                                self.layer_number,
-                                self.config,
-                                self.config.recompute_num_layers,
-                            )
-                        )
-            elif isinstance(self.config.recompute_modules, dict):
-                assert self.config.recompute_method in ["first_n", "block"]
-                if "core_attn" in self.config.recompute_modules:
-                    self.recompute_core_attention = (
-                        need_recompute_in_block(
-                            self.layer_number,
-                            self.config,
-                            self.config.recompute_modules["core_attn"],
-                        )
-                        if self.config.recompute_method == "block"
-                        else need_recompute_in_first_n(
-                            self.layer_number,
-                            self.config,
-                            self.config.recompute_modules["core_attn"],
-                        )
-                    )
+            self.recompute_core_attention = module_needs_recompute(
+                "core_attn", self.layer_number, self.config
+            )
         if (
             self.config.recompute_modules is not None
             and "flash_attn" in self.config.recompute_modules
@@ -399,14 +364,9 @@ class Attention(FleetLayer, ABC):
             assert self.config.recompute_granularity is not None, (
                 "rr must be used when recompute is enabled"
             )
-            if isinstance(self.config.recompute_modules, list):
-                self.use_rr_flash_attention = True
-            elif isinstance(self.config.recompute_modules, dict):
-                self.use_rr_flash_attention = not need_recompute_in_first_n(
-                    self.layer_number,
-                    self.config,
-                    self.config.recompute_modules["flash_attn"],
-                )
+            self.use_rr_flash_attention = module_needs_refined_recompute(
+                "flash_attn", self.layer_number, self.config
+            )
         # Output.
         self.o_proj = build_spec_layer(
             sublayers_spec.o_proj,
@@ -423,8 +383,9 @@ class Attention(FleetLayer, ABC):
 
         self.recompute_gated_attn = (
             self.config.recompute_granularity == "selective"
-            and self.config.recompute_modules is not None
-            and "gated_attn" in self.config.recompute_modules
+            and module_needs_recompute(
+                "gated_attn", self.layer_number, self.config
+            )
         )
 
     def _post_core_attention_hook(self, core_attn_out: Tensor) -> Tensor:

@@ -46,8 +46,7 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
 )
 from paddlefleet.recompute_utils import (
     keep_indexer_grad_path,
-    need_recompute_in_block,
-    need_recompute_in_first_n,
+    module_needs_recompute,
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.attention import Attention
@@ -553,14 +552,12 @@ class DSv4HybridAttention(Attention):
 
         self.recompute_gated_attn = (
             config.recompute_granularity == "selective"
-            and config.recompute_modules is not None
-            and "gated_attn" in config.recompute_modules
+            and module_needs_recompute("gated_attn", self.layer_number, config)
         )
 
         self.recompute_full_attn = (
             config.recompute_granularity == "selective"
-            and config.recompute_modules is not None
-            and "full_attn" in config.recompute_modules
+            and module_needs_recompute("full_attn", self.layer_number, config)
         )
         self._full_attn_recompute = None
         self._gate_recompute = None
@@ -616,33 +613,12 @@ class DSv4HybridAttention(Attention):
                 default_initializer=nn.initializer.Constant(0.0),
             )
         # Selective recompute for the VHA postmix scatter chain (independently
-        # configurable via the "vha_postmix" entry in recompute_modules). Only
-        # list configuration is supported; honours recompute_num_layers +
-        # recompute_method (first_n / block) like the other selective modules.
-        modules = config.recompute_modules
-        self.recompute_vha_postmix = False
-        if config.recompute_granularity == "selective" and modules is not None:
-            if isinstance(modules, dict) and "vha_postmix" in modules:
-                raise ValueError(
-                    "recompute_modules['vha_postmix'] only supports list "
-                    "configuration"
-                )
-            if isinstance(modules, list) and "vha_postmix" in modules:
-                n = config.recompute_num_layers
-                if n is None:
-                    self.recompute_vha_postmix = True
-                elif config.recompute_method == "block":
-                    self.recompute_vha_postmix = need_recompute_in_block(
-                        self.layer_number, config, n
-                    )
-                elif config.recompute_method == "first_n":
-                    self.recompute_vha_postmix = need_recompute_in_first_n(
-                        self.layer_number, config, n
-                    )
-                else:
-                    raise ValueError(
-                        "recompute_method must be 'first_n' or 'block'"
-                    )
+        # configurable via the "vha_postmix" entry in recompute_modules),
+        # configured like every other selective submodule.
+        self.recompute_vha_postmix = (
+            config.recompute_granularity == "selective"
+            and module_needs_recompute("vha_postmix", self.layer_number, config)
+        )
 
     def forward(
         self,

@@ -72,6 +72,7 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
 
+from paddlefleet.recompute_utils import module_needs_recompute
 from paddlefleet.tensor_parallel.layers import (
     ColumnParallelLinear,
     _initialize_affine_weight_cpu,
@@ -264,10 +265,7 @@ class GPTLMHead(ColumnParallelLinear):
 
             return (hidden_states, self.weight, self.bias)
 
-        if (
-            self.config.recompute_modules is not None
-            and "lm_head" in self.config.recompute_modules
-        ):
+        if module_needs_recompute("lm_head", None, self.config):
             recompute_func = super().forward
 
             def recompute_handler(hidden_states, weight):

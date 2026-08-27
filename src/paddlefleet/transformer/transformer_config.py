@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Literal
 import paddle.nn.functional as F
 
 from ..model_parallel_config import ModelParallelConfig
+from ..recompute_utils import validate_recompute_modules
 from ..utils import (
     get_magic_init_method,
     init_method_normal,
@@ -729,9 +730,20 @@ class TransformerConfig(ModelParallelConfig):
     'selective' activation checkpointing."""
 
     recompute_modules: list[str] | dict = None
-    """The submodules to recompute.
-    list: contains all submodule need recompute
-    dict: keys contains all submodule need recompute, value means submodule in which layers need recompute
+    """Submodules to recompute under ``recompute_granularity="selective"``.
+
+    ``list[str]``: every listed submodule shares the layers picked by
+    ``recompute_num_layers`` + ``recompute_method`` (all layers if the count is
+    None). ``dict[str, spec]``: per-submodule, where ``spec`` is ``"all"``
+    (negative int / None equivalent), a list of global 0-based layer ids
+    (empty head/tail layers included), or a count resolved through
+    ``recompute_method``::
+
+        recompute_modules: {core_attn: [0, 1, 2], mlp: 2, moe_gate_up: all}
+
+    ``flash_attn`` / ``moe_combine`` are refined-recompute entries and invert
+    the spec: selected layers keep plain recompute, RR runs on the rest.
+    ``lm_head`` / ``loss_fn`` are single instances and reject a layer list.
     """
 
     decoderlayer_act_offload_settings: dict = None
@@ -2067,6 +2079,11 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError(
                     "recompute_granularity must be one of full and selective"
                 )
+
+        # Checked outside the granularity branches: the refined-recompute
+        # entries and the lm_head / loss_fn entries are also read under
+        # recompute_granularity="full".
+        validate_recompute_modules(self)
 
         if self.use_truncated_normal_init or self.magic_init:
             self.output_layer_init_method = self.init_method
