@@ -84,3 +84,6 @@ class GenerationConfig:
             raise ValueError(
                 f"repetition_penalty must be positive, got {self.repetition_penalty}"
             )
+
+
+FleetGenerationConfig = GenerationConfig

@@ -17,11 +17,11 @@ import paddle
 
 
 def get_ernie_attention_classes():
-    from paddleformers.transformers.ernie4_5.modeling import Ernie4_5Attention
+    from paddlefleet.transformers.ernie4_5.modeling import Ernie4_5Attention
 
     attention_classes = [Ernie4_5Attention]
     try:
-        from paddleformers.transformers.ernie4_5_moe.modeling import (
+        from paddlefleet.transformers.ernie4_5_moe.modeling import (
             Ernie4_5_MoeAttention,
         )
     except ImportError:
@@ -88,7 +88,7 @@ def new_attention_forward(
     value_states = value_states.transpose(1, 2)
 
     if self.config.apply_rope_fusion:
-        from paddleformers.transformers.ernie4_5.modeling import (
+        from paddlefleet.transformers.ernie4_5.modeling import (
             apply_fused_rope,
         )
 
@@ -96,7 +96,7 @@ def new_attention_forward(
             query_states, key_states, self.config.rope_theta
         )
     else:
-        from paddleformers.transformers.ernie4_5.modeling import (
+        from paddlefleet.transformers.ernie4_5.modeling import (
             apply_rotary_pos_emb,
         )
 

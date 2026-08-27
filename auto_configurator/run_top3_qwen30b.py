@@ -18,7 +18,7 @@
 
 Uses auto_search's MoE scoring function to select the top 3 parallel
 strategy configurations for Qwen3-30B-A3B on 8×H800 80GB, then
-benchmarks each one via paddleformers-cli train.
+benchmarks each one via paddlefleet-cli train.
 
 Usage:
   # Full benchmark (default: 20 steps per config)
@@ -37,13 +37,13 @@ import sys
 # Ensure project paths are on PYTHONPATH
 _this_dir = os.path.dirname(os.path.abspath(__file__))
 _project_root = os.path.dirname(_this_dir)
-_paddleformers_root = os.path.join(
-    os.path.dirname(_project_root), "PaddleFormers"
+_paddlefleet_root = os.path.join(
+    os.path.dirname(_project_root), "PaddleFleet"
 )
 for p in [
     _project_root,
     os.path.join(_project_root, "src"),
-    _paddleformers_root,
+    _paddlefleet_root,
 ]:
     if p not in sys.path:
         sys.path.insert(0, p)

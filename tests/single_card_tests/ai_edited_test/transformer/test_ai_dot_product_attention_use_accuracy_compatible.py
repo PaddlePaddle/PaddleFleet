@@ -167,7 +167,7 @@ class TestDotProductAttentionUseAccuracyCompatible(unittest.TestCase):
         self.assertTrue(attn.scale_mask_softmax.softmax_in_fp32)
 
     def test_float32_mask_is_converted(self):
-        """A PaddleFormers-style float32 mask (1.0=attend, 0.0=mask) must be
+        """A PaddleFleet-style float32 mask (1.0=attend, 0.0=mask) must be
         converted to bool semantics and yield the same result as the
         equivalent bool mask (True=masked-out)."""
         query, key, value, (bsz, seq_len, nh, hd) = self._inputs(seed=5)

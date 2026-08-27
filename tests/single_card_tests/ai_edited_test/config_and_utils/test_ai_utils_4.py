@@ -162,7 +162,7 @@ class TestLogSingleRank(unittest.TestCase):
 
         logger = MagicMock()
         with patch(
-            "paddlefleet.utils.paddle.distributed.is_initialized",
+            "paddlefleet.utils._fleet_utils.paddle.distributed.is_initialized",
             return_value=False,
         ):
             log_single_rank(logger, logging.INFO, "test message")

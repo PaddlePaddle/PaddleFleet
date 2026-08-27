@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Backward compatibility shim — PaddleFormers imports LayerSpec/build_layer from here.
+# Backward compatibility shim — PaddleFleet imports LayerSpec/build_layer from here.
 # These were migrated to Paddle in commit 8c1a3e5 (Apr 16, 2026).
 
 from paddle.distributed.fleet.meta_parallel import (
