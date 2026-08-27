@@ -253,6 +253,35 @@ class TestMoETokenDispatcherConfig(unittest.TestCase):
         # default rather than being force-corrected behind the user's back.
         self.assertTrue(config.moe_allgather_gate_overlap)
 
+    def test_documented_dispatcher_types_are_all_accepted(self):
+        """The field docstring is the only list of accepted values, so pin it.
+
+        Fails if a dispatcher is wired up without being documented, or
+        documented without being accepted by the schema.
+        """
+        import inspect
+        import re
+
+        # Field docstrings are not kept at runtime; read them from the source.
+        doc = re.search(
+            r'moe_token_dispatcher_type: str = "alltoall"\s*"""(.*?)"""',
+            inspect.getsource(TransformerConfig),
+            re.DOTALL,
+        )
+        self.assertIsNotNone(doc, "field docstring not found")
+        documented = set(re.findall(r"'([a-z0-9]+)'", doc.group(1)))
+        self.assertIn("ringmoe", documented)
+        for dispatcher_type in sorted(documented):
+            with self.subTest(dispatcher_type=dispatcher_type):
+                config = TransformerConfig(
+                    num_hidden_layers=4,
+                    n_routed_experts=8,
+                    moe_token_dispatcher_type=dispatcher_type,
+                )
+                self.assertEqual(
+                    config.moe_token_dispatcher_type, dispatcher_type
+                )
+
     def test_hybridep_dispatcher_type_is_preserved(self):
         config = TransformerConfig(
             num_hidden_layers=4,
