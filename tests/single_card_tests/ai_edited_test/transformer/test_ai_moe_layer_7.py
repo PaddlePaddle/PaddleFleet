@@ -123,6 +123,10 @@ class TestMoELayerInitExpertParallel(unittest.TestCase):
         layer = MoELayer.__new__(MoELayer)
         layer.config = config
         layer.moe_token_dispatcher_type = config.moe_token_dispatcher_type
+        # Derived in MoELayer.__init__; __new__ skips it, so mirror it here.
+        layer.use_intermediate_ep_sharding = (
+            config.moe_token_dispatcher_type in ("allgather", "ringmoe")
+        )
         layer.pg_collection = pg
         layer.moe_group = pg.ep
         layer.expert_model_parallel_size = 4
@@ -146,6 +150,9 @@ class TestMoELayerInitExpertParallel(unittest.TestCase):
         layer = MoELayer.__new__(MoELayer)
         layer.config = config
         layer.moe_token_dispatcher_type = config.moe_token_dispatcher_type
+        layer.use_intermediate_ep_sharding = (
+            config.moe_token_dispatcher_type in ("allgather", "ringmoe")
+        )
         layer.pg_collection = pg
         layer.moe_group = pg.ep
         layer.expert_model_parallel_size = 2
