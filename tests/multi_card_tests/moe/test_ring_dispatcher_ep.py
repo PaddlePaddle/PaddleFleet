@@ -643,6 +643,15 @@ class TestMoELayerRingBranches(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._validate(moe_intermediate_size=255)
 
+    def test_validation_fp8_requires_128_aligned_shard(self):
+        # fp8 block-scale tiles are 128 wide, so mid/EP must be a multiple of
+        # 128 -- 256/2 = 128 passes, 192/2 = 96 does not.
+        self._validate(fp8=True, moe_intermediate_size=256)
+        with self.assertRaises(ValueError) as ctx:
+            self._validate(fp8=True, moe_intermediate_size=192)
+        # The message names the configured dispatcher, not "allgather".
+        self.assertIn("ringmoe + fp8", str(ctx.exception))
+
     # -- combine() routing ------------------------------------------------
     def test_combine_routes_ringmoe_to_token_combine(self):
         from paddlefleet.transformer.moe.moe_layer import MoELayer

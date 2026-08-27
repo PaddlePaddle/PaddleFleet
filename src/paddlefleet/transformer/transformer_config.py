@@ -632,9 +632,9 @@ class TransformerConfig(ModelParallelConfig):
     the process group when using MoonEP."""
 
     moe_allgather_gate_overlap: bool = True
-    """Whether to issue the token AllGather before the gate so it overlaps with
-    gate compute. Only honoured when ``moe_token_dispatcher_type`` is 'allgather'
-    or 'ringmoe' and ``expert_model_parallel_size > 1``; ignored otherwise."""
+    """Whether to issue the AllGather before the gate so it overlaps with gate
+    compute. Only honoured when ``moe_token_dispatcher_type='allgather'`` and
+    ``expert_model_parallel_size > 1``; ignored otherwise."""
 
     moe_use_fusion_node: bool = True
     """Whether to use fusion node for MoE layer. Default is True"""

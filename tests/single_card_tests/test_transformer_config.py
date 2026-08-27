@@ -223,6 +223,36 @@ class TestRoutedScalingFactorConfig(unittest.TestCase):
 
 
 class TestMoETokenDispatcherConfig(unittest.TestCase):
+    def test_default_dispatcher_type_is_alltoall(self):
+        # Pins the schema default: every dispatcher-specific branch in MoELayer
+        # keys off this field, so a silent change of default would reroute all
+        # MoE traffic.
+        field = TransformerConfig.__dataclass_fields__[
+            "moe_token_dispatcher_type"
+        ]
+        self.assertEqual(field.default, "alltoall")
+        self.assertEqual(
+            TransformerConfig(
+                num_hidden_layers=4, n_routed_experts=8
+            ).moe_token_dispatcher_type,
+            "alltoall",
+        )
+
+    def test_ringmoe_dispatcher_type_is_preserved(self):
+        # 'ringmoe' is accepted as a non-default value and survives
+        # __post_init__ unrewritten -- MoELayer decides the ring vs flat path
+        # from exactly this string.
+        config = TransformerConfig(
+            num_hidden_layers=4,
+            n_routed_experts=8,
+            moe_token_dispatcher_type="ringmoe",
+        )
+
+        self.assertEqual(config.moe_token_dispatcher_type, "ringmoe")
+        # The ring ignores the gate-overlap prefetch, but the flag keeps its
+        # default rather than being force-corrected behind the user's back.
+        self.assertTrue(config.moe_allgather_gate_overlap)
+
     def test_hybridep_dispatcher_type_is_preserved(self):
         config = TransformerConfig(
             num_hidden_layers=4,
