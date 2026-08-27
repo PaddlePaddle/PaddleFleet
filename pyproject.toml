@@ -21,7 +21,6 @@ dependencies = [
     "aistudio-sdk>=0.3.0",
     "binpacking",
     "colorlog>=6.10.1",
-<<<<<<< HEAD
     "datasets>=3.0.0",
     "fast_dataindex>=0.1.1; platform_system == 'Linux'",
     "gputil",
@@ -36,22 +35,18 @@ dependencies = [
     "omegaconf",
     "orjson",
     "paddlecodec>=0.2,<0.3; sys_platform == 'linux'",
-    "paddlepaddle-gpu==3.4.0.post20260808+733f3454aa0",
+    "paddlepaddle-gpu==3.4.0.post20260820+1b89cc6828f",
     "protobuf>=3.20.2",
     "regex",
+    "ruamel.yaml>=0.17",
     "safetensors",
     "scikit-learn",
     "sentencepiece",
     "tiktoken",
-    "tilelang-paddle",
+    "tilelang-paddle==0.1.12",
     "tqdm",
     "transformers>=5.0.0,<5.4.0",
     "visualdl",
-=======
-    "paddlepaddle-gpu==3.4.0.post20260820+1b89cc6828f",
-    "ruamel.yaml>=0.17",
->>>>>>> c6ac049f5f4fa69f55e033c5e0e76b5effcfd6c2
-    "tilelang-paddle==0.1.12",
 ]
 license = { text = "Apache 2.0" }
 authors = [{ name = "PaddlePaddle", email = "Paddle-better@baidu.comm" }]
