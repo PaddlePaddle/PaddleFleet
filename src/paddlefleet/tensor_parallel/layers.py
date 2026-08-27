@@ -29,6 +29,9 @@ from paddle.distributed.communication.reduce_scatter import _reduce_scatter_base
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
+from paddle.distributed.fleet.utils.sequence_parallel_utils import (
+    mark_as_sequence_parallel_parameter,
+)
 
 from ..parallel_state import (
     get_global_memory_buffer,
@@ -1404,6 +1407,7 @@ class Linear(paddle.nn.Layer):
             self.weight.allreduce = True
             self.weight.is_distributed = False
             self.weight.is_expert_param = self.is_expert
+            self._mark_replicated_grad_needs_tp_reduction(self.weight)
         else:
             self.weight = None
 
@@ -1419,6 +1423,7 @@ class Linear(paddle.nn.Layer):
                     self.bias.zero_()
             self.bias.allreduce = True
             self.bias.is_distributed = False
+            self._mark_replicated_grad_needs_tp_reduction(self.bias)
         else:
             self.bias = None
 
@@ -1459,6 +1464,22 @@ class Linear(paddle.nn.Layer):
             # Color the bf16 weight so ``clear_param_storage("linear_fp8")``
             # can free it after pre-quant.
             _maybe_color_linear_fp8_weight(self)
+
+    def _mark_replicated_grad_needs_tp_reduction(self, parameter) -> None:
+        """Mark a replicated parameter so its gradient is reduced over the TP group.
+
+        Under sequence parallelism each rank sees s/TP of the sequence, so the
+        local wgrad is a partial sum. Linear.forward never gathers, so nothing
+        else adds that term. SPGradSyncCallback all-reduces marked parameters
+        over the model-parallel group (E-205).
+        """
+        if self.is_expert:
+            return
+        if not getattr(self.config, "sequence_parallel", False):
+            return
+        if getattr(self.config, "tensor_model_parallel_size", 1) <= 1:
+            return
+        mark_as_sequence_parallel_parameter(parameter)
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
         """Pre-quantize this Linear's weight and cache on ``self.weight``.

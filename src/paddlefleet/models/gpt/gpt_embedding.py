@@ -303,6 +303,26 @@ class GPTEmbedding(FleetLayer):
                     "multi_latent_attention is not supported when gpt_model_use_experimental_version=True and sequence_parallel=True"
                 )
         input_ids = dict_args["input_ids"]
+        # Under use_accuracy_compatible, zero the MTP carrier tail so offset
+        # slices match Megatron roll-and-zero-fill (E-217). Main path slices
+        # input_ids[:, :-num_nextn] and is unchanged.
+        if (
+            getattr(self.config, "use_accuracy_compatible", False)
+            and input_ids is not None
+            and self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
+            and input_ids.shape[-1] > self.config.num_nextn_predict_layers
+        ):
+            _mtp_tail = self.config.num_nextn_predict_layers
+            input_ids = paddle.concat(
+                [
+                    input_ids[..., :-_mtp_tail],
+                    paddle.zeros_like(input_ids[..., -_mtp_tail:]),
+                ],
+                axis=-1,
+            )
+            dict_args["input_ids"] = input_ids
         labels = dict_args.get("labels", None)
         if labels is not None:
             labels = labels.cuda()
