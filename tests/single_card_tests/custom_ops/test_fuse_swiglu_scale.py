@@ -575,7 +575,8 @@ class TestFusedSwiGLUScale(unittest.TestCase):
         out = ops.fused_swiglu_scale(x, scale)
         expected = ops.fused_swiglu_scale(x, scale.contiguous())
         np.testing.assert_array_equal(
-            out.astype("float32").numpy(), expected.astype("float32").numpy()
+            out.astype("float32").numpy(),
+            expected.astype("float32").numpy(),
         )
 
     def test_fused_swiglu_accepts_non_contiguous_probs(self):

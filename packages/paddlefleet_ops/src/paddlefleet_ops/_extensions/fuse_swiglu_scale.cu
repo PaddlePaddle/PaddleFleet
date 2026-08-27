@@ -392,11 +392,6 @@ static void CheckFusedSwiGLUInputs(const paddle::Tensor& x,
                (d_out == nullptr || x.place() == d_out->place()),
            op_name,
            " expects inputs on the same GPU");
-  PD_CHECK(x.is_contiguous() && scale.is_contiguous(),
-           op_name,
-           " expects contiguous X and ",
-           scale_name);
-
   const auto x_shape = x.shape();
   const auto scale_shape = scale.shape();
   CheckFusedSwiGLUXShape(x_shape, op_name);
@@ -468,9 +463,14 @@ static void CheckFusedSwiGLUInputs(const paddle::Tensor& x,
 
 template <bool kHasClamp>
 static std::vector<paddle::Tensor> FusedSwiGLUScaleForwardImpl(
-    const paddle::Tensor& x, const paddle::Tensor& scale, double clamp_value) {
+    const paddle::Tensor& x_input,
+    const paddle::Tensor& scale_input,
+    double clamp_value) {
   const char* op_name =
       kHasClamp ? "fused_swiglu_scale_clamp" : "fused_swiglu_scale";
+  const auto x = x_input.is_contiguous() ? x_input : x_input.contiguous();
+  const auto scale =
+      scale_input.is_contiguous() ? scale_input : scale_input.contiguous();
   CheckFusedSwiGLUInputs(x, scale, nullptr, op_name, "Scale");
   if constexpr (kHasClamp) {
     PD_CHECK(std::isfinite(clamp_value) && clamp_value > 0.0,
@@ -538,12 +538,17 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleForwardImpl(
 
 template <bool kHasClamp>
 static std::vector<paddle::Tensor> FusedSwiGLUScaleBackwardImpl(
-    const paddle::Tensor& x,
-    const paddle::Tensor& scale,
-    const paddle::Tensor& d_out,
+    const paddle::Tensor& x_input,
+    const paddle::Tensor& scale_input,
+    const paddle::Tensor& d_out_input,
     double clamp_value) {
   const char* op_name =
       kHasClamp ? "fused_swiglu_scale_clamp_bwd" : "fused_swiglu_scale_bwd";
+  const auto x = x_input.is_contiguous() ? x_input : x_input.contiguous();
+  const auto scale =
+      scale_input.is_contiguous() ? scale_input : scale_input.contiguous();
+  const auto d_out =
+      d_out_input.is_contiguous() ? d_out_input : d_out_input.contiguous();
   CheckFusedSwiGLUInputs(x, scale, &d_out, op_name, "Scale");
   if constexpr (kHasClamp) {
     PD_CHECK(std::isfinite(clamp_value) && clamp_value > 0.0,
@@ -564,9 +569,7 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleBackwardImpl(
   }
 
   auto d_scale = paddle::empty(d_scale_shape, scale.dtype(), scale.place());
-  // DOut may be strided because it is framework-produced; materialize it
-  // before the kernel.
-  const auto kernel_d_out = d_out.is_contiguous() ? d_out : d_out.contiguous();
+  const auto& kernel_d_out = d_out;
 
   // Paddle extension gridDim is int. The kernel uses a grid-stride loop
   // over rows, so we cap grid_size at kMaxSwiGLUGridSize and let the kernel
@@ -629,12 +632,17 @@ static std::vector<paddle::Tensor> FusedSwiGLUScaleBackwardImpl(
 // ==========================================================================
 template <bool kHasClamp>
 static std::vector<paddle::Tensor> FusedSwiGLUWeightedBackwardImpl(
-    const paddle::Tensor& x,
-    const paddle::Tensor& probs,
-    const paddle::Tensor& d_out,
+    const paddle::Tensor& x_input,
+    const paddle::Tensor& probs_input,
+    const paddle::Tensor& d_out_input,
     double clamp_value) {
   const char* op_name = kHasClamp ? "fused_swiglu_weighted_clamp_bwd"
                                   : "fused_swiglu_weighted_bwd";
+  const auto x = x_input.is_contiguous() ? x_input : x_input.contiguous();
+  const auto probs =
+      probs_input.is_contiguous() ? probs_input : probs_input.contiguous();
+  const auto d_out =
+      d_out_input.is_contiguous() ? d_out_input : d_out_input.contiguous();
   CheckFusedSwiGLUInputs(x, probs, &d_out, op_name, "Probs");
   if constexpr (kHasClamp) {
     PD_CHECK(std::isfinite(clamp_value) && clamp_value > 0.0,
@@ -657,7 +665,7 @@ static std::vector<paddle::Tensor> FusedSwiGLUWeightedBackwardImpl(
   }
 
   auto d_probs = paddle::empty(d_probs_shape, probs.dtype(), probs.place());
-  const auto kernel_d_out = d_out.is_contiguous() ? d_out : d_out.contiguous();
+  const auto& kernel_d_out = d_out;
 
   // Paddle extension gridDim is int. The kernel uses a grid-stride loop
   // over rows, so we cap grid_size at kMaxSwiGLUGridSize and let the kernel
