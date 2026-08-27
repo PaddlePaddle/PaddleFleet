@@ -896,60 +896,34 @@ class MoELayer(nn.Layer):
         )
         return self.unpermute(expert_outs)
 
-    def _maybe_pre_allgather_overlap(
-        self,
-        hidden_states: paddle.Tensor,
-        dispatcher_hidden_states: paddle.Tensor | None = None,
-    ):
-        """Pre-issue the token AllGather on the comm stream, before the gate MLP.
+    def _maybe_pre_allgather_overlap(self, hidden_states: paddle.Tensor):
+        """Pre-issue the flat EP token AllGather on the comm stream, before the gate.
 
-        Needs ``moe_allgather_gate_overlap`` and EP>1. 'allgather' prefetches the
-        flat EP AllGather that ``dispatch_preprocess`` consumes; 'ringmoe'
-        prefetches round 0's intra-node one that ``_node_slice`` consumes -- it
-        never calls ``dispatch_preprocess``, so a flat prefetch would go unused.
-        Only the tokens can be prefetched; the routing idx/weight AllGathers need
-        the gate output.
+        Needs ``moe_allgather_gate_overlap``, EP>1 and the 'allgather'
+        dispatcher, whose ``dispatch_preprocess`` is what consumes the handle.
+        'ringmoe' deliberately does not prefetch: the only thing it could hide
+        behind the gate is round 0's intra-node AllGather, and issuing that on
+        the comm stream ahead of time cost more in contention with the
+        inter-node shift than the gate was worth. Only the tokens can be
+        prefetched; the routing idx/weight AllGathers need the gate output.
 
-        The ring reads ``dispatcher_hidden_states``, the tensor the expert path
-        consumes, which under the three-path accuracy-compatible clone is not
-        ``hidden_states``. For latent MoE, ``fc1_latent_proj`` is hoisted here so
-        the AllGather runs in latent space; ``_project_to_latent`` reuses the
-        result via ``self._latent_hidden``.
+        For latent MoE, ``fc1_latent_proj`` is hoisted here so the AllGather runs
+        in latent space; ``_project_to_latent`` reuses it via
+        ``self._latent_hidden``.
         """
         if not (
             self.expert_model_parallel_size > 1
             and self.moe_allgather_gate_overlap
+            and self.moe_token_dispatcher_type == "allgather"
         ):
             self._latent_hidden = None
             return
-        if self.moe_token_dispatcher_type == "allgather":
-            if self.use_latent_moe:
-                self._latent_hidden = self.fc1_latent_proj(hidden_states)
-                self.token_dispatcher.pre_allgather(self._latent_hidden)
-            else:
-                self._latent_hidden = None
-                self.token_dispatcher.pre_allgather(hidden_states)
-        elif self.use_ring_moe:
-            if not self._supports_three_path_clone():
-                # A subclass overriding _prepare_expert_input feeds the experts
-                # something other than hidden_states, so a prefetch issued here
-                # would gather the wrong tensor -- and the shape guard in
-                # _take_pre_intra_ag would not necessarily catch it.
-                self._latent_hidden = None
-                return
-            src = (
-                hidden_states
-                if dispatcher_hidden_states is None
-                else dispatcher_hidden_states
-            )
-            if self.use_latent_moe:
-                self._latent_hidden = self.fc1_latent_proj(src)
-                self.token_dispatcher.pre_intra_allgather(self._latent_hidden)
-            else:
-                self._latent_hidden = None
-                self.token_dispatcher.pre_intra_allgather(src)
+        if self.use_latent_moe:
+            self._latent_hidden = self.fc1_latent_proj(hidden_states)
+            self.token_dispatcher.pre_allgather(self._latent_hidden)
         else:
             self._latent_hidden = None
+            self.token_dispatcher.pre_allgather(hidden_states)
 
     def _validate_intermediate_ep_sharding_config(self):
         """Validate and force-correct config flags for intermediate-EP sharding.
@@ -1556,7 +1530,7 @@ class MoELayer(nn.Layer):
             _hs_router_path = _hs_dispatcher_path = hidden_states
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
 
-        self._maybe_pre_allgather_overlap(hidden_states, _hs_dispatcher_path)
+        self._maybe_pre_allgather_overlap(hidden_states)
         gate_input = self._prepare_gate_input(_hs_router_path, residual)
 
         (

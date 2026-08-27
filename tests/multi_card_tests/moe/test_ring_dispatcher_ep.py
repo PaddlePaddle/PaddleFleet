@@ -310,46 +310,9 @@ class TestRingCollectives(_RingTestBase):
         self.assertEqual(g_idx.shape[0], self.T_local * disp.G)
         self.assertEqual(g_w.shape[0], self.T_local * disp.G)
 
-
-class TestRingPrefetch(_RingTestBase):
-    def test_prefetch_matches_inline_all_gather(self):
-        from paddlefleet.transformer.moe.token_dispatcher import (
-            _RingAllGather,
-            _RingPreAllGatherResult,
-        )
-
-        disp = _make_dispatcher(2, self.ep_group)
-        base_in = self._tokens()
-
-        inline_in = base_in.clone().detach()
-        inline_in.stop_gradient = False
-        inline = _RingAllGather.apply(inline_in, disp.intra_group)
-        (inline.astype("float32") ** 2).sum().backward()
-
-        pre_in = base_in.clone().detach()
-        pre_in.stop_gradient = False
-        disp.pre_intra_allgather(pre_in)
-        handle = disp._take_pre_intra_ag(pre_in)
-        self.assertIsNotNone(handle)
-        pre = _RingPreAllGatherResult.apply(pre_in, handle)
-        (pre.astype("float32") ** 2).sum().backward()
-
-        np.testing.assert_array_equal(inline.numpy(), pre.numpy())
-        np.testing.assert_array_equal(
-            inline_in.grad.numpy(), pre_in.grad.numpy()
-        )
-
-    def test_take_prefetch_is_idempotent(self):
-        disp = _make_dispatcher(2, self.ep_group)
-        x = self._tokens()
-        disp.pre_intra_allgather(x)
-        self.assertIsNotNone(disp._take_pre_intra_ag(x))
-        # Handle is consumed; a second round must issue its own AllGather.
-        self.assertIsNone(disp._take_pre_intra_ag(x))
-
     def test_flat_path_prefetch_also_drains_leftovers(self):
-        # pre_allgather on the inherited flat path shares _drain_async_handle;
-        # the ring never calls it, so cover the refactored line here.
+        # pre_allgather belongs to the inherited flat EP path; the ring never
+        # prefetches, so cover _drain_async_handle's caller here.
         from paddlefleet.transformer.moe.token_dispatcher import (
             AllGatherTokenDispatcher,
         )
@@ -363,31 +326,6 @@ class TestRingPrefetch(_RingTestBase):
         flat.pre_allgather(x2)
         self.assertIsNot(flat._pre_ag_handle, first)
         flat._pre_ag_handle["task"].wait()
-
-    def test_shape_mismatch_raises_instead_of_falling_back(self):
-        disp = _make_dispatcher(2, self.ep_group)
-        x = self._tokens()
-        disp.pre_intra_allgather(x)
-        with self.assertRaises(RuntimeError):
-            disp._take_pre_intra_ag(self._tokens(rows=self.T_local // 2))
-
-    def test_prefetch_noop_without_intra_group(self):
-        disp = _make_dispatcher(1, self.ep_group)  # G=1 -> intra_group is None
-        disp.pre_intra_allgather(self._tokens())
-        self.assertIsNone(disp._pre_intra_ag)
-        self.assertIsNone(disp._take_pre_intra_ag(self._tokens()))
-
-    def test_leftover_prefetch_is_drained(self):
-        disp = _make_dispatcher(2, self.ep_group)
-        # Keep both inputs alive: the collective reads them asynchronously.
-        x1, x2 = self._tokens(), self._tokens()
-        disp.pre_intra_allgather(x1)
-        first = disp._pre_intra_ag
-        # A forward that never reached the ring leaves the handle behind; the
-        # next prefetch must wait it out rather than race it.
-        disp.pre_intra_allgather(x2)
-        self.assertIsNotNone(disp._pre_intra_ag)
-        self.assertIsNot(disp._pre_intra_ag, first)
 
 
 class TestRingForward(_RingTestBase):
@@ -438,19 +376,6 @@ class TestRingForward(_RingTestBase):
         x3 = x.reshape([2, self.T_local // 2, self.d_latent])
         out = self._run(disp, x3, idx, w)
         np.testing.assert_allclose(out.numpy(), flat.numpy(), rtol=1e-6)
-
-    def test_prefetched_round0_matches_inline(self):
-        disp = _make_dispatcher(2, self.ep_group)
-        idx, w = self._routing()
-        x = self._tokens()
-        baseline = self._run(disp, x, idx, w)
-
-        x_pre = x.clone().detach()
-        x_pre.stop_gradient = False
-        disp.pre_intra_allgather(x_pre)
-        pre = self._run(disp, x_pre, idx, w)
-        np.testing.assert_array_equal(baseline.numpy(), pre.numpy())
-        self.assertIsNone(disp._pre_intra_ag)
 
     def test_equal_token_check_runs_once_per_dispatcher(self):
         disp = _make_dispatcher(1, self.ep_group)
@@ -620,42 +545,18 @@ class TestMoELayerRingBranches(unittest.TestCase):
         return SimpleNamespace(**base)
 
     # -- _maybe_pre_allgather_overlap -------------------------------------
-    def _pre_overlap(self, layer, hs, dispatcher_hs=None):
+    def _pre_overlap(self, layer, hs):
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
-        return MoELayer._maybe_pre_allgather_overlap(layer, hs, dispatcher_hs)
+        return MoELayer._maybe_pre_allgather_overlap(layer, hs)
 
-    def test_ring_prefetch_uses_dispatcher_path_tensor(self):
-        layer = self._layer()
-        hs, disp_hs = paddle.randn([4, 8]), paddle.randn([4, 8])
-        self._pre_overlap(layer, hs, disp_hs)
-        layer.token_dispatcher.pre_intra_allgather.assert_called_once_with(
-            disp_hs
-        )
-        self.assertIsNone(layer._latent_hidden)
-
-    def test_ring_prefetch_falls_back_to_hidden_states(self):
-        layer = self._layer()
-        hs = paddle.randn([4, 8])
-        self._pre_overlap(layer, hs)
-        layer.token_dispatcher.pre_intra_allgather.assert_called_once_with(hs)
-
-    def test_ring_prefetch_hoists_latent_projection(self):
-        layer = self._layer(
-            use_latent_moe=True, fc1_latent_proj=lambda t: t * 2.0
-        )
-        hs = paddle.randn([4, 8])
-        self._pre_overlap(layer, hs)
-        np.testing.assert_allclose(
-            layer._latent_hidden.numpy(), hs.numpy() * 2.0, rtol=1e-6
-        )
-        layer.token_dispatcher.pre_intra_allgather.assert_called_once_with(
-            layer._latent_hidden
-        )
-
-    def test_ring_prefetch_skipped_for_custom_expert_input(self):
-        layer = self._layer(_supports_three_path_clone=lambda: False)
+    def test_ringmoe_never_prefetches(self):
+        # The ring used to pre-issue round 0's intra AllGather here. It was
+        # removed: the only thing it could hide was the gate, and the early
+        # collective cost more in contention than the gate was worth.
+        layer = self._layer(_latent_hidden=paddle.randn([4, 8]))
         self._pre_overlap(layer, paddle.randn([4, 8]))
+        layer.token_dispatcher.pre_allgather.assert_not_called()
         layer.token_dispatcher.pre_intra_allgather.assert_not_called()
         self.assertIsNone(layer._latent_hidden)
 
@@ -664,9 +565,12 @@ class TestMoELayerRingBranches(unittest.TestCase):
             {"expert_model_parallel_size": 1},
             {"moe_allgather_gate_overlap": False},
         ):
-            layer = self._layer(**attrs)
+            layer = self._layer(
+                moe_token_dispatcher_type="allgather",
+                use_ring_moe=False,
+                **attrs,
+            )
             self._pre_overlap(layer, paddle.randn([4, 8]))
-            layer.token_dispatcher.pre_intra_allgather.assert_not_called()
             layer.token_dispatcher.pre_allgather.assert_not_called()
 
     def test_allgather_prefetch_path_unchanged(self):
@@ -674,9 +578,24 @@ class TestMoELayerRingBranches(unittest.TestCase):
             moe_token_dispatcher_type="allgather", use_ring_moe=False
         )
         hs = paddle.randn([4, 8])
-        self._pre_overlap(layer, hs, paddle.randn([4, 8]))
-        # The flat path keeps prefetching hidden_states, not the dispatcher path.
+        self._pre_overlap(layer, hs)
         layer.token_dispatcher.pre_allgather.assert_called_once_with(hs)
+
+    def test_allgather_prefetch_hoists_latent_projection(self):
+        layer = self._layer(
+            moe_token_dispatcher_type="allgather",
+            use_ring_moe=False,
+            use_latent_moe=True,
+            fc1_latent_proj=lambda t: t * 2.0,
+        )
+        hs = paddle.randn([4, 8])
+        self._pre_overlap(layer, hs)
+        np.testing.assert_allclose(
+            layer._latent_hidden.numpy(), hs.numpy() * 2.0, rtol=1e-6
+        )
+        layer.token_dispatcher.pre_allgather.assert_called_once_with(
+            layer._latent_hidden
+        )
 
     def test_other_dispatchers_only_clear_latent_cache(self):
         layer = self._layer(
