@@ -362,25 +362,25 @@ class StandardMoERouter(nn.Layer):
             )
 
         # Initialize gate weight with Normal distribution aligned with Megatron.
-        if self.use_accuracy_compatible:
-            self.weight = paddle.create_parameter(
-                shape=[self.num_experts, self.hidden_size],
-                dtype=config.params_dtype,
-                default_initializer=paddle.nn.initializer.Constant(0.0),
-            )
-        else:
-            self.weight = paddle.create_parameter(
-                shape=[self.num_experts, self.hidden_size],
-                dtype="float32",
-                default_initializer=paddle.nn.initializer.Constant(0.0),
-            )
-        config.init_method(self.weight)
+        # if self.use_accuracy_compatible:
+        #     self.weight = paddle.create_parameter(
+        #         shape=[self.num_experts, self.hidden_size],
+        #         dtype=config.params_dtype,
+        #         default_initializer=paddle.nn.initializer.Constant(0.0),
+        #     )
+        # else:
+        #     self.weight = paddle.create_parameter(
+        #         shape=[self.num_experts, self.hidden_size],
+        #         dtype="float32",
+        #         default_initializer=paddle.nn.initializer.Constant(0.0),
+        #     )
+        # config.init_method(self.weight)
 
-        if (
-            self.sequence_parallel
-            and self.config.expert_model_parallel_size > 1
-        ):
-            mark_as_sequence_parallel_parameter(self.weight)
+        # if (
+        #     self.sequence_parallel
+        #     and self.config.expert_model_parallel_size > 1
+        # ):
+        #     mark_as_sequence_parallel_parameter(self.weight)
 
         # Multi-view (split-feature) routing: instead of a single gate
         # projection, score each expert with the SUM of two independent views.
@@ -434,23 +434,23 @@ class StandardMoERouter(nn.Layer):
                     self.routed_scaling_factor_param
                 )
 
-        if self.topk_method == "noaux_tc":
-            if not self.config.gpt_model_use_experimental_version:
-                self.register_buffer(
-                    "e_score_correction_bias",
-                    paddle.zeros((self.num_experts,), dtype=paddle.float32),
-                )
-            else:
-                self.register_buffer(
-                    "e_score_correction_bias",
-                    paddle.zeros((1, self.num_experts), dtype=paddle.float32),
-                )
-            self._cast_to_low_precision = False
-            self.expert_usage = paddle.zeros(
-                shape=[self.num_experts],
-                dtype=paddle.int64,
-            )  # Used in MoECorrectionBiasAdjustCallback
-            self.expert_usage.stop_gradient = True
+        # if self.topk_method == "noaux_tc":
+        #     if not self.config.gpt_model_use_experimental_version:
+        #         self.register_buffer(
+        #             "e_score_correction_bias",
+        #             paddle.zeros((self.num_experts,), dtype=paddle.float32),
+        #         )
+        #     else:
+        #         self.register_buffer(
+        #             "e_score_correction_bias",
+        #             paddle.zeros((1, self.num_experts), dtype=paddle.float32),
+        #         )
+        #     self._cast_to_low_precision = False
+        #     self.expert_usage = paddle.zeros(
+        #         shape=[self.num_experts],
+        #         dtype=paddle.int64,
+        #     )  # Used in MoECorrectionBiasAdjustCallback
+        #     self.expert_usage.stop_gradient = True
 
         if self.topk_method == "quantile_balancing":
             if self.routing_type != "none":
@@ -1480,7 +1480,32 @@ class TopKRouter(StandardMoERouter):
         self.layer_number = layer_number
         self._setup_hash_layer(layer_number, is_mtp_layer=is_mtp_layer)
 
+    def fake_balanced_routing(self, input):
+        n_experts = self.num_experts
+        n_topk = self.num_experts_per_tok
+        n_tokens = input.shape[0]
+        top_gate = (
+            paddle.ones([n_tokens, n_topk], dtype=paddle.float32) / n_topk
+        )
+        top_idx = (
+            paddle.arange(n_tokens * n_topk).reshape([-1, n_topk]) % n_experts
+        )
+        return (
+            None,
+            top_gate,
+            top_idx,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
     def forward(self, input, input_ids=None, origin_input_ids=None):
+        if self.config.moe_router_force_load_balancing:
+            return self.fake_balanced_routing(
+                input.reshape([-1, input.shape[-1]])
+            )
         if len(input.shape) == 3:
             if not self.sequence_parallel:
                 batch_size, seq_len, d_model = input.shape

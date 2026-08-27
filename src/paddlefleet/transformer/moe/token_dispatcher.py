@@ -854,7 +854,11 @@ class _DeepEPManager(_DispatchManager):
         topk_weights: paddle.Tensor | None = None,
         topk_indices: paddle.Tensor | None = None,
     ):
-        num_tokens = routing_map.shape[0]
+        num_tokens = (
+            routing_map.shape[0]
+            if routing_map is not None
+            else topk_weights.shape[0]
+        )
 
         if _try_setup_router_topk_metadata(
             self, num_tokens, topk_weights, topk_indices
