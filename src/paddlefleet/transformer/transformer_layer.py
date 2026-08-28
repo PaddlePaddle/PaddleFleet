@@ -39,9 +39,8 @@ from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
     has_recovered,
     keep_indexer_grad_path,
+    module_needs_recompute,
     need_full_recompute,
-    need_recompute_in_block,
-    need_recompute_in_first_n,
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.dsv4_hybrid_attention import DSv4HybridAttention
@@ -88,12 +87,7 @@ def is_mtp_shared_last_layer(config, layer_number, is_mtp_layer):
     if not getattr(config, "stage1_overlap", False):
         return False
     # Only re-color when MTP is actually present in the model.
-    mtp_num_layers = (
-        config.mtp_num_layers
-        if getattr(config, "mtp_num_layers", 0)
-        else (getattr(config, "num_nextn_predict_layers", 0) or 0)
-    )
-    if mtp_num_layers <= 0:
+    if (getattr(config, "num_nextn_predict_layers", 0) or 0) <= 0:
         return False
     if is_mtp_layer:
         return False
@@ -356,92 +350,18 @@ class TransformerLayer(nn.Layer):
                 self.layer_number, self.config
             )
         elif self.config.recompute_granularity == "selective":
-            if isinstance(self.config.recompute_modules, list):
-                if self.config.recompute_num_layers is None:
-                    # selective all submodels to recompute
-                    if "norm" in self.config.recompute_modules:
-                        if not isinstance(self.input_layernorm, IdentityOp):
-                            self.recompute_input_layernorm = True
-
-                        if not isinstance(
-                            self.post_attention_layernorm, IdentityOp
-                        ):
-                            self.recompute_post_attention_layernorm = True
-                    if "mlp" in self.config.recompute_modules:
-                        self.recompute_mlp = True
-                else:
-                    # selective submodels in special layers to recompute
-                    assert self.config.recompute_method in ["first_n", "block"]
-                    if "norm" in self.config.recompute_modules:
-                        if not isinstance(self.input_layernorm, IdentityOp):
-                            self.recompute_input_layernorm = (
-                                need_recompute_in_block(
-                                    self.layer_number,
-                                    self.config,
-                                    self.config.recompute_num_layers,
-                                )
-                                if self.config.recompute_method == "block"
-                                else need_recompute_in_first_n(
-                                    self.layer_number,
-                                    self.config,
-                                    self.config.recompute_num_layers,
-                                )
-                            )
-                            self.recompute_post_attention_layernorm = (
-                                self.recompute_input_layernorm
-                            )
-
-                    if "mlp" in self.config.recompute_modules:
-                        self.recompute_mlp = (
-                            need_recompute_in_block(
-                                self.layer_number,
-                                self.config,
-                                self.config.recompute_num_layers,
-                            )
-                            if self.config.recompute_method == "block"
-                            else need_recompute_in_first_n(
-                                self.layer_number,
-                                self.config,
-                                self.config.recompute_num_layers,
-                            )
-                        )
-            elif isinstance(self.config.recompute_modules, dict):
-                assert self.config.recompute_method in ["first_n", "block"]
-                if "norm" in self.config.recompute_modules:
-                    if not isinstance(self.input_layernorm, IdentityOp):
-                        self.recompute_input_layernorm = (
-                            need_recompute_in_block(
-                                self.layer_number,
-                                self.config,
-                                self.config.recompute_modules["norm"],
-                            )
-                            if self.config.recompute_method == "block"
-                            else need_recompute_in_first_n(
-                                self.layer_number,
-                                self.config,
-                                self.config.recompute_modules["norm"],
-                            )
-                        )
-                        self.recompute_post_attention_layernorm = (
-                            self.recompute_input_layernorm
-                        )
-
-                if "mlp" in self.config.recompute_modules:
-                    self.recompute_mlp = (
-                        need_recompute_in_block(
-                            self.layer_number,
-                            self.config,
-                            self.config.recompute_modules["mlp"],
-                        )
-                        if self.config.recompute_method == "block"
-                        else need_recompute_in_first_n(
-                            self.layer_number,
-                            self.config,
-                            self.config.recompute_modules["mlp"],
-                        )
-                    )
-            else:
-                raise ValueError("recompute_modules must be list or dict")
+            if module_needs_recompute("norm", self.layer_number, self.config):
+                # Both norms share the "norm" entry; each is skipped when it has
+                # been specialised away to an IdentityOp.
+                self.recompute_input_layernorm = not isinstance(
+                    self.input_layernorm, IdentityOp
+                )
+                self.recompute_post_attention_layernorm = not isinstance(
+                    self.post_attention_layernorm, IdentityOp
+                )
+            self.recompute_mlp = module_needs_recompute(
+                "mlp", self.layer_number, self.config
+            )
 
         # [Layer 10: Block Attention Residuals] Optional
         self.attn_res_block_size = None
@@ -551,6 +471,14 @@ class TransformerLayer(nn.Layer):
         Each block spans ``attn_res_block_size`` transformer layers, and the
         layer whose index is a multiple of that span closes the previous
         block. This matches Kimi K3's ``layer_idx % attn_res_block_size == 0``.
+
+        ``self.layer_number`` is the *physical* index, which the spec builders
+        shift by ``num_empty_layers_add_in_head`` so the empty head layers
+        occupy the leading slots (see
+        ``gpt_layer_specs.get_gpt_decoder_layers_spec``). The schedule is
+        defined on the logical decoder index, so undo that shift here --
+        otherwise the whole block layout slides by the offset and logical
+        layer 0 never opens a block.
         """
         block_span = self.attn_res_block_size
         if block_span <= 0:
@@ -558,7 +486,10 @@ class TransformerLayer(nn.Layer):
                 "attn_res_block_size must be at least 1 when "
                 "block_attention_residuals is enabled."
             )
-        return self.layer_number % block_span == 0
+        head_offset = (
+            getattr(self.config, "num_empty_layers_add_in_head", 0) or 0
+        )
+        return (self.layer_number - head_offset) % block_span == 0
 
     def _forward_impl_block_attn_res_split_recompute(
         self,
@@ -747,12 +678,21 @@ class TransformerLayer(nn.Layer):
         )
         mtp_input = None
         mtp_ids = None
+        # Under use_erndata the data pipeline emits length-L
+        # tensors (input_ids / labels / position_ids / attn_mask) and
+        # GPTEmbedding produces mtp_emb_res as (K+1) length-L blocks — the
+        # per-depth left-shift is performed inline via roll_tensor. That means
+        # the main decoder here runs at seq_len = L (not L-K), so the ernie5
+        # L+K path below must be skipped for position_ids / input_ids / mask
+        # trims.
+        _mtp_is_megatron = getattr(self.config, "use_erndata", False)
         if (
             self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
             and not is_mtp
             and not self.config.mtp_load_weight_only
             and not self.config.enable_mtp_magic_send
+            and not self.config.separate_mtp_input
         ):
             # process hidden_states
             hidden_states_concat = dict_args["hidden_states"]
@@ -764,7 +704,12 @@ class TransformerLayer(nn.Layer):
             dict_args["hidden_states"] = hidden_states
 
             # process position_ids
-            if not self.config.gpt_model_use_experimental_version:
+            # Under use_erndata position_ids is [B, L] already
+            # (roll happens inside MTP layer), so DO NOT strip K positions.
+            if (
+                not self.config.gpt_model_use_experimental_version
+                and not _mtp_is_megatron
+            ):
                 if "position_ids" in dict_args.keys():
                     position_ids = dict_args["position_ids"]
                     # Slice the sequence axis, which is the last one for both
@@ -848,9 +793,12 @@ class TransformerLayer(nn.Layer):
                     dict_args["input_ids"] = decoder_input_ids
             if (
                 not self.config.experimental_dataflow
+                and not _mtp_is_megatron
                 and "attn_mask_startend_row_indices" in dict_args.keys()
             ):
-                # Old dataflow: main mask contains mtp parts appended along seq dim, need to split
+                # Old dataflow (ernie5 L+K path): main mask contains mtp parts
+                # appended along seq dim (total length L+K), split into main
+                # [B,1,L,1] + mtp [B,1,K,1] and hand main to the backbone.
                 attn_mask_startend_row_indices = dict_args[
                     "attn_mask_startend_row_indices"
                 ]
@@ -869,7 +817,9 @@ class TransformerLayer(nn.Layer):
                 )
             else:
                 # New dataflow (experimental_dataflow=True): main mask is already main-seq only,
-                # mtp masks are in mtp_startend_row_indices_all and will be used by MTP layer directly
+                # mtp masks are in mtp_startend_row_indices_all and will be used by MTP layer directly.
+                # Megatron style: mask is already length-L; MTP layer will derive per-depth mask
+                # from cu_seqlens_q, so leave main mask untouched here.
                 attn_mask_startend_row_indices_mtp = None
 
         if self.config.block_attention_residuals and "blocks" not in dict_args:
@@ -1008,11 +958,17 @@ class TransformerLayer(nn.Layer):
             and not is_mtp
             and not self.config.mtp_load_weight_only
             and not self.config.enable_mtp_magic_send
+            and not self.config.separate_mtp_input
         ):
             hidden_states_concat = paddle.concat([output, *mtp_input])
             rst["hidden_states"] = hidden_states_concat
-            if not self.config.gpt_model_use_experimental_version:
-                if "position_ids" in dict_args.keys():
+            # Under use_erndata the L+K position-ids split was
+            # skipped up front, so there is nothing to concat back either.
+            if (
+                not self.config.gpt_model_use_experimental_version
+                and not _mtp_is_megatron
+            ):
+                if "position_ids" in dict_args.keys() and mtp_ids is not None:
                     position_ids = paddle.concat(
                         [dict_args["position_ids"], mtp_ids], axis=-1
                     )
@@ -1633,15 +1589,44 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             "HyperConnectionTransformerLayer does not support block_attention_residuals."
         )
 
+        # mHC treats attention and MLP as two independent layers (paper Fig. 3).
+        # HyperConnectionModule uses this index to rotate the one-hot H_pre bias
+        # across the n residual streams (mhc_single_stream_init only), so the two
+        # sub-layers must get distinct numbers or half of the streams would
+        # never be a "home stream".
+        #
+        # The rotation runs over the layer's logical position in the stack, which
+        # is not ``self.layer_number``:
+        #  - decoder layers are numbered index + num_empty_layers_add_in_head
+        #    (get_gpt_decoder_layers_spec), so the offset is subtracted to keep
+        #    the phase independent of the empty-head-layer count;
+        #  - MTP layers are numbered by their own 0-based index and carry no such
+        #    offset (get_gpt_mtp_layers_spec), so subtracting it would shift
+        #    their phase and, with empty head layers, make the index negative.
+        #    They keep reading and writing the n streams the backbone wrote, so
+        #    they continue the decoder's rotation rather than restarting it --
+        #    restarting would hand the first MTP sub-layer the same home stream
+        #    as the last decoder sub-layer whenever n is odd.
+        if self.is_mtp_layer:
+            mhc_logical_index = (
+                self.config.num_hidden_layers + self.layer_number
+            )
+        else:
+            head_offset = (
+                getattr(self.config, "num_empty_layers_add_in_head", 0) or 0
+            )
+            mhc_logical_index = self.layer_number - head_offset
+        mhc_sublayer_base = 2 * mhc_logical_index
+
         self.self_attention_hyper_connection = build_spec_layer(
             sublayers_spec.self_attention_hyper_connection,
             config=self.config,
-            layer_number=self.layer_number,
+            layer_number=mhc_sublayer_base,
         )
         self.mlp_hyper_connection = build_spec_layer(
             sublayers_spec.mlp_hyper_connection,
             config=self.config,
-            layer_number=self.layer_number,
+            layer_number=mhc_sublayer_base + 1,
         )
 
         # The hyper-connection submodules are created after super().__init__()
@@ -1666,46 +1651,10 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             doc_mask_meta_registry.register(self._docmask_meta_key)
 
         # mHC forward recompute config
-        self.recompute_mhc_forward = False
-        if (
+        self.recompute_mhc_forward = (
             config.recompute_granularity == "selective"
-            and config.recompute_modules is not None
-        ):
-            if isinstance(config.recompute_modules, list):
-                if "mhc_forward" in config.recompute_modules:
-                    if config.recompute_num_layers is None:
-                        self.recompute_mhc_forward = True
-                    else:
-                        assert config.recompute_method in ["first_n", "block"]
-                        self.recompute_mhc_forward = (
-                            need_recompute_in_block(
-                                self.layer_number,
-                                config,
-                                config.recompute_num_layers,
-                            )
-                            if config.recompute_method == "block"
-                            else need_recompute_in_first_n(
-                                self.layer_number,
-                                config,
-                                config.recompute_num_layers,
-                            )
-                        )
-            elif isinstance(config.recompute_modules, dict):
-                if "mhc_forward" in config.recompute_modules:
-                    assert config.recompute_method in ["first_n", "block"]
-                    self.recompute_mhc_forward = (
-                        need_recompute_in_block(
-                            self.layer_number,
-                            config,
-                            config.recompute_modules["mhc_forward"],
-                        )
-                        if config.recompute_method == "block"
-                        else need_recompute_in_first_n(
-                            self.layer_number,
-                            config,
-                            config.recompute_modules["mhc_forward"],
-                        )
-                    )
+            and module_needs_recompute("mhc_forward", self.layer_number, config)
+        )
 
     def _fused_h_res_h_post_bda(
         self,
@@ -2125,6 +2074,7 @@ class HySparseTransformerLayer(TransformerLayer):
             and not is_mtp
             and not self.config.mtp_load_weight_only
             and not self.config.enable_mtp_magic_send
+            and not self.config.separate_mtp_input
         )
 
     def _mtp_split(self, dict_args, is_mtp):
@@ -2141,6 +2091,12 @@ class HySparseTransformerLayer(TransformerLayer):
         if not self._mtp_enabled(is_mtp):
             return None
         n = self.config.num_nextn_predict_layers
+        # Under use_erndata position_ids / masks are already
+        # main-decoder length L (per-doc shifting happens inside the MTP layer
+        # via roll_tensor), so the L+K -> L seq-dim trims below must be
+        # skipped. Mirrors the ``_mtp_is_megatron`` guards in
+        # ``TransformerLayer.forward``.
+        _mtp_is_megatron = getattr(self.config, "use_erndata", False)
         ctx = {
             "mtp_ids": None,
             "mtp_input_ids": None,
@@ -2156,8 +2112,11 @@ class HySparseTransformerLayer(TransformerLayer):
         ctx["mtp_input"] = tuple(tensor_list[1:])
         dict_args["hidden_states"] = hidden_states
 
-        # position_ids: split along seq dim
-        if not self.config.gpt_model_use_experimental_version:
+        # position_ids: split along seq dim (ernie5 L+K path only)
+        if (
+            not self.config.gpt_model_use_experimental_version
+            and not _mtp_is_megatron
+        ):
             if (
                 "position_ids" in dict_args
                 and dict_args["position_ids"] is not None
@@ -2215,9 +2174,11 @@ class HySparseTransformerLayer(TransformerLayer):
                 dict_args["input_ids"] = full_input_ids[:, :-n].contiguous()
                 ctx["mtp_input_ids"] = full_input_ids[:, -n:].contiguous()
 
-        # attn_mask_startend_row_indices: split along seq dim (old dataflow)
+        # attn_mask_startend_row_indices: split along seq dim (old dataflow,
+        # ernie5 L+K path only -- under megatron the mask is already length L)
         if (
             not self.config.experimental_dataflow
+            and not _mtp_is_megatron
             and "attn_mask_startend_row_indices" in dict_args
             and dict_args["attn_mask_startend_row_indices"] is not None
         ):

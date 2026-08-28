@@ -66,7 +66,6 @@ class TestMTPLayer43Dispatch(unittest.TestCase):
             num_hidden_layers=43,
             csa_compress_ratios=_prod_csa_ratios(),
             num_nextn_predict_layers=1,
-            mtp_num_layers=0,
             num_empty_layers_add_in_head=0,
         )
         li, atype, ratio = _get_dsv4_hybrid_attention_layer_type(

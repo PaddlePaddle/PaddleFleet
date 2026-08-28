@@ -13,9 +13,12 @@
 # limitations under the License.
 
 
+import functools
 import os
+from collections.abc import Callable
 from contextlib import nullcontext
 from copy import deepcopy
+from dataclasses import dataclass
 
 import paddle
 import paddle.nn.functional as F
@@ -27,6 +30,7 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
 
 from paddlefleet import utils
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.recompute_utils import module_needs_recompute
 from paddlefleet.tensor_parallel.random import (
     get_cuda_rng_tracker,
     get_expert_parallel_rng_tracker_name,
@@ -73,12 +77,34 @@ g_shard_bypass_dygraph_optimizer = int(
 )
 
 
+@dataclass(frozen=True)
+class RuntimeExpertWeights:
+    """Expert weights with hooks that restore mutable storage for backward."""
+
+    tensors: tuple[paddle.Tensor, paddle.Tensor]
+    restore_before_backward: tuple[
+        Callable[[], None] | None,
+        Callable[[], None] | None,
+    ] = (None, None)
+
+    def __iter__(self):
+        return iter(self.tensors)
+
+
 class BMMFunction(paddle.autograd.PyLayer):
     @staticmethod
-    def forward(ctx, x, y, batch_sizes, trans_y=False):
+    def forward(
+        ctx,
+        x,
+        y,
+        batch_sizes,
+        trans_y=False,
+        restore_weight=None,
+    ):
         ctx.save_for_backward(x, y)
         ctx.batch_sizes = batch_sizes
         ctx.trans_y = trans_y
+        ctx.restore_weight = restore_weight
         return paddle.incubate.nn.functional.batched_gemm(
             x, y, batch_sizes, trans_rhs=trans_y
         )
@@ -86,6 +112,10 @@ class BMMFunction(paddle.autograd.PyLayer):
     @staticmethod
     def backward(ctx, grad):
         x, y = ctx.saved_tensor()
+        if ctx.restore_weight is not None:
+            # Restore and consume the weight in one autograd node so another
+            # microbatch cannot replace MoonEP's redundant slots in between.
+            ctx.restore_weight()
         batch_sizes = ctx.batch_sizes
         trans_y = ctx.trans_y
 
@@ -180,10 +210,10 @@ class GroupedMLPExpert(FleetLayer):
         self.config: TransformerConfig = config
         self.num_local_experts = num_local_experts
         self.moe_deep_gemm = moe_deep_gemm
-        # Intermediate size for the local shard of every expert. When using the
-        # 'allgather' MoE dispatcher every expert is sharded along its
-        # intermediate dim across the EP group, so this can be smaller than
-        # ``config.moe_intermediate_size``.
+        # Intermediate size for the local shard of every expert. Under the
+        # intermediate-EP-sharded dispatchers ('allgather' / 'ringmoe') every
+        # expert is sharded along its intermediate dim across the EP group, so
+        # this can be smaller than ``config.moe_intermediate_size``.
         self.intermediate_size_per_partition = (
             intermediate_size_per_partition
             if intermediate_size_per_partition is not None
@@ -199,7 +229,12 @@ class GroupedMLPExpert(FleetLayer):
         )
 
         if self.config.gated_linear_unit:
-            if self.config.hidden_act in [F.silu, F.gelu]:
+            hidden_act = self.config.hidden_act
+            is_gelu = hidden_act is F.gelu or (
+                isinstance(hidden_act, functools.partial)
+                and hidden_act.func is F.gelu
+            )
+            if hidden_act is F.silu or is_gelu:
 
                 def glu(x):
                     x = paddle.chunk(x, 2, dim=-1)
@@ -223,14 +258,7 @@ class GroupedMLPExpert(FleetLayer):
             self.activation_func = glu
         else:
             self.activation_func = self.config.hidden_act
-        self.activation_recompute = (
-            self.config.recompute_granularity == "selective"
-            and "moe_act" in self.config.recompute_modules
-        )
-        if self.activation_recompute and self.config.fp8:
-            raise ValueError(
-                "moe_act recompute for fp8 cannot work with the legacy GroupedMLP."
-            )
+        self.update_activation_recompute(None)
 
         # No tensor parallel - full sizes
         fc1_output_size = self.intermediate_size_per_partition
@@ -278,17 +306,39 @@ class GroupedMLPExpert(FleetLayer):
         self.weight1.is_distributed = self.expert_parallel
         self.weight2.is_distributed = self.expert_parallel
 
+    def update_activation_recompute(self, layer_number):
+        """Resolve the ``moe_act`` flag; re-called once the layer id is known.
+
+        ``layer_number=None`` (construction time) means a count-based selector
+        resolves to every layer and a layer list to False.
+        """
+        self.activation_recompute = (
+            self.config.recompute_granularity == "selective"
+            and module_needs_recompute(
+                "moe_act",
+                layer_number,
+                self.config,
+                defer_if_layer_unknown=True,
+            )
+        )
+        if self.activation_recompute and self.config.fp8:
+            raise ValueError(
+                "moe_act recompute for fp8 cannot work with the legacy GroupedMLP."
+            )
+
     @property
     def intermediate_ep_sharded(self):
         """Whether this rank owns all experts but only ``I // EP`` of each.
 
-        The 'allgather' dispatcher shards the experts along their intermediate
-        dim instead of along the expert dim, so a rank holds every expert.
-        ``sharded_state_dict`` keys off the same condition; keep the two in sync.
+        Both the 'allgather' and 'ringmoe' dispatchers shard experts along their
+        intermediate dim instead of along the expert dim, so a rank holds every
+        expert; 'ringmoe' only reorganizes the collectives. ``sharded_state_dict``
+        and ``MoELayer.use_intermediate_ep_sharding`` key off the same condition;
+        keep the three in sync.
         """
         return (
             getattr(self.config, "moe_token_dispatcher_type", None)
-            == "allgather"
+            in ("allgather", "ringmoe")
             and self.expert_parallel
         )
 
@@ -300,10 +350,11 @@ class GroupedMLPExpert(FleetLayer):
         inherently a fused 3D expert tensor).
 
         When this rank only holds a slice of every expert's intermediate dim
-        (allgather dispatcher with EP > 1) both weights must first be
-        redistributed to the traditional EP layout, otherwise Newton-Schulz runs
-        on a slab instead of the real matrix. ``muon_ffn_split`` keeps
-        controlling whether gate and up are orthogonalised independently.
+        (intermediate-EP sharding, i.e. 'allgather' / 'ringmoe' with EP > 1) both
+        weights must first be redistributed to the traditional EP layout,
+        otherwise Newton-Schulz runs on a slab instead of the real matrix.
+        ``muon_ffn_split`` keeps controlling whether gate and up are
+        orthogonalised independently.
         """
         from paddlefleet.transformer.muon_utils import (
             ortho_ep_full_intermediate,
@@ -341,8 +392,22 @@ class GroupedMLPExpert(FleetLayer):
         self,
         permuted_local_hidden_states: paddle.Tensor,
         tokens_per_expert: paddle.Tensor,
+        expert_weights: (
+            RuntimeExpertWeights | tuple[paddle.Tensor, paddle.Tensor] | None
+        ) = None,
     ):
         """Forward step of the GroupedMLP without TP/DP."""
+
+        restore_weight1 = restore_weight2 = None
+        if isinstance(expert_weights, RuntimeExpertWeights):
+            weight1, weight2 = expert_weights.tensors
+            restore_weight1, restore_weight2 = (
+                expert_weights.restore_before_backward
+            )
+        elif expert_weights is not None:
+            weight1, weight2 = expert_weights
+        else:
+            weight1, weight2 = self.weight1, self.weight2
 
         if permuted_local_hidden_states.numel() != 0:
             tokens_per_expert = tokens_per_expert.cpu().tolist()
@@ -351,14 +416,16 @@ class GroupedMLPExpert(FleetLayer):
             if self.moe_deep_gemm:
                 fc1_output = DeepGEMMBMMFunction.apply(
                     permuted_local_hidden_states,
-                    self.weight1,
+                    weight1,
                     paddle.to_tensor(tokens_per_expert, dtype="int32"),
                 )
             else:
                 fc1_output = BMMFunction.apply(
                     permuted_local_hidden_states,
-                    self.weight1,
+                    weight1,
                     tokens_per_expert,
+                    False,
+                    restore_weight1,
                 )
             if self.activation_recompute:
                 raise NotImplementedError(
@@ -369,20 +436,24 @@ class GroupedMLPExpert(FleetLayer):
                 if self.moe_deep_gemm:
                     fc2_output = DeepGEMMBMMFunction.apply(
                         intermediate_parallel,
-                        self.weight2,
+                        weight2,
                         paddle.to_tensor(tokens_per_expert, dtype="int32"),
                     )
                 else:
                     fc2_output = BMMFunction.apply(
-                        intermediate_parallel, self.weight2, tokens_per_expert
+                        intermediate_parallel,
+                        weight2,
+                        tokens_per_expert,
+                        False,
+                        restore_weight2,
                     )
         else:
             # No token is allocated for local experts.
             assert paddle.count_nonzero(tokens_per_expert) == 0
 
             # Make sure params of experts still have gradients even given zero tokens.
-            w1 = self.weight1.reshape(self.config.hidden_size, -1)
-            w2 = self.weight2.reshape(-1, self.config.hidden_size)
+            w1 = weight1.reshape(weight1.shape[1], -1)
+            w2 = weight2.reshape(-1, weight2.shape[2])
             h = paddle.matmul(permuted_local_hidden_states, w1)
             if self.activation_recompute:
                 raise NotImplementedError(
@@ -405,9 +476,10 @@ class GroupedMLPExpert(FleetLayer):
         structured_name_prefix: str = "",
     ):
         # standard:  shard on expert dim (axis=0), each rank owns disjoint experts.
-        # allgather: shard on intermediate dim, each rank owns all experts.
+        # allgather/ringmoe: shard on intermediate dim, each rank owns all
+        #            experts.
         # Cross-topology reshard is handled by the DCP resharder.
-        # See _get_intermediate_sharded_state_dict for allgather details.
+        # See _get_intermediate_sharded_state_dict for the intermediate layout.
         state_dict = self.state_dict(structured_name_prefix="")
 
         if self.intermediate_ep_sharded:
@@ -451,7 +523,9 @@ class GroupedMLPExpert(FleetLayer):
     def _get_intermediate_sharded_state_dict(
         self, state_dict, structured_name_prefix: str
     ):
-        """Build sharded state dict for the allgather EP layout.
+        """Build sharded state dict for the intermediate-EP-sharded layout.
+
+        Shared by the 'allgather' and 'ringmoe' dispatchers.
 
         weight1 [E, H, 2*I_local] is reshaped to [E, H, 2, I_local] and
         sharded on axis=3 → global [E, H, 2, I_full].
@@ -460,7 +534,7 @@ class GroupedMLPExpert(FleetLayer):
 
         weight2 [E, I_local, H] is sharded on axis=1 → global [E, I_full, H].
 
-        In allgather mode E = num_experts (all experts per rank); in deepep
+        In this layout E = num_experts (all experts per rank); in deepep
         mode E = num_experts // EP (disjoint experts per rank).  The DCP
         resharder handles this difference during cross-topology loading.
         """

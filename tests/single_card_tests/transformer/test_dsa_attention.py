@@ -975,7 +975,9 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
 
     def test_get_total_num_layers_treats_none_as_zero(self):
         """None nextn layer count should be treated as zero."""
-        config = SimpleNamespace(num_hidden_layers=4, mtp_num_layers=0)
+        config = SimpleNamespace(
+            num_hidden_layers=4, num_nextn_predict_layers=0
+        )
         config.num_nextn_predict_layers = None
         self.assertEqual(
             DSAIndexerLossLoggingHelper.get_total_num_layers(config), 4
@@ -984,7 +986,9 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
     def test_register_total_num_layers_clears_stale_tracker(self):
         DSAIndexerLossLoggingHelper.num_layers = 1
         DSAIndexerLossLoggingHelper.tracker["values"] = paddle.zeros([1])
-        config = SimpleNamespace(num_hidden_layers=4, mtp_num_layers=0)
+        config = SimpleNamespace(
+            num_hidden_layers=4, num_nextn_predict_layers=0
+        )
 
         DSAIndexerLossLoggingHelper.register_total_num_layers(config)
 
@@ -1832,7 +1836,7 @@ class TestMLASelfAttentionWithDSAZeroLossCoeff(unittest.TestCase):
         return model
 
     def test_forward_zero_loss_coeff(self):
-        """With loss_coeff=0, the model should still compute loss but skip logging."""
+        """With loss_coeff=0, the indexer-loss path is skipped entirely (0 disables the KL loss)."""
         model = self._build_model()
         model.train()
         hidden = paddle.randn(
@@ -1845,8 +1849,9 @@ class TestMLASelfAttentionWithDSAZeroLossCoeff(unittest.TestCase):
         DSAIndexerLossLoggingHelper.tracker = {}
         output, bias = model(hidden, attention_mask=None)
         self.assertEqual(output.shape[0], self.micro_batch_size)
-        # loss_coeff=0 means save_loss_to_tracker is NOT called (coeff <= 0 check)
-        # Actually the code checks `if self.dsa_indexer_loss_coeff > 0`
+        # loss_coeff=0 disables the indexer-loss path (`if coeff > 0`), and
+        # None would be normalized to 0.0 upstream, so save_loss_to_tracker is
+        # never called and no loss logging entry appears.
         self.assertNotIn("values", DSAIndexerLossLoggingHelper.tracker)
         DSAIndexerLossLoggingHelper.tracker = {}
 

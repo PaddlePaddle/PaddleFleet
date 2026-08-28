@@ -157,6 +157,7 @@ class TestMoeBalanceLogging(unittest.TestCase):
         hidden_states = paddle.ones([2, 4])
         moe_layer = SimpleNamespace(
             use_latent_moe=False,
+            moe_token_dispatcher_type="alltoall",
             dispatch=MagicMock(return_value=(hidden_states, None)),
             layer_number=0,
             is_mtp_layer=True,

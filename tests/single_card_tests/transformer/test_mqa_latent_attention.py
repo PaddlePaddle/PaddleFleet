@@ -965,6 +965,88 @@ class TestMQADSA(unittest.TestCase):
             )
         self.assertIn("values", DSAIndexerLossLoggingHelper.tracker)
 
+    def test_deterministic_sparse_backward_runs_at_the_fixture_head_count(self):
+        # ``mqa_sparse_attn_backward_backend="tilelang"`` must be usable on the
+        # same layers as the default: this fixture has H=8 heads per rank, well
+        # below the 32-wide head group the tilelang backward prefers, and the
+        # cuDNN backward it replaces accepts any ``h <= 64``. Two runs must also
+        # give bitwise identical gradients -- that is the whole point of the
+        # switch (cuDNN's dkv scatter-add is not reproducible).
+        config = _create_mqa_config("mqa_dsa", loss_coeff=0.01)
+        config.mqa_sparse_attn_backward_backend = "tilelang"
+        module = _build_module(config, bf16=True)
+        self.assertEqual(module.sparse_attn_backward_backend, "tilelang")
+        module.train()
+        seqlen = WINDOW + INDEX_TOPK
+
+        def once():
+            # Fresh input leaves each time (the module and its weights are
+            # shared, so only the inputs' own gradients are compared).
+            query, key, w_v, x, qr = self._inputs(seqlen)
+            for tensor in (query, key, x, qr):
+                tensor.stop_gradient = False
+            out = module(
+                query,
+                key,
+                None,
+                None,
+                _row_end([seqlen], seqlen),
+                v_b_proj_weight=w_v,
+                x=x,
+                qr=qr,
+            )
+            out.cast("float32").sum().backward()
+            return (
+                query.grad.cast("float32").numpy().copy(),
+                key.grad.cast("float32").numpy().copy(),
+            )
+
+        dq1, dkv1 = once()
+        for name, grad in (("query", dq1), ("key", dkv1)):
+            self.assertTrue(
+                bool(np.isfinite(grad).all()), f"{name} grad is not finite"
+            )
+        dq2, dkv2 = once()
+        self.assertTrue(np.array_equal(dq1, dq2), "dq is not reproducible")
+        self.assertTrue(np.array_equal(dkv1, dkv2), "dkv is not reproducible")
+
+    def test_unfused_indexer_backend_survives_the_sparse_backward(self):
+        # ``csa_indexer_backend="unfused"`` is accepted by the config validation
+        # and used by several hybrid-MLA fixtures, but the loss scaler
+        # (``TileLangCSAIndexerLossAutoScaler.backward``) implements only
+        # "cudnn" and "tilelang". Forwarding the name verbatim made a legal
+        # configuration raise ``NotImplementedError`` on the *first* sparse
+        # backward, so the layer maps it onto tilelang -- the same substitution
+        # the warmup KL makes. This runs the real backward to prove it.
+        config = _create_mqa_config("mqa_dsa", loss_coeff=0.01)
+        config.csa_indexer_backend = "unfused"
+        module = _build_module(config, bf16=True)
+        self.assertEqual(module.indexer_backend, "tilelang")
+
+        seqlen = WINDOW + INDEX_TOPK
+        query, key, w_v, x, qr = self._inputs(seqlen)
+        for tensor in (query, key, x, qr):
+            tensor.stop_gradient = False
+        module.train()
+        out = module(
+            query,
+            key,
+            None,
+            None,
+            _row_end([seqlen], seqlen),
+            v_b_proj_weight=w_v,
+            x=x,
+            qr=qr,
+        )
+        out.cast("float32").sum().backward()
+        for name in ("wq_b", "wk", "weights_proj"):
+            grad = getattr(module.indexer, name).linear.weight.grad
+            self.assertIsNotNone(grad, f"indexer.{name} has no gradient")
+            self.assertTrue(
+                bool(paddle.isfinite(grad.cast("float32")).all()),
+                f"indexer.{name} gradient is not finite",
+            )
+
     def test_indexer_loss_mask_comes_from_input_ids(self):
         """Padding rows must not dilute the KL loss, and only ``input_ids`` sees them.
 
@@ -2136,6 +2218,51 @@ class TestSparseAttnPlumbingMocked(unittest.TestCase):
         # "sinkless softmax", it is not an omitted argument.
         self.assertIsNone(kwargs["attn_sink"])
         self.assertIn("attn_sink", kwargs)
+
+    def _call(self, module, calls):
+        with self._patched(calls):
+            module._sparse_attn(
+                paddle.zeros([1, 2, H, DK], dtype="bfloat16"),
+                paddle.zeros([1, 2, DK], dtype="bfloat16"),
+                paddle.zeros([1, 2, 4], dtype="int32"),
+                module.softmax_scale,
+                DV,
+            )
+
+    def test_backward_backend_is_read_from_the_config(self):
+        # ``mqa_sparse_attn_backward_backend`` picks the dkv backward: "cudnn"
+        # (fast, atomics, non-reproducible) or "tilelang" (deterministic, ~14x
+        # slower). The layer only forwards it, but it must forward the
+        # *configured* value -- a silent default here would make the
+        # determinism switch a no-op.
+        calls = []
+        self._call(self.module, calls)
+        self.assertEqual(calls[0][2]["backward_backend"], "cudnn")
+
+        config = _create_mqa_config("mqa_dsa")
+        config.mqa_sparse_attn_backward_backend = "tilelang"
+        calls = []
+        self._call(_build_module(config, bf16=True), calls)
+        self.assertEqual(calls[0][2]["backward_backend"], "tilelang")
+
+    def test_indexer_backend_is_read_from_the_config(self):
+        # The indexer-loss scaler shares the CSA layers' ``csa_indexer_backend``
+        # switch; cuDNN's ``d_index_k`` scatter is the non-reproducible half.
+        module = _build_module(_create_mqa_config("mqa_dsa"), bf16=True)
+        self.assertEqual(module.indexer_backend, "tilelang")
+        config = _create_mqa_config("mqa_dsa")
+        config.csa_indexer_backend = "cudnn"
+        self.assertEqual(
+            _build_module(config, bf16=True).indexer_backend, "cudnn"
+        )
+        # "unfused" has no scaler backward of its own, so it is served by
+        # tilelang instead of reaching the scaler's NotImplementedError. The
+        # real backward is exercised in ``TestMQADSA``.
+        config = _create_mqa_config("mqa_dsa")
+        config.csa_indexer_backend = "unfused"
+        self.assertEqual(
+            _build_module(config, bf16=True).indexer_backend, "tilelang"
+        )
 
 
 class TestForwardDsaFusedDispatchMocked(unittest.TestCase):

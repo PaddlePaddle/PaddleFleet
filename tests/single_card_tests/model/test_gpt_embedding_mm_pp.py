@@ -64,6 +64,7 @@ class _Cfg:
         self.num_nextn_predict_layers = 0
         self.mtp_load_weight_only = False
         self.enable_mtp_magic_send = False
+        self.separate_mtp_input = False
         self.experimental_dataflow = False
         self.cp_balance_mode = "padding"
         self.clone_scatter_output_in_embedding = False

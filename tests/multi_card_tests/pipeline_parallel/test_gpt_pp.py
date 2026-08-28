@@ -244,7 +244,7 @@ class TestPP(unittest.TestCase):
                 )
             else:
                 assert (
-                    overlap_loss._md5sum() == "bce3fed95247f1b7a165e32b33d6fca7"
+                    overlap_loss._md5sum() == "4fbae88e4f37dfcb9fe16986eecde3ff"
                 )
             if paddle.distributed.get_rank() == 0:
                 for name, p in overlap_gpt_model.named_parameters():

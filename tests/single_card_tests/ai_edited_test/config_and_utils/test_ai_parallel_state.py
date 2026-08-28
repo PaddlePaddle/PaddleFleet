@@ -29,7 +29,6 @@ sys.path.insert(
 # context parallel, memory buffer, and embedding group
 
 import unittest
-import warnings
 from unittest import mock
 
 
@@ -189,7 +188,7 @@ class TestPipelineHelpers(unittest.TestCase):
         """Test is_pipeline_first_stage returns True when rank is 0."""
         from paddlefleet.parallel_state import is_pipeline_first_stage
 
-        # get_pipeline_model_parallel_rank always returns 0
+        # no pipeline group here, so rank is 0
         result = is_pipeline_first_stage()
         self.assertTrue(result)
 
@@ -208,8 +207,14 @@ class TestPipelineHelpers(unittest.TestCase):
             set_pipeline_model_parallel_world_size,
         )
 
+        original = ps._PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+        self.addCleanup(
+            set_pipeline_model_parallel_world_size,
+            original,
+        )
         set_pipeline_model_parallel_world_size(4)
         self.assertEqual(ps._PIPELINE_MODEL_PARALLEL_WORLD_SIZE, 4)
+        self.assertEqual(ps.get_pipeline_model_parallel_world_size(), 4)
 
     def test_get_virtual_pipeline_model_parallel_rank_none(self):
         """Test get_virtual_pipeline_model_parallel_rank returns None."""
@@ -229,16 +234,12 @@ class TestPipelineHelpers(unittest.TestCase):
         result = get_virtual_pipeline_model_parallel_world_size()
         self.assertIsNone(result)
 
-    def test_get_pipeline_model_parallel_rank_warns(self):
-        """Test get_pipeline_model_parallel_rank issues warning."""
+    def test_get_pipeline_model_parallel_rank_without_group(self):
+        """Test get_pipeline_model_parallel_rank falls back to 0."""
         from paddlefleet.parallel_state import get_pipeline_model_parallel_rank
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            rank = get_pipeline_model_parallel_rank()
-            self.assertEqual(rank, 0)
-            self.assertTrue(len(w) > 0)
-            self.assertIn("not implemented", str(w[0].message))
+        # No pipeline group is initialized here, so world size is 1.
+        self.assertEqual(get_pipeline_model_parallel_rank(), 0)
 
 
 class TestGlobalMemoryBuffer(unittest.TestCase):

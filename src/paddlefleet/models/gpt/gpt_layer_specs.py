@@ -119,24 +119,12 @@ LNImpl = WrappedPaddleNorm
 
 
 def _get_effective_mtp_layers(config: TransformerConfig) -> int:
-    mtp_num_layers = getattr(config, "mtp_num_layers", 0) or 0
     nextn_num_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
-    if not isinstance(mtp_num_layers, int) or isinstance(mtp_num_layers, bool):
-        mtp_num_layers = 0
     if not isinstance(nextn_num_layers, int) or isinstance(
         nextn_num_layers, bool
     ):
         nextn_num_layers = 0
-    if (
-        mtp_num_layers > 0
-        and nextn_num_layers > 0
-        and mtp_num_layers != nextn_num_layers
-    ):
-        raise ValueError(
-            "mtp_num_layers and num_nextn_predict_layers must be equal when "
-            f"both are positive, got {mtp_num_layers} and {nextn_num_layers}"
-        )
-    return mtp_num_layers if mtp_num_layers > 0 else nextn_num_layers
+    return nextn_num_layers
 
 
 def _get_dsv4_hybrid_attention_layer_type(
@@ -147,10 +135,10 @@ def _get_dsv4_hybrid_attention_layer_type(
     int, Literal["multi_latent_attention", "dsv4_hybrid_attention"], int
 ]:
     if is_mtp_layer:
-        mtp_num_layers = _get_effective_mtp_layers(config)
-        if not 0 <= layer_number < mtp_num_layers:
+        mtp_layers = _get_effective_mtp_layers(config)
+        if not 0 <= layer_number < mtp_layers:
             raise IndexError(
-                f"MTP layer_number {layer_number} is outside [0, {mtp_num_layers})"
+                f"MTP layer_number {layer_number} is outside [0, {mtp_layers})"
             )
         logical_index = config.num_hidden_layers + layer_number
     else:
@@ -873,10 +861,10 @@ def get_gpt_mtp_layers_spec_for_backend(
 ) -> list[LayerSpec]:
     assert isinstance(spec, list) and isinstance(spec[-1], LayerSpec)
 
-    mtp_num_layers = _get_effective_mtp_layers(config)
+    mtp_layers = _get_effective_mtp_layers(config)
 
     mtp_layer_specs = []
-    for i in range(mtp_num_layers):
+    for i in range(mtp_layers):
         if config.use_dense_mtp and config.n_routed_experts is not None:
             num_experts = None
             moe_expert_fusion = False

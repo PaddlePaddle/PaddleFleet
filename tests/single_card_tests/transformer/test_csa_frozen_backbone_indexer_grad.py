@@ -166,5 +166,104 @@ class TestFrozenBackboneIndexerForwardBackward(unittest.TestCase):
         )
 
 
+@unittest.skipUnless(
+    _has_usable_cuda(), "CSA/Indexer kernels require a usable CUDA device"
+)
+class TestCSAZeroLossCoeffSkipsLossPath(unittest.TestCase):
+    """``dsa_indexer_loss_coeff == 0`` must disable the indexer-loss path
+    entirely, not merely zero the gradient.
+
+    Guards the short-circuits in ``_compute_indexer_compressed_topk_idxs`` /
+    ``_forward_cp``: without them a coeff=0 CSA training run still built the
+    target/KL kernels (``FusedDSAIndexerLoss``, ``TilelangIndexerLossState``)
+    and their autoscaling PyLayers, paying forward+backward costs for a
+    gradient that was identically 0. Any of those symbols being constructed
+    or applied here fails the test loudly, while sparse-attention top-k must
+    keep working (forward + backward stay clean).
+    """
+
+    BATCH, SEQ = 1, 128
+
+    CASES = (
+        # Paddle reference loss (unfused indexer + unfused sparse attn).
+        {
+            "csa_indexer_backend": "unfused",
+            "csa_sparse_attn_backend": "unfused",
+        },
+        # TileLang indexer backend would otherwise build a
+        # TilelangIndexerLossState and TileLangCSAIndexerLossAutoScaler.
+        # The TileLang kernels constrain the shapes: the indexer top-k kernel
+        # tiles over indexer heads (needs <= 64 and divisible by 8, the
+        # _make_config default is 4) and the sparse-MQA kernel's MMA warp
+        # partition needs a head dim of at least 64 (default is 32).
+        {
+            "csa_indexer_backend": "tilelang",
+            "csa_sparse_attn_backend": "tilelang",
+            "dsa_index_n_heads": 16,
+            "v_head_dim": 128,
+        },
+    )
+
+    def test_zero_coeff_runs_without_any_loss_construction(self):
+        from unittest import mock
+
+        import paddlefleet.transformer.csa_attention as csa_mod
+        from paddlefleet.transformer.dsa_attention import (
+            DSAIndexerLossLoggingHelper,
+        )
+
+        for backend in self.CASES:
+            with self.subTest(backend=backend["csa_indexer_backend"]):
+                model_parallel_cuda_manual_seed(_SEED)
+                config = _make_config(
+                    csa_dense_mode=False,
+                    dsa_indexer_loss_coeff=0.0,  # disabled
+                    **backend,
+                )
+                attn = _build_attention(config, layer_number=_CSA_LAYER_NUMBER)
+                attn.train()
+                DSAIndexerLossLoggingHelper.tracker = {}
+
+                hidden = paddle.randn(
+                    [self.BATCH, self.SEQ, config.hidden_size],
+                    dtype=paddle.bfloat16,
+                )
+
+                no_call = AssertionError(
+                    "dsa_indexer_loss_coeff=0 must not build the indexer loss "
+                    f"path (backend={backend['csa_indexer_backend']})"
+                )
+                with (
+                    mock.patch.object(
+                        csa_mod.FusedDSAIndexerLoss,
+                        "apply",
+                        side_effect=no_call,
+                    ),
+                    mock.patch.object(
+                        csa_mod.DSAIndexerLossAutoScaler,
+                        "apply",
+                        side_effect=no_call,
+                    ),
+                    mock.patch.object(
+                        csa_mod, "TilelangIndexerLossState", side_effect=no_call
+                    ),
+                    mock.patch.object(
+                        csa_mod.TileLangCSAIndexerLossAutoScaler,
+                        "apply",
+                        side_effect=no_call,
+                    ),
+                ):
+                    output, _ = attn(hidden_states=hidden, attention_mask=None)
+
+                self.assertEqual(
+                    tuple(output.shape),
+                    (self.BATCH, self.SEQ, config.hidden_size),
+                )
+                # Backward must also stay on the no-loss path.
+                output.cast("float32").sum().backward()
+                self.assertNotIn("values", DSAIndexerLossLoggingHelper.tracker)
+                DSAIndexerLossLoggingHelper.tracker = {}
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -49,8 +49,7 @@ from paddlefleet.parallel_state import (
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
     keep_indexer_grad_path,
-    need_recompute_in_block,
-    need_recompute_in_first_n,
+    module_needs_recompute,
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.tensor_parallel.mappings import (
@@ -696,43 +695,17 @@ class MultiLatentAttention(Attention):
 
         self.recompute_gated_attn = (
             self.config.recompute_granularity == "selective"
-            and self.config.recompute_modules is not None
-            and "gated_attn" in self.config.recompute_modules
+            and module_needs_recompute(
+                "gated_attn", self.layer_number, self.config
+            )
         )
 
-        self.recompute_qkv_up_porj_and_rope = False
-        if self.config.recompute_granularity == "selective":
-            modules = self.config.recompute_modules
-            if isinstance(modules, list) and "mla_qkv_recompute" in modules:
-                self.recompute_qkv_up_porj_and_rope = (
-                    True
-                    if self.config.recompute_num_layers is None
-                    else (
-                        need_recompute_in_block(
-                            self.layer_number,
-                            self.config,
-                            self.config.recompute_num_layers,
-                        )
-                        if self.config.recompute_method == "block"
-                        else need_recompute_in_first_n(
-                            self.layer_number,
-                            self.config,
-                            self.config.recompute_num_layers,
-                        )
-                    )
-                )
-            elif isinstance(modules, dict) and "mla_qkv_recompute" in modules:
-                assert self.config.recompute_method in ["first_n", "block"]
-                num_layers = modules["mla_qkv_recompute"]
-                self.recompute_qkv_up_porj_and_rope = (
-                    need_recompute_in_block(
-                        self.layer_number, self.config, num_layers
-                    )
-                    if self.config.recompute_method == "block"
-                    else need_recompute_in_first_n(
-                        self.layer_number, self.config, num_layers
-                    )
-                )
+        self.recompute_qkv_up_porj_and_rope = (
+            self.config.recompute_granularity == "selective"
+            and module_needs_recompute(
+                "mla_qkv_recompute", self.layer_number, self.config
+            )
+        )
 
         # VHA postmix: ungrouped low-rank cross-head mixing (I + U Vᵀ) on the head
         # axis, applied to the attention output (head space) before the output
@@ -769,36 +742,15 @@ class MultiLatentAttention(Attention):
                     0.0
                 ),  # identity at init
             )
-        # Selective recompute for the VHA postmix. Only list configuration is
-        # supported; honours recompute_num_layers + recompute_method
-        # (first_n / block) like the other selective modules.
-        modules = self.config.recompute_modules
-        self.recompute_vha_postmix = False
-        if (
+        # Selective recompute for the VHA postmix, configured like every other
+        # selective submodule (list entry, or dict entry with a layer count or
+        # an explicit layer list).
+        self.recompute_vha_postmix = (
             self.config.recompute_granularity == "selective"
-            and modules is not None
-        ):
-            if isinstance(modules, dict) and "vha_postmix" in modules:
-                raise ValueError(
-                    "recompute_modules['vha_postmix'] only supports list "
-                    "configuration"
-                )
-            if isinstance(modules, list) and "vha_postmix" in modules:
-                n = self.config.recompute_num_layers
-                if n is None:
-                    self.recompute_vha_postmix = True
-                elif self.config.recompute_method == "block":
-                    self.recompute_vha_postmix = need_recompute_in_block(
-                        self.layer_number, self.config, n
-                    )
-                elif self.config.recompute_method == "first_n":
-                    self.recompute_vha_postmix = need_recompute_in_first_n(
-                        self.layer_number, self.config, n
-                    )
-                else:
-                    raise ValueError(
-                        "recompute_method must be 'first_n' or 'block'"
-                    )
+            and module_needs_recompute(
+                "vha_postmix", self.layer_number, self.config
+            )
+        )
 
     def _apply_vha_postmix(self, attn_out, U=None, V=None):
         # attn_out: [b, sq, nh_pp * v_head_dim] (head space, pre-gate / pre output proj).
@@ -909,6 +861,15 @@ class MultiLatentAttention(Attention):
             "MLA does not support Flash Decoding"
         )
 
+        # Extract inference kwargs early: ``is_decode`` is needed both by
+        # ``get_query_key_value_tensors`` (RoPE apply) and by core_attention.
+        past_key_values = kwargs.get("past_key_values")
+        layer_idx = kwargs.get("layer_idx")
+        use_cache = kwargs.get("use_cache", False)
+        is_decode = _is_incremental_decode(
+            past_key_values, layer_idx, use_cache
+        )
+
         # =====================
         # Query, Key, and Value
         # =====================
@@ -920,6 +881,7 @@ class MultiLatentAttention(Attention):
                 key_value_states,
                 position_ids,
                 packed_seq_params,
+                is_decode=is_decode,
             )
         )
 
@@ -948,14 +910,6 @@ class MultiLatentAttention(Attention):
             key = key.transpose([1, 0, 2, 3]).contiguous()
             value = value.transpose([1, 0, 2, 3]).contiguous()
 
-        # Extract inference kwargs to pass through to core_attention
-        past_key_values = kwargs.get("past_key_values")
-        layer_idx = kwargs.get("layer_idx")
-        use_cache = kwargs.get("use_cache", False)
-        is_decode = _is_incremental_decode(
-            past_key_values, layer_idx, use_cache
-        )
-
         # The indexer-loss row mask needs ``input_ids``: the packed sequence's
         # trailing padding is invisible to ``attn_mask_startend_row_indices``.
         # Only the non-absorbed-MQA core attention accepts it (and only that one
@@ -971,6 +925,20 @@ class MultiLatentAttention(Attention):
         # against the callee's signature.
         if self.mqa_latent and kwargs.get("docmask_mb_idx") is not None:
             core_attn_extra["docmask_mb_idx"] = kwargs["docmask_mb_idx"]
+        # ``dsa_indexer_loss_bwd_p2p_overlap`` must tell the real forward pass
+        # from the recompute replay, and the two differ only in whether the layer
+        # body is wrapped at all -- a per-layer property
+        # (``need_full_recompute(layer_number, config)``) that cannot be
+        # re-derived from the config here. Declared on
+        # ``MQALatentAttention.forward`` for the same kwarg-flattening reason as
+        # ``docmask_mb_idx`` above. Passed through unchanged: the
+        # ``recompute(self.core_attention, ...)`` below is a *second*, independent
+        # wrapper, and folding it in here would double-enqueue whenever both are
+        # active (both replays would then look like a no-grad first pass). It only
+        # costs the overlap, which ``indexer_loss_overlap.validate_config`` warns
+        # about; see ``MQALatentAttention._needs_indexer_loss``.
+        if self.mqa_latent:
+            core_attn_extra["in_recompute"] = in_recompute
 
         if self.mqa_latent:
             # Query is already absorbed; the core attention only needs the V-side
@@ -1108,10 +1076,19 @@ class MultiLatentAttention(Attention):
 
         if self.recompute_qkv_up_porj_and_rope and self.training:
             assert getattr(self, "_qkv_recompute", None) is not None
-            self._qkv_recompute.discard_output_and_register_recompute(
-                core_attn_out
-            )
+            span = self._qkv_recompute
             self._qkv_recompute = None
+            # ``mla_qkv_recompute`` frees query / key / value here and restores
+            # them only in backward, but ``dsa_indexer_loss_bwd_p2p_overlap``
+            # still reads query and kv later in this same forward. With both on,
+            # the discard must follow the branch; see
+            # ``indexer_loss_overlap.defer_discard``.
+            from paddlefleet.transformer import indexer_loss_overlap
+
+            if not indexer_loss_overlap.defer_discard(
+                self.core_attention, span, core_attn_out
+            ):
+                span.discard_output_and_register_recompute(core_attn_out)
 
         _log(core_attn_out, "core_attn_out", layer_num)
 
@@ -1679,6 +1656,7 @@ class MLASelfAttention(MultiLatentAttention):
         key_value_states=None,
         position_ids=None,
         packed_seq_params=None,
+        is_decode=False,
     ):
         """
         Derives `query`, `key` and `value` tensors from `hidden_states`.
@@ -1975,6 +1953,10 @@ class MLASelfAttention(MultiLatentAttention):
                 )
                 key = paddle.cat([k_no_pe, k_pos_emb], axis=-1)
             elif bool(self.config.apply_rope_fusion) and not self.mqa_latent:
+                if is_decode:
+                    raise NotImplementedError(
+                        "apply_rope_fusion does not support incremental decode in MLA yet."
+                    )
                 from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
                     fused_apply_mla_rope_for_kv,
                     fused_apply_mla_rope_for_q,
@@ -2032,12 +2014,6 @@ class MLASelfAttention(MultiLatentAttention):
                     cp_rank,
                     cp_size,
                 )
-
-                # dynamic_inference not supported for now
-                if not self.training:
-                    raise NotImplementedError(
-                        "apply_rope_fusion does not support dynamic inference yet."
-                    )
 
                 k_pe = None
             else:
@@ -2617,6 +2593,7 @@ class MQASelfAttention(MLASelfAttention):
                 key_value_states,
                 position_ids,
                 packed_seq_params,
+                is_decode=is_decode,
             )
         )
 
@@ -2908,6 +2885,7 @@ class MQASelfAttention(MLASelfAttention):
         key_value_states=None,
         position_ids=None,
         packed_seq_params=None,
+        is_decode=False,
     ):
         """
         Derives `query`, `key` and `value` tensors from `hidden_states`.
@@ -2918,6 +2896,7 @@ class MQASelfAttention(MLASelfAttention):
                 key_value_states=key_value_states,
                 position_ids=position_ids,
                 packed_seq_params=packed_seq_params,
+                is_decode=is_decode,
             )
 
         # b = batch size, s = sequence length, h = hidden size, n = num attention heads

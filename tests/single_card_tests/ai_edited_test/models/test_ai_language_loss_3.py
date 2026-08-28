@@ -200,6 +200,12 @@ class TestLanguageLossForwardWithListLogits(unittest.TestCase):
         mock_config.mtp_loss_scaling_factor = 0.5
         mock_config.gpt_model_use_experimental_version = True
         mock_config.fused_linear_ce_loss_chunk = 0
+        # MagicMock attributes are truthy, so pin the real default: otherwise
+        # the erndata packed-doc MTP branch is taken and the L+K label trim is
+        # skipped.
+        mock_config.use_erndata = False
+        # recompute_modules is type-checked now, so a MagicMock is rejected.
+        mock_config.recompute_modules = None
 
         loss_fn = LanguageLoss(config=mock_config)
         vocab_size = 128
@@ -237,6 +243,12 @@ class TestLanguageLossForwardWithListLogits(unittest.TestCase):
         mock_config.add_mtp_loss = True
         mock_config.mtp_loss_scaling_factor = 1.0
         mock_config.gpt_model_use_experimental_version = False
+        # MagicMock attributes are truthy, so pin the real default: otherwise
+        # the erndata packed-doc MTP branch is taken and the loss demands a
+        # cu_seqlens_q stash this test never provides.
+        mock_config.use_erndata = False
+        # recompute_modules is type-checked now, so a MagicMock is rejected.
+        mock_config.recompute_modules = None
 
         loss_fn = LanguageLoss(config=mock_config)
         vocab_size = 128

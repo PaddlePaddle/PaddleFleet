@@ -49,6 +49,7 @@ from paddlefleet.transformer.doc_mask_meta_registry import (
 )
 from paddlefleet.transformer.dsv4_hybrid_attention import (
     DSv4HybridAttention,
+    pack_dsv4_docmask,
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.mqa_latent_attention import (
@@ -971,8 +972,12 @@ def _stub_indexer_loss_leaves(module):
     target / loss-mask are replaced by shape-only zeros. The two remaining
     kernel patches (the indexer topk kernel and the tilelang autoscaler) stay
     at the call site so the with-block reads linearly.
+
+    The predicate takes an ``in_recompute`` argument at the sparse call site, so
+    the stand-in swallows arguments rather than naming them: what it stands for
+    is "this layer wants the loss", which is true of every phase.
     """
-    module._needs_indexer_loss = lambda: True
+    module._needs_indexer_loss = lambda *a, **k: True
     module._indexer_projections = lambda *a, **k: (
         paddle.zeros([1, 4, 8]),
         paddle.zeros([1, 4, 8]),
@@ -1162,3 +1167,60 @@ class TestLayerDocmaskSlotKwarg(unittest.TestCase):
         self.assertEqual(probe.core_attention.calls, 1)
         # the slot kwarg made it into the self-attention call (line 1920)
         self.assertEqual(fwd.call_args.kwargs["docmask_mb_idx"], 0)
+
+
+class TestPrebuildFromBatchedMicroBatch(unittest.TestCase):
+    """A ``b > 1`` micro-batch mask must be packed before it is preloaded.
+
+    The producer (the trainer's ``_docmask_meta_prebuild``) sees the micro-batch's
+    ``[b, 1, s, 1]`` mask, while the consumer looks the slot up with the shape
+    ``DSv4HybridAttention.forward`` computes after packing, ``(1, b*s)``.
+    Preloading the unpacked layout is what ``per_device_train_batch_size=4``
+    used to do, and it never reached a layer at all.
+    """
+
+    def setUp(self):
+        self.b, self.s, self.ratio = 4, 32, 4
+        self.mask = paddle.concat(
+            [_row_end([13, self.s - 13], self.s) for _ in range(self.b)]
+        )
+        doc_mask_meta_registry.begin_step(1)
+
+    def test_unpacked_preload_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "only support batch_size = 1"):
+            doc_mask_meta_registry.preload(
+                0,
+                self.ratio,
+                self.b,
+                self.s,
+                self.mask,
+                dense_mode=True,
+                mask_group=("main",),
+                window_size=WINDOW,
+            )
+
+    def test_packed_preload_is_hit_by_the_layer_shape(self):
+        packed = pack_dsv4_docmask(
+            self.mask,
+            self.b,
+            self.s,
+            cp_size=1,
+            dense_mode=True,
+            max_sequence_length=self.s,
+        )
+        total = self.b * self.s
+        doc_mask_meta_registry.preload(
+            0,
+            self.ratio,
+            1,
+            total,
+            packed,
+            dense_mode=True,
+            mask_group=("main",),
+            window_size=WINDOW,
+        )
+        meta = doc_mask_meta_registry.get(0, self.ratio, 1, total, ("main",))
+        self.assertIsNotNone(meta)
+        self.assertEqual(
+            (meta.ratio, meta.batch_size, meta.seqlen), (self.ratio, 1, total)
+        )

@@ -208,12 +208,14 @@ class TestTransformerLayerConstructor(unittest.TestCase):
         self.assertFalse(layer.recompute_mlp)
 
     def test_selective_recompute_invalid_modules(self):
-        config = _make_config(
-            recompute_granularity="selective",
-            recompute_modules="invalid",
-        )
+        # validate_recompute_modules runs from TransformerConfig.__post_init__,
+        # so a malformed recompute_modules is rejected at config init instead of
+        # deep inside the layer constructor.
         with self.assertRaises(ValueError):
-            _make_layer(config)
+            _make_config(
+                recompute_granularity="selective",
+                recompute_modules="invalid",
+            )
 
     def test_block_attention_residuals(self):
         config = _make_config(
