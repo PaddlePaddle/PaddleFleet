@@ -1399,26 +1399,41 @@ jobs:
 
   coverage_approval:
     name: Check coverage approval
-    needs: check-bypass
+
+    needs:
+      - multi-card_test
+      - single_card_test
+      - integration-test-H20-multi-card
+      - integration-test-a100
+      - integration-test-H20-single-card
+      - check-bypass
+
     if: ${{ always() && needs.check-bypass.outputs.can-skip != 'true' }}
+
     runs-on:
       group: APPROVAL
+
     permissions:
       contents: read
       pull-requests: read
+
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
       HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
     outputs:
       can-skip: ${{ steps.check-approval.outputs.can-skip }}
+
     steps:
       - name: Check swgu98 coverage approval
         id: check-approval
         run: |
           set -euo pipefail
+
           reviews=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUMBER}/reviews?per_page=100" | jq -s 'add')
+
           can_skip=$(echo "${reviews}" | jq -r --arg head "${HEAD_SHA}" '
             [ .[]
               | select(.user.login == "swgu98")
@@ -1434,6 +1449,7 @@ jobs:
                 "false"
               end
           ')
+
           echo "swgu98 coverage approval: ${can_skip}"
           echo "can-skip=${can_skip}" >> "${GITHUB_OUTPUT}"
 
