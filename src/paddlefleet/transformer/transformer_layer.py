@@ -50,6 +50,18 @@ from paddlefleet.train_infer_consistent_ops.inspect_util import (
 )
 from paddlefleet.transformer.dsv4_hybrid_attention import DSv4HybridAttention
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
+from paddlefleet.transformer.indexcache_state import (
+    INDEXCACHE_DISTILL_STATE_LEN,
+    INDEXCACHE_RECOMPUTE_STATE_MAX_LEN,
+    INDEXCACHE_STATE_KIND_DISTILL,
+    INDEXCACHE_STATE_KIND_TOPK_ONLY,
+    INDEXCACHE_TOPK_ONLY_STATE_LEN,
+    apply_stop_gradient_mask,
+    clone_state_outputs,
+    state_from_slots,
+    state_kind,
+    state_to_slots,
+)
 from paddlefleet.transformer.kimi_delta_attention import KimiDeltaAttention
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
@@ -68,6 +80,33 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _indexcache_stall_trace_enabled(layer_number):
+    """Return whether count-only stall tracing is enabled for this layer."""
+    if os.environ.get("INDEXCACHE_STALL_TRACE", "0") != "1":
+        return False
+    try:
+        layers = {
+            int(value.strip())
+            for value in os.environ.get(
+                "INDEXCACHE_STALL_TRACE_LAYERS", "2"
+            ).split(",")
+            if value.strip()
+        }
+    except ValueError:
+        return False
+    return layer_number in layers
+
+
+def _emit_indexcache_stall_trace(layer_number, phase, edge):
+    """Emit a symmetric marker without tensor values or CUDA synchronization."""
+    if _indexcache_stall_trace_enabled(layer_number):
+        print(
+            "[INDEXCACHE_STALL_TRACE] "
+            f"layer={layer_number} phase={phase} edge={edge}",
+            flush=True,
+        )
 
 
 def is_mtp_shared_last_layer(config, layer_number, is_mtp_layer):
@@ -135,6 +174,98 @@ def tensors_clone(outputs):
         raise ValueError(
             f"Unsupported data type:{type(outputs)} in tensors_clone"
         )
+
+
+def _is_indexcache_recompute_state(value):
+    if not (
+        isinstance(value, (tuple, list))
+        and len(value)
+        in (INDEXCACHE_TOPK_ONLY_STATE_LEN, INDEXCACHE_DISTILL_STATE_LEN)
+        and all(isinstance(item, paddle.Tensor) for item in value)
+    ):
+        return False
+    return state_kind(value) in (
+        INDEXCACHE_STATE_KIND_TOPK_ONLY,
+        INDEXCACHE_STATE_KIND_DISTILL,
+    )
+
+
+def _mark_indexcache_recompute_state_stop_gradient(value):
+    if not _is_indexcache_recompute_state(value):
+        return value
+    return apply_stop_gradient_mask(value)
+
+
+def _ensure_recompute_non_leaf_tensor(value):
+    if (
+        isinstance(value, paddle.Tensor)
+        and not value.stop_gradient
+        and getattr(value, "is_leaf", False)
+    ):
+        return paddle.scale(value, scale=1.0, bias=0.0)
+    return value
+
+
+def _describe_indexcache_recompute_input(value):
+    if value is None:
+        return None
+    if isinstance(value, paddle.Tensor):
+        return {
+            "type": "Tensor",
+            "shape": list(value.shape),
+            "dtype": str(value.dtype),
+            "stop_gradient": bool(value.stop_gradient),
+            "is_leaf": bool(getattr(value, "is_leaf", False)),
+        }
+    if isinstance(value, (tuple, list)):
+        return [
+            _describe_indexcache_recompute_input(item)
+            for item in value
+            if item is not None
+        ]
+    return {"type": type(value).__name__}
+
+
+def _clone_indexcache_recompute_state_outputs(value):
+    return clone_state_outputs(value)
+
+
+def _flatten_indexcache_recompute_outputs(outputs):
+    if not isinstance(outputs, tuple) or len(outputs) <= 2:
+        return outputs
+
+    output, context, indexcache_state = outputs[0], outputs[1], outputs[2]
+    if not _is_indexcache_recompute_state(indexcache_state):
+        return outputs
+
+    indexcache_state = _clone_indexcache_recompute_state_outputs(
+        indexcache_state
+    )
+
+    if context is None:
+        return (output, *indexcache_state)
+    return (output, context, *indexcache_state)
+
+
+def _unpack_flattened_indexcache_recompute_outputs(outputs):
+    if not isinstance(outputs, tuple):
+        return None
+
+    if len(outputs) in (
+        1 + INDEXCACHE_TOPK_ONLY_STATE_LEN,
+        1 + INDEXCACHE_DISTILL_STATE_LEN,
+    ) and all(isinstance(item, paddle.Tensor) for item in outputs[1:]):
+        indexcache_state = apply_stop_gradient_mask(outputs[1:])
+        return outputs[0], None, indexcache_state
+
+    if len(outputs) in (
+        2 + INDEXCACHE_TOPK_ONLY_STATE_LEN,
+        2 + INDEXCACHE_DISTILL_STATE_LEN,
+    ) and all(isinstance(item, paddle.Tensor) for item in outputs[2:]):
+        indexcache_state = apply_stop_gradient_mask(outputs[2:])
+        return outputs[0], outputs[1], indexcache_state
+
+    return None
 
 
 @dataclass
@@ -238,6 +369,12 @@ class TransformerLayer(nn.Layer):
         # scheduler, so install here rather than in one subclass: the base is the
         # only place every transformer variant passes through.
         install_recompute_p2p_overlap(config)
+        if getattr(config, "index_topk_pattern", None):
+            from paddlefleet.pipeline_parallel.indexcache_adapter import (
+                register_indexcache_pipeline_adapter,
+            )
+
+            register_indexcache_pipeline_adapter(config.index_topk_pattern)
         TransformerLayer._gpt_model_use_experimental_version = (
             config.gpt_model_use_experimental_version
         )
@@ -914,8 +1051,91 @@ class TransformerLayer(nn.Layer):
                     **cu_seqlens_kwargs,
                 )
             else:
+                indexcache_state = dict_args.get("indexcache_state", None)
+                indexcache_state = (
+                    apply_stop_gradient_mask(indexcache_state)
+                    if indexcache_state is not None
+                    else None
+                )
+                indexcache_state_slots = state_to_slots(indexcache_state)
+                assert (
+                    len(indexcache_state_slots)
+                    == INDEXCACHE_RECOMPUTE_STATE_MAX_LEN
+                )
+
+                def _forward_impl_for_recompute(
+                    hidden_states,
+                    attention_mask=None,
+                    attn_mask_startend_row_indices=None,
+                    context=None,
+                    context_mask=None,
+                    rotary_pos_emb=None,
+                    rotary_pos_cos=None,
+                    rotary_pos_sin=None,
+                    swa_rotary_pos_emb=None,
+                    swa_rotary_pos_cos=None,
+                    swa_rotary_pos_sin=None,
+                    position_ids=None,
+                    attention_bias=None,
+                    packed_seq_params=None,
+                    input_ids=None,
+                    origin_input_ids=None,
+                    cu_seqlens=None,
+                    indexcache_state_0=None,
+                    indexcache_state_1=None,
+                    indexcache_state_2=None,
+                    indexcache_state_3=None,
+                    indexcache_state_4=None,
+                    indexcache_state_5=None,
+                    indexcache_state_6=None,
+                    indexcache_state_7=None,
+                ):
+                    recompute_indexcache_state = state_from_slots(
+                        (
+                            indexcache_state_0,
+                            indexcache_state_1,
+                            indexcache_state_2,
+                            indexcache_state_3,
+                            indexcache_state_4,
+                            indexcache_state_5,
+                            indexcache_state_6,
+                            indexcache_state_7,
+                        )
+                    )
+                    _emit_indexcache_stall_trace(
+                        self.layer_number, "recompute_body", "enter"
+                    )
+                    body_outputs = self._forward_impl(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                        context=context,
+                        context_mask=context_mask,
+                        rotary_pos_emb=rotary_pos_emb,
+                        rotary_pos_cos=rotary_pos_cos,
+                        rotary_pos_sin=rotary_pos_sin,
+                        swa_rotary_pos_emb=swa_rotary_pos_emb,
+                        swa_rotary_pos_cos=swa_rotary_pos_cos,
+                        swa_rotary_pos_sin=swa_rotary_pos_sin,
+                        position_ids=position_ids,
+                        attention_bias=attention_bias,
+                        packed_seq_params=packed_seq_params,
+                        input_ids=input_ids,
+                        origin_input_ids=origin_input_ids,
+                        cu_seqlens=cu_seqlens,
+                        indexcache_state=recompute_indexcache_state,
+                        **docmask_meta_kwargs,
+                    )
+                    _emit_indexcache_stall_trace(
+                        self.layer_number, "recompute_body", "exit"
+                    )
+                    return _flatten_indexcache_recompute_outputs(body_outputs)
+
+                _emit_indexcache_stall_trace(
+                    self.layer_number, "full_recompute", "enter"
+                )
                 outputs = recompute(
-                    self._forward_impl,
+                    _forward_impl_for_recompute,
                     hidden_states=hidden_states,
                     attention_mask=attention_mask,
                     attn_mask_startend_row_indices=attn_mask_startend_row_indices.clone()
@@ -948,15 +1168,35 @@ class TransformerLayer(nn.Layer):
                     packed_seq_params=packed_seq_params,
                     input_ids=input_ids,
                     origin_input_ids=origin_input_ids,
-                    **cu_seqlens_kwargs,
-                    **docmask_meta_kwargs,
+                    cu_seqlens=cu_seqlens_kwargs.get("cu_seqlens"),
+                    indexcache_state_0=indexcache_state_slots[0],
+                    indexcache_state_1=indexcache_state_slots[1],
+                    indexcache_state_2=indexcache_state_slots[2],
+                    indexcache_state_3=indexcache_state_slots[3],
+                    indexcache_state_4=indexcache_state_slots[4],
+                    indexcache_state_5=indexcache_state_slots[5],
+                    indexcache_state_6=indexcache_state_slots[6],
+                    indexcache_state_7=indexcache_state_slots[7],
                     **offload_kwargs,
+                )
+                _emit_indexcache_stall_trace(
+                    self.layer_number, "full_recompute", "exit"
                 )
         else:
             outputs = self._forward_impl(**dict_args, **docmask_meta_kwargs)
 
-        if isinstance(outputs, tuple):
+        indexcache_state = None
+        flattened_indexcache_outputs = (
+            _unpack_flattened_indexcache_recompute_outputs(outputs)
+            if self.full_recompute
+            else None
+        )
+        if flattened_indexcache_outputs is not None:
+            output, context, indexcache_state = flattened_indexcache_outputs
+        elif isinstance(outputs, tuple):
             output, context = outputs[0], outputs[1]
+            if len(outputs) > 2:
+                indexcache_state = outputs[2]
         else:
             output, context = outputs, None
 
@@ -1023,7 +1263,43 @@ class TransformerLayer(nn.Layer):
             # dict_args unchanged and will be consumed by MTP layer directly
         if context is not None:
             rst["context"] = context
+        if indexcache_state is not None:
+            rst["indexcache_state"] = indexcache_state
+        else:
+            dict_args.pop("indexcache_state", None)
         rst = {**dict_args, **rst}
+        if os.environ.get("INDEXCACHE_TRAIN_DEBUG", "0") == "1" and getattr(
+            self.config, "index_topk_pattern", None
+        ):
+            state = rst.get("indexcache_state", None)
+            if isinstance(state, (tuple, list)):
+                state_len = len(state)
+                state_shapes = [
+                    list(item.shape)
+                    if isinstance(item, paddle.Tensor)
+                    else type(item).__name__
+                    for item in state
+                ]
+                state_stop_gradients = [
+                    bool(item.stop_gradient)
+                    if isinstance(item, paddle.Tensor)
+                    else None
+                    for item in state
+                ]
+            else:
+                state_len = 0
+                state_shapes = None
+                state_stop_gradients = None
+            print(
+                "[INDEXCACHE_TRAIN_FLOW] "
+                f"layer={self.layer_number} "
+                f"full_recompute={self.full_recompute} "
+                f"flattened={flattened_indexcache_outputs is not None} "
+                f"state_len={state_len} state_shapes={state_shapes} "
+                f"state_stop_gradients={state_stop_gradients} "
+                f"keys={list(rst.keys())}",
+                flush=True,
+            )
         return rst
 
     def _forward_impl(
@@ -1044,11 +1320,34 @@ class TransformerLayer(nn.Layer):
         packed_seq_params: PackedSeqParams | None = None,
         input_ids: Tensor | None = None,
         origin_input_ids: Tensor | None = None,
+        indexcache_state: tuple | list | None = None,
         blocks: list | tuple | None = None,
         cu_seqlens: Tensor | None = None,
         docmask_mb_idx: int = -1,
         **kwargs,
     ):
+        if indexcache_state is None:
+            indexcache_state = kwargs.get("indexcache_state", None)
+        if _is_indexcache_recompute_state(indexcache_state):
+            indexcache_state = _mark_indexcache_recompute_state_stop_gradient(
+                indexcache_state
+            )
+            kwargs["indexcache_state"] = indexcache_state
+        elif indexcache_state is not None and "indexcache_state" not in kwargs:
+            kwargs["indexcache_state"] = indexcache_state
+
+        def unpack_attention_outputs(attention_outputs):
+            if (
+                isinstance(attention_outputs, tuple)
+                and len(attention_outputs) == 3
+            ):
+                return (
+                    attention_outputs[0],
+                    attention_outputs[1],
+                    attention_outputs[2],
+                )
+            return attention_outputs[0], attention_outputs[1], indexcache_state
+
         def need_do_attention():
             # need_do_prefill = forward_meta.max_len_tensor_cpu[1] > 0
             # need_do_decode = forward_meta.max_len_tensor_cpu[2] > 0
@@ -1099,27 +1398,31 @@ class TransformerLayer(nn.Layer):
             # Self-attention (skip internal bda residual)
             with profile("attn"):
                 if need_do_attention():
-                    hidden_states, context = self._forward_attention(
-                        hidden_states=hidden_states,
-                        attention_mask=attention_mask,
-                        attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-                        context=context,
-                        context_mask=context_mask,
-                        rotary_pos_emb=rotary_pos_emb,
-                        rotary_pos_cos=rotary_pos_cos,
-                        rotary_pos_sin=rotary_pos_sin,
-                        swa_rotary_pos_emb=swa_rotary_pos_emb,
-                        swa_rotary_pos_cos=swa_rotary_pos_cos,
-                        swa_rotary_pos_sin=swa_rotary_pos_sin,
-                        position_ids=position_ids,
-                        attention_bias=attention_bias,
-                        packed_seq_params=packed_seq_params,
-                        block_attention_residuals=True,
-                        in_recompute=self.full_recompute,
-                        input_ids=input_ids,
-                        cu_seqlens=cu_seqlens,
-                        docmask_mb_idx=docmask_mb_idx,
-                        **kwargs,
+                    hidden_states, context, indexcache_state = (
+                        unpack_attention_outputs(
+                            self._forward_attention(
+                                hidden_states=hidden_states,
+                                attention_mask=attention_mask,
+                                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                                context=context,
+                                context_mask=context_mask,
+                                rotary_pos_emb=rotary_pos_emb,
+                                rotary_pos_cos=rotary_pos_cos,
+                                rotary_pos_sin=rotary_pos_sin,
+                                swa_rotary_pos_emb=swa_rotary_pos_emb,
+                                swa_rotary_pos_cos=swa_rotary_pos_cos,
+                                swa_rotary_pos_sin=swa_rotary_pos_sin,
+                                position_ids=position_ids,
+                                attention_bias=attention_bias,
+                                packed_seq_params=packed_seq_params,
+                                block_attention_residuals=True,
+                                in_recompute=self.full_recompute,
+                                input_ids=input_ids,
+                                cu_seqlens=cu_seqlens,
+                                docmask_mb_idx=docmask_mb_idx,
+                                **kwargs,
+                            )
+                        )
                     )
 
             # Accumulate attn output into partial_block
@@ -1157,26 +1460,30 @@ class TransformerLayer(nn.Layer):
             )
             with profile("attn"):
                 if need_do_attention():
-                    hidden_states, context = self._forward_attention(
-                        hidden_states=hidden_states,
-                        attention_mask=attention_mask,
-                        attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-                        context=context,
-                        context_mask=context_mask,
-                        rotary_pos_emb=rotary_pos_emb,
-                        rotary_pos_cos=rotary_pos_cos,
-                        rotary_pos_sin=rotary_pos_sin,
-                        swa_rotary_pos_emb=swa_rotary_pos_emb,
-                        swa_rotary_pos_cos=swa_rotary_pos_cos,
-                        swa_rotary_pos_sin=swa_rotary_pos_sin,
-                        position_ids=position_ids,
-                        attention_bias=attention_bias,
-                        packed_seq_params=packed_seq_params,
-                        in_recompute=self.full_recompute,
-                        input_ids=input_ids,
-                        cu_seqlens=cu_seqlens,
-                        docmask_mb_idx=docmask_mb_idx,
-                        **kwargs,
+                    hidden_states, context, indexcache_state = (
+                        unpack_attention_outputs(
+                            self._forward_attention(
+                                hidden_states=hidden_states,
+                                attention_mask=attention_mask,
+                                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                                context=context,
+                                context_mask=context_mask,
+                                rotary_pos_emb=rotary_pos_emb,
+                                rotary_pos_cos=rotary_pos_cos,
+                                rotary_pos_sin=rotary_pos_sin,
+                                swa_rotary_pos_emb=swa_rotary_pos_emb,
+                                swa_rotary_pos_cos=swa_rotary_pos_cos,
+                                swa_rotary_pos_sin=swa_rotary_pos_sin,
+                                position_ids=position_ids,
+                                attention_bias=attention_bias,
+                                packed_seq_params=packed_seq_params,
+                                in_recompute=self.full_recompute,
+                                input_ids=input_ids,
+                                cu_seqlens=cu_seqlens,
+                                docmask_mb_idx=docmask_mb_idx,
+                                **kwargs,
+                            )
+                        )
                     )
             self._log_md5(
                 hidden_states, "post_attn_residual", self.layer_number
@@ -1189,6 +1496,8 @@ class TransformerLayer(nn.Layer):
                 )
             self._log_md5(output, "layer_output", self.layer_number)
             output = inspect_tensor("layer_output", self.layer_number, output)
+        if indexcache_state is not None:
+            return output, context, indexcache_state
         if context is not None:
             return output, context
         return output
@@ -1243,6 +1552,7 @@ class TransformerLayer(nn.Layer):
                 context (Tensor): Updated context tensor if cross-attention is used,
                 otherwise None.
         """
+        _emit_indexcache_stall_trace(self.layer_number, "attention", "enter")
 
         # Residual connection.
         residual = hidden_states
@@ -1254,6 +1564,9 @@ class TransformerLayer(nn.Layer):
             )
         else:
             input_layernorm_output = self.input_layernorm(hidden_states)
+        _emit_indexcache_stall_trace(
+            self.layer_number, "input_layernorm", "exit"
+        )
 
         self._log_md5(
             input_layernorm_output, "input_layernorm_out", self.layer_number
@@ -1276,6 +1589,11 @@ class TransformerLayer(nn.Layer):
             extra_kwargs["cu_seqlens"] = cu_seqlens
         if "shared_kv" in kwargs:
             extra_kwargs["shared_kv"] = kwargs["shared_kv"]
+        indexcache_state = kwargs.get("indexcache_state", None)
+        if indexcache_state is not None and isinstance(
+            self.self_attn, DSv4HybridAttention
+        ):
+            extra_kwargs["indexcache_state"] = indexcache_state
 
         if isinstance(self.self_attn, MultiLatentAttention):
             attention_output_with_bias = self.self_attn(
@@ -1325,6 +1643,18 @@ class TransformerLayer(nn.Layer):
                 use_cache=kwargs.get("use_cache", False),
                 **extra_kwargs,
             )
+        _emit_indexcache_stall_trace(
+            self.layer_number, "self_attention", "exit"
+        )
+
+        indexcache_state_updated = False
+        if (
+            isinstance(attention_output_with_bias, tuple)
+            and len(attention_output_with_bias) == 3
+        ):
+            indexcache_state = attention_output_with_bias[2]
+            attention_output_with_bias = attention_output_with_bias[:2]
+            indexcache_state_updated = True
 
         with paddle.enable_grad():
             if block_attention_residuals:
@@ -1375,6 +1705,9 @@ class TransformerLayer(nn.Layer):
         if is_first_fwd:
             hidden_states.stop_gradient = False
 
+        _emit_indexcache_stall_trace(self.layer_number, "attention", "exit")
+        if indexcache_state_updated or indexcache_state is not None:
+            return hidden_states, context, indexcache_state
         return hidden_states, context
 
     def _forward_mlp(
@@ -1395,6 +1728,7 @@ class TransformerLayer(nn.Layer):
         Returns:
             output (Tensor): Transformed hidden states of shape [s, b, h].
         """
+        _emit_indexcache_stall_trace(self.layer_number, "mlp", "enter")
 
         # Residual connection.
         residual = hidden_states
@@ -1408,6 +1742,9 @@ class TransformerLayer(nn.Layer):
             post_attention_layernorm_output = self.post_attention_layernorm(
                 hidden_states
             )
+        _emit_indexcache_stall_trace(
+            self.layer_number, "post_attention_layernorm", "exit"
+        )
 
         self._log_md5(
             post_attention_layernorm_output,
@@ -1415,6 +1752,7 @@ class TransformerLayer(nn.Layer):
             self.layer_number,
         )
 
+        _emit_indexcache_stall_trace(self.layer_number, "mlp_core", "enter")
         if self.recompute_mlp:
             _mlp_input_ids = (
                 input_ids if isinstance(self.mlp, MoELayer) else None
@@ -1460,6 +1798,7 @@ class TransformerLayer(nn.Layer):
                 )
             else:
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
+        _emit_indexcache_stall_trace(self.layer_number, "mlp_core", "exit")
 
         # Log MLP raw output before BDA
         if (
@@ -1494,6 +1833,7 @@ class TransformerLayer(nn.Layer):
         if is_first_fwd:
             hidden_states.stop_gradient = False
 
+        _emit_indexcache_stall_trace(self.layer_number, "mlp", "exit")
         return hidden_states
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
@@ -1874,6 +2214,11 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         if isinstance(self.self_attn, KimiDeltaAttention):
             # Built once per step by the embedding; None makes KDA build its own.
             extra_kwargs["cu_seqlens"] = kwargs.get("cu_seqlens")
+        indexcache_state = kwargs.get("indexcache_state", None)
+        if indexcache_state is not None and isinstance(
+            self.self_attn, DSv4HybridAttention
+        ):
+            extra_kwargs["indexcache_state"] = indexcache_state
         # Micro-batch slot for the shared document-mask metadata, decided in
         # ``forward`` (outside recompute) and only read here. This override is
         # the ``_forward_attention`` that runs whenever enable_hyper_connections
@@ -1934,6 +2279,15 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 **extra_kwargs,
             )
 
+        indexcache_state_updated = False
+        if (
+            isinstance(attention_output_with_bias, tuple)
+            and len(attention_output_with_bias) == 3
+        ):
+            indexcache_state = attention_output_with_bias[2]
+            attention_output_with_bias = attention_output_with_bias[:2]
+            indexcache_state_updated = True
+
         # mHC: fused H_res + H_post + bias-dropout-add
         attention_output_with_bias = inspect_tensor(
             "Attn_output",
@@ -1984,6 +2338,8 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         if is_first_fwd:
             hidden_states.stop_gradient = False
 
+        if indexcache_state_updated or indexcache_state is not None:
+            return hidden_states, context, indexcache_state
         return hidden_states, context
 
     def _forward_mlp(
