@@ -1122,6 +1122,13 @@ class IdentityHyperConnectionModule(nn.Layer):
             default_initializer=nn.initializer.Constant(init_alpha),
         )
 
+        # With enable_hyper_connections=True, every HC sub-module registers
+        # alpha_pre/alpha_post/alpha_res. alpha_pre/post exist in the model's
+        # sharded_state_dict(), but alpha_res does not -- the AOA shape
+        # propagation pass cannot find an input ref for it
+        # (aoa_engine.py:643-649) and would raise "should be assigned before".
+        # So we keep an alpha_res param here that takes no part in any
+        # forward/backward computation, purely to let AOA shape propagate.
         self.alpha_res = self.create_parameter(
             shape=[1],
             dtype=self.config.params_dtype,
