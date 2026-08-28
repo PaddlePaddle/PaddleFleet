@@ -318,6 +318,7 @@ jobs:
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e repo_flag="paddlefleet" \
+            -e NCCL_NVLS_ENABLE=0 \
             -w /paddle --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -424,6 +425,7 @@ jobs:
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e repo_flag="paddlefleet" \
+            -e NCCL_NVLS_ENABLE=0 \
             -w /paddle --network host ${docker_image}
 
       - name: Clone PaddleFleet
@@ -540,6 +542,7 @@ jobs:
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
+            -e NCCL_NVLS_ENABLE=0 \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -743,6 +746,7 @@ jobs:
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
+            -e NCCL_NVLS_ENABLE=0 \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
