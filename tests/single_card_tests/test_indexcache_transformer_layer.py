@@ -53,9 +53,26 @@ def _bias_dropout_add(_training, _fused):
     return apply
 
 
+def _fake_fused_h_res_h_post_bda(
+    _hyper_connection,
+    _h_res,
+    _original_residual,
+    _h_post,
+    layer_output_with_bias,
+    _enable_recompute,
+):
+    return layer_output_with_bias[0], None
+
+
+def _fake_forward_mlp(hidden_states, input_ids=None, **_kwargs):
+    del input_ids
+    return hidden_states
+
+
 def _make_attention_layer(layer_type, state_update):
     layer = SimpleNamespace(
         recompute_input_layernorm=False,
+        recompute_mhc_forward=False,
         input_layernorm=lambda value: value,
         layer_number=1,
         self_attn=_FakeSelfAttention(state_update),
@@ -70,6 +87,10 @@ def _make_attention_layer(layer_type, state_update):
     )
     if layer_type is HyperConnectionTransformerLayer:
         layer.self_attention_hyper_connection = _FakeHyperConnection()
+        layer._fused_h_res_h_post_bda = _fake_fused_h_res_h_post_bda
+        layer._cast_and_discard_fused_bda = (
+            lambda output, _ori_dtype, _span: output
+        )
     return layer
 
 
@@ -93,7 +114,7 @@ def _make_forward_impl_layer(attention_result):
         ),
         _log_md5=lambda *_args, **_kwargs: None,
         _forward_attention=lambda **_kwargs: attention_result,
-        _forward_mlp=lambda hidden_states, input_ids=None: hidden_states,
+        _forward_mlp=_fake_forward_mlp,
     )
 
 
