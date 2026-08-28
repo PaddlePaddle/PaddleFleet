@@ -1953,10 +1953,6 @@ class MLASelfAttention(MultiLatentAttention):
                 )
                 key = paddle.cat([k_no_pe, k_pos_emb], axis=-1)
             elif bool(self.config.apply_rope_fusion) and not self.mqa_latent:
-                if is_decode:
-                    raise NotImplementedError(
-                        "apply_rope_fusion does not support incremental decode in MLA yet."
-                    )
                 from paddlefleet.triton_ops.fused_mla_yarn_rope_apply import (
                     fused_apply_mla_rope_for_kv,
                     fused_apply_mla_rope_for_q,
