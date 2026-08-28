@@ -1122,13 +1122,10 @@ class IdentityHyperConnectionModule(nn.Layer):
             default_initializer=nn.initializer.Constant(init_alpha),
         )
 
-        # With enable_hyper_connections=True, every HC sub-module registers
-        # alpha_pre/alpha_post/alpha_res. alpha_pre/post exist in the model's
-        # sharded_state_dict(), but alpha_res does not -- the AOA shape
-        # propagation pass cannot find an input ref for it
-        # (aoa_engine.py:643-649) and would raise "should be assigned before".
-        # So we keep an alpha_res param here that takes no part in any
-        # forward/backward computation, purely to let AOA shape propagate.
+        # enable_hyper_connections 为true，就无条件给每个 HC 子模块生成三条 alpha_res/pre/post -> alpha_res/pre/post 语句。
+        # alpha_pre/post 存在所以通过，alpha_res 在ihc中没有，因此，在模型 sharded_state_dict() 中找不到输入，
+        # AOA shape 传播的 _get_var_ref 查不到输入（aoa_engine.py:643-649）→ 抛 "should be assigned before"。
+        # 这里初始化一个self.alhpa_res，实际不参与任何前向/反向计算，仅为让 AOA shape 能正确传播。
         self.alpha_res = self.create_parameter(
             shape=[1],
             dtype=self.config.params_dtype,
