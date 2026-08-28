@@ -2917,23 +2917,21 @@ class TransformerConfig(ModelParallelConfig):
                         "indexcache_multi_layer_distill=True requires a "
                         "non-empty index_topk_pattern."
                     )
-                if self.context_parallel_size > 1 and (
+                active_mtp = (
                     self.num_nextn_predict_layers is not None
                     and self.num_nextn_predict_layers > 0
-                ):
+                    and not self.mtp_load_weight_only
+                )
+                if self.context_parallel_size > 1 and active_mtp:
                     raise NotImplementedError(
                         "indexcache_multi_layer_distill currently supports "
-                        "CP training only when num_nextn_predict_layers=0."
+                        "CP training only when the MTP forward is disabled. "
+                        "Weight-only MTP is supported."
                     )
                 if self.csa_indexer_backend != "tilelang":
                     raise NotImplementedError(
                         "indexcache_multi_layer_distill currently supports "
                         "only csa_indexer_backend='tilelang'."
-                    )
-                if self.csa_sparse_attn_backend != "tilelang":
-                    raise NotImplementedError(
-                        "indexcache_multi_layer_distill currently supports "
-                        "only csa_sparse_attn_backend='tilelang'."
                     )
 
             if self.index_topk_pattern and self.recompute_granularity:
@@ -2952,11 +2950,6 @@ class TransformerConfig(ModelParallelConfig):
                     raise NotImplementedError(
                         "IndexCache recompute currently supports only "
                         "csa_indexer_backend='tilelang'."
-                    )
-                if self.csa_sparse_attn_backend != "tilelang":
-                    raise NotImplementedError(
-                        "IndexCache recompute currently supports only "
-                        "csa_sparse_attn_backend='tilelang'."
                     )
 
             if (

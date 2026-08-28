@@ -20,7 +20,11 @@ from paddlefleet.transformer.csa_attention import (
     _indexcache_restore_saved_delta,
     _unpack_indexcache_pipeline_topk,
 )
-from paddlefleet.transformer.dsa_attention import DSAIndexerLossAutoScaler
+from paddlefleet.transformer.dsa_attention import (
+    DSAIndexerLossAutoScaler,
+    DSAIndexerLossLoggingHelper,
+    FusedDSAIndexerLoss,
+)
 from paddlefleet.transformer.indexcache_state import (
     INDEXCACHE_DISTILL_GRAD_INDICES,
     INDEXCACHE_DISTILL_STATE_TOPK_INDICES_PLACEHOLDER,
@@ -146,6 +150,60 @@ class TestIndexCacheConfig(unittest.TestCase):
         )
         self.assertEqual(recompute.recompute_method, "uniform")
 
+    def test_baseline_cp_distill_recompute_contract_is_accepted(self):
+        config = _config_for_pattern(
+            "FS",
+            csa_compress_ratios=[4, 128, 4, 128, 0],
+            indexcache_multi_layer_distill=True,
+            context_parallel_size=8,
+            num_nextn_predict_layers=1,
+            mtp_load_weight_only=True,
+            csa_indexer_backend="tilelang",
+            csa_sparse_attn_backend="cudnn",
+            recompute_granularity="full",
+            recompute_method="uniform",
+            recompute_num_layers=1,
+        )
+
+        self.assertTrue(config.mtp_load_weight_only)
+        self.assertEqual(config.csa_sparse_attn_backend, "cudnn")
+        self.assertEqual(config.recompute_granularity, "full")
+
+    def test_cp_distill_rejects_active_mtp(self):
+        with self.assertRaisesRegex(NotImplementedError, "MTP forward"):
+            _config_for_pattern(
+                "FS",
+                csa_compress_ratios=[4, 128, 4, 128, 0],
+                indexcache_multi_layer_distill=True,
+                context_parallel_size=8,
+                num_nextn_predict_layers=1,
+                mtp_load_weight_only=False,
+            )
+
+    def test_distill_rejects_non_tilelang_indexer(self):
+        with self.assertRaisesRegex(
+            NotImplementedError, "csa_indexer_backend='tilelang'"
+        ):
+            _config_for_pattern(
+                "FS",
+                indexcache_multi_layer_distill=True,
+                csa_indexer_backend="unfused",
+                csa_sparse_attn_backend="cudnn",
+            )
+
+    def test_recompute_rejects_non_tilelang_indexer(self):
+        with self.assertRaisesRegex(
+            NotImplementedError, "csa_indexer_backend='tilelang'"
+        ):
+            _config_for_pattern(
+                "FS",
+                csa_indexer_backend="unfused",
+                csa_sparse_attn_backend="cudnn",
+                recompute_granularity="full",
+                recompute_method="uniform",
+                recompute_num_layers=1,
+            )
+
     def test_invalid_pattern_contracts_fail_fast(self):
         cases = (
             ({"pattern": "FX"}, ValueError),
@@ -182,6 +240,93 @@ class TestIndexCacheConfig(unittest.TestCase):
 
 
 class TestIndexCacheCoreState(unittest.TestCase):
+    def test_cp_indexer_helper_preserves_legacy_and_extended_contracts(self):
+        config = _layer_config(
+            "F",
+            csa_indexer_backend="unfused",
+            dsa_indexer_use_sparse_loss=True,
+            num_hidden_layers=1,
+        )
+        layer = _make_layer(config, 1)
+        layer.cp_size = 2
+        object.__setattr__(layer, "cp_group", None)
+        object.__setattr__(layer, "tp_group", None)
+        object.__setattr__(layer, "softmax_scale", 1.0)
+
+        q_indexer = paddle.zeros([1, 4, 1, 2], dtype="float32")
+        k_indexer = paddle.zeros([1, 2, 2], dtype="float32")
+        weights = paddle.zeros([1, 4, 1], dtype="float32")
+        indexer = SimpleNamespace(
+            index_topk=2,
+            softmax_scale=1.0,
+            forward_before_topk=lambda *_args, **_kwargs: (
+                q_indexer,
+                k_indexer,
+                weights,
+            ),
+        )
+        object.__setattr__(layer, "indexer", indexer)
+
+        query = paddle.zeros([1, 4, 2, 3], dtype="float32")
+        x = paddle.zeros([1, 4, 8], dtype="float32")
+        qr = paddle.zeros([1, 4, 6], dtype="float32")
+        compressed_kv = paddle.zeros([1, 2, 3], dtype="float32")
+        q_positions = paddle.arange(4, dtype="int64")
+        topk_indices = paddle.zeros([1, 4, 2], dtype="int32")
+        mapped_topk = paddle.full([1, 4, 2], 4, dtype="int32")
+        indexer_loss = paddle.to_tensor(2.0, dtype="float32")
+
+        with (
+            patch.object(
+                FusedDSAIndexerLoss,
+                "apply",
+                return_value=indexer_loss,
+            ),
+            patch.object(
+                FusedDSAIndexerLoss,
+                "_last_topk_indices",
+                topk_indices,
+                create=True,
+            ),
+            patch.object(
+                DSAIndexerLossLoggingHelper,
+                "save_loss_to_tracker",
+            ) as save_loss,
+            patch(
+                "paddlefleet.transformer.csa_attention."
+                "map_compressed_topk_to_kv_full_cp",
+                return_value=mapped_topk,
+            ),
+        ):
+            legacy = layer._compute_indexer_compressed_topk_idxs_cp(
+                query,
+                x,
+                qr,
+                compressed_kv,
+                2,
+                4,
+                q_positions,
+                0,
+            )
+            extended = layer._compute_indexer_compressed_topk_idxs_cp(
+                query,
+                x,
+                qr,
+                compressed_kv,
+                2,
+                4,
+                q_positions,
+                0,
+                indexcache_action=(0, "F", "F"),
+            )
+
+        self.assertEqual(len(legacy), 3)
+        self.assertIs(legacy[0], mapped_topk)
+        self.assertAlmostEqual(float(legacy[1]), 1.0)
+        self.assertEqual(len(extended), 6)
+        self.assertEqual(extended[3:], (None, False, None))
+        self.assertEqual(save_loss.call_count, 2)
+
     def test_saved_delta_offload_roundtrip_preserves_device_id(self):
         class FakePlace:
             @staticmethod
