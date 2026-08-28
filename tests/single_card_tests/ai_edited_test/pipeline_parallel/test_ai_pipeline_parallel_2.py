@@ -89,8 +89,15 @@ class TestPipelineParallelMicroStepLocations(unittest.TestCase):
             PipelineParallelMicroStepLocations,
         )
 
-        members = list(PipelineParallelMicroStepLocations)
-        self.assertEqual(len(members), 4)
+        values = {m.value for m in PipelineParallelMicroStepLocations}
+        self.assertTrue(
+            {
+                "forward_begin",
+                "forward_end",
+                "backward_begin",
+                "backward_end",
+            }.issubset(values)
+        )
 
 
 class TestPipelineParallelMicroStepCallback(unittest.TestCase):
