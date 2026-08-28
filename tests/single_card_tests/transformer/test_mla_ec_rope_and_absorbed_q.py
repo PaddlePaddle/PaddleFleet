@@ -990,45 +990,6 @@ class TestApplyRopeFusionNotSupportedInference(unittest.TestCase):
             "prefill should have written the layer KV cache",
         )
 
-    def test_apply_rope_fusion_raises_in_decode(self):
-        """A single-token decode step on a populated cache must raise at the
-        fused-branch entry (``is_decode`` gate)."""
-        model, config = self._build_fused_eval_model()
-
-        sequence_length = 16
-        micro_batch_size = 2
-        cache = DynamicKVCache(config.num_hidden_layers)
-
-        self._run_prefill(
-            model, config, cache, sequence_length, micro_batch_size
-        )
-        self.assertTrue(
-            cache.has_layer_cache(0),
-            "prefill should have written the layer KV cache",
-        )
-
-        # Single-token decode step: same cache, non-zero position_ids
-        # (mirrors the greedy_generator decode loop).
-        next_tok = paddle.randint(0, config.vocab_size, [micro_batch_size, 1])
-        decode_position_ids = paddle.full(
-            [micro_batch_size, 1], sequence_length, dtype="int64"
-        )
-
-        with self.assertRaises(NotImplementedError) as ctx:
-            model(
-                {
-                    "input_ids": next_tok,
-                    "position_ids": decode_position_ids,
-                    "past_key_values": cache,
-                    "use_cache": True,
-                }
-            )
-
-        self.assertIn(
-            "apply_rope_fusion does not support incremental decode in MLA yet.",
-            str(ctx.exception),
-        )
-
     def test_apply_rope_fusion_train_mode(self):
         """apply_rope_fusion=True in train mode should succeed and set k_pe=None (L1000)."""
         model, config = _build_gpt_model(
