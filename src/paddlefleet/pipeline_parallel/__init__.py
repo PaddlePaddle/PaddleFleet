@@ -16,6 +16,7 @@ from paddle.distributed.fleet.meta_parallel.parallel_layers.pp_layers import (
     PipelineLayer,
 )
 
+from .indexcache_adapter import register_indexcache_pipeline_adapter
 from .pp_utils.forward_backward_overlap_utils import (
     ScheduleChunk,
     ScheduleNode,
@@ -25,4 +26,5 @@ __all__ = [
     "PipelineLayer",
     "ScheduleNode",
     "ScheduleChunk",
+    "register_indexcache_pipeline_adapter",
 ]
