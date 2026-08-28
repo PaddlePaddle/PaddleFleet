@@ -798,6 +798,9 @@ class TransformerConfig(ModelParallelConfig):
     use_fp8_qat: bool = False
     """Whether to enable FP8 Quantization-Aware Training (QAT)."""
 
+    use_w4a8: bool = False
+    """Whether to use w4a8 for mlp gemm."""
+
     ####################
     # initialization
     ####################
