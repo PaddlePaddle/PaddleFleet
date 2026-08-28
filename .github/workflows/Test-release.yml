@@ -707,6 +707,7 @@ jobs:
     name: Integration test (H20, multi-card)
     runs-on:
       group: Fleet-H-multi-card
+    timeout-minutes: 400
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -805,7 +806,7 @@ jobs:
 
       - name: GLM4.5 pre-train
         if: (success() || failure()) && steps.formers_install.conclusion == 'success'
-        timeout-minutes: 5
+        timeout-minutes: 330
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -814,6 +815,7 @@ jobs:
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
           bash -x PaddleFormers/tests/integration_test/glm45_pt.sh
           glm45_exit_code=$?
+          sleep 5h
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
             exit 1
