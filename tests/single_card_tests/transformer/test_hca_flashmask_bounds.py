@@ -336,5 +336,105 @@ class TestHCAFlashmaskBoundsCP(unittest.TestCase):
         self.assertFalse(mask[:, :window_size].any())
 
 
+class TestHCAFlashmaskBoundsCache(unittest.TestCase):
+    """``get_hca_flashmask_bounds`` caches without changing the table."""
+
+    def _meta(self, seqlen=32, ratio=4):
+        return CSADocMaskMetadata.build(
+            ratio, 1, seqlen, _startend([5, 14, 3, 8], 2), dense_mode=True
+        )
+
+    def test_matches_uncached_builder(self):
+        seqlen, ratio, window_size = 32, 4, 8
+        meta = self._meta(seqlen, ratio)
+        geometry = (seqlen, seqlen // ratio)
+        cached = meta.get_hca_flashmask_bounds(
+            *geometry, window_size, seqlen, seqlen, 0, 1
+        )
+        direct = build_hca_flashmask_bounds(
+            *geometry,
+            ratio,
+            window_size,
+            seqlen_global=seqlen,
+            seqlen_local=seqlen,
+            position_offset=0,
+            batch_size=1,
+            docmask_meta=self._meta(seqlen, ratio),
+        )
+        np.testing.assert_array_equal(cached.numpy(), direct.numpy())
+
+    def test_same_geometry_hits(self):
+        seqlen, ratio, window_size = 32, 4, 8
+        meta = self._meta(seqlen, ratio)
+        args = (seqlen, seqlen // ratio, window_size, seqlen, seqlen, 0, 1)
+        first = meta.get_hca_flashmask_bounds(*args)
+        # Same tensor object, not just an equal one: the point of the cache is
+        # that all HCA layers of a micro-batch share one table.
+        self.assertIs(meta.get_hca_flashmask_bounds(*args), first)
+
+    def test_changed_geometry_rebuilds(self):
+        """A CP rank shift must not read the previous rank's rows."""
+        seqlen, ratio, window_size, cp_size = 32, 4, 8, 2
+        sq_local = seqlen // cp_size
+        meta = self._meta(seqlen, ratio)
+        n_raw, n_compressed = window_size + sq_local, seqlen // ratio
+        rank0 = meta.get_hca_flashmask_bounds(
+            n_raw, n_compressed, window_size, seqlen, sq_local, 0, 1
+        )
+        rank0 = rank0.clone()
+        rank1 = meta.get_hca_flashmask_bounds(
+            n_raw, n_compressed, window_size, seqlen, sq_local, sq_local, 1
+        )
+        self.assertFalse(np.array_equal(rank0.numpy(), rank1.numpy()))
+        np.testing.assert_array_equal(
+            rank1.numpy(),
+            build_hca_flashmask_bounds(
+                n_raw,
+                n_compressed,
+                ratio,
+                window_size,
+                seqlen_global=seqlen,
+                seqlen_local=sq_local,
+                position_offset=sq_local,
+                batch_size=1,
+                docmask_meta=self._meta(seqlen, ratio),
+            ).numpy(),
+        )
+
+    def test_global_halves_are_shared_across_cp_ranks(self):
+        """The warmed, geometry-free halves serve every rank unchanged.
+
+        This is what makes ``DocMaskMetaRegistry._warm`` worth doing: warming
+        cannot know the CP geometry, so it may only build a table that every
+        rank then slices.
+        """
+        seqlen, ratio, window_size, cp_size = 32, 4, 8, 2
+        sq_local = seqlen // cp_size
+        meta = self._meta(seqlen, ratio)
+        warmed = meta.get_hca_global_row_bounds(window_size)
+        for cp_rank in range(cp_size):
+            meta.get_hca_flashmask_bounds(
+                window_size + sq_local,
+                seqlen // ratio,
+                window_size,
+                seqlen,
+                sq_local,
+                cp_rank * sq_local,
+                1,
+            )
+            after = meta.get_hca_global_row_bounds(window_size)
+            self.assertIs(after[0], warmed[0])
+            self.assertIs(after[1], warmed[1])
+
+    def test_wrong_seqlen_raises(self):
+        """The global halves are indexed by global row, so seqlen must match."""
+        seqlen, ratio, window_size = 32, 4, 8
+        meta = self._meta(seqlen, ratio)
+        with self.assertRaises(ValueError):
+            meta.get_hca_flashmask_bounds(
+                seqlen, seqlen // ratio, window_size, 2 * seqlen, seqlen, 0, 1
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
