@@ -1053,14 +1053,48 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         self.assertEqual(config["sharding_parallel_size"], 2)
         self.assertEqual(model_config["n_routed_experts"], 8)
         self.assertEqual(model_config["num_hidden_layers"], 32)
-        # Default batch strategy shrinks GBS and leaves acc alone.
-        self.assertEqual(config["global_batch_size"], 2)
+        # Default batch strategy shrinks GBS and leaves acc alone.  GBS
+        # follows the data-parallel width (96 -> 2), not the card count:
+        # the trainer asserts GBS == micro_bs * acc * dataset_world_size,
+        # so 8 cards / PP 4 give width 2 and GBS = 1 * 2 * 2 = 4.
+        self.assertEqual(config["global_batch_size"], 4)
         self.assertEqual(config["gradient_accumulation_steps"], 2)
         # No determinism switches unless --test-accuracy is given.
         self.assertEqual(config["csa_sparse_attn_backend"], "cudnn")
         self.assertEqual(model_config["multimax_modules"], ["lm_head"])
         # Environment-specific pin is always dropped.
         self.assertNotIn("fa_version", config)
+
+    def test_stale_checkpoint_refs_are_dropped_when_structure_shrinks(self):
+        # Shrinking EP/PP rescales n_routed_experts / num_hidden_layers, so a
+        # full-scale checkpoint no longer matches; loading it anyway produces
+        # NaN gradients on step 1. The adapter must fall back to random init.
+        self.write_yaml(
+            SOURCE_YAML
+            + "resume_from_checkpoint: /ckpt/full_scale_base\n"
+            + "load_from_hf: true\n"
+        )
+        ok, message = self.adapt(target_nodes=1)
+        self.assertTrue(ok, message)
+        config = self.load_output_yaml(8)
+        self.assertNotIn("resume_from_checkpoint", config)
+        self.assertEqual(config["load_from_hf"], False)
+
+    def test_checkpoint_refs_survive_when_structure_is_unchanged(self):
+        # --test-performance freezes the parallel dims, so the model structure
+        # (and therefore the checkpoint) still matches and must be kept.
+        self.write_yaml(
+            SOURCE_YAML
+            + "resume_from_checkpoint: /ckpt/full_scale_base\n"
+            + "load_from_hf: true\n"
+        )
+        ok, message = self.adapt(target_nodes=64, test_performance=True)
+        self.assertTrue(ok, message)
+        config = self.load_output_yaml(512)
+        self.assertEqual(
+            config["resume_from_checkpoint"], "/ckpt/full_scale_base"
+        )
+        self.assertEqual(config["load_from_hf"], True)
 
     def test_pp_is_shrunk_as_little_as_the_card_count_allows(self):
         # EP 64 -> 2 alone cannot reach 8 cards, but it lets PP stop at 4
@@ -1201,7 +1235,9 @@ class TestAccuracySwitch(ConfigAdapterTestBase):
         self.assertTrue(ok, message)
         config = self.load_output_yaml(8)
         self.assertEqual(config["global_batch_size"], 192)
-        self.assertEqual(config["gradient_accumulation_steps"], 192)
+        # acc follows the data-parallel width (96 -> 2): GBS must equal
+        # micro_bs * acc * dataset_world_size, so acc = 192 / (1 * 2) = 96.
+        self.assertEqual(config["gradient_accumulation_steps"], 96)
         self.assertEqual(config["csa_sparse_attn_backend"], "tilelang")
         # Written even though the source YAML never declared it: the field's
         # own default is the non-deterministic cuDNN backward.
