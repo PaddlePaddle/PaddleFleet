@@ -1387,6 +1387,33 @@ class TransformerConfig(ModelParallelConfig):
         kernel.
     """
 
+    csa_hca_use_flashmask: bool = False
+    """Run the HCA layers through FlashMask instead of ``csa_sparse_attn``.
+
+    Only affects the HCA regime (``csa_compress_ratios`` entry ``>= 128``, i.e.
+    a non-overlapping compressor and no learned Indexer), where every KV
+    column's visible row set is a single contiguous interval and therefore
+    expressible as a 2-vector FlashMask column bound table. The window-only
+    (ratio ``0``), Indexer (``1 < ratio < 128``) and latent-MQA (ratio ``-1`` /
+    ``-2``) regimes keep using ``csa_sparse_attn`` regardless of this switch --
+    the Indexer's per-row top-k column choice is data dependent and has no
+    column-range representation at all.
+
+    Deliberately separate from ``csa_sparse_attn_backend`` because a single
+    model mixes HCA and non-HCA layers under one config, so overloading that
+    switch would also move the out-of-scope regimes.
+
+    Covers both ``cp_size == 1`` and context parallel.
+
+    Requires FA4 (the CSA geometry has ``q_head_dim == v_head_dim``, which only
+    the FA4 cute-DSL kernels accept); the layer raises rather than silently
+    falling back to FA2. Note also that FlashMask asserts a bf16
+    ``learnable_sink``, so the HCA attention sink is read at bf16 here while
+    ``csa_sparse_attn`` reads it at fp32 unless
+    FLAGS_use_accuracy_compatible_kernel=1 -- a small precision difference, not
+    a bug.
+    """
+
     mqa_sparse_attn_backward_backend: str = "cudnn"
     """Backward kernel for the absorbed-MQA latent sparse attention (dkv).
 
@@ -1540,6 +1567,7 @@ class TransformerConfig(ModelParallelConfig):
         "csa_dense_mode": "csa_dense_mode",
         "csa_indexer_backend": "csa_indexer_backend",
         "csa_sparse_attn_backend": "csa_sparse_attn_backend",
+        "csa_hca_use_flashmask": "csa_hca_use_flashmask",
         "csa_share_docmask_meta": "csa_share_docmask_meta",
         "mqa_share_docmask_meta": "mqa_share_docmask_meta",
         "o_groups": "o_groups",
@@ -2317,6 +2345,17 @@ class TransformerConfig(ModelParallelConfig):
                     f"mqa_sparse_attn_backward_backend="
                     f"{self.mqa_sparse_attn_backward_backend!r} is invalid. "
                     "Must be one of {'cudnn', 'tilelang'}."
+                )
+            if self.csa_hca_use_flashmask and not any(
+                r >= 128 for r in (self.csa_compress_ratios or [])
+            ):
+                # The switch only reroutes the HCA regime, so without an HCA
+                # layer it is a silent no-op. Fail instead of pretending the
+                # model runs on FlashMask.
+                raise ValueError(
+                    "csa_hca_use_flashmask=True requires at least one HCA "
+                    "layer (a csa_compress_ratios entry >= 128), got "
+                    f"{self.csa_compress_ratios!r}."
                 )
 
             # Per-attention-type RoPE variant validation (HCA / CSA).
