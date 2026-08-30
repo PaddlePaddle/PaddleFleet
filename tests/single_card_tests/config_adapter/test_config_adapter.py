@@ -1080,6 +1080,18 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         self.assertNotIn("resume_from_checkpoint", config)
         self.assertEqual(config["load_from_hf"], False)
 
+    def test_comm_group_call_opt_is_dropped_when_shrunk_ep_violates_it(self):
+        # muon_sharding_optimizer only allows the switch when EP is a multiple
+        # of gpus_per_node (8); EP shrinks to 2 here, so the adapter must turn
+        # it off instead of shipping a config that dies on the assert.  The
+        # quoted "True" also exercises the loose YAML bool parsing.
+        self.write_yaml(SOURCE_YAML + 'sharding_comm_group_call_opt: "True"\n')
+        ok, message = self.adapt(target_nodes=1)
+        self.assertTrue(ok, message)
+        config = self.load_output_yaml(8)
+        self.assertEqual(config["expert_model_parallel_size"], 2)
+        self.assertEqual(config["sharding_comm_group_call_opt"], False)
+
     def test_checkpoint_refs_survive_when_structure_is_unchanged(self):
         # --test-performance freezes the parallel dims, so the model structure
         # (and therefore the checkpoint) still matches and must be kept.
