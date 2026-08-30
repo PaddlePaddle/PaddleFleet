@@ -495,28 +495,28 @@ class TestAdjacentPairingConfigGuards(unittest.TestCase):
     be reported.
     """
 
-    MLA_DIMS = dict(
-        hybrid_mla_q_lora_rank=128,
-        hybrid_mla_kv_lora_rank=512,
-        hybrid_mla_qk_nope_head_dim=192,
-        hybrid_mla_qk_rope_head_dim=64,
-        hybrid_mla_v_head_dim=64,
-        hybrid_mla_num_attention_heads=1,
-        hybrid_mla_num_key_value_heads=1,
-        dsa_index_n_heads=64,
-        dsa_index_head_dim=128,
-        dsa_index_topk=128,
-    )
+    MLA_DIMS = {
+        "hybrid_mla_q_lora_rank": 128,
+        "hybrid_mla_kv_lora_rank": 512,
+        "hybrid_mla_qk_nope_head_dim": 192,
+        "hybrid_mla_qk_rope_head_dim": 64,
+        "hybrid_mla_v_head_dim": 64,
+        "hybrid_mla_num_attention_heads": 1,
+        "hybrid_mla_num_key_value_heads": 1,
+        "dsa_index_n_heads": 64,
+        "dsa_index_head_dim": 128,
+        "dsa_index_topk": 128,
+    }
 
     def _config(self, **kwargs):
-        base = dict(
-            num_hidden_layers=2,
-            experimental_attention_variant="dsv4_hybrid",
-            csa_compress_ratios=[-2, 128],
-            hybrid_mla_attention="mqa_dsa",
-            mqa_latent_rope_adjacent_pairing=True,
+        base = {
+            "num_hidden_layers": 2,
+            "experimental_attention_variant": "dsv4_hybrid",
+            "csa_compress_ratios": [-2, 128],
+            "hybrid_mla_attention": "mqa_dsa",
+            "mqa_latent_rope_adjacent_pairing": True,
             **self.MLA_DIMS,
-        )
+        }
         base.update(kwargs)
         return TransformerConfig(**base)
 
