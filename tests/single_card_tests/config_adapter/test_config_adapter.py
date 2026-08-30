@@ -1092,6 +1092,34 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         self.assertEqual(config["expert_model_parallel_size"], 2)
         self.assertEqual(config["sharding_comm_group_call_opt"], False)
 
+    def test_comm_group_call_opt_requires_the_muon_optimizer(self):
+        # PaddleFormers' TrainingArguments asserts optim == muon whenever the
+        # switch is on, so satisfying the EP/moe_sharding/TP conditions is not
+        # enough: 128 nodes with the frozen source dims give EP 64 (a multiple
+        # of 8), moe_sharding 2 and TP 1, yet adamw must still drop the flag.
+        self.write_yaml(
+            SOURCE_YAML
+            + "optim: adamw\n"
+            + 'sharding_comm_group_call_opt: "True"\n'
+        )
+        ok, message = self.adapt(target_nodes=128, test_performance=True)
+        self.assertTrue(ok, message)
+        config = self.load_output_yaml(1024)
+        self.assertEqual(config["sharding_comm_group_call_opt"], False)
+
+    def test_comm_group_call_opt_survives_when_all_conditions_hold(self):
+        # Same scale as above but with the Muon optimizer: every condition of
+        # both framework asserts holds, so the switch must NOT be touched.
+        self.write_yaml(
+            SOURCE_YAML
+            + "optim: muon\n"
+            + "sharding_comm_group_call_opt: true\n"
+        )
+        ok, message = self.adapt(target_nodes=128, test_performance=True)
+        self.assertTrue(ok, message)
+        config = self.load_output_yaml(1024)
+        self.assertEqual(config["sharding_comm_group_call_opt"], True)
+
     def test_checkpoint_refs_survive_when_structure_is_unchanged(self):
         # --test-performance freezes the parallel dims, so the model structure
         # (and therefore the checkpoint) still matches and must be kept.
@@ -1665,6 +1693,29 @@ class TestLayerFields(ConfigAdapterTestBase):
         self.assertIn(128, model_config["csa_compress_ratios"][:32])
         self.assertIn(-2, model_config["csa_compress_ratios"][:32])
         self.assertIn("逐层配置", message)
+
+    def test_hf_spelling_compress_ratios_is_truncated_too(self):
+        # dsv4-style HF configs spell the field "compress_ratios";
+        # DeepseekV4ModelProvider transform_rules map it to
+        # csa_compress_ratios verbatim, so the adapter must shrink it under
+        # its original key or the run dies on the length check at startup.
+        self.write_json(
+            {
+                **MODEL_CONFIG,
+                "compress_ratios": [128, 128, 128, -2] * 16 + [-2],
+            }
+        )
+        ok, message = self.adapt(target_nodes=1)
+        self.assertTrue(ok, message)
+        model_config = self.load_output_json(8)
+        self.assertEqual(model_config["num_hidden_layers"], 32)
+        # Written back under the HF spelling, 32 layers + 1 MTP tail entry.
+        self.assertNotIn("csa_compress_ratios", model_config)
+        self.assertEqual(len(model_config["compress_ratios"]), 33)
+        self.assertEqual(model_config["compress_ratios"][-1], -2)
+        # Both attention families of the source pattern survive.
+        self.assertIn(128, model_config["compress_ratios"][:32])
+        self.assertIn(-2, model_config["compress_ratios"][:32])
 
     def test_last_layer_is_realigned_with_the_shared_mtp_layer(self):
         # mtp_shared_last_layer aliases the MTP layer's attention onto the last
