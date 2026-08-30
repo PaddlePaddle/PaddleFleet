@@ -514,6 +514,7 @@ def apply_rotary_pos_emb(
     inverse: bool = False,
     mla_output_remove_interleaving: bool = False,
     apply_rope_fusion: bool | None = None,
+    multi_latent_attention: bool | None = None,
 ):
     """
     Reroute to the appropriate apply_rotary_pos_emb function depending on
@@ -548,16 +549,30 @@ def apply_rotary_pos_emb(
             handle -- e.g. absorbed MQA, whose per-head K/V never exists --
             pass ``False`` so only their layer falls back to the eager path
             while the rest of the model keeps the fusion.
+        multi_latent_attention (bool | None): Per-call override of
+            ``config.multi_latent_attention`` for the RoPE input pairing only.
+            ``None`` (default) means "follow the config", which is what every
+            existing caller gets. Pass ``True`` to de-interleave (pair channels
+            ``2k`` / ``2k+1``) on this call alone -- absorbed-MQA layers need
+            that to keep an MLA checkpoint's channel-to-frequency map, and
+            ``config.multi_latent_attention`` cannot be used for it because it
+            also drives layer-spec selection and position-embedding
+            construction.
     """
     use_fusion = (
         config.apply_rope_fusion
         if apply_rope_fusion is None
         else apply_rope_fusion
     )
+    use_mla_pairing = (
+        config.multi_latent_attention
+        if multi_latent_attention is None
+        else multi_latent_attention
+    )
     rope_kwargs = {
         "apply_rope_fusion": use_fusion if not inverse else False,
         "rotary_interleaved": config.rotary_interleaved,
-        "multi_latent_attention": config.multi_latent_attention,
+        "multi_latent_attention": use_mla_pairing,
         "high_precision_rope": config.high_precision_rope,
         "rope_theta": config.rope_theta,
         "time_major": config.sequence_parallel,
