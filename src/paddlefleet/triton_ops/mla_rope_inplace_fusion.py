@@ -586,7 +586,7 @@ class RoPECatKeyFusion(paddle.autograd.PyLayer):
     """PyLayer wrapping the rope+concat absorbed-key kernels."""
 
     @staticmethod
-    def forward(ctx, kv, kpe, cos, sin, latent_dim, pe_dim, adjacent_in=False):
+    def forward(ctx, kv, kpe, cos, sin, latent_dim, pe_dim, adjacent_in):
         # Input validation via explicit exceptions (not ``assert``): this is the
         # PyLayer behind the public ``fused_rope_cat_key`` entry, so under
         # ``python -O`` a stripped assert would let a wrong shape / non-contiguous
@@ -897,8 +897,8 @@ def _rope_half_out_fwd_kernel(
 
     if ADJACENT_IN:
         # The pair sharing a frequency is adjacent in the *source*, as in
-        # ``rotary_fwd_q_kernel`` (fused_mla_yarn_rope_apply.py:126). Only the
-        # gather positions move: cos/sin indexing, the arithmetic below, the
+        # ``rotary_fwd_q_kernel`` in ``fused_mla_yarn_rope_apply.py``. Only
+        # the gather positions move: cos/sin indexing, the arithmetic below, the
         # rounding and the half-split store positions are all unchanged, which
         # is what keeps this bit-exact with the eager
         # ``multi_latent_attention=True, mla_output_remove_interleaving=False``
@@ -1010,7 +1010,7 @@ class RoPEHalfOutFusion(paddle.autograd.PyLayer):
     """PyLayer wrapping the out-of-place rotate_half fwd/bwd kernels."""
 
     @staticmethod
-    def forward(ctx, t, cos, sin, pe_dim, pe_offset, adjacent_in=False):
+    def forward(ctx, t, cos, sin, pe_dim, pe_offset, adjacent_in):
         # Input validation via explicit exceptions (not ``assert``): this is the
         # PyLayer behind the public ``fused_apply_rope_half`` entry, so under
         # ``python -O`` a stripped assert would let a wrong shape / non-contiguous

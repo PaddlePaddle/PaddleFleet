@@ -1979,20 +1979,16 @@ class MLASelfAttention(MultiLatentAttention):
                     rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3])
 
                 k_rope_fused_with_cat = False
-                # RoPE input pairing for this layer. False (the default, and
-                # what every pre-existing config gets) keeps the (k, k+half)
+                # RoPE input pairing for this layer. False -- the default, and
+                # what every pre-existing config gets -- keeps the (k, k+half)
                 # pairing both branches below have always used. True restores
                 # the (2k, 2k+1) pairing of ``fused_apply_mla_rope_for_q`` /
-                # ``_for_kv``, which is what an unabsorbed MLA checkpoint was
-                # trained with -- absorption cannot reach those kernels
-                # (:1826 falls through on ``mqa_latent``), so without this the
-                # channel-to-frequency map silently permutes when a run switches
-                # to absorbed MQA. Only the absorbed layers are affected; the
-                # HCA/CSA layers pair adjacently already.
-                mqa_rope_adjacent = self.mqa_latent and bool(
-                    getattr(
-                        self.config, "mqa_latent_rope_adjacent_pairing", False
-                    )
+                # ``_for_kv``, which absorption cannot reach (the fused branch
+                # above falls through on ``mqa_latent``), so an MLA checkpoint keeps
+                # its channel-to-frequency map. Inert on non-absorbed layers;
+                # see ``mqa_latent_rope_adjacent_pairing``.
+                mqa_rope_adjacent = self.mqa_latent and getattr(
+                    self.config, "mqa_latent_rope_adjacent_pairing", False
                 )
                 if self.config.gpt_model_use_experimental_version:
                     # EC-compatible RoPE: complex rotation, no YaRN, no mscale
@@ -2040,10 +2036,10 @@ class MLASelfAttention(MultiLatentAttention):
                     # Matches the shape guards elsewhere in this file.
                     # ``mqa_latent_rope_adjacent_pairing`` is the one case that
                     # does implement it: ``adjacent_in=True`` below gathers
-                    # (2k, 2k+1), which is exactly the de-interleave, so the
-                    # guard lifts for it and stands for everything else.
-                    if self.config.multi_latent_attention and not (
-                        mqa_rope_adjacent
+                    # (2k, 2k+1), which is exactly the de-interleave.
+                    if (
+                        self.config.multi_latent_attention
+                        and not mqa_rope_adjacent
                     ):
                         raise ValueError(
                             "mqa_latent_rope_fusion does not implement the "
@@ -2126,13 +2122,10 @@ class MLASelfAttention(MultiLatentAttention):
                         cp_group=self.pg_collection.cp,
                         apply_rope_fusion=bool(self.config.apply_rope_fusion)
                         and not self.mqa_latent,
-                        # None = follow the config, which is what every
-                        # pre-existing config gets. True de-interleaves so the
-                        # pair sharing a frequency is (2k, 2k+1), matching the
-                        # unabsorbed MLA layer's fused kernels; it is passed per
-                        # call because ``config.multi_latent_attention`` also
-                        # drives layer-spec selection and position-embedding
-                        # construction and cannot be flipped globally.
+                        # None = follow the config. True de-interleaves this
+                        # call only, because ``config.multi_latent_attention``
+                        # also drives layer-spec selection and
+                        # position-embedding construction.
                         multi_latent_attention=True
                         if mqa_rope_adjacent
                         else None,
