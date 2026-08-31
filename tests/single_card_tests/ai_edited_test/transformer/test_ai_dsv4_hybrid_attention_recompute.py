@@ -86,6 +86,9 @@ def _make_dsv4_instance(
     inst.qk_pos_emb_head_dim = config.qk_pos_emb_head_dim
     inst.o_local_groups = config.o_groups
     inst.training = True
+    # inspect_tensor probes in forward() / _full_attn_forward() read
+    # self.layer_number; the real module sets it in Attention.__init__.
+    inst.layer_number = 0
 
     # Recompute flags (same logic as __init__)
     inst.recompute_gated_attn = (
