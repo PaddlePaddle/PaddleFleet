@@ -1692,9 +1692,30 @@ class MLASelfAttention(MultiLatentAttention):
                 )
             else:
                 if bool(self.config.apply_rope_fusion) and not self.mqa_latent:
+                    # The fused kernels index the cached cos/sin table by the
+                    # *local* token row (``pid_m % seq_len`` in
+                    # fused_mla_yarn_rope_apply.py), and ``get_cached_cos_sin``
+                    # only knows ``offset`` -- unlike the eager path, which
+                    # also accepts absolute ``position_ids``. During a single-
+                    # token cache decode the caller passes the *absolute*
+                    # position (greedy_generator.py: ``position_ids = full(
+                    # [bsz, 1], cur_len)``), so the table must be regenerated
+                    # at that offset; otherwise row 0 is read for position N
+                    # and the step rotates with position-0 angles. The
+                    # ``.item()`` D2H sync is guarded exactly like the eager
+                    # branch below (:2031).
+                    start_pos = 0
+                    if (
+                        position_ids is not None
+                        and not self.training
+                        and get_context_parallel_world_size() == 1
+                        and position_ids.numel() == rotary_seq_len
+                    ):
+                        start_pos = int(position_ids.flatten()[0].item())
                     rotary_pos_cos, rotary_pos_sin = (
                         self.rotary_pos_emb.get_cached_cos_sin(
                             rotary_seq_len,
+                            offset=start_pos,
                             dtype=hidden_states.dtype,
                             packed_seq=packed_seq,
                         )

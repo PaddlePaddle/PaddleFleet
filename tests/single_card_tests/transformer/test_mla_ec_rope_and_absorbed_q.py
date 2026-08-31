@@ -172,10 +172,13 @@ def _build_gpt_model_with_forward_meta(
     return model, config
 
 
-def _build_gpt_model(gpt_model_use_experimental_version=False):
+def _build_gpt_model(
+    gpt_model_use_experimental_version=False, rope_type="rope"
+):
     """Build a GPT model with MLA."""
     config = _make_mla_gpt_config(
-        gpt_model_use_experimental_version=gpt_model_use_experimental_version
+        gpt_model_use_experimental_version=gpt_model_use_experimental_version,
+        rope_type=rope_type,
     )
 
     # Build transformer layers spec
@@ -909,8 +912,10 @@ class TestNonExperimentalVersionPositionIds(unittest.TestCase):
         self.assertTrue(has_grad, "Should have gradients after backward")
 
 
-class TestApplyRopeFusionNotSupportedInference(unittest.TestCase):
-    """Fused MLA RoPE inference contract: prefill passes, incremental decode raises.
+class TestApplyRopeFusionInferenceContract(unittest.TestCase):
+    """Fused MLA RoPE inference contract: prefill and train-mode forward pass
+    through the fused branch, and prefill + multi-step cache decode matches the
+    eager (non-fused) path numerically, for both ``rope`` and ``yarn``.
 
     All tests below flip ``config.apply_rope_fusion`` on the *already built*
     model and rely on the change taking effect at forward time. They are the
@@ -920,11 +925,13 @@ class TestApplyRopeFusionNotSupportedInference(unittest.TestCase):
     construction -- as generation/greedy_generator.py does for KV cache -- still
     works.
 
-    The decode test additionally guards the ``is_decode`` gate at the fused
-    branch entry (multi_latent_attention.py, ``qkv_up_proj_and_rope_apply``):
-    once a layer has written its prefill KV into ``past_key_values``, the next
-    single-token call is an incremental decode step and must raise
-    NotImplementedError. Eval + prefill (cache still empty) must pass.
+    A single-token decode step carries only its *absolute* position
+    (``greedy_generator.generate`` decode loop passes ``position_ids =
+    full([bsz, 1], cur_len)``). The fused kernels read the cached cos/sin
+    table by *local* token row, so the fused YaRN branch must regenerate the
+    table at ``offset = absolute position`` (multi_latent_attention.py,
+    ``get_query_key_value_tensors``); the decode-equivalence tests below lock
+    that down for both rope types.
     """
 
     def _build_fused_eval_model(self):
@@ -995,11 +1002,7 @@ class TestApplyRopeFusionNotSupportedInference(unittest.TestCase):
         model, config = _build_gpt_model(
             gpt_model_use_experimental_version=False
         )
-        for sublayer in model.sublayers():
-            if hasattr(sublayer, "config") and hasattr(
-                sublayer.config, "apply_rope_fusion"
-            ):
-                sublayer.config.apply_rope_fusion = True
+        self._set_rope_fusion(model, True)
 
         model.train()
 
@@ -1033,6 +1036,154 @@ class TestApplyRopeFusionNotSupportedInference(unittest.TestCase):
             hidden_states.shape,
             [micro_batch_size, sequence_length, config.vocab_size],
         )
+
+    def _set_rope_fusion(self, model, enabled):
+        """Flip ``apply_rope_fusion`` on every layer of an already-built model."""
+        for sublayer in model.sublayers():
+            if hasattr(sublayer, "config") and hasattr(
+                sublayer.config, "apply_rope_fusion"
+            ):
+                sublayer.config.apply_rope_fusion = enabled
+
+    def _run_prefill_decode(
+        self,
+        model,
+        config,
+        input_ids,
+        position_ids,
+        decode_tokens,
+        decode_positions,
+    ):
+        """Prefill through one shared ``DynamicKVCache``, then step through the
+        single-token decode calls. Returns the hidden state of every step,
+        prefill first.
+
+        ``decode_tokens`` / ``decode_positions`` are fixed by the caller so the
+        eager (fusion-off) and fused runs consume identical inputs.
+        Mirrors the ``greedy_generator.generate`` decode loop: per-step
+        ``position_ids = full([bsz, 1], cur_len)``, no attention mask (causal
+        default).
+        """
+        cache = DynamicKVCache(config.num_hidden_layers)
+        outputs = []
+        with paddle.no_grad():
+            result = model(
+                {
+                    "input_ids": input_ids,
+                    "position_ids": position_ids,
+                    "past_key_values": cache,
+                    "use_cache": True,
+                }
+            )
+            outputs.append(
+                result["hidden_states"] if isinstance(result, dict) else result
+            )
+            for token, step_position in zip(decode_tokens, decode_positions):
+                result = model(
+                    {
+                        "input_ids": token,
+                        "position_ids": step_position,
+                        "past_key_values": cache,
+                        "use_cache": True,
+                    }
+                )
+                outputs.append(
+                    result["hidden_states"]
+                    if isinstance(result, dict)
+                    else result
+                )
+        return outputs
+
+    def _assert_prefill_decode_equivalence(self, rope_type):
+        """Prefill + multi-step cache decode with ``apply_rope_fusion=True``
+        must reproduce the eager (non-fused) model's hidden states step by
+        step, for the given ``rope_type``. A single-token decode at position
+        ``cur_len`` rotates with the *absolute* position's angles; a fused
+        table left at offset 0 would differ by O(1) and fail the tolerance.
+        """
+        model, config = _build_gpt_model(
+            gpt_model_use_experimental_version=False, rope_type=rope_type
+        )
+        model.eval()
+
+        sequence_length = 8
+        decode_steps = 4
+        batch_size = 1
+
+        # Fixed inputs shared by the eager and fused runs.
+        input_ids = paddle.randint(
+            0, config.vocab_size, [batch_size, sequence_length]
+        )
+        position_ids = paddle.arange(
+            sequence_length, dtype=paddle.int64
+        ).unsqueeze(0)
+        decode_tokens = paddle.randint(
+            0, config.vocab_size, [decode_steps, batch_size, 1]
+        )
+        decode_positions = paddle.arange(
+            sequence_length, sequence_length + decode_steps, dtype=paddle.int64
+        ).reshape([decode_steps, batch_size, 1])
+
+        self._set_rope_fusion(model, False)
+        eager_outputs = self._run_prefill_decode(
+            model,
+            config,
+            input_ids,
+            position_ids,
+            decode_tokens,
+            decode_positions,
+        )
+        self._set_rope_fusion(model, True)
+        fused_outputs = self._run_prefill_decode(
+            model,
+            config,
+            input_ids,
+            position_ids,
+            decode_tokens,
+            decode_positions,
+        )
+
+        self.assertEqual(len(eager_outputs), len(fused_outputs))
+        for step_index, (eager, fused) in enumerate(
+            zip(eager_outputs, fused_outputs)
+        ):
+            self.assertEqual(
+                list(fused.shape),
+                list(eager.shape),
+                f"rope_type={rope_type} step {step_index}: shape mismatch",
+            )
+            eager_f32 = eager.astype(paddle.float32)
+            fused_f32 = fused.astype(paddle.float32)
+            max_diff = (fused_f32 - eager_f32).abs().max().item()
+            # Measured fused-vs-eager spread on this model is <= ~1.5% of the
+            # output scale (bf16 cos/sin cache for the fused kernels vs fp32
+            # freqs for the eager path), while a decode step rotated with the
+            # wrong absolute position changes q/k by O(1), so a 2%-scale
+            # tolerance separates path noise from the position bug.
+            self.assertTrue(
+                bool(
+                    paddle.allclose(
+                        fused_f32,
+                        eager_f32,
+                        rtol=2e-2,
+                        atol=5e-2,
+                    ).item()
+                ),
+                f"rope_type={rope_type} step {step_index} "
+                f"(prefill if 0 else decode): fused vs eager differ, "
+                f"max abs diff={max_diff}, "
+                f"eager absmax={eager_f32.abs().max().item()}",
+            )
+
+    def test_rope_prefill_then_decode_matches_eager(self):
+        """``rope_type='rope'``: fused prefill + multi-step cache decode equals
+        the eager path, step by step."""
+        self._assert_prefill_decode_equivalence(rope_type="rope")
+
+    def test_yarn_prefill_then_decode_matches_eager(self):
+        """``rope_type='yarn'`` (default): fused prefill + multi-step cache
+        decode equals the eager path, step by step."""
+        self._assert_prefill_decode_equivalence(rope_type="yarn")
 
 
 if __name__ == "__main__":
