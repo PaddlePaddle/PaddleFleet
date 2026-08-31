@@ -221,7 +221,6 @@ def _apply_rotary_pos_emb_identity(
     inverse=False,
     mla_output_remove_interleaving=False,
     apply_rope_fusion=None,
-    multi_latent_attention=None,
 ):
     return t
 

@@ -610,8 +610,20 @@ class TransformerConfig(ModelParallelConfig):
     """
 
     mqa_latent_rope_adjacent_pairing: bool = False
-    """If True, the absorbed-MQA (``mqa_latent``) layers pair RoPE channels
-    ``(2k, 2k+1)`` instead of ``(k, k+half)``.
+    """Which RoPE channel pair shares a frequency in absorbed-MQA layers.
+
+    Values, both meaningful for every absorbed-MQA (``mqa_latent``) config:
+
+    - ``False`` (default) -- pair ``(k, k+half)``, exactly what both the eager
+      and the ``mqa_latent_rope_fusion`` branch have always done. The default
+      therefore leaves every pre-existing config bit-identical, and the DSA
+      indexer, which shares ``fused_apply_rope_half``, keeps this pairing too.
+      Choose it for a model trained from scratch with absorption on, or whenever
+      no checkpoint has to survive an absorption switch.
+    - ``True`` -- pair ``(2k, 2k+1)`` in the absorbed layers only. Choose it when
+      loading a checkpoint whose MLA layers were trained unabsorbed under
+      ``apply_rope_fusion``, above all when the backbone is frozen and cannot
+      adapt.
 
     A **checkpoint-compatibility** switch, not a performance one: which two
     channels share a frequency decides which frequency each learned channel of
@@ -630,7 +642,8 @@ class TransformerConfig(ModelParallelConfig):
     distils a scrambled attention distribution; see ``train_indexer_only``).
 
     Set it to keep the pairing across that switch. It reaches both paths: the
-    eager one via a per-call ``multi_latent_attention=True`` (the config field
+    eager one via a per-call ``multi_latent_attention=True`` (passed only when
+    this flag is set, so the default path's call is unchanged; the config field
     itself cannot be flipped, since it also drives layer-spec selection and
     position-embedding construction), the fused one via ``adjacent_in=True`` on
     ``fused_apply_rope_half`` / ``fused_rope_cat_key``. Only the gather

@@ -1990,6 +1990,16 @@ class MLASelfAttention(MultiLatentAttention):
                 mqa_rope_adjacent = self.mqa_latent and getattr(
                     self.config, "mqa_latent_rope_adjacent_pairing", False
                 )
+                # Only spelled out when the pairing is switched, so the default
+                # path calls ``apply_rotary_pos_emb`` with exactly the arguments
+                # it did before. ``True`` de-interleaves these two calls alone,
+                # because ``config.multi_latent_attention`` also drives
+                # layer-spec selection and position-embedding construction.
+                rope_pairing_kwargs = (
+                    {"multi_latent_attention": True}
+                    if mqa_rope_adjacent
+                    else {}
+                )
                 if self.config.gpt_model_use_experimental_version:
                     # EC-compatible RoPE: complex rotation, no YaRN, no mscale
                     from paddlefleet.transformer.transformer_layer import (
@@ -2122,13 +2132,7 @@ class MLASelfAttention(MultiLatentAttention):
                         cp_group=self.pg_collection.cp,
                         apply_rope_fusion=bool(self.config.apply_rope_fusion)
                         and not self.mqa_latent,
-                        # None = follow the config. True de-interleaves this
-                        # call only, because ``config.multi_latent_attention``
-                        # also drives layer-spec selection and
-                        # position-embedding construction.
-                        multi_latent_attention=True
-                        if mqa_rope_adjacent
-                        else None,
+                        **rope_pairing_kwargs,
                     )
                     # k_pos_emb:[num_tokens, 1, qk_rope_head_dim]
                     k_pos_emb = apply_rotary_pos_emb(
@@ -2146,9 +2150,7 @@ class MLASelfAttention(MultiLatentAttention):
                         apply_rope_fusion=bool(self.config.apply_rope_fusion)
                         and not self.mqa_latent,
                         # Must match the q side above: the two meet in q @ k^T.
-                        multi_latent_attention=True
-                        if mqa_rope_adjacent
-                        else None,
+                        **rope_pairing_kwargs,
                     )
 
                 # query: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
