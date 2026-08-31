@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import inspect
 import os
 import subprocess
 import sys
@@ -806,6 +807,183 @@ class TestSituGLU(unittest.TestCase):
                             f"{ref_mean:.6f}"
                         ),
                     )
+
+    def test_fp8_swiglu_clamp_paths_still_run(self):
+        """Inserting the SiTU branch must not shadow SwiGLU's clamp branch.
+
+        ``fwd_down_fp8`` and ``bwd_down_input_fp8`` dispatch on
+        ``activation_type`` before they look at ``clamp_value``, so a SwiGLU
+        expert with a clamp has to keep reaching
+        ``fuse_weighted_swiglu_fp8_quant_clamp`` /
+        ``fused_swiglu_weighted_clamp_bwd``. Nothing else in this file drives
+        the fp8 clamp branches.
+
+        The clamp is asserted to bite by comparing against the same expert run
+        without one: a clamp low enough to cut into ``o1`` has to move the
+        output, otherwise this test would pass even if the branch silently fell
+        through to the non-clamp kernel.
+        """
+        hidden_size = 1024
+        intermediate_size = 512
+        tokens_per_expert = [128, 128]
+        num_tokens = sum(tokens_per_expert)
+
+        def run(clamp_value):
+            model_parallel_cuda_manual_seed(2026)
+            paddle.seed(2026)
+            hidden_states = paddle.randn(
+                [num_tokens, hidden_size], dtype="bfloat16"
+            )
+            probs = paddle.rand([num_tokens], dtype="float32")
+            out_grad = paddle.randn([num_tokens, hidden_size], dtype="bfloat16")
+            # 0.1 (not the usual 0.01) so o1 reaches past the clamp value.
+            weight1 = (
+                paddle.randn(
+                    [2, hidden_size, 2 * intermediate_size], dtype="bfloat16"
+                )
+                * 0.1
+            )
+            weight2 = (
+                paddle.randn(
+                    [2, intermediate_size, hidden_size], dtype="bfloat16"
+                )
+                * 0.1
+            )
+            config = TransformerConfig(
+                hidden_size=hidden_size,
+                num_hidden_layers=1,
+                num_attention_heads=8,
+                intermediate_size=intermediate_size,
+                moe_intermediate_size=intermediate_size,
+                gated_linear_unit=True,
+                params_dtype="bfloat16",
+            )
+            expert = GroupedMLPExpert(
+                num_local_experts=2, config=config, moe_deep_gemm=True
+            )
+            expert.weight1.set_value(weight1)
+            expert.weight2.set_value(weight2)
+            expert.weight1.main_grad = None
+            expert.weight2.main_grad = None
+            custom_map = SimpleNamespace(
+                config=config,
+                grouped_gemm_experts=expert,
+                token_dispatcher=SimpleNamespace(
+                    _comm_manager=SimpleNamespace(
+                        tokens_per_expert=tokens_per_expert
+                    )
+                ),
+            )
+            node = ExpertsGroupGemmContiguousNode(
+                custom_map,
+                use_fp8_mlp=True,
+                moe_expert_fusion=True,
+                moe_deep_gemm=True,
+                use_ue8m0=False,
+                use_bf16_gemm_weight_grad=True,
+                activation_type="swiglu",
+                clamp_value=clamp_value,
+            )
+            output = node.forward(hidden_states, probs, tokens_per_expert)
+            input_grad, probs_grad = node.backward(out_grad, probs)
+            return output, input_grad, probs_grad
+
+        clamped = run(0.5)
+        unclamped = run(None)
+
+        for name, tensor in zip(
+            ("output", "input_grad", "probs_grad"), clamped
+        ):
+            self.assertTrue(
+                bool(paddle.isfinite(tensor.astype("float32")).all()),
+                msg=f"clamped {name} has non-finite values",
+            )
+
+        for name, with_clamp, without in zip(
+            ("output", "input_grad", "probs_grad"), clamped, unclamped
+        ):
+            delta = float(
+                (with_clamp.astype("float32") - without.astype("float32"))
+                .abs()
+                .max()
+            )
+            self.assertGreater(
+                delta,
+                0.0,
+                msg=(
+                    f"{name} is identical with and without clamp_value, so the "
+                    "fp8 clamp branch was not taken"
+                ),
+            )
+
+    def test_situ_glu_fusion_defaults_to_off(self):
+        """The Triton SiTU-GLU kernel is opt-in, on every entry point.
+
+        Four defaults were flipped from True to False together; a regression in
+        any one of them silently moves runs onto (or off) the fused kernel
+        without touching a config file, so pin all four.
+        """
+        self.assertFalse(TransformerConfig.situ_glu_fusion)
+        self.assertFalse(
+            TransformerConfig(
+                hidden_size=8,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                intermediate_size=8,
+            ).situ_glu_fusion
+        )
+
+        for fn in (situ_glu_scale_forward, situ_glu_scale_backward):
+            self.assertIs(
+                inspect.signature(fn).parameters["situ_glu_fusion"].default,
+                False,
+                msg=f"{fn.__name__} must default to the unfused path",
+            )
+
+        # The node reads the flag off the config with its own fallback, used
+        # when an older config object predates the field. moe_expert_fusion
+        # keeps __init__ on the branch that only needs grouped_gemm_experts.
+        node = ExpertsGroupGemmContiguousNode(
+            SimpleNamespace(
+                config=SimpleNamespace(),
+                grouped_gemm_experts=SimpleNamespace(),
+            ),
+            use_fp8_mlp=False,
+            moe_expert_fusion=True,
+        )
+        self.assertFalse(node.situ_glu_fusion)
+
+    def test_situ_backward_allocates_fresh_grad_buffers(self):
+        """SiTU's backward must not alias its input, fused or not.
+
+        ``backward_impl_fp8`` only sets ``used_inplace_swiglu`` for
+        non-SiTU activations, and the release timing for ``o1`` hangs off that
+        flag: were ``situ_glu_scale_backward`` to hand back a view of ``x``,
+        the early ``del o1`` would drop the buffer while kernels still read it.
+        Assert the property the guard relies on rather than the guard itself.
+        """
+        rows, width = 8, 64
+        for situ_glu_fusion in (False, True):
+            with self.subTest(situ_glu_fusion=situ_glu_fusion):
+                paddle.seed(2026)
+                x = paddle.randn([rows, 2 * width], dtype="bfloat16")
+                probs = paddle.rand([rows], dtype="float32")
+                out_grad = paddle.randn([rows, width], dtype="bfloat16")
+
+                x_grad, o2_s, probs_grad = situ_glu_scale_backward(
+                    x,
+                    probs,
+                    out_grad,
+                    4.0,
+                    25.0,
+                    situ_glu_fusion=situ_glu_fusion,
+                )
+
+                self.assertNotEqual(x_grad.data_ptr(), x.data_ptr())
+                self.assertNotEqual(o2_s.data_ptr(), out_grad.data_ptr())
+                self.assertEqual(x_grad.shape, x.shape)
+                self.assertEqual(o2_s.shape, out_grad.shape)
+                self.assertEqual(probs_grad.shape, probs.shape)
 
     def test_situ_fusion_moe_deep_gemm_smoke(self):
         model_parallel_cuda_manual_seed(2026)
