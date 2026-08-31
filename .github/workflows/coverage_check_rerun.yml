@@ -2,7 +2,7 @@ name: Coverage-check Re-run
 
 on:
   pull_request_review:
-    types: [submitted]
+    types: [submitted, edited, dismissed]
 
 permissions:
   actions: write
@@ -16,11 +16,11 @@ concurrency:
 jobs:
   rerun-on-approval:
     if: >-
-      github.event.review.state == 'approved' &&
-      github.event.review.commit_id == github.event.pull_request.head.sha &&
       github.event.review.user.login == 'swgu98' &&
-      contains(github.event.review.body, 'lgtm') &&
-      contains(github.event.review.body, 'coverage')
+      github.event.review.commit_id == github.event.pull_request.head.sha &&
+      (github.event.action == 'submitted' ||
+       github.event.action == 'edited' ||
+       github.event.action == 'dismissed')
     runs-on:
       group: APPROVAL
     env:
@@ -121,7 +121,12 @@ jobs:
           unfinished_jobs=()
           for job_name in "${required_jobs[@]}"; do
             job_status=$(jq -r --arg name "${job_name}" '
-              [.jobs[] | select(.name == $name)]
+              [.jobs[]
+                | select(
+                    .name == $name or
+                    ($name == "Check bypass" and (.name | endswith(" / Check bypass")))
+                  )
+              ]
               | sort_by(.started_at // .completed_at // "")
               | last
               | .status // "missing"
