@@ -40,6 +40,7 @@ from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
 from paddlefleet.transformer import FleetLayer
+from paddlefleet.transformer.dw_overlap import deferrable_linear
 
 _ACCURACY_COMPATIBLE_KERNEL: bool = (
     os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
@@ -1724,8 +1725,12 @@ class Compressor(nn.Layer):
                 x, self.linear_wgate.weight
             )  # [b, sq, coff * head_dim]
         else:
-            kv, _ = self.linear_wkv(x)  # [b, sq, coff * head_dim]
-            score, _ = self.linear_wgate(x)  # [b, sq, coff * head_dim]
+            kv, _ = deferrable_linear(
+                self.config, "attn_compressor_proj", self.linear_wkv, x
+            )  # [b, sq, coff * head_dim]
+            score, _ = deferrable_linear(
+                self.config, "attn_compressor_proj", self.linear_wgate, x
+            )  # [b, sq, coff * head_dim]
 
         cp_size = getattr(cp_group, "nranks", 1) if cp_group is not None else 1
         cp_rank = cp_group.rank if cp_size > 1 else 0
@@ -2120,7 +2125,9 @@ class CSAIndexer(nn.Layer):
         b, sq, _ = x.shape
         doc_lens = docmask_meta.doc_lens if docmask_meta is not None else None
         # Q path
-        q, _ = self.linear_wq_b(qr)  # [b, sq, n_heads * head_dim]
+        q, _ = deferrable_linear(
+            self.config, "attn_indexer_q_proj", self.linear_wq_b, qr
+        )  # [b, sq, n_heads * head_dim]
         q = q.reshape([b, sq, self.index_n_heads, self.index_head_dim])
         if self.rotary_pos_emb is not None and self.qk_pos_emb_head_dim > 0:
             q = _apply_rope(
@@ -2148,7 +2155,12 @@ class CSAIndexer(nn.Layer):
         )  # [b, n_compressed, index_head_dim]
 
         # Weights
-        weights, _ = self.linear_weights_proj(x)  # [b, sq, n_heads]
+        weights, _ = deferrable_linear(
+            self.config,
+            "attn_indexer_weights_proj",
+            self.linear_weights_proj,
+            x,
+        )  # [b, sq, n_heads]
         weights = weights * (self.index_n_heads**-0.5)
 
         return q, k, weights

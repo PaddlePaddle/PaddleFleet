@@ -6,7 +6,7 @@ Unit tests for PaddleFleet pipeline parallel communication, P2P operations, sche
 
 | File | Description / 描述 |
 |------|-------------------|
-| `test_ai_dw_overlap.py` | Tests for dw_p2p_overlap code paths in FusedGateDetachMatmul, TopKRouter, FP8OverlapProj / 测试数据权重重叠 P2P 代码路径 |
+| `test_ai_moe_router.py` | Tests for the p2p_overlap_dw_calc deferral points in FusedGateDetachMatmul, TopKRouter, DeferredWeightGradLinear / 测试 dW 延后计算掩盖 P2P 的各个生效点 |
 | `test_ai_forward_backward_overlap_extra.py` | Tests for ScheduleChunk initialization / 测试调度块初始化 |
 | `test_ai_forward_backward_overlap_utils.py` | Tests for FakeClone in forward_backward_overlap_utils / 测试前向反向重叠工具中的 FakeClone |
 | `test_ai_four_directions_p2p_communication.py` | Tests for XPU communication group management / 测试四方向 P2P 通信组管理 |

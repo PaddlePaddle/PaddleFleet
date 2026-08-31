@@ -25,7 +25,7 @@ Covers:
   - AllGatherTokenDispatcher (all methods)
   - AllToAllTokenDispatcher.get_dispatched_routing / token_combine
   - MoEFlexTokenDispatcher.get_dispatched_routing
-  - MoELayer._validate_allgather_config / _project_to_latent /
+  - MoELayer._validate_intermediate_ep_sharding_config / _project_to_latent /
     _maybe_pre_allgather_overlap / combine
   - TransformerLayerWithOverlap ValueError for non-deepep dispatchers
 """
@@ -740,7 +740,7 @@ class TestFlexDispatcherGetDispatchedRouting(unittest.TestCase):
 
 
 class TestMoELayerHelpers(unittest.TestCase):
-    """Tests for MoELayer._validate_allgather_config, _project_to_latent,
+    """Tests for MoELayer._validate_intermediate_ep_sharding_config, _project_to_latent,
     _maybe_pre_allgather_overlap."""
 
     def _make_mock_layer(self, **overrides):
@@ -770,27 +770,27 @@ class TestMoELayerHelpers(unittest.TestCase):
 
         layer = self._make_mock_layer(using_sonic_moe=False)
         with self.assertRaises(ValueError):
-            MoELayer._validate_allgather_config(layer)
+            MoELayer._validate_intermediate_ep_sharding_config(layer)
 
     def test_validate_allgather_forces_fusion_node(self):
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
         layer = self._make_mock_layer(moe_use_fusion_node=False)
-        MoELayer._validate_allgather_config(layer)
+        MoELayer._validate_intermediate_ep_sharding_config(layer)
         self.assertTrue(layer.moe_use_fusion_node)
 
     def test_validate_allgather_forces_expert_fusion(self):
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
         layer = self._make_mock_layer(moe_expert_fusion=False)
-        MoELayer._validate_allgather_config(layer)
+        MoELayer._validate_intermediate_ep_sharding_config(layer)
         self.assertTrue(layer.moe_expert_fusion)
 
     def test_validate_allgather_disables_deep_gemm(self):
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
         layer = self._make_mock_layer(moe_deep_gemm=True)
-        MoELayer._validate_allgather_config(layer)
+        MoELayer._validate_intermediate_ep_sharding_config(layer)
         self.assertFalse(layer.moe_deep_gemm)
 
     def test_validate_allgather_bad_intermediate_raises(self):
@@ -800,13 +800,13 @@ class TestMoELayerHelpers(unittest.TestCase):
             moe_intermediate_size=7, expert_model_parallel_size=2
         )
         with self.assertRaises(ValueError):
-            MoELayer._validate_allgather_config(layer)
+            MoELayer._validate_intermediate_ep_sharding_config(layer)
 
     def test_validate_allgather_ok(self):
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
         layer = self._make_mock_layer()
-        MoELayer._validate_allgather_config(layer)
+        MoELayer._validate_intermediate_ep_sharding_config(layer)
         self.assertTrue(layer.using_sonic_moe)
 
     def test_validate_allgather_fp8_bad_intermediate_per_rank_raises(self):
@@ -824,7 +824,7 @@ class TestMoELayerHelpers(unittest.TestCase):
             fp8="e4m3",
         )
         with self.assertRaises(ValueError) as ctx:
-            MoELayer._validate_allgather_config(layer)
+            MoELayer._validate_intermediate_ep_sharding_config(layer)
         self.assertIn("128", str(ctx.exception))
         self.assertIn("448", str(ctx.exception))
 
@@ -837,7 +837,7 @@ class TestMoELayerHelpers(unittest.TestCase):
             expert_model_parallel_size=4,
             fp8="e4m3",
         )
-        MoELayer._validate_allgather_config(layer)
+        MoELayer._validate_intermediate_ep_sharding_config(layer)
         self.assertTrue(layer.using_sonic_moe)
 
     def test_validate_allgather_fp8_disabled_skips_128_check(self):
@@ -849,7 +849,7 @@ class TestMoELayerHelpers(unittest.TestCase):
             expert_model_parallel_size=8,
             fp8=None,
         )
-        MoELayer._validate_allgather_config(layer)
+        MoELayer._validate_intermediate_ep_sharding_config(layer)
         self.assertTrue(layer.using_sonic_moe)
 
     def test_project_to_latent_no_latent(self):
@@ -1407,7 +1407,7 @@ class TestMoELayerInitAllgatherPaths(unittest.TestCase):
     """Cover moe_layer.py lines 296, 356, 461-462, 606."""
 
     def test_validate_called_on_allgather_init(self):
-        """Line 296: _validate_allgather_config called for allgather type."""
+        """Line 296: _validate_intermediate_ep_sharding_config called for allgather type."""
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
         layer = MagicMock()
@@ -1425,7 +1425,7 @@ class TestMoELayerInitAllgatherPaths(unittest.TestCase):
             called["yes"] = True
 
         with patch.object(
-            MoELayer, "_validate_allgather_config", fake_validate
+            MoELayer, "_validate_intermediate_ep_sharding_config", fake_validate
         ):
             fake_validate(layer)
         self.assertIn("yes", called)

@@ -43,6 +43,7 @@ from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
 from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
+from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -695,6 +696,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 dtype=hc_param_dtype,
                 default_initializer=nn.initializer.Constant(1.0),
             )
+            self._cast_to_low_precision = False
             if self.sequence_parallel:
                 self.hc_head_fn.is_distributed = False
                 self.hc_head_base.is_distributed = False
@@ -838,7 +840,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                 hs_streams = hs_streams * mtp_hidden_inputs_mask.unsqueeze(-1)
 
             # e_proj: [.., h] -> [.., h/tp]
-            e_out, _ = self.e_proj(decoder_input)
+            e_out, _ = deferrable_linear(
+                self.config, "mtp_e_proj", self.e_proj, decoder_input
+            )
             # h_proj: applied per-stream [.., n, h] -> [.., n, h/tp]
             # 4D tensor [b,s,n,h] causes .t() error in backward; reshape to 3D first
             orig_shape = list(hs_streams.shape)  # [s/sp, b, n, h]
@@ -846,7 +850,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                 # [s/sp, b, n, h] --> [s, b, n, h]
                 orig_shape[0] = orig_shape[0] * self.tensor_parallel
             hs_flat = hs_streams.reshape([-1, orig_shape[-1]])  # [s/sp*b*n, h]
-            h_out, _ = self.h_proj(hs_flat)  # [s*b*n, h/tp]
+            h_out, _ = deferrable_linear(
+                self.config, "mtp_h_proj", self.h_proj, hs_flat
+            )  # [s*b*n, h/tp]
             h_out = h_out.reshape([*orig_shape[:-1], -1])  # [s, b, n, h/tp]
             # Broadcast add before gather (saves one all-gather vs gathering separately)
             hidden_states = e_out.unsqueeze(-2) + h_out

@@ -86,33 +86,33 @@ class TestMLASelfAttentionSublayersSpecDefaults(unittest.TestCase):
         self.assertEqual(spec.kv_a_layernorm, mock_spec)
 
 
-class TestFP8OverlapProj(unittest.TestCase):
-    """Tests for FP8OverlapProj."""
+class TestDeferredWeightGradLinear(unittest.TestCase):
+    """Tests for DeferredWeightGradLinear."""
 
     @unittest.skipIf(not paddle.is_compiled_with_cuda(), "Requires CUDA")
     def test_forward_output_shape(self):
-        """FP8OverlapProj.forward should produce output matching F.linear."""
-        from paddlefleet.transformer.multi_latent_attention import (
-            FP8OverlapProj,
+        """DeferredWeightGradLinear.forward should produce output matching F.linear."""
+        from paddlefleet.transformer.dw_overlap import (
+            DeferredWeightGradLinear,
         )
 
         paddle.disable_static()
         x = paddle.randn([2, 4, 8])
         weight = paddle.randn([8, 16])
-        result = FP8OverlapProj.apply(x, weight)
+        result = DeferredWeightGradLinear.apply(x, weight)
         self.assertEqual(result.shape, [2, 4, 16])
 
     @unittest.skipIf(not paddle.is_compiled_with_cuda(), "Requires CUDA")
     def test_forward_output_matches_linear(self):
-        """FP8OverlapProj.forward should match paddle.nn.functional.linear."""
-        from paddlefleet.transformer.multi_latent_attention import (
-            FP8OverlapProj,
+        """DeferredWeightGradLinear.forward should match paddle.nn.functional.linear."""
+        from paddlefleet.transformer.dw_overlap import (
+            DeferredWeightGradLinear,
         )
 
         paddle.disable_static()
         x = paddle.randn([2, 4, 8])
         weight = paddle.randn([8, 16])
-        result = FP8OverlapProj.apply(x, weight)
+        result = DeferredWeightGradLinear.apply(x, weight)
         expected = paddle.nn.functional.linear(x, weight)
         self.assertTrue(paddle.allclose(result, expected, atol=1e-5))
 

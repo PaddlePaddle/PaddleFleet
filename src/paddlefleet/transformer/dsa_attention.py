@@ -48,6 +48,7 @@ from paddlefleet.tensor_parallel.mappings import (
     gather_from_sequence_parallel_region,
 )
 from paddlefleet.transformer.cp_utils import all_gather_cp
+from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -552,11 +553,15 @@ class DSAIndexer(paddle.nn.Layer):
             else freqs
         )
 
-        q, _ = self.wq_b(q_latent)  # [b, s, n_heads * head_dim]
+        q, _ = deferrable_linear(
+            self.config, "attn_indexer_q_proj", self.wq_b, q_latent
+        )  # [b, s, n_heads * head_dim]
         q = q.reshape([bsz, seqlen, self.n_heads, self.head_dim])
         q = self._apply_rope(q, freqs_q, mscale)
 
-        k, _ = self.wk(hidden_states)  # [b, s, head_dim]
+        k, _ = deferrable_linear(
+            self.config, "attn_indexer_k_proj", self.wk, hidden_states
+        )  # [b, s, head_dim]
         if cp_size > 1:
             k = all_gather_cp(k, dim=1, group=cp_group)  # [b, s_global, hd]
         k = self.k_norm(k)
@@ -566,7 +571,12 @@ class DSAIndexer(paddle.nn.Layer):
         q = rotate_activation(q, use_fast_hadamard=self.use_fast_hadamard)
         k = rotate_activation(k, use_fast_hadamard=self.use_fast_hadamard)
 
-        weights, _ = self.weights_proj(hidden_states)
+        weights, _ = deferrable_linear(
+            self.config,
+            "attn_indexer_weights_proj",
+            self.weights_proj,
+            hidden_states,
+        )
         weights = weights * (self.n_heads**-0.5) * self.softmax_scale
 
         return q, k, weights

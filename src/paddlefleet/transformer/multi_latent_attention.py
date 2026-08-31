@@ -16,15 +16,11 @@ import logging
 import math
 import os
 from dataclasses import dataclass
-from functools import partial
 from typing import NoReturn
 
 import paddle
 from paddle import Tensor
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
-from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
-    WeightGradStore,
-)
 from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet.context_parallel_utils import (
@@ -49,8 +45,7 @@ from paddlefleet.parallel_state import (
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
     keep_indexer_grad_path,
-    need_recompute_in_block,
-    need_recompute_in_first_n,
+    module_needs_recompute,
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.tensor_parallel.mappings import (
@@ -59,6 +54,7 @@ from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
 from paddlefleet.transformer.attention import Attention
+from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_rank, get_pg_size
@@ -304,64 +300,6 @@ class MLASelfAttentionSublayersSpec:
     core_attention: LayerSpec | type = None
     o_proj: LayerSpec | type = None
     gate_proj: LayerSpec | type = None
-
-
-class FP8OverlapProj(paddle.autograd.PyLayer):
-    """
-    Replaces RowParallelLinear (no bias, mp==1) with explicit split backward.
-    Defers dw computation via WeightGradStore to overlap with P2P communication.
-    Bit-exact with F.linear(x, weight) for arbitrary batch dimensions.
-    """
-
-    @staticmethod
-    def forward(ctx, x, weight):
-        ctx.save_for_backward(x, weight)
-        # Bit-exact with RowParallelLinear mp==1, no bias:
-        # F.linear(x, weight) = x @ weight, weight shape: [in, out]
-        return paddle.nn.functional.linear(x, weight)
-
-    @staticmethod
-    def backward(ctx, out_grad):
-        x, weight = ctx.saved_tensor()
-
-        def _compute_weight_grad(x, out_grad, weight):
-            with paddle.amp.auto_cast(False):
-                # Flatten all leading batch dims to 2D before matmul,
-                # so dw = x_2d.T @ out_grad_2d has shape [in, out] == weight.shape
-                x_2d = x.reshape([-1, x.shape[-1]])  # [B*S, in]
-                og_2d = out_grad.reshape([-1, out_grad.shape[-1]])  # [B*S, out]
-                w_grad = paddle.matmul(
-                    x_2d, og_2d, transpose_x=True
-                )  # [in, out]
-                # print("w_grad compute")
-
-            if hasattr(weight, "main_grad"):
-                if weight.main_grad is None:
-                    weight.main_grad = paddle.zeros(
-                        weight.shape, dtype=paddle.float32
-                    )
-                weight.main_grad.add_(w_grad)
-            else:
-                raise AssertionError("fp8 overlap need main_grad attribute")
-
-            if hasattr(weight, "_apply_backward_hook"):
-                weight._apply_backward_hook()
-
-        # dx = out_grad @ weight.T, weight: [in, out] -> [out, in]
-        dx = paddle.matmul(out_grad, weight, transpose_y=True)
-
-        # dw computation (deferred via WeightGradStore)
-        if not weight.stop_gradient:
-            # print("enter overlap weight grad")
-            WeightGradStore.enabled = True
-            WeightGradStore.put(
-                partial(
-                    _compute_weight_grad, x.detach(), out_grad.detach(), weight
-                )
-            )
-            WeightGradStore.enabled = False
-
-        return dx, None
 
 
 class MultiLatentAttention(Attention):
@@ -696,43 +634,17 @@ class MultiLatentAttention(Attention):
 
         self.recompute_gated_attn = (
             self.config.recompute_granularity == "selective"
-            and self.config.recompute_modules is not None
-            and "gated_attn" in self.config.recompute_modules
+            and module_needs_recompute(
+                "gated_attn", self.layer_number, self.config
+            )
         )
 
-        self.recompute_qkv_up_porj_and_rope = False
-        if self.config.recompute_granularity == "selective":
-            modules = self.config.recompute_modules
-            if isinstance(modules, list) and "mla_qkv_recompute" in modules:
-                self.recompute_qkv_up_porj_and_rope = (
-                    True
-                    if self.config.recompute_num_layers is None
-                    else (
-                        need_recompute_in_block(
-                            self.layer_number,
-                            self.config,
-                            self.config.recompute_num_layers,
-                        )
-                        if self.config.recompute_method == "block"
-                        else need_recompute_in_first_n(
-                            self.layer_number,
-                            self.config,
-                            self.config.recompute_num_layers,
-                        )
-                    )
-                )
-            elif isinstance(modules, dict) and "mla_qkv_recompute" in modules:
-                assert self.config.recompute_method in ["first_n", "block"]
-                num_layers = modules["mla_qkv_recompute"]
-                self.recompute_qkv_up_porj_and_rope = (
-                    need_recompute_in_block(
-                        self.layer_number, self.config, num_layers
-                    )
-                    if self.config.recompute_method == "block"
-                    else need_recompute_in_first_n(
-                        self.layer_number, self.config, num_layers
-                    )
-                )
+        self.recompute_qkv_up_porj_and_rope = (
+            self.config.recompute_granularity == "selective"
+            and module_needs_recompute(
+                "mla_qkv_recompute", self.layer_number, self.config
+            )
+        )
 
         # VHA postmix: ungrouped low-rank cross-head mixing (I + U Vᵀ) on the head
         # axis, applied to the attention output (head space) before the output
@@ -769,36 +681,15 @@ class MultiLatentAttention(Attention):
                     0.0
                 ),  # identity at init
             )
-        # Selective recompute for the VHA postmix. Only list configuration is
-        # supported; honours recompute_num_layers + recompute_method
-        # (first_n / block) like the other selective modules.
-        modules = self.config.recompute_modules
-        self.recompute_vha_postmix = False
-        if (
+        # Selective recompute for the VHA postmix, configured like every other
+        # selective submodule (list entry, or dict entry with a layer count or
+        # an explicit layer list).
+        self.recompute_vha_postmix = (
             self.config.recompute_granularity == "selective"
-            and modules is not None
-        ):
-            if isinstance(modules, dict) and "vha_postmix" in modules:
-                raise ValueError(
-                    "recompute_modules['vha_postmix'] only supports list "
-                    "configuration"
-                )
-            if isinstance(modules, list) and "vha_postmix" in modules:
-                n = self.config.recompute_num_layers
-                if n is None:
-                    self.recompute_vha_postmix = True
-                elif self.config.recompute_method == "block":
-                    self.recompute_vha_postmix = need_recompute_in_block(
-                        self.layer_number, self.config, n
-                    )
-                elif self.config.recompute_method == "first_n":
-                    self.recompute_vha_postmix = need_recompute_in_first_n(
-                        self.layer_number, self.config, n
-                    )
-                else:
-                    raise ValueError(
-                        "recompute_method must be 'first_n' or 'block'"
-                    )
+            and module_needs_recompute(
+                "vha_postmix", self.layer_number, self.config
+            )
+        )
 
     def _apply_vha_postmix(self, attn_out, U=None, V=None):
         # attn_out: [b, sq, nh_pp * v_head_dim] (head space, pre-gate / pre output proj).
@@ -1219,13 +1110,9 @@ class MultiLatentAttention(Attention):
             else:
                 core_attn_out = self._gate(gate_source, core_attn_out)
 
-        if getattr(self.config, "dw_p2p_overlap", False) and not getattr(
-            self.config, "use_bias", False
-        ):
-            output = FP8OverlapProj.apply(core_attn_out, self.o_proj.weight)
-            bias = None
-        else:
-            output, bias = self.o_proj(core_attn_out)
+        output, bias = deferrable_linear(
+            self.config, "attn_out_proj", self.o_proj, core_attn_out
+        )
 
         if self.gated_attention and self.recompute_gated_attn:
             gate_recompute.discard_output_and_register_recompute(output)
@@ -1235,7 +1122,9 @@ class MultiLatentAttention(Attention):
         return output, bias
 
     def _gate(self, gate_source, core_attn_out):
-        gate, _ = self.gate_proj(gate_source)
+        gate, _ = deferrable_linear(
+            self.config, "attn_gate_proj", self.gate_proj, gate_source
+        )
         if self.config.sigmoid_gate_fusion:
             from paddlefleet.triton_ops import SigmoidGateFusionTriton
 
@@ -1849,7 +1738,9 @@ class MLASelfAttention(MultiLatentAttention):
         if self.q_lora_rank is not None:
             # if q_a_proj is ColumnParallelLinear:
             #     q_compressed: [b, s, q_lora_rank / TP]
-            q_compressed, _ = self.q_a_proj(hidden_states)
+            q_compressed, _ = deferrable_linear(
+                self.config, "attn_q_proj", self.q_a_proj, hidden_states
+            )
 
             # When output is sharded (ColumnParallelLinear):
             # Gather output to restore output dim q_lora_rank;
@@ -1867,7 +1758,12 @@ class MLASelfAttention(MultiLatentAttention):
 
         # if kv_a_proj_with_mqa is ColumnParallelLinear:
         #     kv_combined: [b, s, (kv_lora_rank + qk_rope_head_dim) / TP]
-        kv_combined, _ = self.kv_a_proj_with_mqa(hidden_states)
+        kv_combined, _ = deferrable_linear(
+            self.config,
+            "attn_kv_proj",
+            self.kv_a_proj_with_mqa,
+            hidden_states,
+        )
         if kv_combined.size(-1) != self.kv_lora_rank + self.qk_rope_head_dim:
             # kv_combined: [b, s, (kv_lora_rank + qk_rope_head_dim)]
             kv_combined = gather_from_tensor_model_parallel_region(kv_combined)
@@ -1946,11 +1842,15 @@ class MLASelfAttention(MultiLatentAttention):
             if self.q_lora_rank is not None:
                 # q_compressed: [num_tokens, q_lora_rank]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
-                q, _ = self.q_b_proj(q_compressed)
+                q, _ = deferrable_linear(
+                    self.config, "attn_q_proj", self.q_b_proj, q_compressed
+                )
             else:
                 # q_compressed: [num_tokens, hidden_size]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
-                q, _ = self.q_proj(q_compressed)
+                q, _ = deferrable_linear(
+                    self.config, "attn_q_proj", self.q_proj, q_compressed
+                )
 
             # q: [num_tokens, n, q_head_dim]
             q = q.view(
@@ -1965,7 +1865,9 @@ class MLASelfAttention(MultiLatentAttention):
             if self.mqa_latent:
                 kv = None
             else:
-                kv, _ = self.kv_b_proj(kv_compressed)
+                kv, _ = deferrable_linear(
+                    self.config, "attn_kv_proj", self.kv_b_proj, kv_compressed
+                )
 
                 # Debug: print kv shape
                 # if self.layer_number == 0:
@@ -2160,6 +2062,27 @@ class MLASelfAttention(MultiLatentAttention):
                     rotary_pos_emb = rotary_pos_emb.transpose([1, 0, 2, 3])
 
                 k_rope_fused_with_cat = False
+                # RoPE input pairing for this layer. False -- the default, and
+                # what every pre-existing config gets -- keeps the (k, k+half)
+                # pairing both branches below have always used. True restores
+                # the (2k, 2k+1) pairing of ``fused_apply_mla_rope_for_q`` /
+                # ``_for_kv``, which absorption cannot reach (the fused branch
+                # above falls through on ``mqa_latent``), so an MLA checkpoint keeps
+                # its channel-to-frequency map. Inert on non-absorbed layers;
+                # see ``mqa_latent_rope_adjacent_pairing``.
+                mqa_rope_adjacent = self.mqa_latent and getattr(
+                    self.config, "mqa_latent_rope_adjacent_pairing", False
+                )
+                # Only spelled out when the pairing is switched, so the default
+                # path calls ``apply_rotary_pos_emb`` with exactly the arguments
+                # it did before. ``True`` de-interleaves these two calls alone,
+                # because ``config.multi_latent_attention`` also drives
+                # layer-spec selection and position-embedding construction.
+                rope_pairing_kwargs = (
+                    {"multi_latent_attention": True}
+                    if mqa_rope_adjacent
+                    else {}
+                )
                 if self.config.gpt_model_use_experimental_version:
                     # EC-compatible RoPE: complex rotation, no YaRN, no mscale
                     from paddlefleet.transformer.transformer_layer import (
@@ -2204,7 +2127,13 @@ class MLASelfAttention(MultiLatentAttention):
                     # strips ``assert`` and would let the wrong layout reach
                     # ``fused_apply_rope_half`` and silently corrupt results.
                     # Matches the shape guards elsewhere in this file.
-                    if self.config.multi_latent_attention:
+                    # ``mqa_latent_rope_adjacent_pairing`` is the one case that
+                    # does implement it: ``adjacent_in=True`` below gathers
+                    # (2k, 2k+1), which is exactly the de-interleave.
+                    if (
+                        self.config.multi_latent_attention
+                        and not mqa_rope_adjacent
+                    ):
                         raise ValueError(
                             "mqa_latent_rope_fusion does not implement the "
                             "multi_latent_attention de-interleave (0::2 / 1::2)"
@@ -2268,6 +2197,7 @@ class MLASelfAttention(MultiLatentAttention):
                         rotary_pos_emb,
                         self.qk_rope_head_dim,
                         mscale,
+                        adjacent_in=mqa_rope_adjacent,
                     )
                     # Defer k's rope to ``fused_rope_cat_key`` below, which
                     # rotates and concatenates in one pass.
@@ -2285,6 +2215,7 @@ class MLASelfAttention(MultiLatentAttention):
                         cp_group=self.pg_collection.cp,
                         apply_rope_fusion=bool(self.config.apply_rope_fusion)
                         and not self.mqa_latent,
+                        **rope_pairing_kwargs,
                     )
                     # k_pos_emb:[num_tokens, 1, qk_rope_head_dim]
                     k_pos_emb = apply_rotary_pos_emb(
@@ -2301,6 +2232,8 @@ class MLASelfAttention(MultiLatentAttention):
                         else None,
                         apply_rope_fusion=bool(self.config.apply_rope_fusion)
                         and not self.mqa_latent,
+                        # Must match the q side above: the two meet in q @ k^T.
+                        **rope_pairing_kwargs,
                     )
 
                 # query: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
@@ -2372,6 +2305,7 @@ class MLASelfAttention(MultiLatentAttention):
                             self.kv_lora_rank,
                             self.qk_rope_head_dim,
                             mscale,
+                            adjacent_in=mqa_rope_adjacent,
                         )
                     else:
                         key = paddle.cat(
@@ -2999,12 +2933,19 @@ class MQASelfAttention(MLASelfAttention):
         # QKV down projection and layernorm
         # =========================================
         if self.config.q_lora_rank is not None:
-            q_compressed, _ = self.q_a_proj(hidden_states)
+            q_compressed, _ = deferrable_linear(
+                self.config, "attn_q_proj", self.q_a_proj, hidden_states
+            )
         else:
             q_compressed = hidden_states
 
         # kv_combined: [b, s, (kv_lora_rank + qk_rope_head_dim)]
-        kv_combined, _ = self.kv_a_proj_with_mqa(hidden_states)
+        kv_combined, _ = deferrable_linear(
+            self.config,
+            "attn_kv_proj",
+            self.kv_a_proj_with_mqa,
+            hidden_states,
+        )
 
         # kv_compressed: [b, s, kv_lora_rank], k_pos_emb: [b, s, qk_rope_head_dim]
         kv_compressed, k_pos_emb = paddle.split(
@@ -3053,11 +2994,15 @@ class MQASelfAttention(MLASelfAttention):
             if self.config.q_lora_rank is not None:
                 # q_compressed: [num_tokens, q_lora_rank]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
-                q, _ = self.q_b_proj(q_compressed)
+                q, _ = deferrable_linear(
+                    self.config, "attn_q_proj", self.q_b_proj, q_compressed
+                )
             else:
                 # q_compressed: [num_tokens, hidden_size]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
-                q, _ = self.q_proj(q_compressed)
+                q, _ = deferrable_linear(
+                    self.config, "attn_q_proj", self.q_proj, q_compressed
+                )
 
             # q: [num_tokens, n, q_head_dim]
             q = q.view(

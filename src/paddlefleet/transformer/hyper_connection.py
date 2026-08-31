@@ -259,6 +259,71 @@ def native_h_post_bda(
     return x_expanded + mixed
 
 
+class _FixedOrderMappings(paddle.autograd.PyLayer):
+    """``compute_mappings`` + ``aggregate`` with a fixed gradient sum order.
+
+    Both halves read the same ``x``: the mapping head projects it, and the
+    aggregation weights it. Composed plainly, that hands autograd two separate
+    contributions to ``dx`` and leaves it to the engine when to add them, so
+    the sum comes out differently depending on whether the segment was replayed
+    by ``RecomputeWithoutOutput`` -- which is the ``mhc_forward`` recompute
+    case. Each half is given its own detached view of ``x`` here and their
+    gradients are added explicitly below, which pins the order down.
+
+    Nothing about the mappings is reimplemented: the two halves call the
+    module's own methods, so the dtype handling, ``fuse_cast`` and the
+    accuracy-compatible paths all stay in one place.
+
+    Two details of the mechanics are worth knowing:
+
+    * ``paddle.is_grad_enabled()`` always reads False inside a
+      ``PyLayer.forward``, so whether to build the inner graph cannot be
+      decided here -- the caller reads it and passes it in. It is False on
+      ``RecomputeWithoutOutput``'s first pass, so no graph is built there,
+      which is the point of that pass; the replay runs with grad enabled.
+    * the outputs are returned detached. ``apply`` takes over the ``grad_fn``
+      of whatever it returns, so returning the inner tensors themselves would
+      make ``autograd.backward`` below re-enter this very node instead of
+      walking the inner graph. The detached views share their data, so this
+      costs nothing; ``save_for_backward`` keeps the undetached ones, whose
+      ``grad_fn`` it preserves, and those are what backward walks.
+    """
+
+    @staticmethod
+    def forward(ctx, module, x, build_graph):
+        x_map = x.detach()
+        x_agg = x.detach()
+        x_map.stop_gradient = x.stop_gradient
+        x_agg.stop_gradient = x.stop_gradient
+        with paddle.set_grad_enabled(build_graph):
+            h_pre, h_post, h_res = module.compute_mappings(x_map)
+            aggregated = module.aggregate(x_agg, h_pre)
+        ctx.x_stop_gradient = x.stop_gradient
+        ctx.build_graph = build_graph
+        if build_graph:
+            ctx.save_for_backward(x_map, x_agg, aggregated, h_res, h_post)
+        return aggregated.detach(), h_res.detach(), h_post.detach()
+
+    @staticmethod
+    def backward(ctx, *output_grads):
+        if ctx.x_stop_gradient or not ctx.build_graph:
+            return None
+        x_map, x_agg, *outputs = ctx.saved_tensor()
+        # An output the caller never used has no gradient; filtering mirrors
+        # ``RecomputeWithoutOutputFunction.backward``, as does restoring the
+        # forward's ``auto_cast`` scope, which has been left by now.
+        pairs = [
+            (out, grad)
+            for out, grad in zip(outputs, output_grads)
+            if grad is not None
+        ]
+        with paddle.amp.auto_cast(enable=False):
+            paddle.autograd.backward(
+                [out for out, _ in pairs], [grad for _, grad in pairs]
+            )
+        return x_map.grad + x_agg.grad
+
+
 class HyperConnectionModule(nn.Layer):
     """
     Unified mHC (Manifold-Constrained Hyper-Connections) module.
@@ -303,6 +368,7 @@ class HyperConnectionModule(nn.Layer):
         # alpha_* / bias, and the MoE gate fp32 storage in moe_router.py):
         # they are tiny, and keeping them out of BF16 removes the parameter
         # rounding error from the mHC gating computation.
+        self._cast_to_low_precision = False
         param_dtype = "float32"
         default_dtype = paddle.get_default_dtype()
         try:
@@ -314,6 +380,7 @@ class HyperConnectionModule(nn.Layer):
             )
         finally:
             paddle.set_default_dtype(default_dtype)
+        self.mapping_proj._cast_to_low_precision = False
 
         init_alpha = config.mhc_init_gating_factor
         # Learnable scaling factors (Eq. 5 in paper)
@@ -700,10 +767,20 @@ class HyperConnectionModule(nn.Layer):
                 and not self._widen_in_kernel
             ):
                 hidden_states = hidden_states.astype("float32")
-            h_pre, h_post, h_res = self.compute_mappings(hidden_states)
 
-            # Aggregate for layer input
-            aggregated = self.aggregate(hidden_states, h_pre)
+            if _use_accuracy_compatible_kernel():
+                h_pre, h_post, h_res = self.compute_mappings(hidden_states)
+
+                # Aggregate for layer input
+                aggregated = self.aggregate(hidden_states, h_pre)
+            else:
+                # The same two calls, with the order in which their gradients
+                # reach ``hidden_states`` pinned down; see
+                # ``_FixedOrderMappings``. ``is_grad_enabled`` has to be read
+                # out here, since it always reads False inside the node.
+                aggregated, h_res, h_post = _FixedOrderMappings.apply(
+                    self, hidden_states, paddle.is_grad_enabled()
+                )
 
         return aggregated, h_res, h_post
 
@@ -990,6 +1067,7 @@ class HyperConnectionContractLayer(FleetLayer):
             dtype=hc_param_dtype,
             default_initializer=nn.initializer.Constant(1.0),
         )
+        self._cast_to_low_precision = False
 
         if config.sequence_parallel:
             self.hc_head_fn.is_distributed = False

@@ -23,6 +23,8 @@ Backward: dx[g, m, :] = dy[g, m, :] @ w[g, :, :]      for each group g
           dw[g, r, :] = dy[g, :, r]^T @ x[g, :, :]     for each group g
 """
 
+from functools import partial
+
 import paddle
 
 from .utils import enable_compat_on_triton_kernel, is_torch_compat_available
@@ -303,6 +305,51 @@ def _grouped_3d_strides(t):
     return stride_m, stride_g, stride_x
 
 
+def _launch_grouped_dw(
+    dy_3d,
+    x_3d,
+    M,
+    G,
+    R,
+    D,
+    stride_dyg,
+    stride_dym,
+    stride_dyk,
+    stride_xg,
+    stride_xm,
+    stride_xk,
+):
+    """dw: [G, R, D] = dy^T[G, R, M] @ x[G, M, D] via strides.
+
+    Split out of ``GroupedMatmulTriton.backward`` so the same launch can either
+    run inline or be handed to a caller as a thunk to run later.
+    """
+    dw = paddle.empty([G, R, D], dtype=dy_3d.dtype)
+    grid_dw = lambda META: (
+        G,
+        triton.cdiv(R, META["BLOCK_M"]) * triton.cdiv(D, META["BLOCK_N"]),
+    )
+    grouped_matmul_dw_kernel[grid_dw](
+        dy_3d,
+        x_3d,
+        dw,
+        M,
+        D,  # N = D (output cols)
+        R,  # K = R (rows of dw, which is the R dim)
+        stride_dyg,
+        stride_dym,
+        stride_dyk,  # stride_dyr
+        stride_xg,
+        stride_xm,
+        stride_xk,  # stride_xd
+        dw.stride()[0],
+        dw.stride()[1],
+        dw.stride()[2],
+        tl.bfloat16 if dy_3d.dtype == paddle.bfloat16 else tl.float16,
+    )
+    return dw
+
+
 class GroupedMatmulTriton(paddle.autograd.PyLayer):
     """Fused grouped matmul: einsum("...gd,grd->...gr") via Triton.
 
@@ -316,7 +363,19 @@ class GroupedMatmulTriton(paddle.autograd.PyLayer):
     """
 
     @staticmethod
-    def forward(ctx, x, w):
+    def forward(ctx, x, w, dw_accumulator=None, group_shape=None):
+        # PyLayer.forward runs with grad tracking off, so a tensor created here
+        # comes out with stop_gradient=True. Read the caller's intent from the
+        # inputs *before* any reshape, or w_needs_grad below silently turns
+        # False and the weight grad is dropped entirely.
+        w_needs_grad = not w.stop_gradient
+        if group_shape is not None:
+            # w is the leaf parameter; view it as [G, R, D] here so the
+            # deferred path can legally return None for its grad.
+            assert dw_accumulator is not None, (
+                "group_shape is only for the deferred-dW path"
+            )
+            w = w.reshape(group_shape)
         orig_shape = x.shape  # [..., G, D]
         G = w.shape[0]
         R = w.shape[1]
@@ -379,7 +438,8 @@ class GroupedMatmulTriton(paddle.autograd.PyLayer):
         # a frozen backbone (DSv4 phase 2, ``train_indexer_only``) also skips
         # the matching kernel instead of violating the contract.
         ctx.x_needs_grad = not x.stop_gradient
-        ctx.w_needs_grad = not w.stop_gradient
+        ctx.w_needs_grad = w_needs_grad
+        ctx.dw_accumulator = dw_accumulator
 
         # out is already [M, G, R] -> reshape to [..., G, R]
         out = out.reshape([*orig_shape[:-1], R])
@@ -435,41 +495,44 @@ class GroupedMatmulTriton(paddle.autograd.PyLayer):
 
         dw = None
         if ctx.w_needs_grad:
-            # dw: [G, R, D] = dy^T[G, R, M] @ x[G, M, D] via strides
-            dw = paddle.empty([G, R, D], dtype=dy.dtype)
-            grid_dw = lambda META: (
-                G,
-                triton.cdiv(R, META["BLOCK_M"])
-                * triton.cdiv(D, META["BLOCK_N"]),
-            )
-            grouped_matmul_dw_kernel[grid_dw](
+            compute_dw = partial(
+                _launch_grouped_dw,
                 dy_3d,
                 x_3d,
-                dw,
                 M,
-                D,  # N = D (output cols)
-                R,  # K = R (rows of dw, which is the R dim)
-                stride_dyg,  # stride_dyg
-                stride_dym,  # stride_dym
-                stride_dyk,  # stride_dyr
-                stride_xg,  # stride_xg
-                stride_xm,  # stride_xm
-                stride_xk,  # stride_xd
-                dw.stride()[0],
-                dw.stride()[1],
-                dw.stride()[2],
-                tl.bfloat16 if dy.dtype == paddle.bfloat16 else tl.float16,
+                G,
+                R,
+                D,
+                stride_dyg,
+                stride_dym,
+                stride_dyk,
+                stride_xg,
+                stride_xm,
+                stride_xk,
             )
+            if ctx.dw_accumulator is not None:
+                # Hand the thunk to the caller and return no weight grad: the
+                # accumulator owns both when it runs and where it lands. Used to
+                # push dW into a pp p2p window (see dw_overlap.py).
+                ctx.dw_accumulator(compute_dw)
+            else:
+                dw = compute_dw()
 
         return dx, dw
 
 
-def fused_grouped_matmul(x, w):
+def fused_grouped_matmul(x, w, dw_accumulator=None, group_shape=None):
     """Fused grouped matmul replacing paddle.einsum("...gd,grd->...gr", x, w).
 
     Args:
         x: Input tensor [..., G, D] (typically [b, sq, G, D])
         w: Weight tensor [G, R, D]
+
+        dw_accumulator: optional callable taking a zero-arg thunk that
+            produces dw [G, R, D]. When given, the weight grad is not
+            returned to autograd -- the accumulator owns when it runs and
+            where it lands (see dw_overlap.deferred_grouped_dw_accumulator).
+            Ignored on the einsum fallback path.
 
     Returns:
         Output tensor [..., G, R]
@@ -483,16 +546,30 @@ def fused_grouped_matmul(x, w):
     # out of bounds) instead of failing. The dense path used to get this check
     # for free from ``x.reshape([M, G, D])``; the zero-copy view path never
     # reshapes, so state it here for both.
-    if w.ndim != 3:
+    if group_shape is not None:
+        # deferred-dW path: w is the 2-D leaf parameter, viewed as [G, R, D]
+        # inside the PyLayer. Validate against the view, not the parameter.
+        if len(group_shape) != 3:
+            raise ValueError(
+                f"group_shape must be [G, R, D], got {group_shape}"
+            )
+        w_view_shape = list(group_shape)
+    elif w.ndim != 3:
         raise ValueError(f"w must be 3-D [G, R, D], got shape {w.shape}")
-    if x.ndim < 2 or tuple(x.shape[-2:]) != (w.shape[0], w.shape[2]):
+    else:
+        w_view_shape = list(w.shape)
+    if x.ndim < 2 or tuple(x.shape[-2:]) != (w_view_shape[0], w_view_shape[2]):
         raise ValueError(
             "x's trailing dims must match w's [G, D]: expected "
-            f"{(w.shape[0], w.shape[2])}, got x shape {x.shape} for w shape "
-            f"{w.shape}"
+            f"{(w_view_shape[0], w_view_shape[2])}, got x shape {x.shape} for "
+            f"w shape {w.shape}"
         )
     if x.dtype not in _SUPPORTED_DTYPES:
         # fp32 (and any other unsupported dtype) stays on paddle.einsum to
         # preserve numerical equivalence instead of being downcast to fp16.
-        return paddle.einsum("...gd,grd->...gr", x, w)
-    return GroupedMatmulTriton.apply(x, w)
+        return paddle.einsum(
+            "...gd,grd->...gr",
+            x,
+            w.reshape(w_view_shape) if group_shape is not None else w,
+        )
+    return GroupedMatmulTriton.apply(x, w, dw_accumulator, group_shape)

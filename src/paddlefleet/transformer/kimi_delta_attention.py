@@ -42,10 +42,7 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
 
 from paddlefleet.jit import jit_fuser
 from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.recompute_utils import (
-    need_recompute_in_block,
-    need_recompute_in_first_n,
-)
+from paddlefleet.recompute_utils import module_needs_recompute
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.identity_op import IdentityOp
 from paddlefleet.transformer.layer import FleetLayer
@@ -340,27 +337,15 @@ class KimiDeltaAttention(FleetLayer):
             _FUSED_KERNEL_LOGGED = True
             log_single_rank(logger, logging.INFO, "KDA will use fused kernel")
 
-        # Selectively recompute the gated RMSNorm in backward instead of keeping
-        # its output activation around. Uses RecomputeWithoutOutput so the norm
-        # output buffer is discarded after the forward and rebuilt just before
-        # out_proj's backward needs it. Honour the same layer-range semantics as
-        # the other selective modules (Attention.core_attn / MLA.mla_qkv): a list
-        # entry with recompute_num_layers, or a dict entry whose value is the
-        # per-module layer count, restricts recompute to first_n / block layers.
-        self.recompute_rms_norm_gated = False
-        if self.config.recompute_granularity == "selective":
-            modules = self.config.recompute_modules
-            if isinstance(modules, list) and "rms_norm_gated" in modules:
-                if self.config.recompute_num_layers is None:
-                    self.recompute_rms_norm_gated = True
-                else:
-                    self.recompute_rms_norm_gated = self._need_recompute_layer(
-                        self.config.recompute_num_layers
-                    )
-            elif isinstance(modules, dict) and "rms_norm_gated" in modules:
-                self.recompute_rms_norm_gated = self._need_recompute_layer(
-                    modules["rms_norm_gated"]
-                )
+        # Recompute the gated RMSNorm in backward instead of keeping its output
+        # around: RecomputeWithoutOutput drops the buffer after the forward and
+        # rebuilds it just before out_proj's backward needs it.
+        self.recompute_rms_norm_gated = (
+            self.config.recompute_granularity == "selective"
+            and module_needs_recompute(
+                "rms_norm_gated", self.layer_number, self.config
+            )
+        )
 
         # q/k/v/beta are all sharded by head, so both head counts must divide
         # evenly; otherwise the per-tensor split sizes in forward() silently stop
@@ -501,28 +486,6 @@ class KimiDeltaAttention(FleetLayer):
         )
 
         self.reset_parameters()
-
-    def _need_recompute_layer(self, recompute_num_layers):
-        """Whether this layer_number is in the selective-recompute set.
-
-        Mirrors Attention/MLA: recompute_method picks first_n vs block, and
-        recompute_num_layers is the per-module layer count. Uses an explicit
-        raise (not assert) so an invalid method cannot silently fall through to
-        first_n under ``python -O``, which would change the recompute set.
-        """
-        if self.config.recompute_method == "block":
-            return need_recompute_in_block(
-                self.layer_number, self.config, recompute_num_layers
-            )
-        if self.config.recompute_method == "first_n":
-            return need_recompute_in_first_n(
-                self.layer_number, self.config, recompute_num_layers
-            )
-        raise ValueError(
-            "selective recompute of rms_norm_gated with a layer count requires "
-            "recompute_method to be 'first_n' or 'block', got "
-            f"{self.config.recompute_method!r}"
-        )
 
     def _build_lora_pair(self, a_spec, b_spec):
         """hidden -> gate_lora_rank (replicated) -> v_dim (column parallel)."""

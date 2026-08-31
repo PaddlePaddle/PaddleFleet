@@ -23,6 +23,12 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
 class StandardMLPSharedExpert(MLP):
+    # 共享专家的两个投影对应的延后点。注意它的 backward 本来就跟 combine 集合
+    # 通信重叠（token_dispatcher 把它作为 callback 交给 combine），所以打开这两项
+    # 是把计算从 combine 窗口挪到 p2p 窗口，而不是凭空造出填充料，要单独量。
+    _dw_up_gate_point = "moe_shared_expert_up_gate_proj"
+    _dw_down_point = "moe_shared_expert_down_proj"
+
     def __init__(
         self,
         config: TransformerConfig,

@@ -990,7 +990,21 @@ class GPTEmbedding(FleetLayer):
                 # layer through a dedicated key instead. Every entry of mtp_emb_res is
                 # already CP/SP-scattered above, so stack() is a pure container op and
                 # MultiTokenPredictionLayer must not re-scatter them.
-                preproc_output["hidden_states"] = mtp_emb_res[0].contiguous()
+                #
+                # clone() -- NOT contiguous(): Paddle's Tensor.contiguous() returns
+                # `self` when the tensor is already contiguous (see
+                # paddle/fluid/pybind/eager_method.cc, tensor_contiguous), so it
+                # creates neither a new tensor nor an autograd node. The backbone
+                # would then consume mtp_emb_res[0] itself, and the layer-internal
+                # uses of its input (residual bypass + input_layernorm) would become
+                # extra consumers of mtp_emb_res[0]. Its gradient would be accumulated
+                # in a different grouping than the concat baseline -- Paddle
+                # accumulates gradients in-place one contribution at a time
+                # (GradTensorHolder::add), so a different grouping means a different
+                # bf16 rounding path and a 1-ULP mismatch in the embedding gradient.
+                # The concat branch below gets this isolation for free from concat();
+                # clone() gives the same isolation here.
+                preproc_output["hidden_states"] = mtp_emb_res[0].clone()
                 preproc_output["mtp_decoder_inputs"] = paddle.stack(
                     mtp_emb_res[1:]
                 )

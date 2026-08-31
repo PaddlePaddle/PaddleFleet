@@ -62,6 +62,7 @@ _MPU_EXPERT_TENSOR_PARALLEL_RANK = None
 # Inter-layer model parallel group that the current rank belongs to.
 _PIPELINE_MODEL_PARALLEL_GROUP = None
 _PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+_PIPELINE_MODEL_PARALLEL_RANK = None
 
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = None
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
@@ -235,13 +236,14 @@ def get_context_parallel_rank():
 
 def get_pipeline_model_parallel_world_size():
     """Return world size for the pipeline-model-parallel group."""
-    # TODO: Support get_pipeline_model_parallel_world_size
-    return 1
-
     global _PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     if _PIPELINE_MODEL_PARALLEL_WORLD_SIZE is not None:
         return _PIPELINE_MODEL_PARALLEL_WORLD_SIZE
-    return get_pipeline_model_parallel_group().nranks
+    return (
+        1
+        if get_pipeline_model_parallel_group(False) is None
+        else get_pipeline_model_parallel_group().nranks
+    )
 
 
 def set_pipeline_model_parallel_world_size(world_size):
@@ -251,11 +253,19 @@ def set_pipeline_model_parallel_world_size(world_size):
 
 
 def get_pipeline_model_parallel_rank():
-    # TODO: Support get_pipeline_model_parallel_rank
-    warnings.warn(
-        "get_pipeline_model_parallel_rank is not implemented yet, always returns 0 for now. "
-    )
-    return 0
+    """Return caller's rank for the pipeline-model-parallel group."""
+    global _PIPELINE_MODEL_PARALLEL_RANK
+    if _PIPELINE_MODEL_PARALLEL_RANK is not None:
+        return _PIPELINE_MODEL_PARALLEL_RANK
+    if get_pipeline_model_parallel_world_size() == 1:
+        return 0
+    if (
+        paddle.distributed.is_initialized()
+        and get_pipeline_model_parallel_group(False) is not None
+    ):
+        return get_pipeline_model_parallel_group().rank
+    else:
+        return 0
 
 
 def is_pipeline_first_stage(ignore_virtual=True, vp_stage=None):

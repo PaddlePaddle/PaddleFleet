@@ -816,6 +816,65 @@ class _PerExpertWeightProxy:
         )
 
 
+def _check_expert_dw_deferral_supported(
+    defer_up_gate,
+    defer_down,
+    moe_deep_gemm,
+    subbatch_token_num,
+    use_fp8_mlp,
+    use_bf16_gemm_weight_grad,
+):
+    """Fail fast when a requested expert dW deferral cannot be honoured.
+
+    Both points need the deep_gemm weight-grad path, because that is the only
+    branch of ``bf16_weight_grad`` with a ``WeightGradStore`` call; the
+    ``batched_gemm`` fallback would ignore the request and compute inline, so
+    the feature would be a silent no-op.
+
+    FP8 expert compute additionally needs its BF16 weight-gradient fallback.
+    Native FP8 weight-gradient kernels compute inline and do not enqueue work
+    on ``WeightGradStore``.
+
+    down_proj additionally needs a non-subbatch backward: a deferred dw2 keeps
+    reading ``out_grad``, so dx must not reuse that buffer. Outside the
+    subbatch loop we give dx its own buffer, but the loop *needs* the alias:
+    it assembles dx by writing each slice back into ``out_grad`` and returns
+    ``out_grad`` as dx (``assert tmp_dx is tmp_out_grad`` in
+    ``backward_impl_subbatch``), so there the alias cannot be broken.
+    """
+    if defer_up_gate or defer_down:
+        if not moe_deep_gemm:
+            raise ValueError(
+                "p2p_overlap_dw_calc requests an expert dW deferral "
+                "(moe_expert_up_gate_proj / moe_expert_down_proj), but "
+                "moe_deep_gemm=False. Only the deep_gemm weight-grad path can "
+                "queue dW on WeightGradStore, so the request would be a silent "
+                "no-op. Set moe_deep_gemm=True or drop the point."
+            )
+    if (
+        (defer_up_gate or defer_down)
+        and use_fp8_mlp
+        and not use_bf16_gemm_weight_grad
+    ):
+        raise ValueError(
+            "p2p_overlap_dw_calc requests an expert dW deferral "
+            "(moe_expert_up_gate_proj / moe_expert_down_proj), but "
+            "fp8_wgrad=True selects the native FP8 weight-gradient path. "
+            "That path computes dW inline and cannot queue work on "
+            "WeightGradStore. Set fp8_wgrad=False or drop the point."
+        )
+    if defer_down:
+        if subbatch_token_num is not None:
+            raise ValueError(
+                "p2p_overlap_dw_calc requests moe_expert_down_proj, but "
+                f"moe_subbatch_token_num_after_dispatch={subbatch_token_num}. "
+                "The subbatch backward returns out_grad itself as dx, so a "
+                "deferred dw2 would read the overwritten buffer and produce a "
+                "wrong gradient. Unset moe_subbatch_token_num_after_dispatch "
+                "or drop the point."
+            )
+
+
 class ExpertsGroupGemmContiguousNode:
     """ExpertsGroupGemmContiguousNode"""
 
@@ -832,7 +891,8 @@ class ExpertsGroupGemmContiguousNode:
         use_fp8_mlp=True,
         moe_deep_gemm=False,
         use_ue8m0=False,
-        dw_p2p_overlap=False,
+        defer_expert_up_gate_dw=False,
+        defer_expert_down_dw=False,
         moe_expert_fusion=False,
         clamp_value=None,
         activation_type="swiglu",
@@ -904,7 +964,8 @@ class ExpertsGroupGemmContiguousNode:
         self.moe_deep_gemm = moe_deep_gemm
         self.use_ue8m0 = use_ue8m0
         self.is_split_group_gemm = not moe_expert_fusion
-        self.dw_p2p_overlap = dw_p2p_overlap
+        self.defer_expert_up_gate_dw = defer_expert_up_gate_dw
+        self.defer_expert_down_dw = defer_expert_down_dw
         self.moe_expert_fusion = moe_expert_fusion
         self.clamp_value = clamp_value
         self.activation_type = activation_type
@@ -937,6 +998,14 @@ class ExpertsGroupGemmContiguousNode:
             )
             # 用户指定：w4a8 下 dw 全部走 bf16 grouped gemm
             self.use_bf16_gemm_weight_grad = True
+        _check_expert_dw_deferral_supported(
+            defer_expert_up_gate_dw,
+            defer_expert_down_dw,
+            moe_deep_gemm,
+            self.moe_subbatch_token_num_after_dispatch,
+            use_fp8_mlp,
+            self.use_bf16_gemm_weight_grad,
+        )
 
     def cached_tensors(self):
         """
@@ -2624,7 +2693,11 @@ class ExpertsGroupGemmContiguousNode:
                     dw2, _ge.weight2_lora_A, _ge.weight2_lora_B, _ge.scaling
                 )
         else:
-            self.bf16_weight_grad(out_grad, o2_s, expert_w2)
+            # dx here allocates its own buffer (no dx=out_grad aliasing), so a
+            # deferred dw2 can keep reading out_grad safely.
+            self.bf16_weight_grad(
+                out_grad, o2_s, expert_w2, self.defer_expert_down_dw
+            )
 
         # dx
         dx = self.bwd_gate_up_input_bf16(do1, expert_w1)
@@ -2683,10 +2756,15 @@ class ExpertsGroupGemmContiguousNode:
         if used_inplace_swiglu:
             del o1
         self.o1 = None
+        # dw2 deferral additionally needs the bf16 weight-grad GEMM; the
+        # bwd_down_weight fallback has no WeightGradStore path.
+        defer_dw2 = self.defer_expert_down_dw and self.use_bf16_gemm_weight_grad
         if a2a_async_fn is None:
             # dw1
             if self.use_bf16_gemm_weight_grad:
-                self.bf16_weight_grad(do1, None, expert_w1, self.dw_p2p_overlap)
+                self.bf16_weight_grad(
+                    do1, None, expert_w1, self.defer_expert_up_gate_dw
+                )
             else:
                 self.bwd_gate_up_weight(do1, None, expert_w1, clear_input=True)
             # 不调用 _record_stream，直接 None。
@@ -2697,14 +2775,24 @@ class ExpertsGroupGemmContiguousNode:
             self.input_scale = None
             self.input = None
 
-            # dw2
-            if self.use_bf16_gemm_weight_grad:
-                self.bf16_weight_grad(out_grad, o2_s, expert_w2)
+            # dw2 / dx
+            #
+            # bwd_gate_up_input_fp8(dx=out_grad) writes dx into out_grad's
+            # buffer, so out_grad is gone by the time dx returns. That is fine
+            # while dw2 runs inline before dx, but a deferred dw2 would read the
+            # clobbered buffer. When deferring, let dx allocate its own output
+            # and keep out_grad alive for the deferred GEMM. Cost: one extra
+            # [m_sum, hidden_size] activation, plus o2_s [m_sum,
+            # moe_intermediate_size] held until the scheduler pops the store.
+            if defer_dw2:
+                self.bf16_weight_grad(out_grad, o2_s, expert_w2, True)
+                dx = self.bwd_gate_up_input_fp8(do1, expert_w1)
             else:
-                self.bwd_down_weight(out_grad, o2_s, expert_w2)
-
-            # dx
-            dx = self.bwd_gate_up_input_fp8(do1, expert_w1, dx=out_grad)
+                if self.use_bf16_gemm_weight_grad:
+                    self.bf16_weight_grad(out_grad, o2_s, expert_w2)
+                else:
+                    self.bwd_down_weight(out_grad, o2_s, expert_w2)
+                dx = self.bwd_gate_up_input_fp8(do1, expert_w1, dx=out_grad)
 
             # out-of-place 路径下 fused_swiglu_weighted_bwd 异步读 o1，但此时
             # 中间已经执行了 dw1、dw2 等多个 GEMM kernel（同一 stream 顺序入队），
@@ -2716,7 +2804,14 @@ class ExpertsGroupGemmContiguousNode:
             # 为了更充分地overlap, 将dx提前。不过这样可能会增加峰值显存。
 
             # dx
-            dx = self.bwd_gate_up_input_fp8(do1, expert_w1, dx=out_grad)
+            # NOTE: 这里复用 out_grad 作为 dx 的输出 buffer，会覆盖 out_grad；
+            # 下面的 dw2 仍然读 out_grad，疑似已有缺陷（见 dw2 处注释）。
+            # defer_expert_down_dw 打开时必须给 dx 单独的 buffer，否则延后的 dw2
+            # 读到的是被覆盖后的数据。
+            if defer_dw2:
+                dx = self.bwd_gate_up_input_fp8(do1, expert_w1)
+            else:
+                dx = self.bwd_gate_up_input_fp8(do1, expert_w1, dx=out_grad)
 
             dx, task = a2a_async_fn(dx)
             # dw1
@@ -2730,7 +2825,9 @@ class ExpertsGroupGemmContiguousNode:
             del do1
 
             # dw2
-            if self.use_bf16_gemm_weight_grad:
+            if defer_dw2:
+                self.bf16_weight_grad(out_grad, o2_s, expert_w2, True)
+            elif self.use_bf16_gemm_weight_grad:
                 self.bf16_weight_grad(out_grad, o2_s, expert_w2)
             else:
                 self.bwd_down_weight(out_grad, o2_s, expert_w2)
@@ -2744,7 +2841,7 @@ class ExpertsGroupGemmContiguousNode:
         self.reset_state()
         return dx, probs_grad
 
-    def bf16_weight_grad(self, dy, x, weights, p2p_overlap=False):
+    def bf16_weight_grad(self, dy, x, weights, defer_dw=False):
         """
         BF16 GEMM for weight grad
         """
@@ -2818,7 +2915,7 @@ class ExpertsGroupGemmContiguousNode:
                     )
                 if self.moe_deep_gemm:
                     # Use WeightGradStore for deferred execution to overlap with P2P communication
-                    if p2p_overlap:
+                    if defer_dw:
                         WeightGradStore.enabled = True
                         WeightGradStore.put(
                             partial(
@@ -2829,7 +2926,7 @@ class ExpertsGroupGemmContiguousNode:
                                 weights.main_grad,
                                 self.tokens_per_expert,
                                 self.tokens_per_expert_tensor,
-                                p2p_overlap,
+                                defer_dw,
                             )
                         )
                         WeightGradStore.enabled = False
@@ -2841,7 +2938,7 @@ class ExpertsGroupGemmContiguousNode:
                             weights.main_grad,
                             self.tokens_per_expert,
                             self.tokens_per_expert_tensor,
-                            p2p_overlap,
+                            defer_dw,
                         )
 
                 else:
@@ -2871,7 +2968,7 @@ class ExpertsGroupGemmContiguousNode:
                     )
                 if self.moe_deep_gemm:
                     # Use WeightGradStore for deferred execution to overlap with P2P communication
-                    if p2p_overlap:
+                    if defer_dw:
                         WeightGradStore.enabled = True
                         WeightGradStore.put(
                             partial(
@@ -2882,7 +2979,7 @@ class ExpertsGroupGemmContiguousNode:
                                 weights.grad,
                                 self.tokens_per_expert,
                                 self.tokens_per_expert_tensor,
-                                p2p_overlap,
+                                defer_dw,
                             )
                         )
                         WeightGradStore.enabled = False
@@ -2894,7 +2991,7 @@ class ExpertsGroupGemmContiguousNode:
                             weights.grad,
                             self.tokens_per_expert,
                             self.tokens_per_expert_tensor,
-                            p2p_overlap,
+                            defer_dw,
                         )
                 else:
                     assert not self.use_fp8_mlp, (

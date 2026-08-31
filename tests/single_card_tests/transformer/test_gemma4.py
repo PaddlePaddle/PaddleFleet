@@ -167,7 +167,7 @@ def _make_router_config():
         topk_group=1,
         tensor_model_parallel_size=1,
         moe_router_force_load_balancing=False,
-        dw_p2p_overlap=False,
+        p2p_overlap_dw_calc=None,
         expert_model_parallel_size=1,
         gpt_model_use_experimental_version=False,
         moe_router_enable_expert_bias=False,

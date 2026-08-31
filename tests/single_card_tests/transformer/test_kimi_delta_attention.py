@@ -1281,21 +1281,103 @@ class TestGatedNormRecompute(unittest.TestCase):
         # list without a count still recomputes every layer
         self.assertTrue(flag(1, ["rms_norm_gated"]))
 
-    def test_layer_count_without_valid_method_raises(self):
-        """A layer count with no first_n/block method must raise, not silently
-        fall through to first_n (which an assert would under python -O)."""
-        # recompute_method=None is accepted by the config for selective, so the
-        # guard has to live in the layer resolver itself.
-        for modules in (["rms_norm_gated"], {"rms_norm_gated": 1}):
-            overrides = {
+    def test_invalid_recompute_method_never_resolves_silently(self):
+        """An invalid recompute_method must raise, never silently pick first_n.
+
+        The config assert is stripped under ``python -O``; the resolver's raise
+        is what still catches it there.
+        """
+        with self.assertRaises((AssertionError, ValueError)):
+            _build_kda(
+                layer_number=0,
+                config_overrides={
+                    "recompute_granularity": "selective",
+                    "recompute_modules": ["rms_norm_gated"],
+                    "recompute_num_layers": 1,
+                    "recompute_method": "uniform",
+                },
+            )
+
+    def test_dict_layer_count_without_method_rejected_at_startup(self):
+        """A dict layer count needs first_n/block, checked at config init."""
+        with self.assertRaises(ValueError):
+            _build_kda(
+                layer_number=0,
+                config_overrides={
+                    "recompute_granularity": "selective",
+                    "recompute_modules": {"rms_norm_gated": 1},
+                    "recompute_method": None,
+                },
+            )
+
+    def test_method_none_resolves_as_first_n(self):
+        """recompute_method=None is a first_n alias, like every other module."""
+
+        def flag(layer_number):
+            return _build_kda(
+                layer_number=layer_number,
+                config_overrides={
+                    "recompute_granularity": "selective",
+                    "recompute_modules": ["rms_norm_gated"],
+                    "recompute_num_layers": 1,
+                    "recompute_method": None,
+                },
+            ).recompute_rms_norm_gated
+
+        self.assertTrue(flag(0))
+        self.assertFalse(flag(1))
+
+    def test_dict_selectors(self):
+        """rms_norm_gated accepts every selector the shared resolver does."""
+
+        def flag(layer_number, spec, method=None):
+            return _build_kda(
+                layer_number=layer_number,
+                config_overrides={
+                    "recompute_granularity": "selective",
+                    "recompute_modules": {"rms_norm_gated": spec},
+                    "recompute_method": method,
+                },
+            ).recompute_rms_norm_gated
+
+        # Explicit layer list: only the listed global 0-based ids, no method
+        # needed.
+        self.assertFalse(flag(0, [1]))
+        self.assertTrue(flag(1, [1]))
+        self.assertTrue(flag(0, [0, 1]))
+
+        # "all" / None / a negative count mean every layer.
+        for spec in ("all", None, -1):
+            self.assertTrue(flag(0, spec))
+            self.assertTrue(flag(1, spec))
+
+        # A layer count still honours recompute_method.
+        self.assertTrue(flag(0, 1, method="first_n"))
+        self.assertFalse(flag(1, 1, method="first_n"))
+        self.assertTrue(flag(0, 1, method="block"))
+        self.assertFalse(flag(1, 1, method="block"))
+
+    def test_non_list_sequence_entry(self):
+        """A tuple entry behaves like a list instead of silently disabling."""
+        kda = _build_kda(
+            layer_number=0,
+            config_overrides={
                 "recompute_granularity": "selective",
-                "recompute_modules": modules,
-                "recompute_method": None,
-            }
-            if isinstance(modules, list):
-                overrides["recompute_num_layers"] = 1
-            with self.assertRaises(ValueError):
-                _build_kda(layer_number=0, config_overrides=overrides)
+                "recompute_modules": ("rms_norm_gated",),
+            },
+        )
+        self.assertTrue(kda.recompute_rms_norm_gated)
+
+    def test_out_of_range_layer_id_rejected_at_startup(self):
+        """num_hidden_layers=2 here, so layer id 5 is out of range."""
+        with self.assertRaises(ValueError):
+            _build_kda(
+                layer_number=0,
+                config_overrides={
+                    "recompute_granularity": "selective",
+                    "recompute_modules": {"rms_norm_gated": [0, 5]},
+                },
+            )
 
     def _assert_matches_baseline(self, deterministic):
         paddle.seed(0)

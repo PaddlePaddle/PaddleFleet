@@ -36,6 +36,7 @@ import paddle
 from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
+from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.triton_ops import (
     fused_apply_rope_half,
     fused_rope_cat_key,
@@ -338,6 +339,215 @@ class TestFusedRopeCatKey(unittest.TestCase):
         ref, pe_ref = self._reference(kv, kpe.unsqueeze(-2), freqs)
         _check_equal(key, ref)
         _check_equal(k_pe, pe_ref)
+
+
+class TestAdjacentInPairing(unittest.TestCase):
+    """``adjacent_in``: pair source channels (2k, 2k+1), not (k, k+half).
+
+    This is the ``mqa_latent_rope_adjacent_pairing`` path. It exists so an
+    absorbed-MQA layer can keep the channel-to-frequency map an unabsorbed MLA
+    checkpoint was trained with, i.e. the one
+    ``fused_apply_mla_rope_for_q`` / ``_for_kv`` produce -- absorption cannot
+    reach those kernels, and every path that remains pairs ``(k, k+half)``.
+
+    Only the gather positions move; the *output* stays half-split. So the
+    reference is eager with ``multi_latent_attention=True`` (de-interleaves the
+    input) and ``mla_output_remove_interleaving=False`` (leaves the output in
+    halves), and the match must be bit-exact both ways.
+    """
+
+    LATENT = 512
+
+    def setUp(self) -> None:
+        paddle.seed(0)
+
+    @staticmethod
+    def _eager(x, freqs, pe_dim, pe_offset, adjacent):
+        lead = x[..., :pe_offset]
+        x_pe = x[..., pe_offset : pe_offset + pe_dim]
+        trail = x[..., pe_offset + pe_dim :]
+        x_pe = _apply_rotary_pos_emb_bshd(
+            x_pe,
+            freqs,
+            rotary_interleaved=False,
+            multi_latent_attention=adjacent,
+            mla_output_remove_interleaving=False,
+            mscale=1.0,
+        )
+        return paddle.concat([lead, x_pe, trail], axis=-1)
+
+    def _run_half(self, s, h, head_dim, pe_offset, adjacent):
+        x0 = paddle.randn([1, s, h, head_dim], "bfloat16")
+        freqs = paddle.randn([1, s, 1, PE_DIM])
+        freqs.stop_gradient = True
+
+        outs = []
+        grad = None
+        for fused in (False, True):
+            x = x0.detach()
+            x.stop_gradient = False
+            if fused:
+                out = fused_apply_rope_half(
+                    x,
+                    freqs,
+                    PE_DIM,
+                    pe_offset=pe_offset,
+                    adjacent_in=adjacent,
+                )
+            else:
+                out = self._eager(x, freqs, PE_DIM, pe_offset, adjacent)
+            if grad is None:
+                grad = paddle.randn_like(out)
+            out.backward(grad)
+            outs.append((out.detach(), x.grad))
+
+        (out_ref, grad_ref), (out_fused, grad_fused) = outs
+        _check_equal(out_fused, out_ref)
+        _check_equal(grad_fused, grad_ref)
+        return out_fused
+
+    def test_matches_eager_de_interleave(self) -> None:
+        """MLA q shape, rope block trailing: the production call site."""
+        self._run_half(512, 64, 192 + PE_DIM, 192, adjacent=True)
+
+    def test_default_still_matches_half_split_eager(self) -> None:
+        """``adjacent_in=False`` must stay exactly what it always was.
+
+        Every pre-existing caller -- the DSA indexer included -- keeps the
+        default, so a regression here would silently change trained models.
+        """
+        self._run_half(512, 64, 192 + PE_DIM, 192, adjacent=False)
+
+    def test_pe_only_and_mid_block(self) -> None:
+        """``k_pos_emb`` ([b, s, 1, 64]) and a rope block with both sides."""
+        self._run_half(256, 1, PE_DIM, 0, adjacent=True)
+        self._run_half(128, 12, 192, 64, adjacent=True)
+
+    def test_the_two_pairings_differ(self) -> None:
+        """Guard against the flag becoming a no-op.
+
+        The whole point is that the two conventions assign different
+        frequencies to the same channel, so they must not agree.
+        """
+        s, h = 128, 4
+        x = paddle.randn([1, s, h, PE_DIM], "bfloat16")
+        freqs = paddle.randn([1, s, 1, PE_DIM])
+        freqs.stop_gradient = True
+        half = fused_apply_rope_half(x, freqs, PE_DIM, adjacent_in=False)
+        adj = fused_apply_rope_half(x, freqs, PE_DIM, adjacent_in=True)
+        self.assertFalse(bool(paddle.all(half == adj)))
+
+    def test_cat_key_matches_eager_de_interleave(self) -> None:
+        """``fused_rope_cat_key`` builds the absorbed key; q/k must agree."""
+        s = 512
+        kv0 = paddle.randn([1, s, self.LATENT], "bfloat16")
+        kpe0 = paddle.randn([1, s, 1, PE_DIM], "bfloat16")
+        freqs = paddle.randn([1, s, 1, PE_DIM])
+        freqs.stop_gradient = True
+
+        outs = []
+        grads = {}
+        for fused in (False, True):
+            kv = kv0.detach()
+            kpe = kpe0.detach()
+            kv.stop_gradient = False
+            kpe.stop_gradient = False
+            if fused:
+                key, k_pe = fused_rope_cat_key(
+                    kv,
+                    kpe,
+                    freqs,
+                    self.LATENT,
+                    PE_DIM,
+                    adjacent_in=True,
+                )
+            else:
+                rot = _apply_rotary_pos_emb_bshd(
+                    kpe,
+                    freqs,
+                    rotary_interleaved=False,
+                    multi_latent_attention=True,
+                    mla_output_remove_interleaving=False,
+                    mscale=1.0,
+                )
+                key = paddle.concat([kv.unsqueeze(-2), rot], axis=-1)
+                k_pe = rot
+            if not grads:
+                grads["key"] = paddle.randn_like(key)
+                grads["k_pe"] = paddle.randn_like(k_pe)
+            loss = (key.astype("float32") * grads["key"]).sum() + (
+                k_pe.astype("float32") * grads["k_pe"]
+            ).sum()
+            loss.backward()
+            outs.append((key.detach(), k_pe.detach(), kv.grad, kpe.grad))
+
+        ref, fus = outs
+        for got, want in zip(fus, ref):
+            _check_equal(got, want)
+
+
+class TestAdjacentPairingConfigGuards(unittest.TestCase):
+    """``mqa_latent_rope_adjacent_pairing`` fails loudly where it is inert.
+
+    Every way of mis-setting it is silent at runtime -- the flag is simply never
+    read, or it is read on top of a second mechanism that already does the same
+    de-interleave -- so ``__post_init__`` is the only place a mistake can still
+    be reported.
+    """
+
+    MLA_DIMS = {
+        "hybrid_mla_q_lora_rank": 128,
+        "hybrid_mla_kv_lora_rank": 512,
+        "hybrid_mla_qk_nope_head_dim": 192,
+        "hybrid_mla_qk_rope_head_dim": 64,
+        "hybrid_mla_v_head_dim": 64,
+        "hybrid_mla_num_attention_heads": 1,
+        "hybrid_mla_num_key_value_heads": 1,
+        "dsa_index_n_heads": 64,
+        "dsa_index_head_dim": 128,
+        "dsa_index_topk": 128,
+    }
+
+    def _config(self, **kwargs):
+        base = {
+            "num_hidden_layers": 2,
+            "experimental_attention_variant": "dsv4_hybrid",
+            "csa_compress_ratios": [-2, 128],
+            "hybrid_mla_attention": "mqa_dsa",
+            "mqa_latent_rope_adjacent_pairing": True,
+            **self.MLA_DIMS,
+        }
+        base.update(kwargs)
+        return TransformerConfig(**base)
+
+    def test_default_is_off(self) -> None:
+        config = TransformerConfig(num_hidden_layers=2)
+        self.assertFalse(config.mqa_latent_rope_adjacent_pairing)
+
+    def test_happy_path(self) -> None:
+        self.assertTrue(self._config().mqa_latent_rope_adjacent_pairing)
+
+    def test_requires_absorbed_layers(self) -> None:
+        # 'mha' leaves the -2 layers as unabsorbed MLA, which already pairs
+        # (2k, 2k+1) through apply_rope_fusion.
+        with self.assertRaises(ValueError):
+            self._config(hybrid_mla_attention="mha")
+
+    def test_requires_a_minus2_ratio(self) -> None:
+        with self.assertRaises(ValueError):
+            self._config(csa_compress_ratios=[128, 128])
+
+    def test_rejects_rotary_interleaved(self) -> None:
+        # Both select the same pairing by different means; together they rotate
+        # the pair twice.
+        with self.assertRaises(ValueError):
+            self._config(rotary_interleaved=True)
+
+    def test_rejects_experimental_version(self) -> None:
+        # That path rotates in the complex domain via
+        # _ec_compatible_rope_apply, which neither branch of the switch reaches.
+        with self.assertRaises(ValueError):
+            self._config(gpt_model_use_experimental_version=True)
 
 
 class TestOptimizedModeValidation(unittest.TestCase):

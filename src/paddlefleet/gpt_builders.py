@@ -29,10 +29,16 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_mtp_layers_spec,
     get_gpt_spec,
 )
+from paddlefleet.transformer.moe.token_dispatcher import init_ring_subgroups
 
 
 def gpt_builder(config, **kwargs):
     print("building GPT model ...")
+    if getattr(config, "moe_token_dispatcher_type", None) == "ringmoe":
+        # RingMoE sub-group creation is a world collective, so it cannot live in
+        # the dispatcher: every rank runs the builder, but only the pipeline
+        # stages holding a MoE layer ever construct a dispatcher.
+        init_ring_subgroups()
     if (
         config.n_routed_experts
         or getattr(config, "layer_types", None) is not None

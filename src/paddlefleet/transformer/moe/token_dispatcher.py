@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+from paddlefleet.transformer.utils import profile
+
 from .fp8_utils import FP8_ALIGN
 from .fused_a2a import (
     HYBRIDEP_TOKEN_ALIGNMENT,
@@ -90,10 +92,11 @@ def is_hybrid_ep_backend_selected(
         "deepep",
         "hybridep",
         "moonep",
+        "ringmoe",
     ):
         raise ValueError(
             "moe_token_dispatcher_type must be one of: "
-            "allgather, alltoall, deepep, hybridep, moonep"
+            "allgather, alltoall, deepep, hybridep, moonep, ringmoe"
         )
     if selected_dispatcher != "hybridep":
         return False
@@ -1582,6 +1585,31 @@ class _RouterAllGather(paddle.autograd.PyLayer):
         return out
 
 
+def _drain_async_handle(handle: dict | None, where: str) -> None:
+    """Wait out a leftover pre-issued collective and discard its handle.
+
+    A prefetch whose consumer was never reached -- an exception between issuing
+    and consuming -- leaves an in-flight NCCL task owning an output buffer.
+    Waiting before the slot is overwritten keeps the next prefetch from racing
+    it. A failed wait is logged rather than raised: there is nothing left to
+    recover, and raising here would mask whatever aborted the previous forward.
+
+    Always returns None, so the caller can assign the result back over the slot
+    it just drained.
+    """
+    if handle is None:
+        return None
+    try:
+        handle["task"].wait()
+    except (RuntimeError, OSError) as exc:
+        logger.warning(
+            "%s: leftover async task wait failed (%s), discarding handle.",
+            where,
+            exc,
+        )
+    return None
+
+
 class _PreAllGatherResult(paddle.autograd.PyLayer):
     """Consume a pre-issued async AllGather of hidden_states.
 
@@ -1972,16 +2000,9 @@ class AllGatherTokenDispatcher(nn.Layer):
             return
 
         # Drain leftover handle from a possibly-aborted previous forward.
-        if self._pre_ag_handle is not None:
-            try:
-                self._pre_ag_handle["task"].wait()
-            except (RuntimeError, OSError) as _e:
-                logger.warning(
-                    "pre_allgather: leftover async task wait failed (%s), "
-                    "discarding handle.",
-                    _e,
-                )
-            self._pre_ag_handle = None
+        self._pre_ag_handle = _drain_async_handle(
+            self._pre_ag_handle, "pre_allgather"
+        )
 
         if len(hidden_states.shape) == 3:
             _, _, d_model = hidden_states.shape
@@ -2250,3 +2271,481 @@ class AllGatherTokenDispatcher(nn.Layer):
             self._overlap_combined = None
             return out
         return ReduceScatterGroupOp.apply(hidden_states, self.moe_group)
+
+
+_RING_SUBGROUP_CACHE: dict = {}
+
+# Intra-node GPU count (G) the ring splits on. Fixed rather than detected: the
+# split has to match the real NVLink domain, and over-estimating it silently
+# routes inter-node traffic as if it were intra-node, which shows up as an
+# unexplained slowdown instead of an error. Every target machine has 8.
+_RING_GPUS_PER_NODE = 8
+
+
+def _build_ring_subgroups(moe_group, gpus_per_node: int = _RING_GPUS_PER_NODE):
+    """Split the EP group into intra-node and inter-node sub-groups.
+
+    Assumes EP ranks are node-contiguous: the first G EP ranks live on one
+    machine, the next G on the next, etc. ``G = min(gpus_per_node, EP)``, so an
+    EP group that fits inside one machine collapses to the intra level only.
+    Returns ``(G, N, intra_group, inter_group)``; a level's group is None when
+    degenerate (size 1).
+
+    ``new_group`` and the ``all_gather_object`` below are world collectives, so
+    every world rank must reach this in the same order. Repeated MoE layers on
+    one rank collapse into one call (the cache key is per EP group, not per
+    layer), but a rank owning *no* MoE layer never gets here at all -- which is
+    why production pre-creates the groups via ``init_ring_subgroups`` at
+    model-build time instead of relying on MoE layer construction.
+
+    Every rank contributes its own EP group's partition via
+    ``all_gather_object``; the merged set is deduplicated and sorted so all
+    ranks create identical groups in identical order.
+    """
+    ep_ranks = list(moe_group.ranks)
+    ep_size = len(ep_ranks)
+    G = min(gpus_per_node, ep_size)
+    if ep_size % G != 0:
+        raise ValueError(
+            f"RingMoE requires EP size ({ep_size}) to be a multiple of the "
+            f"per-node GPU count ({G}), so that EP == N*G. Pick an EP degree "
+            f"that divides evenly across whole machines."
+        )
+    N = ep_size // G
+
+    key = (tuple(ep_ranks), G)
+    if key in _RING_SUBGROUP_CACHE:
+        return _RING_SUBGROUP_CACHE[key]
+
+    intra_lists = (
+        [ep_ranks[n * G : (n + 1) * G] for n in range(N)] if G > 1 else []
+    )
+    inter_lists = (
+        [[ep_ranks[n * G + j] for n in range(N)] for j in range(G)]
+        if N > 1
+        else []
+    )
+
+    gathered: list = []
+    paddle.distributed.all_gather_object(
+        gathered, {"intra": intra_lists, "inter": inter_lists}
+    )
+
+    def _unique_sorted(kind: str):
+        seen, out = set(), []
+        for proposal in gathered:
+            for lst in proposal[kind]:
+                k = tuple(sorted(lst))
+                if len(k) > 1 and k not in seen:
+                    seen.add(k)
+                    out.append(list(k))
+        out.sort()
+        return out
+
+    global_rank = paddle.distributed.get_rank()
+    intra_group = inter_group = None
+    for lst in _unique_sorted("intra"):
+        g = paddle.distributed.new_group(ranks=lst)
+        if global_rank in lst:
+            intra_group = g
+    for lst in _unique_sorted("inter"):
+        g = paddle.distributed.new_group(ranks=lst)
+        if global_rank in lst:
+            inter_group = g
+
+    result = (G, N, intra_group, inter_group)
+    _RING_SUBGROUP_CACHE[key] = result
+    return result
+
+
+def init_ring_subgroups(moe_group=None, gpus_per_node: int | None = None):
+    """Pre-create the RingMoE sub-groups on every rank, once, at build time.
+
+    Creating them lazily inside ``RingMoETokenDispatcher.__init__`` deadlocks:
+    the creation path is a *world* collective, but a dispatcher only exists on
+    ranks whose pipeline stage owns a MoE layer. With
+    ``pipeline_model_parallel_size > 1`` and a sparse ``moe_layer_freq`` (or a
+    dense prefix), a whole stage can be MoE-free; its ranks would skip the
+    collective while the MoE-bearing stages block in it forever.
+
+    So the model builder calls this instead -- every rank runs the builder
+    exactly once with the same config, so the sub-groups are already cached by
+    the time any dispatcher is constructed. Idempotent, and a no-op when EP is
+    degenerate (nothing to build, hence no collective to join).
+    """
+    if gpus_per_node is None:
+        gpus_per_node = _RING_GPUS_PER_NODE
+    if moe_group is None:
+        from paddlefleet import parallel_state
+
+        moe_group = parallel_state.get_expert_model_parallel_group(
+            check_initialized=False
+        )
+    if moe_group is None or moe_group.nranks == 1:
+        return None
+    return _build_ring_subgroups(moe_group, gpus_per_node)
+
+
+class _InterRingShift(paddle.autograd.PyLayer):
+    """Autograd-safe async cyclic ring shift over an inter-node group.
+
+    forward launches a non-blocking all-to-all on the comm stream (send my rows
+    to ``dst``, receive from ``src``) and stashes the task in ``handle`` so the
+    caller can wait lazily — this is what lets the shift overlap with the intra
+    expert GEMM. backward performs the reverse (sync) shift.
+    """
+
+    @staticmethod
+    def forward(ctx, x, group, dst, src, handle):
+        ctx.group, ctx.dst, ctx.src = group, dst, src
+        n = group.nranks
+        rows = x.shape[0]
+        in_split = [0] * n
+        in_split[dst] = rows
+        out_split = [0] * n
+        out_split[src] = rows
+        out = paddle.empty(x.shape, dtype=x.dtype)
+        handle["task"] = paddle.distributed.stream.alltoall_single(
+            out,
+            x.contiguous(),
+            out_split_sizes=out_split,
+            in_split_sizes=in_split,
+            group=group,
+            sync_op=False,
+            use_calc_stream=False,
+        )
+        return out
+
+    @staticmethod
+    def backward(ctx, grad):
+        n = ctx.group.nranks
+        rows = grad.shape[0]
+        # Reverse direction: send to src, receive from dst.
+        in_split = [0] * n
+        in_split[ctx.src] = rows
+        out_split = [0] * n
+        out_split[ctx.dst] = rows
+        out = paddle.empty(grad.shape, dtype=grad.dtype)
+        task = paddle.distributed.stream.alltoall_single(
+            out,
+            grad.contiguous(),
+            out_split_sizes=out_split,
+            in_split_sizes=in_split,
+            group=ctx.group,
+            sync_op=True,
+        )
+        return out
+
+
+class _RingAllGather(paddle.autograd.PyLayer):
+    """AllGather over a ring sub-group. Backward is ReduceScatter-SUM.
+
+    Same semantics as :class:`~.moe_utils.AllGatherGroupOp` minus the
+    ``paddle.distributed.barrier`` it runs in both directions to protect state
+    shared across ranks between collectives; the ring owns its sub-groups and
+    every output buffer, so it has nothing to protect. Dropping it matters
+    because the barrier blocks the host in ``cudaDeviceSynchronize`` on a call
+    that runs once per ring round per layer per micro-batch in both directions,
+    and because a device-wide sync also drains the in-flight ``_InterRingShift``
+    and the pipeline's p2p sends -- defeating both this ring's overlap and VPP's
+    ``overlap_p2p_comm``.
+    """
+
+    @staticmethod
+    def forward(ctx, input, group):
+        ctx.group = group
+        return all_gather_group(input, group=group)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return reduce_scatter_group(grad.contiguous(), group=ctx.group)
+
+
+class RingMoETokenDispatcher(AllGatherTokenDispatcher):
+    """Two-level ring dispatcher for intermediate-sharded experts (bf16).
+
+    Mathematically identical to :class:`AllGatherTokenDispatcher`: every rank
+    holds all experts sharded along the intermediate dim (``I_local = mid/EP``),
+    and a token's output is the sum of every I-shard's down-proj contribution.
+    Only the shape of the global gather/reduce differs. Instead of one flat
+    AllGather/ReduceScatter over the whole EP group, tokens rotate through the N
+    nodes while each node applies its own I-shard via intra-node
+    AllGather/ReduceScatter over its G GPUs, so bulk traffic stays intra-node and
+    only ``[T, d_l]`` crosses the network per hop.
+
+    ``MoELayer`` drives :meth:`ring_forward` directly instead of the flat
+    dispatch/compute/combine pipeline; the inherited AllGather methods
+    (checkpoint IO, ``token_combine``, ...) keep the two paths interchangeable
+    everywhere else. Numerical equivalence against the ``allgather`` dispatcher
+    is the intended correctness check.
+    """
+
+    def __init__(
+        self,
+        moe_group: Group,
+        expert_model_parallel_size: int,
+        num_experts: int,
+        fp8_dispatch: bool = False,
+        use_ue8m0: bool = False,
+    ):
+        super().__init__(
+            moe_group,
+            expert_model_parallel_size,
+            num_experts,
+            fp8_dispatch=fp8_dispatch,
+            use_ue8m0=use_ue8m0,
+        )
+        if fp8_dispatch:
+            raise NotImplementedError(
+                "RingMoE supports bf16 + SonicMoE only; fp8_dispatch is not "
+                "implemented (mid split by EP breaks 128-alignment)."
+            )
+        # ring_forward validates the inter-node token layout on its first step.
+        self._equal_tokens_checked = False
+        # Build the 2-level ring topology on a fixed 8 GPUs per node. Degenerate
+        # cases collapse to a single level (EP <= 8 -> N=1, intra-only == flat
+        # allgather; G=1 -> inter-only).
+        if moe_group is None or moe_group.nranks == 1:
+            self.G, self.N = 1, 1
+            self.intra_group = self.inter_group = None
+        else:
+            (
+                self.G,
+                self.N,
+                self.intra_group,
+                self.inter_group,
+            ) = _build_ring_subgroups(moe_group, _RING_GPUS_PER_NODE)
+
+    def _ag(self, t, group):
+        """Autograd-safe AllGather over a sub-group (backward = ReduceScatter)."""
+        if group is None or group.nranks == 1:
+            return t
+        return _RingAllGather.apply(t, group)
+
+    def _rs(self, t, group):
+        """Autograd-safe ReduceScatter-SUM over a sub-group (bwd = AllGather)."""
+        if group is None or group.nranks == 1:
+            return t
+        return ReduceScatterGroupOp.apply(t, group)
+
+    def _ag_indices(self, idx, group):
+        """AllGather int32 routing indices (no gradient)."""
+        if group is None or group.nranks == 1:
+            return idx
+        out_shape = list(idx.shape)
+        out_shape[0] *= group.nranks
+        out = paddle.empty(shape=out_shape, dtype=idx.dtype)
+        paddle.distributed.stream.all_gather(
+            out, idx, group=group, sync_op=True
+        )
+        return out
+
+    def _ag_router(self, weights, group):
+        """AllGather router weights (has gradient, backward = reduce-scatter)."""
+        if group is None or group.nranks == 1:
+            return weights
+        return _RouterAllGather.apply(weights, group)
+
+    def _check_equal_tokens(self, local_tokens: int):
+        """Assert every inter-group rank holds the same token count.
+
+        ``_InterRingShift`` fills its in/out split sizes from the *local*
+        ``x.shape[0]``, so sender and receiver disagree the moment token counts
+        diverge (e.g. unbalanced DP, or variable_seq_lengths without packing to
+        a fixed length). NCCL then mismatches sizes, which surfaces as a hang or
+        corrupted data rather than an exception. ``ring_forward`` runs this once
+        per dispatcher, on the first step, since it costs an all_gather.
+        """
+        counts = paddle.full([1], local_tokens, dtype="int64")
+        gathered = paddle.empty([self.inter_group.nranks], dtype="int64")
+        paddle.distributed.stream.all_gather(
+            gathered, counts, group=self.inter_group, sync_op=True
+        )
+        counts_list = gathered.tolist()
+        if len(set(counts_list)) != 1:
+            raise ValueError(
+                "RingMoE requires an equal local token count on every rank of "
+                f"the inter-node group, got {counts_list} (this rank: "
+                f"{local_tokens}). Pack sequences to a fixed length or keep DP "
+                "balanced; otherwise the inter-node shift mismatches NCCL "
+                "buffer sizes."
+            )
+
+    def global_tokens_per_expert(self, topk_indices):
+        """EP-wide tokens-per-expert histogram, for MoE balance logging.
+
+        The ring never materializes the flat global index list that
+        :meth:`AllGatherTokenDispatcher.get_dispatched_routing` histograms, so
+        sum the per-rank histograms over the EP group instead — numerically
+        identical to histogramming the AllGathered indices.
+        """
+        counts = _tokens_per_expert_histogram(
+            topk_indices.detach().cast("int32"), self.num_experts
+        )
+        if self.moe_group is not None and self.moe_group.nranks > 1:
+            paddle.distributed.all_reduce(counts, group=self.moe_group)
+        return counts
+
+    def _node_slice(
+        self,
+        tok,
+        cur_idx,
+        cur_w,
+        expert_fn,
+        recompute_moe_gate_up=False,
+    ):
+        """One node's mid-slice contribution for the currently-held tokens:
+        intra AllGather -> SonicMoE partial-I GEMM -> intra ReduceScatter-SUM.
+        Returns [T, d_l].
+        """
+        g_tok = self._ag(tok, self.intra_group)
+        g_idx = self._ag_indices(cur_idx, self.intra_group)
+        g_w = self._ag_router(cur_w, self.intra_group)
+        g_w = paddle.where(g_idx < 0, paddle.zeros_like(g_w), g_w)
+        tokens_per_expert = _tokens_per_expert_histogram(
+            g_idx, self.num_experts
+        )
+        # Same timer name as the flat path's expert GEMM, so the two dispatchers
+        # report comparable compute time. Accumulates over the N rounds: the
+        # collectives around it are outside the scope, so this is compute only.
+        with profile("fusion_mlp"):
+            part = expert_fn(
+                g_tok,
+                g_idx,
+                g_w,
+                False,  # use_fp8 (bf16 only)
+                tokens_per_expert=tokens_per_expert,
+                fp8_scale=None,
+                recompute_moe_gate_up=recompute_moe_gate_up,
+                fp8_combine_grad_handle=None,
+            )
+        return self._rs(part, self.intra_group)
+
+    def _inter_combine(self, x, group, combine_overlap_handle):
+        """Final inter-node combine, optionally overlapped with shared experts.
+
+        Without a handle this is the plain ReduceScatter; ``group=None`` means
+        there is nothing to reduce because the single-node ring already holds
+        the final rows. With a handle, ``_AllGatherCombineAsync`` issues the
+        ReduceScatter on the comm stream and runs the shared-expert subgraph on
+        the calc stream meanwhile. Its forward-RS / backward-AG dual is exactly
+        ``ReduceScatterGroupOp``'s, so autograd is unchanged, and the overlap is
+        safe because the subgraph reads the pre-MoE residual rather than the
+        ring output. With ``group=None`` that same PyLayer degenerates to a
+        clone plus a serial subgraph run, which is what keeps ``fn_out``
+        populated on the N==1 path.
+        """
+        if combine_overlap_handle is None:
+            return x if group is None else ReduceScatterGroupOp.apply(x, group)
+        from paddle import framework as _framework
+
+        combined_x, *fn_out = _AllGatherCombineAsync.apply(
+            x,
+            group,
+            *(combine_overlap_handle["fn_args"]),
+            fn=combine_overlap_handle["fn"],
+            is_first_fwd=not _framework._dygraph_tracer()._has_grad,
+            fp8_combine_grad_handle=None,
+        )
+        combine_overlap_handle["fn_out"] = tuple(fn_out)
+        return combined_x
+
+    def ring_forward(
+        self,
+        x_l,
+        topk_weights,
+        topk_indices,
+        expert_fn,
+        probs_dtype,
+        recompute_moe_gate_up=False,
+        combine_overlap_handle=None,
+    ):
+        """Run the two-level ring and return this rank's combined output.
+
+        Only the token/routing tensors rotate around the N nodes, one hop at a
+        time via async ``_InterRingShift``. At each stop this node applies its
+        own mid-slice to the tokens it currently holds through
+        :meth:`_node_slice`, producing one partial per round. The partials are
+        laid out per destination node and a single inter-node ReduceScatter sums
+        every node's contribution back to each home rank. Keeping the shift
+        independent of the compute is what lets it overlap with the intra GEMM.
+        All collectives are autograd-safe PyLayers, so backward needs no extra
+        wiring. Requires an equal local token count across the inter group --
+        see :meth:`_check_equal_tokens`.
+
+        Peak activation is *not* reduced versus the flat AllGather path: each
+        round's ``g_tok`` (``[G·T, d_l]``) is captured by the expert GEMM for its
+        backward and all N rounds stay resident, so the peak is
+        ``N·G·T·d_l = EP·T·d_l`` -- exactly what one flat EP AllGather holds. The
+        wins are the traffic pattern and the overlap headroom.
+
+        One optional overlap feeds in from ``MoELayer``, a no-op when absent:
+        ``combine_overlap_handle`` runs the shared-expert subgraph while the final
+        inter ReduceScatter is in flight (consumed in :meth:`_inter_combine`,
+        which writes the subgraph's output back as ``fn_out``).
+        """
+        x_l = x_l.reshape([-1, x_l.shape[-1]]).contiguous()
+        tok = x_l
+        cur_idx = topk_indices.detach().cast("int32").contiguous()
+        cur_w = topk_weights.cast(probs_dtype).contiguous()
+
+        n = self.N
+        if n == 1:  # single node: intra-only, no inter routing needed.
+            return self._inter_combine(
+                self._node_slice(
+                    tok,
+                    cur_idx,
+                    cur_w,
+                    expert_fn,
+                    recompute_moe_gate_up,
+                ),
+                None,
+                combine_overlap_handle,
+            )
+
+        r0 = self.inter_group.rank
+        if not self._equal_tokens_checked:
+            # Once per dispatcher: catches a misconfigured token layout at the
+            # first step instead of hanging inside NCCL, without paying for a
+            # collective on every later step.
+            self._equal_tokens_checked = True
+            self._check_equal_tokens(tok.shape[0])
+        dst = (r0 + 1) % n  # send my rows to the next node
+        src = (r0 - 1) % n  # receive from the previous node
+        partials = [None] * n
+        for step in range(n):
+            # Prefetch the next round's token/routing rotation on the comm stream
+            # so it overlaps with this round's intra AllGather/GEMM/ReduceScatter.
+            if step < n - 1:
+                h_tok, h_idx, h_w = {}, {}, {}
+                nxt_tok = _InterRingShift.apply(
+                    tok, self.inter_group, dst, src, h_tok
+                )
+                nxt_idx = _InterRingShift.apply(
+                    cur_idx, self.inter_group, dst, src, h_idx
+                )
+                nxt_w = _InterRingShift.apply(
+                    cur_w, self.inter_group, dst, src, h_w
+                )
+            # Tokens held at this step originate from home node (r0 - step) % n,
+            # so this node's slice for them is destined to that home.
+            node_part = self._node_slice(
+                tok,
+                cur_idx,
+                cur_w,
+                expert_fn,
+                recompute_moe_gate_up,
+            )
+            partials[(r0 - step) % n] = node_part
+            if step < n - 1:
+                # Wait for the in-flight rotation before consuming it next round.
+                h_tok["task"].wait()
+                h_idx["task"].wait()
+                h_w["task"].wait()
+                tok, cur_idx, cur_w = nxt_tok, nxt_idx, nxt_w
+        # partials[d] = this node's contribution destined to home node d.
+        # ReduceScatter over inter sums contributions from all nodes per home.
+        buf = paddle.concat(partials, axis=0)  # [n*T, d_l]
+        return self._inter_combine(
+            buf, self.inter_group, combine_overlap_handle
+        )

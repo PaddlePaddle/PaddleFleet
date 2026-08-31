@@ -29,8 +29,8 @@ from unittest.mock import MagicMock, patch
 
 import paddle
 
+from paddlefleet.transformer.dw_overlap import DeferredWeightGradLinear
 from paddlefleet.transformer.multi_latent_attention import (
-    FP8OverlapProj,
     MLASelfAttentionSublayersSpec,
     MultiLatentAttention,
     _ec_compatible_rope_apply,
@@ -102,21 +102,21 @@ class TestECCompatibleRopeApply(unittest.TestCase):
         self.assertEqual(k_out.dtype, k_pe.dtype)
 
 
-class TestFP8OverlapProj(unittest.TestCase):
-    """Tests for FP8OverlapProj PyLayer."""
+class TestDeferredWeightGradLinear(unittest.TestCase):
+    """Tests for DeferredWeightGradLinear PyLayer."""
 
     def test_forward_basic(self):
-        """Test FP8OverlapProj forward pass."""
+        """Test DeferredWeightGradLinear forward pass."""
         x = paddle.randn([2, 4, 8])
         weight = paddle.randn([8, 4])
-        out = FP8OverlapProj.apply(x, weight)
+        out = DeferredWeightGradLinear.apply(x, weight)
         self.assertEqual(out.shape, [2, 4, 4])
 
     def test_forward_matches_linear(self):
-        """Test FP8OverlapProj forward matches paddle.nn.functional.linear."""
+        """Test DeferredWeightGradLinear forward matches paddle.nn.functional.linear."""
         x = paddle.randn([2, 4, 8])
         weight = paddle.randn([8, 4])
-        out_custom = FP8OverlapProj.apply(x, weight)
+        out_custom = DeferredWeightGradLinear.apply(x, weight)
         out_linear = paddle.nn.functional.linear(x, weight)
         self.assertTrue(
             paddle.allclose(out_custom, out_linear, atol=1e-5).item()
@@ -196,7 +196,7 @@ class TestMultiLatentAttentionForwardAssertions(unittest.TestCase):
         config.sequence_parallel = False
         config.recompute_granularity = None
         config.gated_attention = False
-        config.dw_p2p_overlap = False
+        config.p2p_overlap_dw_calc = None
         config.use_bias = True
 
         # Create a concrete subclass to avoid abstract class instantiation error

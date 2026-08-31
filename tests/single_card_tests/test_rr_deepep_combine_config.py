@@ -337,15 +337,82 @@ class TestRRRecomputeUpdate(unittest.TestCase):
             "meaningless when neither full_recompute", str(ctx.exception)
         )
 
-    @patch("paddlefleet.transformer.moe.moe_layer.need_recompute_in_first_n")
-    def test_dict_mode_sets_flag_via_need_recompute(self, mock_need_recompute):
-        """Dict mode uses need_recompute_in_first_n to decide use_rr_deepep_combine."""
+    def test_dict_mode_negative_count_turns_rr_off(self):
+        """``moe_combine: -1`` asks for plain recompute everywhere, not RR.
+
+        Resolving it as "RR everywhere" used to trip the "meaningless" error
+        below, reporting the opposite of what was configured.
+        """
         from paddlefleet.transformer.moe.moe_layer import MoELayer
 
-        # When need_recompute_in_first_n returns False, use_rr_deepep_combine = True
-        mock_need_recompute.return_value = False
+        for spec in (-1, "all", None):
+            mock = self._make_moe_layer_mock(
+                recompute_modules={"moe_combine": spec},
+                recompute_method="uniform",
+                layer_number=0,
+            )
+            MoELayer.rr_recompute_update(
+                mock, in_full_recompute=False, in_mlp_recompute=False
+            )
+            self.assertFalse(
+                mock.use_rr_deepep_combine,
+                msg=f"moe_combine={spec!r} must leave RR off",
+            )
+
+    def test_dict_mode_zero_count_turns_rr_on(self):
+        """``moe_combine: 0`` is the opposite of a negative count."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        mock = self._make_moe_layer_mock(
+            recompute_modules={"moe_combine": 0},
+            recompute_method="first_n",
+            layer_number=0,
+        )
+        mock.config.num_empty_layers_add_in_head = 0
+        mock.config.num_empty_layers_add_in_tail = 0
+        mock.config.num_hidden_layers = 8
+        mock.config.pipeline_model_parallel_size = 1
+        mock.config.virtual_pipeline_model_parallel_size = None
+        MoELayer.rr_recompute_update(
+            mock, in_full_recompute=True, in_mlp_recompute=False
+        )
+        self.assertTrue(mock.use_rr_deepep_combine)
+
+    @patch(
+        "paddlefleet.transformer.moe.moe_layer.module_needs_refined_recompute"
+    )
+    def test_dict_mode_sets_flag_via_need_recompute(self, mock_needs_rr):
+        """Dict mode delegates the layer decision to the shared RR helper."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        mock_needs_rr.return_value = True
         mock = self._make_moe_layer_mock(
             recompute_modules={"moe_combine": 4}, layer_number=5
+        )
+        MoELayer.rr_recompute_update(
+            mock, in_full_recompute=True, in_mlp_recompute=False
+        )
+        self.assertTrue(mock.use_rr_deepep_combine)
+        mock_needs_rr.assert_called_once_with("moe_combine", 5, mock.config)
+
+    def test_dict_mode_layer_list_needs_no_method(self):
+        """A layer list selects the non-RR layers directly; method is unused."""
+        from paddlefleet.transformer.moe.moe_layer import MoELayer
+
+        mock = self._make_moe_layer_mock(
+            recompute_modules={"moe_combine": [5]},
+            recompute_method="uniform",
+            layer_number=5,
+        )
+        MoELayer.rr_recompute_update(
+            mock, in_full_recompute=True, in_mlp_recompute=False
+        )
+        self.assertFalse(mock.use_rr_deepep_combine)
+
+        mock = self._make_moe_layer_mock(
+            recompute_modules={"moe_combine": [5]},
+            recompute_method="uniform",
+            layer_number=6,
         )
         MoELayer.rr_recompute_update(
             mock, in_full_recompute=True, in_mlp_recompute=False
