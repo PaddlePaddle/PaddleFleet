@@ -222,6 +222,14 @@ class MoELayer(nn.Layer):
                     "paddlefleet_ops.sonicmoe"
                 ]
             )
+            if self.use_accuracy_compatible:
+                raise ValueError(
+                    "use_accuracy_compatible=True is incompatible with "
+                    "using_sonic_moe=True: the accuracy-compatible path runs "
+                    "experts one by one via self.experts, while SonicMoE only "
+                    "builds the fused grouped_gemm_experts. Please disable one "
+                    "of them in the configuration yaml."
+                )
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.moe_deep_gemm = config.moe_deep_gemm
 

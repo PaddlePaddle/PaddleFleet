@@ -1157,8 +1157,9 @@ jobs:
           cd -
           export PADDLEFLEET_WHEEL_PATH="/workspace/PaddleFleet/dist/${{ needs.build_whl.outputs.root_whl_name }}"
           export PADDLEFLEET_OPS_WHEEL_PATH="/workspace/PaddleFleet/dist/${{ needs.build_whl.outputs.ops_whl_name }}"
-          export MEGATRON_CORE_WHEEL_PATH="https://paddle-github-action.bj.bcebos.com/whl/megatron_core-0.0.0-cp312-cp312-linux_x86_64.whl"
-          export MS_SWIFT_WHEEL_PATH="https://paddle-github-action.bj.bcebos.com/whl/ms_swift-0.0.0-py3-none-any.whl"
+          export MEGATRON_CORE_WHEEL_PATH="https://paddle-github-action.bj.bcebos.com/whl/megatron_core-0.19.0+b603565-cp312-cp312-linux_x86_64.whl"
+          export MS_SWIFT_WHEEL_PATH="https://paddle-github-action.bj.bcebos.com/whl/ms_swift-4.5.0.dev0+34832b8-py3-none-any.whl"
+          export MCORE_BRIDGE_WHEEL_PATH="https://paddle-github-action.bj.bcebos.com/whl/mcore_bridge-1.7.0.dev0-py3-none-any.whl"
           bash -x PaddleFleet/scripts/alignment_model_accuracy/run_alignment_test.sh
           model_acc_align_exit_code=$?
           if [[ "$model_acc_align_exit_code" != "0" ]]; then

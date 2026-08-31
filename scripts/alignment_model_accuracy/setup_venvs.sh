@@ -30,9 +30,9 @@ readonly NIGHTLY_WHL_BASE="https://paddle-whl.bj.bcebos.com/nightly/cu130"
 readonly PADDLEFLEET_WHEEL="${PADDLEFLEET_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/paddlefleet/paddlefleet-0.4.0.dev20260807+d01517879a3-py3-none-any.whl}"
 readonly PADDLEFLEET_OPS_WHEEL="${PADDLEFLEET_OPS_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/paddlefleet-ops/paddlefleet_ops-0.4.0.dev20260807+d0151787-cp312-cp312-linux_x86_64.whl}"
 readonly PADDLEFORMERS_WHEEL="${NIGHTLY_WHL_BASE}/paddleformers/paddleformers-0.0.0.dev-py3-none-any.whl"
-readonly MEGATRON_CORE_WHEEL="https://paddle-github-action.bj.bcebos.com/whl/megatron_core-0.19.0+b603565-cp312-cp312-linux_x86_64.whl"
-readonly MS_SWIFT_WHEEL="https://paddle-github-action.bj.bcebos.com/whl/ms_swift-4.5.0.dev0+34832b8-py3-none-any.whl"
-readonly MCORE_BRIDGE_VERSION="https://paddle-github-action.bj.bcebos.com/whl/mcore_bridge-1.7.0.dev0-py3-none-any.whl"
+readonly MEGATRON_CORE_WHEEL="${MEGATRON_CORE_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/megatron_core-0.19.0+f2706b6f3-cp312-cp312-linux_x86_64.whl}"
+readonly MS_SWIFT_WHEEL="${MS_SWIFT_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/ms_swift-4.5.0.dev0-py3-none-any.whl}"
+readonly MCORE_BRIDGE_WHEEL="${MCORE_BRIDGE_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/mcore_bridge-1.7.0.dev0-py3-none-any.whl"
 readonly NO_PROXY_LIST="localhost,127.0.0.1,0.0.0.0,bj.bcebos.com,su.bcebos.com,paddle-ci.gz.bcebos.com,baidu-int.com,.baidu.com,.bcebos.com"
 # readonly PROXY_URL="set your proxy"
 readonly UV_BIN_DIR="/home/.local/bin"
@@ -102,12 +102,12 @@ setup_torch_venv() {
 
     UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --python "${torch_py}" --index-strategy unsafe-best-match \
         --force-reinstall --no-deps \
-        "${MEGATRON_CORE_WHEEL}" "${MS_SWIFT_WHEEL}" "${MCORE_BRIDGE_VERSION}"
+        "${MEGATRON_CORE_WHEEL}" "${MS_SWIFT_WHEEL}" "${MCORE_BRIDGE_WHEEL}"
     # uv pip install --python "${torch_py}" --index-strategy unsafe-best-match \
     #     -e ./ms-swift -e ./Megatron-LM -e ./mcore-bridge
 
     uv pip install --python "${torch_py}" --index-strategy unsafe-best-match \
-        omegaconf tensor-spec-worker datasets transformers_stream_generator tensorboard json_repair matplotlib \
+        omegaconf tensor-spec-worker datasets transformers_stream_generator tensorboard json_repair matplotlib modelscope \
         "transformer-engine[core_cu13]==${TE_VERSION}"
 
     # transformer_engine_torch
