@@ -136,7 +136,7 @@ setup_paddle_venv() {
 
     # Build-time deps must live in the venv so `uv sync --no-build-isolation`
     # can compile paddlefleet-ops against the paddle installed above.
-    uv pip install --python "${paddle_py}" "${paddle_index[@]}" \
+    uv pip install --python "${paddle_py}" \
         "setuptools>=66.1.0" pip wheel packaging "ninja==1.11.1.1" \
         "pybind11[global]>=2.13,<3" "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5" \
         "tensor-spec-worker"
@@ -156,15 +156,13 @@ setup_paddle_venv() {
     # )
 
     # paddlefleet_ops
-    UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --python "${paddle_py}" \
-        "${paddle_index[@]}" --force-reinstall \
+    UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --python "${paddle_py}" --force-reinstall \
         "${PADDLEFLEET_OPS_WHEEL}"
     # uv pip install --python "${paddle_py}" -v --no-build-isolation \
     #     -e ./PaddleFleet/packages/paddlefleet_ops
 
     # PaddleFormers
-    UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --python "${paddle_py}" \
-        "${paddle_index[@]}" --force-reinstall \
+    UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --python "${paddle_py}" --force-reinstall \
         "${PADDLEFORMERS_WHEEL}"
     # uv pip install --python "${paddle_py}" -v -e ./PaddleFormers
 }
