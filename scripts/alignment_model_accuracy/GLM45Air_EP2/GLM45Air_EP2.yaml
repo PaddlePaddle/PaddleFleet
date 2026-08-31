@@ -3,19 +3,21 @@
 # 单节点 2 卡: TP=1, PP=1, EP=2, DP=2 (dense 层在 2 卡间复制, 专家按 EP 切分)
 
 # 数据集类型
-train_dataset_type: messages
-eval_dataset_type: messages
-train_dataset_path: /home/.cache/PaddleFormers/GLM-4.5-Air-tiny-2L/alignment_paddle.jsonl
-eval_dataset_path: /home/.cache/PaddleFormers/GLM-4.5-Air-tiny-2L/alignment_paddle.jsonl
+train_dataset_type: erniekit
+eval_dataset_type: erniekit
+train_dataset_path: /home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP/alignment_paddle.jsonl
+eval_dataset_path: /home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP/alignment_paddle.jsonl
 train_dataset_prob: "1.0"
 eval_dataset_prob: "1.0"
 
 # 数据处理
+dataset_type: map
 packing: false
 truncate_packing: false
+truncation_strategy: right
 max_seq_len: 8192
 mix_strategy: concat
-random_shuffle: true
+random_shuffle: false
 dataloader_shuffle: false
 use_template: false
 
@@ -86,6 +88,6 @@ continue_training: true
 # 权重转换 - 从HF格式正确加载
 convert_from_hf: true
 
-dataloader_num_workers: 32
+dataloader_num_workers: 4
 
 use_accuracy_compatible: true

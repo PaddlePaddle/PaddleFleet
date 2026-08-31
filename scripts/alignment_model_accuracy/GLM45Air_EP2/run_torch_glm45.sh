@@ -65,7 +65,7 @@ ARGS=(
     --model /home/.cache/PaddleFormers/GLM-4.5-Air-tiny-2L
 
     ### data
-    --dataset /home/.cache/PaddleFormers/GLM-4.5-Air-tiny-2L/alignment_paddle.jsonl
+    --dataset /home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP/alignment_torch.jsonl
     --max_length 8192
     --packing False
     --padding_free False
