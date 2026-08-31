@@ -10,17 +10,24 @@ jobs:
   signal:
     if: >-
       github.event.review.state == 'approved' &&
+      github.event.review.commit_id == github.event.pull_request.head.sha &&
       github.event.review.user.login == 'swgu98' &&
-      contains(toLower(github.event.review.body), 'lgtm') &&
-      contains(toLower(github.event.review.body), 'coverage')
+      contains(github.event.review.body, 'lgtm') &&
+      contains(github.event.review.body, 'coverage')
     runs-on:
       group: APPROVAL
 
     steps:
       - name: Record coverage approval
+        env:
+          REVIEW_STATE: ${{ github.event.review.state }}
+          REVIEWER: ${{ github.event.review.user.login }}
+          REVIEW_BODY: ${{ github.event.review.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          echo "Review state: ${{ github.event.review.state }}"
-          echo "Reviewer: ${{ github.event.review.user.login }}"
-          echo "Review body: ${{ github.event.review.body }}"
-          echo "Pull request: ${{ github.event.pull_request.number }}"
-          echo "Head SHA: ${{ github.event.pull_request.head.sha }}"
+          printf 'Review state: %s\n' "$REVIEW_STATE"
+          printf 'Reviewer: %s\n' "$REVIEWER"
+          printf 'Review body: %s\n' "$REVIEW_BODY"
+          printf 'Pull request: %s\n' "$PR_NUMBER"
+          printf 'Head SHA: %s\n' "$HEAD_SHA"

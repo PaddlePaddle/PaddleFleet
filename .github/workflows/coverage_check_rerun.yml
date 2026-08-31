@@ -19,8 +19,8 @@ jobs:
       github.event.review.state == 'approved' &&
       github.event.review.commit_id == github.event.pull_request.head.sha &&
       github.event.review.user.login == 'swgu98' &&
-      contains(toLower(github.event.review.body), 'lgtm') &&
-      contains(toLower(github.event.review.body), 'coverage')
+      contains(github.event.review.body, 'lgtm') &&
+      contains(github.event.review.body, 'coverage')
     runs-on:
       group: APPROVAL
     env:
@@ -37,7 +37,7 @@ jobs:
 
           api() {
             local response status body
-            response=$(curl --fail-with-body --silent --show-error \
+            response=$(curl --silent --show-error \
               --request "$1" \
               --header "Authorization: Bearer ${GH_TOKEN}" \
               --header "Accept: application/vnd.github+json" \
@@ -55,6 +55,12 @@ jobs:
 
           pr=$(api GET "/repos/${REPO}/pulls/${PR_NUMBER}")
           current_sha=$(jq -r '.head.sha' <<<"${pr}")
+          head_repo=$(jq -r '.head.repo.full_name // empty' <<<"${pr}")
+          head_ref=$(jq -r '.head.ref // empty' <<<"${pr}")
+          if [[ -z "${head_repo}" || -z "${head_ref}" ]]; then
+            echo "The PR source repository or branch is unavailable; nothing to rerun."
+            exit 0
+          fi
           if [[ "${current_sha}" != "${HEAD_SHA}" ]]; then
             echo "PR head changed from ${HEAD_SHA} to ${current_sha}; nothing to rerun."
             exit 0
@@ -68,10 +74,11 @@ jobs:
           fi
 
           runs=$(api GET "/repos/${REPO}/actions/workflows/${workflow_id}/runs?event=pull_request&head_sha=${HEAD_SHA}&per_page=100")
-          run_id=$(jq -r --arg sha "${HEAD_SHA}" --argjson pr "${PR_NUMBER}" '
+          run_id=$(jq -r --arg sha "${HEAD_SHA}" --arg head_repo "${head_repo}" --arg head_ref "${head_ref}" '
             [.workflow_runs[]
               | select(.head_sha == $sha)
-              | select(any(.pull_requests[]?; .number == $pr))
+              | select(.head_repository.full_name == $head_repo)
+              | select(.head_branch == $head_ref)
               | select(.event == "pull_request")
             ]
             | sort_by(.run_number)
