@@ -3403,6 +3403,17 @@ def run_sonic_moe(
     release_fp8_weights=False,
     activation_type="swiglu",
 ):
+    # This is the in-tree fallback used only when paddlefleet_ops.sonicmoe
+    # cannot be imported; it predates the SiTU work and has no
+    # encoded-activation plumbing, so refuse rather than silently running
+    # SwiGLU numerics.
+    if activation_type != "swiglu":
+        raise NotImplementedError(
+            "paddlefleet.transformer.moe.fusion_layer_utils.run_sonic_moe is a "
+            "SwiGLU-only fallback and got activation_type="
+            f"{activation_type!r}; install a paddlefleet_ops build that exports "
+            "sonicmoe.run_sonic_moe."
+        )
     T = hidden_states.shape[0]
     stream_id = paddle.device.current_stream()
     topk_indices_i32 = (
@@ -3495,16 +3506,6 @@ def run_sonic_moe(
         )
 
     s_scatter_idx.stop_gradient = True
-    # This is the in-tree fallback used only when paddlefleet_ops.sonicmoe cannot
-    # be imported; it predates the SiTU work and has no encoded-activation
-    # plumbing, so refuse rather than silently running SwiGLU numerics.
-    if activation_type != "swiglu":
-        raise NotImplementedError(
-            "paddlefleet.transformer.moe.fusion_layer_utils.run_sonic_moe is a "
-            "SwiGLU-only fallback and got activation_type="
-            f"{activation_type!r}; install a paddlefleet_ops build that exports "
-            "sonicmoe.run_sonic_moe."
-        )
     activation_type = ActivationType("swiglu")
 
     total_expert_freq = TK_padded

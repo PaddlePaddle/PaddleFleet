@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import functools
+import inspect
 import os
 import subprocess
 import sys
@@ -33,6 +34,7 @@ from paddlefleet.transformer.activations import (
     situ_glu_scale_forward,
 )
 from paddlefleet.transformer.mlp import MLP
+from paddlefleet.transformer.moe import fusion_layer_utils
 from paddlefleet.transformer.moe.fp8_utils import (
     ExpertsGroupGemmContiguousNode,
 )
@@ -432,8 +434,30 @@ class TestSituGLU(unittest.TestCase):
             moe_deep_gemm=True,
             fp8="e4m3",
         )
+        # The DeepGEMM expert path has no fp8 SiTU kernel on this branch, so
+        # MoELayer keeps rejecting it up front instead of letting
+        # ExpertsGroupGemmContiguousNode fail one step into training.
         with self.assertRaisesRegex(ValueError, "supports BF16"):
             MoELayer(fp8_config)
+
+        # SonicMoE *does* have a SiTU-GLU fp8 epilogue, so the rejection above
+        # must not extend to it. fp8 expert weight gradients stay unvalidated
+        # for SiTU on both backends, though, so that one combination is still
+        # rejected -- and by *this* name. Asserting the exact message is the
+        # regression guard: a blanket "situ + fp8" rejection that also covered
+        # SonicMoE would fire first and change it. Both rejections happen
+        # before MoELayer touches paddlefleet_ops, so no SonicMoE-capable
+        # build is needed here.
+        sonic_wgrad_config = TransformerConfig(
+            **config_kwargs,
+            moe_use_fusion_node=True,
+            moe_expert_fusion=True,
+            fp8="e4m3",
+            using_sonic_moe=True,
+        )
+        self.assertTrue(sonic_wgrad_config.fp8_wgrad)
+        with self.assertRaisesRegex(ValueError, "fp8_wgrad=False"):
+            MoELayer(sonic_wgrad_config)
 
     def test_situ_fused_grouped_deep_gemm_forward_backward(self):
         model_parallel_cuda_manual_seed(2026)
@@ -692,10 +716,15 @@ class TestSituGLU(unittest.TestCase):
         )
 
     def test_sonic_moe_rejects_non_swiglu_configurations(self):
-        for hidden_act, gated_linear_unit in (
-            (F.gelu, True),
-            (situ, True),
-            (F.silu, False),
+        # SiTU-GLU is accepted by the activation check now, so it no longer
+        # lands on "only supports SwiGLU" -- with fp8 unset it falls through to
+        # the bf16 rejection instead. All three of these fire before
+        # super().__init__(), so none of them needs a sonicmoe build that ships
+        # the SiTU epilogue.
+        for hidden_act, gated_linear_unit, message in (
+            (F.gelu, True, "only supports SwiGLU"),
+            (situ, True, "no bf16 SiTU-GLU epilogue"),
+            (F.silu, False, "only supports SwiGLU"),
         ):
             with self.subTest(
                 hidden_act=hidden_act,
@@ -711,16 +740,63 @@ class TestSituGLU(unittest.TestCase):
                     hidden_act=hidden_act,
                     params_dtype="bfloat16",
                 )
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "only supports SwiGLU",
-                ):
+                with self.assertRaisesRegex(ValueError, message):
                     SonicMoEExpert(
                         num_local_experts=2,
                         topk=2,
                         config=config,
                     )
                 self.assertIs(config.hidden_act, hidden_act)
+
+    def test_sonic_moe_rejects_situ_with_activation_clamp(self):
+        # The gated epilogue applies the clamp to (gate, up) *before* act_fn,
+        # which is a SwiGLU-only recipe; there is no clamped SiTU variant, so
+        # silently dropping the clamp would change the numerics the config asked
+        # for. Fires before super().__init__(), so no SiTU epilogue needed.
+        config = TransformerConfig(
+            hidden_size=8,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=8,
+            moe_intermediate_size=4,
+            gated_linear_unit=True,
+            hidden_act=situ,
+            activation_situ_beta=4.0,
+            activation_situ_linear_beta=25.0,
+            activation_func_clamp_value=7.0,
+            fp8="e4m3",
+            params_dtype="bfloat16",
+        )
+        with self.assertRaisesRegex(ValueError, "activation_func_clamp_value"):
+            SonicMoEExpert(num_local_experts=2, topk=2, config=config)
+
+    def test_intree_run_sonic_moe_fallback_rejects_situ(self):
+        # fusion_layer_utils.run_sonic_moe is the fallback used only when
+        # paddlefleet_ops.sonicmoe is unimportable. It has no encoded-activation
+        # plumbing, so it must refuse a non-SwiGLU activation_type up front
+        # rather than run SwiGLU numerics under a SiTU config.
+        with self.assertRaisesRegex(
+            NotImplementedError, "SwiGLU-only fallback"
+        ):
+            fusion_layer_utils.run_sonic_moe(
+                hidden_states=None,
+                topk_indices=None,
+                topk_scores=None,
+                K=2,
+                E=2,
+                w1=None,
+                w2=None,
+                activation_type="situ_glu:b=4.0:lb=25.0",
+            )
+
+    def test_intree_run_sonic_moe_fallback_defaults_to_swiglu(self):
+        # The default must stay "swiglu": SonicMoEExpert forwards
+        # activation_type only for SiTU (an older paddlefleet_ops build has no
+        # such kwarg), so the SwiGLU path must reach this function without it.
+        signature = inspect.signature(fusion_layer_utils.run_sonic_moe)
+        self.assertEqual(
+            signature.parameters["activation_type"].default, "swiglu"
+        )
 
     def test_mlp_forward_backward_bypasses_swiglu_fusion(self):
         model_parallel_cuda_manual_seed(2026)
