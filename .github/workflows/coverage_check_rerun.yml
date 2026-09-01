@@ -1,8 +1,9 @@
 name: Coverage-check Re-run
 
 on:
-  pull_request_review:
-    types: [submitted, edited, dismissed]
+  workflow_run:
+    workflows: ["Coverage Approval"]
+    types: [completed]
 
 permissions:
   actions: write
@@ -10,24 +11,20 @@ permissions:
   pull-requests: read
 
 concurrency:
-  group: coverage-rerun-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+  group: coverage-rerun-${{ github.event.workflow_run.pull_requests[0].number }}-${{ github.event.workflow_run.pull_requests[0].head.sha }}
   cancel-in-progress: true
 
 jobs:
   rerun-on-approval:
-    if: >-
-      github.event.review.user.login == 'swgu98' &&
-      github.event.review.commit_id == github.event.pull_request.head.sha &&
-      (github.event.action == 'submitted' ||
-       github.event.action == 'edited' ||
-       github.event.action == 'dismissed')
+    if: github.event.workflow_run.conclusion == 'success'
     runs-on:
       group: APPROVAL
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+      HEAD_SHA: ${{ github.event.workflow_run.pull_requests[0].head.sha }}
+      TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
       API_VERSION: 2022-11-28
     steps:
       - name: Cancel coverage check and rerun approval
@@ -52,6 +49,22 @@ jobs:
             fi
             printf '%s' "${body}"
           }
+
+          if [[ -z "${PR_NUMBER}" || -z "${HEAD_SHA}" ]]; then
+            echo "The triggering workflow run is not associated with a pull request; nothing to rerun."
+            exit 0
+          fi
+
+          trigger_jobs=$(api GET "/repos/${REPO}/actions/runs/${TRIGGER_RUN_ID}/jobs?filter=latest&per_page=100")
+          signal_conclusion=$(jq -r '
+            [.jobs[] | select(.name == "signal")]
+            | last
+            | .conclusion // empty
+          ' <<<"${trigger_jobs}")
+          if [[ "${signal_conclusion}" != "success" ]]; then
+            echo "Coverage Approval signal did not succeed; nothing to rerun."
+            exit 0
+          fi
 
           pr=$(api GET "/repos/${REPO}/pulls/${PR_NUMBER}")
           current_sha=$(jq -r '.head.sha' <<<"${pr}")
