@@ -27,6 +27,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import paddle
+from paddlefleet_ops import flash_mask_facade
 from paddlefleet_ops.flash_mask_facade import get_fa_version
 
 from paddlefleet.refined_recompute.flash_attn import (
@@ -39,7 +40,12 @@ from paddlefleet.refined_recompute.flash_attn import (
 
 
 class TestGetFAVersion(unittest.TestCase):
-    """Tests for get_fa_version function (flash_mask_facade)."""
+    """Tests for get_fa_version function (flash_mask_facade).
+
+    ``_dispatch_fa_version`` degrades to FA2 whenever the resolved version would
+    run on cutedsl but the kernels are missing, so every case that expects FA3 or
+    FA4 has to state which side of that it is on.
+    """
 
     @patch(
         "paddlefleet_ops.flash_mask_facade.paddle.get_device",
@@ -50,12 +56,19 @@ class TestGetFAVersion(unittest.TestCase):
         result = get_fa_version(64)
         self.assertEqual(result, 2)
 
+    @patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", True)
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.is_flash_mask_available",
+        return_value=True,
+    )
     @patch(
         "paddlefleet_ops.flash_mask_facade.paddle.get_device",
         return_value="gpu:0",
     )
     @patch("paddlefleet_ops.flash_mask_facade.paddle.base.framework.get_flags")
-    def test_gpu_returns_flag_value(self, mock_get_flags, mock_device):
+    def test_gpu_returns_flag_value(
+        self, mock_get_flags, mock_device, mock_available
+    ):
         """Test that GPU returns the FLAGS_flash_attn_version value."""
         mock_get_flags.return_value = {"FLAGS_flash_attn_version": 3}
         with patch(
@@ -65,6 +78,36 @@ class TestGetFAVersion(unittest.TestCase):
             result = get_fa_version(64)
             self.assertEqual(result, 3)
 
+    @patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", True)
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.is_flash_mask_available",
+        return_value=False,
+    )
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_device",
+        return_value="gpu:0",
+    )
+    @patch("paddlefleet_ops.flash_mask_facade.paddle.base.framework.get_flags")
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_flags",
+        return_value={"FLAGS_cudnn_deterministic": False},
+    )
+    def test_missing_cutedsl_kernels_degrade_to_2(
+        self, mock_get_flags, mock_base_flags, mock_device, mock_available
+    ):
+        """FA3/FA4 both need the cutedsl kernels; without them, FA2."""
+        for requested in (3, 4):
+            with self.subTest(fa_version=requested):
+                mock_base_flags.return_value = {
+                    "FLAGS_flash_attn_version": requested
+                }
+                self.assertEqual(get_fa_version(64), 2)
+
+    @patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", True)
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.is_flash_mask_available",
+        return_value=True,
+    )
     @patch(
         "paddlefleet_ops.flash_mask_facade.paddle.get_device",
         return_value="gpu:0",
@@ -74,10 +117,31 @@ class TestGetFAVersion(unittest.TestCase):
         "paddlefleet_ops.flash_mask_facade.paddle.get_flags",
         return_value={"FLAGS_cudnn_deterministic": True},
     )
-    def test_deterministic_fa3_large_hdim_returns_2(
+    def test_deterministic_fa3_large_hdim_stays_3_on_cutedsl(
+        self, mock_get_flags, mock_base_flags, mock_device, mock_available
+    ):
+        """On cutedsl, FA3 keeps hdim>128 under deterministic.
+
+        Its backward has an ordered-accumulation variant, and (192, 128) is in
+        the cutedsl whitelist, so there is nothing to degrade for.
+        """
+        mock_base_flags.return_value = {"FLAGS_flash_attn_version": 3}
+        self.assertEqual(get_fa_version(192, 128), 3)
+
+    @patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", False)
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_device",
+        return_value="gpu:0",
+    )
+    @patch("paddlefleet_ops.flash_mask_facade.paddle.base.framework.get_flags")
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_flags",
+        return_value={"FLAGS_cudnn_deterministic": True},
+    )
+    def test_deterministic_fa3_large_hdim_returns_2_on_paddle_kernel(
         self, mock_get_flags, mock_base_flags, mock_device
     ):
-        """Test FA3 + deterministic + hdim>128 falls back to version 2."""
+        """Paddle's FA3 kernel has no deterministic backward above hdim 128."""
         mock_base_flags.return_value = {"FLAGS_flash_attn_version": 3}
         result = get_fa_version(192)
         self.assertEqual(result, 2)
@@ -180,6 +244,7 @@ class TestFlashAttnFunctorForwardVersion4(unittest.TestCase):
 class TestRefinedRcomputeFlashAttentionFirstFwd(unittest.TestCase):
     """Tests for RefinedRcomputeFlashAttention._first_fwd."""
 
+    @patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", False)
     @patch(
         "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=3,
@@ -189,7 +254,10 @@ class TestRefinedRcomputeFlashAttentionFirstFwd(unittest.TestCase):
     def test_first_fwd_version_3(
         self, mock_tracer, mock_flash_v3, mock_version
     ):
-        """Test _first_fwd with version 3 puts tensors in queue."""
+        """Test _first_fwd with version 3 puts tensors in queue.
+
+        FA3 only lands on ``_C_ops.flash_attn_v3`` with the cutedsl switch off.
+        """
         mock_tracer_obj = MagicMock()
         mock_tracer_obj._has_grad = False
         mock_tracer.return_value = mock_tracer_obj
@@ -298,6 +366,7 @@ class TestFlashMaskAttnFunctorVersion4(unittest.TestCase):
 class TestRefinedRcomputeFlashMaskAttentionFirstFwdV3(unittest.TestCase):
     """Tests for RefinedRcomputeFlashMaskAttention._first_fwd with v3."""
 
+    @patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", False)
     @patch(
         "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=3,
@@ -310,7 +379,11 @@ class TestRefinedRcomputeFlashMaskAttentionFirstFwdV3(unittest.TestCase):
     def test_first_fwd_v3_with_block_mask(
         self, mock_tracer, mock_sig, mock_flash_v2, mock_version
     ):
-        """Test _first_fwd with v3 and block_mask parameter."""
+        """Test _first_fwd with v3 and block_mask parameter.
+
+        FA3 only lands on ``_C_ops.flashmask_attention_v2`` with the cutedsl
+        switch off.
+        """
         mock_tracer_obj = MagicMock()
         mock_tracer_obj._has_grad = False
         mock_tracer.return_value = mock_tracer_obj

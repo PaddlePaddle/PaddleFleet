@@ -82,7 +82,16 @@ def assert_tensor_equal(testcase, actual, expected):
 
 
 class TestFlashMaskImportPath(unittest.TestCase):
-    def test_sm100_imports_vendored_flashmask_utils(self):
+    """The conditional import block at the top of ``context_parallel_utils``.
+
+    ``_FLASH_MASK_AVAILABLE`` is resolved once, when ``paddlefleet_ops`` is
+    first imported, so mocking ``get_device_capability`` here would change
+    nothing -- patch the accessor the module actually calls instead. The
+    capability threshold itself (SM90 vs SM100) is a ``paddlefleet_ops``
+    concern, not this module's.
+    """
+
+    def _exec_module(self, available):
         def fake_flash_attn_fwd(*args, **kwargs):
             return None
 
@@ -132,23 +141,46 @@ class TestFlashMaskImportPath(unittest.TestCase):
             REPO_ROOT, "src", "paddlefleet", "context_parallel_utils.py"
         )
         spec = importlib.util.spec_from_file_location(
-            "_test_context_parallel_utils_sm100", module_path
+            "_test_context_parallel_utils_import_path", module_path
         )
         module = importlib.util.module_from_spec(spec)
         with (
             patch.dict(sys.modules, fake_modules),
-            patch.object(paddle.cuda, "is_available", return_value=True),
-            patch.object(
-                paddle.cuda, "get_device_capability", return_value=(10, 0)
+            patch(
+                "paddlefleet_ops.is_flash_mask_available",
+                return_value=available,
             ),
         ):
             spec.loader.exec_module(module)
+        return module, (
+            fake_flash_attn_fwd,
+            fake_flash_attn_bwd,
+            fake_slice,
+        )
 
-        self.assertTrue(module._flash_mask_available)
+    def test_available_imports_vendored_flashmask_utils(self):
+        module, (fwd, bwd, slice_fn) = self._exec_module(available=True)
+
         self.assertIs(module.FlashMaskInfoPaddle, FakeFlashMaskInfoPaddle)
-        self.assertIs(module._flash_attn_fwd, fake_flash_attn_fwd)
-        self.assertIs(module._flash_attn_bwd, fake_flash_attn_bwd)
-        self.assertIs(module.bshd_slice_contiguous_kv, fake_slice)
+        self.assertIs(module._flash_attn_fwd, fwd)
+        self.assertIs(module._flash_attn_bwd, bwd)
+        self.assertIs(module.bshd_slice_contiguous_kv, slice_fn)
+
+    def test_unavailable_leaves_cute_symbols_undefined(self):
+        # The ``else`` of that import block is a bare ``pass``: the names stay
+        # undefined and every call site reaches them only after
+        # ``get_fa_version`` has resolved a cutedsl version, which dispatch
+        # refuses to do when the kernels are missing.
+        module, _ = self._exec_module(available=False)
+
+        for name in (
+            "FlashMaskInfoPaddle",
+            "_flash_attn_fwd",
+            "_flash_attn_bwd",
+            "bshd_slice_contiguous_kv",
+        ):
+            with self.subTest(symbol=name):
+                self.assertFalse(hasattr(module, name))
 
 
 class TestFlashMaskAllGatherModes(unittest.TestCase):
@@ -1055,9 +1087,46 @@ class TestFlashMaskSwaP2PPath(unittest.TestCase):
         assert_tensor_equal(self, backward_result[1], kg)
         assert_tensor_equal(self, backward_result[2], vg)
 
-    def test_flashmask_attention_cp_requires_flashmask_for_p2p_mode(self):
+    def test_flashmask_attention_cp_rejects_non_fa4_for_p2p_mode(self):
+        # The P2P fast path only guards on the resolved version now: dispatch
+        # already degrades to FA2 when the cutedsl kernels are missing, so any
+        # version other than 4 must be rejected here.
         with (
-            patch.object(cp_utils, "_flash_mask_available", False),
+            patch.object(cp_utils, "get_fa_version", lambda *a, **k: 2),
+            patch.object(
+                cp_utils.fleet,
+                "get_hybrid_communicate_group",
+                lambda: FakeHcg(self.group),
+            ),
+            self.assertRaises(AssertionError),
+        ):
+            cp_utils.flashmask_attention_cp(
+                self.query,
+                self.key,
+                self.value,
+                self.indices,
+                mode="contiguous_swap2p",
+            )
+
+    def test_flashmask_attention_cp_rejects_p2p_when_kernels_missing(self):
+        # End to end through the real dispatch: FLAGS ask for FA4, the cutedsl
+        # kernels are unavailable, so ``get_fa_version`` degrades to FA2 and the
+        # P2P assert fires instead of calling into an undefined kernel.
+        with (
+            patch(
+                "paddlefleet_ops.flash_mask_facade.is_flash_mask_available",
+                return_value=False,
+            ),
+            patch.object(
+                cp_utils.paddle.base.framework,
+                "get_flags",
+                lambda _: {"FLAGS_flash_attn_version": 4},
+            ),
+            patch.object(
+                cp_utils.paddle,
+                "get_flags",
+                lambda _: {"FLAGS_cudnn_deterministic": False},
+            ),
             patch.object(
                 cp_utils.fleet,
                 "get_hybrid_communicate_group",
@@ -1083,7 +1152,7 @@ class TestFlashMaskSwaP2PPath(unittest.TestCase):
             return result
 
         with (
-            patch.object(cp_utils, "_flash_mask_available", True),
+            patch.object(cp_utils, "get_fa_version", lambda *a, **k: 4),
             patch.object(
                 cp_utils.fleet,
                 "get_hybrid_communicate_group",

@@ -351,8 +351,14 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
     cp_flashmask_allgatherkv_balance_forward, which now delegates to
     ``flash_mask_facade.get_fa_version``.
 
-    Under FA3, deterministic mode only falls back to FA2 when head_dim > 128;
-    the ``block_mask`` signature no longer affects the decision.
+    These pin the *cpp* (Paddle kernel) side of the dispatch, so they run with
+    ``FLASHMASK_FA3_USE_CUTEDSL`` off: that is both what routes the forward to
+    the mocked ``flashmask_attention`` instead of ``_flash_attn_fwd``, and what
+    makes the deterministic degrade observable at all -- FA3 on cutedsl has an
+    ordered-accumulation backward and keeps every whitelisted head dim.
+
+    Under Paddle's FA3, deterministic mode falls back to FA2 when head_dim > 128;
+    the ``block_mask`` signature does not affect the decision.
 
       A) deterministic + hdim>128 -> override to 2
       B) deterministic + hdim<=128 -> no override (stays 3)
@@ -361,6 +367,8 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
     """
 
     def _run_forward(self, *, has_block_mask, deterministic, hdim, fa_flag=3):
+        from paddlefleet_ops import flash_mask_facade
+
         from paddlefleet import context_parallel_utils as cpu
 
         group = mock.MagicMock()
@@ -406,6 +414,9 @@ class TestCpFlashmaskForwardDeterministicOverride(unittest.TestCase):
         flags_det = {"FLAGS_cudnn_deterministic": deterministic}
 
         with (
+            mock.patch.object(
+                flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", False
+            ),
             mock.patch.object(cpu, "flashmask_attention", fake_flashmask),
             mock.patch.object(
                 cpu, "all_gather_balance", side_effect=lambda t, axis, group: t

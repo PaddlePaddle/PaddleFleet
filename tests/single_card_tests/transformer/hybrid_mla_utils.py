@@ -778,21 +778,42 @@ def _flash_attn_version(value):
 def _fa4_can_serve():
     """Whether pinning ``FLAGS_flash_attn_version=4`` can actually be served.
 
-    ``flash_mask_facade.get_fa_version`` answers from the flag and the head dims
-    alone -- it never checks that a FA4 backend exists. With no cute kernel the
-    facade's ``_flashmask_attention`` is ``paddle.nn.functional``'s, which knows
-    only 2 and 3 and raises ``ValueError: Invalid flash attention version: 4``
-    (``paddle/nn/functional/flash_attention.py:2179``) for *every* head-dim pair
-    the facade whitelists, ``(256, 256)`` plain MHA included. The upstream CI
-    images are cc 9.0 without the kernel, so pinning 4 unconditionally would
-    break the ``mha`` cases, which are not ``_GPU``-gated and used to run there
-    on the image default 2.
+    ``get_fa_version`` degrades to FA2 on its own when the cutedsl kernels are
+    missing, so a pinned 4 quietly becomes 2 instead of reaching a backend that
+    cannot serve it. This probe exists so callers can tell the difference: the
+    ``mha`` cases are not ``_GPU``-gated and run on cc 9.0 CI images without the
+    kernel, where they must keep taking the image default rather than asserting
+    FA4 behaviour.
     """
     try:
         from paddlefleet_ops import is_flash_mask_available
     except ImportError:  # pragma: no cover - packaged build always has it
         return False
     return bool(is_flash_mask_available()) and _production_fa_version() == 4
+
+
+@contextlib.contextmanager
+def cpp_flashmask_backend():
+    """Route FA3 FlashMask to Paddle's cpp kernel for the duration of the block.
+
+    ``FLASHMASK_FA3_USE_CUTEDSL`` is the routing flag, set from
+    ``TransformerConfig.flash_attn_fa3_backend="cpp"`` in production.
+    ``uses_cutedsl_backend`` reads
+    it on every call and ``PyLayer.backward`` reads it independently of the
+    forward, so a forward and its backward must both run inside this context --
+    leaving the block before ``.backward()`` would pair a cpp forward with a
+    cutedsl backward.
+
+    Patching the module global is the only reliable handle: several call sites do
+    ``from ... import uses_cutedsl_backend``, so patching that function on the
+    facade would not reach their already-bound references.
+    """
+    from unittest.mock import patch
+
+    from paddlefleet_ops import flash_mask_facade
+
+    with patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", False):
+        yield
 
 
 @contextlib.contextmanager

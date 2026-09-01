@@ -76,108 +76,24 @@ class TestFlashMaskCpAttentionQueryValidation(unittest.TestCase):
 @unittest.skipUnless(
     _MODULE_AVAILABLE, "paddlefleet.refined_recompute.flash_attn not available"
 )
-class TestFlashAttnFunctorForwardVersions(unittest.TestCase):
-    """Tests for FlashAttnFunctor forward with different FA versions."""
+class TestGetFAVersionValidation(unittest.TestCase):
+    """Invalid versions are rejected by get_fa_version.
 
-    def test_forward_invalid_version_raises(self):
-        """Test that invalid FA version raises ValueError in forward."""
-        from paddlefleet.refined_recompute.flash_attn import FlashAttnFunctor
+    The dispatch chains below it only tell 2 / cpp / cute apart, so an
+    unsupported FLAGS_flash_attn_version has to be caught here.
+    """
 
-        ctx = MagicMock()
-        q = paddle.randn([1, 4, 8], dtype=paddle.bfloat16)
-        k = paddle.randn([1, 4, 8], dtype=paddle.bfloat16)
-        v = paddle.randn([1, 4, 8], dtype=paddle.bfloat16)
-        hold_tensors = {
-            "result_attention": paddle.randn([1, 4, 8]),
-            "softmax_lse": paddle.randn([1, 4]),
-            "causal": True,
-        }
+    def test_invalid_version_raises(self):
+        """Test that a version outside 2/3/4 raises ValueError."""
+        from paddlefleet_ops import flash_mask_facade
 
         with (
-            patch(
-                "paddlefleet.refined_recompute.flash_attn.get_fa_version",
-                return_value=99,
+            patch.object(
+                flash_mask_facade, "_dispatch_fa_version", return_value=99
             ),
             self.assertRaises(ValueError),
         ):
-            FlashAttnFunctor.forward(ctx, q, k, v, hold_tensors)
-
-
-@unittest.skipUnless(
-    _MODULE_AVAILABLE, "paddlefleet.refined_recompute.flash_attn not available"
-)
-class TestFlashAttnFunctorBackwardVersions(unittest.TestCase):
-    """Tests for FlashAttnFunctor backward with different FA versions."""
-
-    def test_backward_invalid_version_raises(self):
-        """Test that invalid FA version raises ValueError in backward."""
-        from paddlefleet.refined_recompute.flash_attn import FlashAttnFunctor
-
-        ctx = MagicMock()
-        ctx.fa_version = 99
-        ctx.saved_tensor = MagicMock(
-            return_value=[paddle.randn([1]) for _ in range(8)]
-        )
-
-        with self.assertRaises(ValueError):
-            FlashAttnFunctor.backward(ctx, paddle.randn([1, 4, 8]))
-
-
-@unittest.skipUnless(
-    _MODULE_AVAILABLE, "paddlefleet.refined_recompute.flash_attn not available"
-)
-class TestFlashMaskAttnFunctorForwardVersions(unittest.TestCase):
-    """Tests for FlashMaskAttnFunctor forward with different FA versions."""
-
-    def test_forward_invalid_version_raises(self):
-        """Test that invalid FA version raises ValueError in forward."""
-        from paddlefleet.refined_recompute.flash_attn import (
-            FlashMaskAttnFunctor,
-        )
-
-        ctx = MagicMock()
-        q = paddle.randn([1, 4, 8], dtype=paddle.bfloat16)
-        k = paddle.randn([1, 4, 8], dtype=paddle.bfloat16)
-        v = paddle.randn([1, 4, 8], dtype=paddle.bfloat16)
-        startend = paddle.randint(0, 10, [1, 4])
-        hold_tensors = {
-            "result_attention": paddle.randn([1, 4, 8]),
-            "softmax_lse": paddle.randn([1, 4]),
-            "causal": True,
-        }
-
-        with (
-            patch(
-                "paddlefleet.refined_recompute.flash_attn.get_fa_version",
-                return_value=99,
-            ),
-            self.assertRaises(ValueError),
-        ):
-            FlashMaskAttnFunctor.forward(
-                ctx, q, k, v, startend, None, hold_tensors
-            )
-
-
-@unittest.skipUnless(
-    _MODULE_AVAILABLE, "paddlefleet.refined_recompute.flash_attn not available"
-)
-class TestFlashMaskAttnFunctorBackwardVersions(unittest.TestCase):
-    """Tests for FlashMaskAttnFunctor backward with different FA versions."""
-
-    def test_backward_invalid_version_raises(self):
-        """Test that invalid FA version raises ValueError in backward."""
-        from paddlefleet.refined_recompute.flash_attn import (
-            FlashMaskAttnFunctor,
-        )
-
-        ctx = MagicMock()
-        ctx.fa_version = 99
-        ctx.saved_tensor = MagicMock(
-            return_value=[paddle.randn([1]) for _ in range(9)]
-        )
-
-        with self.assertRaises(ValueError):
-            FlashMaskAttnFunctor.backward(ctx, paddle.randn([1, 4, 8]))
+            flash_mask_facade.get_fa_version(64)
 
 
 @unittest.skipUnless(

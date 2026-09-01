@@ -129,8 +129,9 @@ def _fa4_is_the_production_kernel():
 
 _FA4 = unittest.skipUnless(
     _fa4_is_the_production_kernel(),
-    "the dense warmup path needs the FA4 (cute) kernel, which production only "
-    "selects on SM100",
+    "the dense warmup path needs the FA4 (cute) kernel, which production selects "
+    "from the compute capability -- the cutedsl kernels are available from SM90 "
+    "on, but only SM100 derives FLAGS_flash_attn_version=4",
 )
 
 
@@ -343,14 +344,12 @@ class TestBackendSelection(unittest.TestCase):
     def test_missing_flash_mask_extension_raises(self):
         """FA4 as a flag value is not FA4 as a backend.
 
-        ``get_fa_version`` reads flags and head dims only, so on an image built
-        without the flash_mask (cute) extension it still answers 4 while the
-        facade has bound ``_flashmask_attention`` to Paddle's native one
-        (``flash_mask_facade.py``, ``else`` branch of the
-        ``is_flash_mask_available()`` guard) -- which serves neither this
-        head-dim pair nor the sink. Left to the kernel the failure reads
-        ``Invalid flash attention version: 4``, from a frame that names nothing
-        about this layer, so availability is part of the check here.
+        Without the flash_mask (cute) extension ``get_fa_version`` degrades to
+        FA2, so the pinned flag value of 4 never reaches a kernel that cannot
+        serve it. The check here is that the layer says so in its own terms --
+        naming the head-dim pair, the flags and ``flash_mask_available`` --
+        instead of letting a bare ``Invalid flash attention version: 4`` surface
+        from a frame that mentions nothing about this layer.
         """
         import paddlefleet_ops
 
