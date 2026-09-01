@@ -23,6 +23,7 @@ readonly PYTHON_VERSION="3.12"
 readonly TORCH_VERSION="2.12.0+cu130"
 readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
 readonly TE_VERSION="2.17.1"
+readonly TRANSFORMERS_VERSION="4.57.1"
 readonly PADDLE_INDEX_URL="https://www.paddlepaddle.org.cn/packages/stable/cu130/"
 readonly NIGHTLY_WHL_BASE="https://paddle-whl.bj.bcebos.com/nightly/cu130"
 # readonly PADDLE_VERSION="xx"
@@ -108,6 +109,7 @@ setup_torch_venv() {
 
     uv pip install --python "${torch_py}" --index-strategy unsafe-best-match \
         omegaconf tensor-spec-worker datasets transformers_stream_generator tensorboard json_repair matplotlib modelscope peft \
+        "transformers==${TRANSFORMERS_VERSION}" \
         "transformer-engine[core_cu13]==${TE_VERSION}"
 
     # transformer_engine_torch
