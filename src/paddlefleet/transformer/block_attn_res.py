@@ -404,13 +404,16 @@ class BlockAttnRes(FleetLayer):
 
         # Fused Triton kernel (FLA fused_attnres) has highest priority:
         # single kernel for RMSNorm + projection + softmax + weighted sum.
-        self._use_fused = (
-            HAVE_FUSED_ATTNRES
-            and self._use_pylayer
+        # Split out from _use_fused so the two cannot disagree: the warning
+        # below must fire only when the extension is the one missing piece, not
+        # when this instance was never eligible (LayerNorm, deterministic mode).
+        fused_eligible = (
+            self._use_pylayer
             and getattr(config, "attn_res_fusion", True)
             and not getattr(config, "deterministic_mode", False)
         )
-        if getattr(config, "attn_res_fusion", True) and not HAVE_FUSED_ATTNRES:
+        self._use_fused = HAVE_FUSED_ATTNRES and fused_eligible
+        if fused_eligible and not HAVE_FUSED_ATTNRES:
             _warn_fused_attnres_unavailable_once()
 
     def forward(self, partial_block: Tensor, blocks: list[Tensor]) -> Tensor:
