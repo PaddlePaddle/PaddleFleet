@@ -107,7 +107,7 @@ setup_torch_venv() {
     #     -e ./ms-swift -e ./Megatron-LM -e ./mcore-bridge
 
     uv pip install --python "${torch_py}" --index-strategy unsafe-best-match \
-        omegaconf tensor-spec-worker datasets transformers_stream_generator tensorboard json_repair matplotlib modelscope \
+        omegaconf tensor-spec-worker datasets transformers_stream_generator tensorboard json_repair matplotlib modelscope peft \
         "transformer-engine[core_cu13]==${TE_VERSION}"
 
     # transformer_engine_torch
