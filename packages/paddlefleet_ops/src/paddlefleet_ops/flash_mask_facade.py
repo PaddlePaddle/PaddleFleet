@@ -35,13 +35,17 @@ else:
         flashmask_attention as _flashmask_attention,
     )
 
+flashmask_fa3_use_cutedsl = True
 
-def get_fa_version(
+
+def _dispatch_fa_version(
     head_dim: int,
     head_dim_v: int | None = None,
     startend_row_indices: paddle.Tensor | None = None,
 ) -> int:
     """Pick the FlashAttention version for the given head dims.
+
+    Prefer the public ``get_fa_version``, which validates what this returns.
 
     Dispatch rules:
       * XPU device -> FA2.
@@ -86,31 +90,129 @@ def get_fa_version(
         "FLAGS_cudnn_deterministic"
     ]
 
-    if fa_version == 3:
-        if deterministic and head_dim > 128:
-            return 2
+    if flashmask_fa3_use_cutedsl:
+        if fa_version in (3, 4):
+            # FA3/FA4 both run on the cutedsl backend. When ``paddlefleet_ops.
+            # flash_mask`` is not loadable (capability below 9.0, a mismatched
+            # paddlefleet_ops build, or a broken cute import) the kernels do not
+            # exist, so degrade here rather than letting call sites reference an
+            # undefined ``_flash_attn_fwd`` / ``_flash_attn_bwd``.
+            if not is_flash_mask_available():
+                return 2
+            _head_dim_v = head_dim_v if head_dim_v is not None else head_dim
+            cutedsl_hdim_ok = (
+                (head_dim <= 128 and _head_dim_v <= 128)
+                or (head_dim == 192 and _head_dim_v == 128)
+                or (head_dim == 256 and _head_dim_v == 256)
+            )
+            # FA4 additionally supports larger head dims (non-deterministic only)
+            if fa_version == 4 and not deterministic:
+                cutedsl_hdim_ok = cutedsl_hdim_ok or (
+                    (head_dim == 512 and _head_dim_v == 512)
+                    or (head_dim == 576 and _head_dim_v == 512)
+                )
+            if not cutedsl_hdim_ok:
+                return 2
+            fa4_mask_ok = (
+                startend_row_indices is None
+                or startend_row_indices.shape[-1] != 4
+            )
+            if fa_version == 4:
+                if not fa4_mask_ok:
+                    return 2
+    else:
+        if fa_version == 3:
+            if deterministic and head_dim > 128:
+                return 2
 
-    if fa_version == 4:
-        _head_dim_v = head_dim_v if head_dim_v is not None else head_dim
-        fa4_hdim_ok = (
-            (head_dim <= 128 and _head_dim_v <= 128)
-            or (head_dim == 192 and _head_dim_v == 128)
-            or (head_dim == 256 and _head_dim_v == 256)
-            # Both of these exceed 256 and so take FA4's big-head-dim backward,
-            # which asserts ``not deterministic`` (``flash_mask/cute/
-            # interface.py``: ``is_bigd_bwd`` -> "deterministic reduction is not
-            # supported by big-headdim bwd"). Degrade instead of aborting, the
-            # same way FA3 degrades above.
-            or (head_dim == 512 and _head_dim_v == 512 and not deterministic)
-            or (head_dim == 576 and _head_dim_v == 512 and not deterministic)
-        )
-        fa4_mask_ok = (
-            startend_row_indices is None or startend_row_indices.shape[-1] != 4
-        )
-        if not (fa4_hdim_ok and fa4_mask_ok):
-            return 2
+        if fa_version == 4:
+            _head_dim_v = head_dim_v if head_dim_v is not None else head_dim
+            fa4_hdim_ok = (
+                (head_dim <= 128 and _head_dim_v <= 128)
+                or (head_dim == 192 and _head_dim_v == 128)
+                or (head_dim == 256 and _head_dim_v == 256)
+                # Both of these exceed 256 and so take FA4's big-head-dim backward,
+                # which asserts ``not deterministic`` (``flash_mask/cute/
+                # interface.py``: ``is_bigd_bwd`` -> "deterministic reduction is not
+                # supported by big-headdim bwd"). Degrade instead of aborting, the
+                # same way FA3 degrades above.
+                or (
+                    head_dim == 512 and _head_dim_v == 512 and not deterministic
+                )
+                or (
+                    head_dim == 576 and _head_dim_v == 512 and not deterministic
+                )
+            )
+            fa4_mask_ok = (
+                startend_row_indices is None
+                or startend_row_indices.shape[-1] != 4
+            )
+            if not (fa4_hdim_ok and fa4_mask_ok):
+                return 2
 
     return fa_version
+
+
+def get_fa_version(
+    head_dim: int,
+    head_dim_v: int | None = None,
+    startend_row_indices: paddle.Tensor | None = None,
+) -> int:
+    """Pick the FlashAttention version, rejecting versions we cannot dispatch.
+
+    Thin validating wrapper over ``_dispatch_fa_version``; see that function for
+    the dispatch rules and argument meanings.
+
+    Returns:
+        The FlashAttention version to use (2, 3 or 4).
+
+    Raises:
+        ValueError: If the resolved version is not 2, 3 or 4 -- in practice this
+            means ``FLAGS_flash_attn_version`` was set to something unsupported,
+            since every degrade path returns 2.
+    """
+    fa_version = _dispatch_fa_version(
+        head_dim, head_dim_v, startend_row_indices
+    )
+    if fa_version not in (2, 3, 4):
+        raise ValueError(f"Invalid flash attention version: {fa_version}")
+    return fa_version
+
+
+def is_flashmask_use_cutedsl(fa_version):
+    if fa_version == 3:
+        return flashmask_fa3_use_cutedsl
+    elif fa_version == 4:
+        return True
+    else:
+        return False
+
+
+def is_value_padding_needed(
+    fa_version: int,
+    head_dim: int,
+    head_dim_v: int,
+) -> bool:
+    """Whether ``value`` must be zero-padded from ``head_dim_v`` to ``head_dim``.
+
+    Args:
+        fa_version: The version returned by :func:`get_fa_version`.
+        head_dim: Query/Key head dim.
+        head_dim_v: Value head dim.
+
+    Returns:
+        ``True`` when ``value`` needs padding.
+    """
+    fa3_native_pair = (
+        flashmask_fa3_use_cutedsl
+        and (fa_version == 3)
+        and (head_dim == 192 and head_dim_v == 128)
+    )
+    fa4_native_pair = (fa_version == 4) and (
+        (head_dim == 192 and head_dim_v == 128)
+        or (head_dim == 576 and head_dim_v == 512)
+    )
+    return head_dim != head_dim_v and not (fa3_native_pair or fa4_native_pair)
 
 
 def flashmask_attention(
@@ -155,19 +257,13 @@ def flashmask_attention(
 
     fa_version = get_fa_version(q_head_dim, v_head_dim, startend_row_indices)
 
-    need_value_padding = (
-        not (
-            fa_version == 4
-            and (
-                (q_head_dim == 192 and v_head_dim == 128)
-                or (q_head_dim == 576 and v_head_dim == 512)
-            )
-        )
-    ) and q_head_dim != v_head_dim
+    need_value_padding = is_value_padding_needed(
+        fa_version, q_head_dim, v_head_dim
+    )
 
     if need_value_padding:
         value_padding = paddle.zeros(
-            [bsz, q_len, value.shape[2], q_head_dim - v_head_dim],
+            [*value.shape[:-1], q_head_dim - v_head_dim],
             dtype=value.dtype,
         )
         value = paddle.concat([value, value_padding], axis=-1)
@@ -237,19 +333,13 @@ def flash_attention(
     # startend_row_indices is None
     fa_version = get_fa_version(q_head_dim, v_head_dim)
 
-    need_value_padding = (
-        not (
-            fa_version == 4
-            and (
-                (q_head_dim == 192 and v_head_dim == 128)
-                or (q_head_dim == 576 and v_head_dim == 512)
-            )
-        )
-    ) and q_head_dim != v_head_dim
+    need_value_padding = is_value_padding_needed(
+        fa_version, q_head_dim, v_head_dim
+    )
 
     if need_value_padding:
         value_padding = paddle.zeros(
-            [bsz, q_len, value.shape[2], q_head_dim - v_head_dim],
+            [*value.shape[:-1], q_head_dim - v_head_dim],
             dtype=value.dtype,
         )
         value = paddle.concat([value, value_padding], axis=-1)
@@ -280,4 +370,6 @@ __all__ = [
     "flashmask_attention",
     "flash_attention",
     "get_fa_version",
+    "is_value_padding_needed",
+    "is_flashmask_use_cutedsl",
 ]

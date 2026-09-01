@@ -20,7 +20,10 @@ from paddle import distributed as dist
 from paddle.autograd.py_layer import PyLayer
 from paddle.distributed import fleet
 from paddle.nn.functional.flash_attention import flashmask_attention
-from paddlefleet_ops.flash_mask_facade import get_fa_version
+from paddlefleet_ops.flash_mask_facade import (
+    get_fa_version,
+    is_flashmask_use_cutedsl,
+)
 
 _flash_mask_available = False
 try:
@@ -740,7 +743,7 @@ def cp_flashmask_allgatherkv_balance_forward(
     v_head_dim = value_gathered.shape[-1]
     fa_version = get_fa_version(q_head_dim, v_head_dim, startend_row_indices)
 
-    if fa_version == 4 and _flash_mask_available:
+    if is_flashmask_use_cutedsl(fa_version):
         output, log_sum_exp = _flash_attn_fwd(
             query,
             key_gathered,
@@ -755,7 +758,7 @@ def cp_flashmask_allgatherkv_balance_forward(
     else:
         if learnable_sink is not None:
             raise NotImplementedError(
-                "learnable_sink only supported on fa_version==4 cute backend"
+                "learnable_sink only supported on cute backend"
             )
         output, log_sum_exp = flashmask_attention(
             query,
@@ -827,7 +830,7 @@ def cp_flashmask_allgatherkv_balance_backward(
     if fa_version == 2:
         if learnable_sink is not None:
             raise NotImplementedError(
-                "learnable_sink only supported on fa_version==4 cute backend"
+                "learnable_sink only supported cute backend"
             )
         if softmax_scale is not None:
             raise NotImplementedError(
@@ -853,10 +856,10 @@ def cp_flashmask_allgatherkv_balance_backward(
                 causal,
             )
         )
-    elif fa_version == 3:
+    elif not is_flashmask_use_cutedsl(fa_version):
         if learnable_sink is not None:
             raise NotImplementedError(
-                "learnable_sink only supported on fa_version==4 cute backend"
+                "learnable_sink only supported on cute backend"
             )
         sig_params = inspect.signature(flashmask_attention).parameters
         if "group" in sig_params:
@@ -911,7 +914,7 @@ def cp_flashmask_allgatherkv_balance_backward(
                     False,
                 )
             )
-    elif fa_version == 4 and _flash_mask_available:
+    else:
         if startend_row_indices is not None:
             flashmask_info = FlashMaskInfoPaddle(
                 startend_row_indices=startend_row_indices,
@@ -935,10 +938,6 @@ def cp_flashmask_allgatherkv_balance_backward(
                     "FLAGS_cudnn_deterministic"
                 ],
             )
-        )
-    else:
-        raise ValueError(
-            f"FlashAttention version {fa_version} is not supported."
         )
 
     # Reduce-scatter key and value gradients
@@ -1981,8 +1980,14 @@ def flashmask_attention_cp(
         hcg = fleet.get_hybrid_communicate_group()
         cp_group = hcg.get_context_parallel_group()
 
-        assert _flash_mask_available, (
-            "P2P SWA fast path requires flashmask installed. Please check."
+        q_head_dim = query.shape[-1]
+        v_head_dim = value.shape[-1]
+        fa_version = get_fa_version(
+            q_head_dim, v_head_dim, startend_row_indices
+        )
+
+        assert fa_version == 4, (
+            f"current fa version is {fa_version}, but P2P SWA fast path requires flashmask 4.0 installed. Please check."
         )
 
         return FlashMaskSwaP2P.apply(
