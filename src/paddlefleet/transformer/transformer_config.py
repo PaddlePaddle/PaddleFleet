@@ -1483,6 +1483,33 @@ class TransformerConfig(ModelParallelConfig):
     by TransformerConfig.transform_rules.
     """
 
+    dsa_indexer_topk_freq: int = 1
+    """Frequency of DSA indexer top-k computation across layers.
+
+    Official GLM-5.2 config.json field ``index_topk_freq``. Values greater
+    than one enable cross-layer top-k sharing.
+    """
+
+    dsa_indexer_skip_topk_offset: int = 0
+    """One-indexed layer offset at which periodic DSA top-k computation starts.
+
+    Official GLM-5.2 config.json field ``index_skip_topk_offset``.
+    """
+
+    dsa_indexer_types: list[str] | None = None
+    """Optional per-layer DSA indexer layout (``full`` or ``shared``).
+
+    Official GLM-5.2 config.json field ``indexer_types``.
+    """
+
+    dsa_index_share_for_mtp_iteration: bool = False
+    """Whether MTP iterations reuse top-k indices from the final decoder layer.
+
+    Official GLM-5.2 config.json field ``index_share_for_mtp_iteration``.
+    This is the HF-name mapping only; consumers that honour the flag land in
+    follow-up PRs.
+    """
+
     dsa_indexer_loss_coeff: float = 0.0
     """KL loss coefficient for DSA Indexer training. 0 disables the KL loss.
 
@@ -1835,6 +1862,10 @@ class TransformerConfig(ModelParallelConfig):
         "index_n_heads": "dsa_index_n_heads",
         "index_head_dim": "dsa_index_head_dim",
         "index_topk": "dsa_index_topk",
+        "index_topk_freq": "dsa_indexer_topk_freq",
+        "index_skip_topk_offset": "dsa_indexer_skip_topk_offset",
+        "indexer_types": "dsa_indexer_types",
+        "index_share_for_mtp_iteration": "dsa_index_share_for_mtp_iteration",
         "indexer_loss_coeff": "dsa_indexer_loss_coeff",
         "indexer_use_sparse_loss": "dsa_indexer_use_sparse_loss",
         "indexer_rotary_interleaved": "dsa_indexer_rotary_interleaved",
