@@ -35,9 +35,14 @@ from paddlefleet.transformer.activations import (
 )
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.fp8_utils import (
+    FP8_ALIGN,
+    USE_INPLACE_SWIGLU_BWD,
     ExpertsGroupGemmContiguousNode,
 )
-from paddlefleet.transformer.moe.fusion_layer_utils import FusionMoePyLayer
+from paddlefleet.transformer.moe.fusion_layer_utils import (
+    FusionMoePyLayer,
+    MlpNode,
+)
 from paddlefleet.transformer.moe.moe_expert import (
     GroupedMLPExpert,
     SonicMoEExpert,
@@ -984,6 +989,90 @@ class TestSituGLU(unittest.TestCase):
                 self.assertEqual(x_grad.shape, x.shape)
                 self.assertEqual(o2_s.shape, out_grad.shape)
                 self.assertEqual(probs_grad.shape, probs.shape)
+
+    def test_rejects_unknown_activation_type(self):
+        """Unknown activation names must raise, not be computed as SwiGLU.
+
+        Both down-projection dispatches special-case the activations they know
+        and let anything else reach the SwiGLU branch, so a typo would silently
+        train the wrong function. Two guards, because a node can also be built
+        via ``__new__`` -- see
+        ``test_fused_node_rejects_unsupported_fp8_activations``.
+        """
+        for bad in ("swigl", "gelu", "SwiGLU", ""):
+            with (
+                self.subTest(activation_type=bad),
+                self.assertRaisesRegex(
+                    ValueError, "activation_type must be one of"
+                ),
+            ):
+                ExpertsGroupGemmContiguousNode(
+                    SimpleNamespace(
+                        config=SimpleNamespace(),
+                        grouped_gemm_experts=SimpleNamespace(),
+                    ),
+                    use_fp8_mlp=False,
+                    moe_expert_fusion=True,
+                    activation_type=bad,
+                )
+
+        # fwd_down is an allowlist rather than a geglu denylist, so it also
+        # refuses names that bypassed __init__.
+        for bad in ("gelu", "geglu"):
+            with self.subTest(fwd_down=bad):
+                node = ExpertsGroupGemmContiguousNode.__new__(
+                    ExpertsGroupGemmContiguousNode
+                )
+                node.use_fp8_mlp = True
+                node.activation_type = bad
+                with self.assertRaisesRegex(
+                    ValueError, "only supports.*swiglu"
+                ):
+                    node.fwd_down(None, None, None, 0)
+
+    def test_subbatch_planner_matches_situ_out_of_place_backward(self):
+        """The subbatch memory planner must not assume SiTU shares o1 with do1.
+
+        ``situ_glu_scale_backward`` always allocates its own outputs, so the
+        backward peak carries o1 *and* do1. A planner that assumed the inplace
+        SwiGLU layout would underestimate the peak and could pick a chunk size
+        that OOMs, so ``_bwd_pre_permute_feature_sizes`` has to exclude SiTU the
+        same way ``backward_impl_fp8``'s del-o1 timing does.
+        """
+        # Distinct dims so that the o1/do1 entry is not aliased by another
+        # buffer of the same byte size (out_grad and the dw1 dequant are both
+        # hidden_size * 2).
+        hidden_size, gate_up_out_dim, inter_dim = 1024, 4096, 2048
+
+        def feature_sizes(activation_type, use_bf16_wgrad):
+            node = MlpNode.__new__(MlpNode)
+            node.activation_type = activation_type
+            node.experts_group_gemm_node = SimpleNamespace(
+                clamp_value=None,
+                use_bf16_gemm_weight_grad=use_bf16_wgrad,
+            )
+            return node._bwd_pre_permute_feature_sizes(
+                hidden_size, gate_up_out_dim, inter_dim
+            )
+
+        for use_bf16_wgrad in (True, False):
+            with self.subTest(use_bf16_wgrad=use_bf16_wgrad):
+                situ = feature_sizes("situ", use_bf16_wgrad)
+                swiglu = feature_sizes("swiglu", use_bf16_wgrad)
+
+                # o1 and do1 are both [N, gate_up_out_dim] bf16; SiTU holds two.
+                o1_bytes = FP8_ALIGN * gate_up_out_dim * 2
+                self.assertEqual(
+                    situ.count(o1_bytes),
+                    2,
+                    msg=f"SiTU must budget o1 and do1 separately: {situ}",
+                )
+                if USE_INPLACE_SWIGLU_BWD:
+                    self.assertEqual(swiglu.count(o1_bytes), 1)
+                    self.assertGreater(sum(situ), sum(swiglu))
+                else:
+                    # Without the inplace op both paths are out-of-place.
+                    self.assertEqual(situ, swiglu)
 
     def test_situ_fusion_moe_deep_gemm_smoke(self):
         model_parallel_cuda_manual_seed(2026)

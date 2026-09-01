@@ -67,6 +67,13 @@ except (ImportError, AttributeError, RuntimeError):
         _fused_swiglu_probs_bwd = None
         USE_INPLACE_SWIGLU_BWD = False
 
+# Activation names the expert nodes know how to compute. Every down-projection
+# dispatch special-cases the ones it handles and falls through to SwiGLU, so an
+# unrecognised name has to be rejected rather than allowed to reach a branch.
+SUPPORTED_ACTIVATION_TYPES = ("swiglu", "geglu", "situ")
+# Of those, the ones the fp8 down projection implements. GeGLU is bf16-only.
+FP8_ACTIVATION_TYPES = ("swiglu", "situ")
+
 try:
     from paddle.nn.functional import swiglu
 except ImportError:
@@ -968,6 +975,16 @@ class ExpertsGroupGemmContiguousNode:
         self.defer_expert_down_dw = defer_expert_down_dw
         self.moe_expert_fusion = moe_expert_fusion
         self.clamp_value = clamp_value
+        if activation_type not in SUPPORTED_ACTIVATION_TYPES:
+            # Every dispatch below this point special-cases the activations it
+            # knows and lets everything else fall through to SwiGLU, so a typo
+            # would silently train the wrong function. Reject the name once,
+            # here, instead of at each branch.
+            raise ValueError(
+                "activation_type must be one of "
+                f"{sorted(SUPPORTED_ACTIVATION_TYPES)}, but got "
+                f"{activation_type!r}."
+            )
         self.activation_type = activation_type
         config = getattr(custom_map, "config", None)
         self.activation_situ_beta = getattr(config, "activation_situ_beta", 1.0)
@@ -1539,7 +1556,11 @@ class ExpertsGroupGemmContiguousNode:
         if not self.use_fp8_mlp:
             return self.fwd_down_bf16(o1, unzipped_probs, expert_w2, clear_o1)
         else:
-            if self.activation_type == "geglu":
+            if self.activation_type not in FP8_ACTIVATION_TYPES:
+                # Allowlist, not a geglu denylist: fwd_down_fp8's final branch
+                # is the SwiGLU quantizer, so anything unrecognised reaching it
+                # would be computed as SwiGLU. __init__ already rejects unknown
+                # names; this also covers nodes built via __new__.
                 raise ValueError(
                     "FP8 MoE path only supports activation_type='swiglu' "
                     f"or 'situ' yet, but got {self.activation_type!r}. Please "
