@@ -597,7 +597,8 @@ jobs:
         run: |
           set -euo pipefail
           name_file="${{ matrix.flavor.name_key }}"
-          rm -f "${name_file}"
+          # Remove the canonical file and numeric wget leftovers from reused runners.
+          rm -f -- "${name_file}" "${name_file}".[0-9]*
           wget --tries=5 --no-proxy --no-check-certificate \
             -O "${name_file}" \
             "https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${COMMIT_ID}/${name_file}"
