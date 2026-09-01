@@ -238,11 +238,19 @@ class MoELayer(nn.Layer):
         )
         self.moe_expert_fusion = config.moe_expert_fusion
         self._activation_type = "situ" if self.hidden_act == situ else "swiglu"
-        if self.hidden_act == situ and self.fp8 and self.using_sonic_moe:
-            raise ValueError(
-                "SiTU-GLU + fp8 is only supported on the DeepGEMM fp8 expert "
-                "path, not on SonicMoE; please disable fp8 or switch backend."
-            )
+        # SiTU-GLU + fp8 is implemented on *both* fp8 expert paths, by different
+        # means:
+        #   SonicMoE -- the betas are encoded into the gated/dgated GEMM
+        #     activation string and baked into the epilogue as Constexpr (see
+        #     sonicmoe/quack_utils/activation_situ.py).
+        #   DeepGEMM -- ExpertsGroupGemmContiguousNode has no fused
+        #     activation+scale+quant kernel for SiTU, so it computes
+        #     SiTU-GLU x probs in bf16 and then runs the generic blockwise
+        #     quantizer (see fp8_utils.fwd_down_fp8 / bwd_down_input_fp8).
+        # SonicMoE's *bf16* path has no SiTU epilogue and raises from
+        # sonicmoe/functional/__init__.py::_gemm_activation_name, so nothing can
+        # silently degrade to SwiGLU there either.  fp8_wgrad remains
+        # unvalidated for SiTU on both backends and is rejected below.
         if self.hidden_act == situ and self.fp8 and self.fp8_wgrad:
             raise ValueError(
                 "SiTU-GLU + fp8 does not support fp8 expert weight gradients "
