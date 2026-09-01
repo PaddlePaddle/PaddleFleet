@@ -691,12 +691,33 @@ class SonicMoEExpert(GroupedMLPExpert):
         pg_collection: ProcessGroupCollection | None = None,
         intermediate_size_per_partition: int | None = None,
     ):
-        if config.hidden_act != F.silu or not config.gated_linear_unit:
+        if (
+            config.hidden_act not in (F.silu, situ)
+            or not config.gated_linear_unit
+        ):
             raise ValueError(
-                "SonicMoE only supports SwiGLU (hidden_act=F.silu and "
-                "gated_linear_unit=True), but got "
+                "SonicMoE only supports SwiGLU (hidden_act=F.silu) and SiTU-GLU "
+                "(hidden_act=situ), both with gated_linear_unit=True, but got "
                 f"hidden_act={config.hidden_act} and "
                 f"gated_linear_unit={config.gated_linear_unit}."
+            )
+        is_situ = config.hidden_act == situ
+        if is_situ and config.fp8 is None:
+            # sonicmoe refuses this deeper down too (_gemm_activation_name), but
+            # failing here names the config knob that has to change.
+            raise ValueError(
+                "SonicMoE has no bf16 SiTU-GLU epilogue; hidden_act=situ needs "
+                "fp8 (e.g. fp8='e4m3'), or switch to the DeepGEMM expert path "
+                "(using_sonic_moe=False)."
+            )
+        if is_situ and config.activation_func_clamp_value:
+            # The gated epilogue applies the clamp to (gate, up) *before* act_fn,
+            # which is a SwiGLU-only recipe; sonicmoe raises rather than dropping
+            # it silently, so reject here with the config-level name.
+            raise ValueError(
+                "activation_func_clamp_value="
+                f"{config.activation_func_clamp_value} is not supported with "
+                "hidden_act=situ on SonicMoE: SiTU-GLU has no clamped variant."
             )
         super().__init__(
             num_local_experts=num_local_experts,
@@ -719,6 +740,38 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.sonic_moe_config.swiglu_clamp_value = (
             0.0 if clamp_value is None else float(clamp_value)
         )
+
+        # Activation forwarded to run_sonic_moe(). For SiTU the two betas are
+        # part of the kernel (baked in as Constexpr), so they must reach the JIT
+        # cache key -- hence the encoded string form rather than a bare
+        # "situ_glu" plus ambient config. _FP8Config.situ_* are set as well so
+        # any cfg-based consumer (warmup signatures, logging) agrees by
+        # construction. Note the *resolved* semantics there: linear_beta=None
+        # means "no up-projection clamp", not "unset".
+        if is_situ:
+            # Imported lazily: activation_situ pulls in cutlass.cute at import
+            # time, which must not become a hard dependency of this module for
+            # the SwiGLU-only builds.
+            from paddlefleet_ops.sonicmoe.quack_utils.activation_situ import (
+                encode_situ_activation,
+            )
+
+            beta = self.config.activation_situ_beta
+            linear_beta = self.config.activation_situ_linear_beta
+            self.sonic_moe_config.situ_beta = float(beta)
+            self.sonic_moe_config.situ_linear_beta = (
+                None if linear_beta is None else float(linear_beta)
+            )
+            self._sonic_activation = encode_situ_activation(
+                self.sonic_moe_config.situ_beta,
+                self.sonic_moe_config.situ_linear_beta,
+            )
+            self._sonic_activation_kwargs = {
+                "activation_type": self._sonic_activation
+            }
+        else:
+            self._sonic_activation = "swiglu"
+            self._sonic_activation_kwargs = {}
 
         # Micro batch tracking for fp8 weight memory optimization.
         # _num_micro_batches: total forward passes per step for this layer.
@@ -920,6 +973,12 @@ class SonicMoEExpert(GroupedMLPExpert):
             fp8_combine_grad_handle=fp8_combine_grad_handle,
             fp8_config=self.sonic_moe_config,
             release_fp8_weights=release_fp8_weight_after_fwd,
+            # Forwarded only for SiTU.  ``activation_type`` is a newer
+            # run_sonic_moe kwarg, so passing it unconditionally would turn every
+            # SwiGLU SonicMoE run against an older paddlefleet_ops build into a
+            # TypeError.  SiTU already fails early and clearly on such a build:
+            # the encode_situ_activation import in __init__ raises ImportError.
+            **self._sonic_activation_kwargs,
         )
         # Release fp8 weights on last micro batch to save memory.
         # Only transposed_fp8 is kept for backward computation.
