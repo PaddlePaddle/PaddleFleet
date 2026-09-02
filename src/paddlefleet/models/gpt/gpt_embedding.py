@@ -460,6 +460,7 @@ class GPTEmbedding(FleetLayer):
                             cu_seqlens_q,
                             decoder_input.shape[0],
                             include_position_axis=self.config.gpt_model_use_experimental_version,
+                            seq_len=decoder_input.shape[1],
                         )
 
                     # decoder_input: [B, L, H] full-length embedding (already

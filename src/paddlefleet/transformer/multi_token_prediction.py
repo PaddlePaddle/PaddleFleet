@@ -154,7 +154,7 @@ def _roll_tensor_packed_seq(
         for _i in range(dim):
             prod_flat *= int(tensor.shape[_i])
         if prod_flat == batch_flat:
-            flat_shape = [seq_span] + list(tensor.shape[dim + 1 :])
+            flat_shape = [seq_span, *tensor.shape[dim + 1 :]]
             rolled_flat, _ = _roll_tensor_packed_seq(
                 tensor.reshape(flat_shape),
                 shifts,
@@ -351,7 +351,7 @@ def extract_local_zigzag_chunks(tensor_full, cp_rank, cp_size, axis=1):
 
 
 def build_startend_row_indices_from_cu_seqlens(
-    cu_seqlens_q, batch_size, include_position_axis=False
+    cu_seqlens_q, batch_size, include_position_axis=False, seq_len=None
 ):
     """Derive flashmask ``attn_mask_startend_row_indices`` from ``cu_seqlens_q``.
 
@@ -368,16 +368,21 @@ def build_startend_row_indices_from_cu_seqlens(
 
     Args:
         cu_seqlens_q: ``[num_docs + 1]`` int32 cumulative doc lengths. The last
-            entry is the full sequence length ``L``. When it equals
-            ``batch_size * seq_len`` (the erndata batch-flat granularity —
-            sample ``i`` occupies ``[i*seq_len, (i+1)*seq_len)`` in row-major
-            order), ``seq_len`` is inferred per sample and each sample gets
-            its own doc boundaries.
+            entry is the doc-boundary span, which is either the per-sample
+            sequence length ``L`` or -- for the erndata batch-flat granularity
+            -- ``batch_size * L`` (sample ``i`` occupies
+            ``[i*L, (i+1)*L)`` in row-major order).
         batch_size: batch axis size to broadcast to.
         include_position_axis: when True emit the 2-column
             ``[B, 1, L, 2]`` layout (``[end, position]``) that
             ``gpt_model_use_experimental_version`` expects; otherwise the
             1-column ``[B, 1, L, 1]`` fleet-mode layout.
+        seq_len: actual per-sample sequence length. Required to tell the two
+            granularities apart: the boundary values alone cannot, because a
+            legitimate per-sample ``cu=[0, 4, 8]`` with ``batch_size=2`` looks
+            exactly like a batch-flat cu over two samples of length 4. Pass it
+            whenever the caller knows ``L`` (both production call sites do);
+            when it is ``None`` the per-sample interpretation is assumed.
 
     Returns:
         ``[batch_size, 1, L, 1 or 2]`` int32 tensor on GPU.
@@ -392,39 +397,42 @@ def build_startend_row_indices_from_cu_seqlens(
     seq_span = int(cu_np[-1])
 
     # erndata batch-flat granularity: cu_seqlens_q spans the whole batch
-    # ([0, batch*seq_len]). Each sample i carries its own doc boundaries within
-    # [i*seq_len, (i+1)*seq_len), so the mask must be materialized per sample
+    # ([0, batch*L]). Each sample carries its own doc boundaries within
+    # [i*L, (i+1)*L), so the mask must be materialized per sample
     # (expand-to-batch would smear one sample's layout onto all samples).
-    # Detection is structural: in the flat form every sample necessarily ends
-    # at a multiple of ``seq_len``, so cu_seqlens_q must contain L, 2L, ...,
-    # (batch-1)*L among its boundary values. A per-sample [0, L] cu with
-    # batch_size > 1 and L % batch_size == 0 fails this test and keeps the
-    # legacy per-sample semantics below.
+    #
+    # The granularity is decided by ``seq_len``, never guessed from the
+    # boundary values: batch_size=2 with per-sample cu=[0, 4, 8] (L=8) has the
+    # same boundary set as a batch-flat cu over two length-4 samples, so any
+    # structural test necessarily mis-classifies one of them.
     flat_batch = False
-    if batch_size > 1 and seq_span % batch_size == 0:
-        seqlen_guess = seq_span // batch_size
-        cu_set = {int(c) for c in cu_np}
-        flat_batch = all(
-            _i * seqlen_guess in cu_set for _i in range(1, batch_size)
-        )
+    if seq_len is not None:
+        seq_len = int(seq_len)
+        if batch_size > 1 and seq_span == batch_size * seq_len:
+            flat_batch = True
+        elif seq_span != seq_len:
+            raise ValueError(
+                "cu_seqlens_q span is neither the per-sample sequence length "
+                f"nor batch_size * seq_len: span={seq_span}, "
+                f"seq_len={seq_len}, batch_size={batch_size}."
+            )
     if flat_batch:
-        seqlen = seq_span // batch_size
-        end = _np.zeros([batch_size, seqlen], dtype=_np.int32)
+        end = _np.zeros([batch_size, seq_len], dtype=_np.int32)
         for j in range(len(cu_np) - 1):
             s, e = int(cu_np[j]), int(cu_np[j + 1])
             if e - s <= 0:
                 continue
-            for _i in range(batch_size):
-                _s0 = _i * seqlen
-                _e0 = _s0 + seqlen
-                if e <= _s0 or s >= _e0:
+            for i in range(batch_size):
+                s0 = i * seq_len
+                e0 = s0 + seq_len
+                if e <= s0 or s >= e0:
                     continue
-                _ls = max(s - _s0, 0)
-                _le = min(e - _s0, seqlen)
-                end[_i, _ls:_le] = _le
+                ls = max(s - s0, 0)
+                le = min(e - s0, seq_len)
+                end[i, ls:le] = le
         if include_position_axis:
             pos = _np.tile(
-                _np.arange(seqlen, dtype=_np.int32)[None, :], (batch_size, 1)
+                _np.arange(seq_len, dtype=_np.int32)[None, :], (batch_size, 1)
             )
             # [B, L, 2] -> [B, 1, L, 2]
             startend_np = _np.stack([end, pos], axis=-1)[:, None, :, :]
@@ -910,59 +918,78 @@ class MultiTokenPredictionLayer(FleetLayer):
         """
         Concatenate the tokens before sending to transformer layer.
 
-        In mHC mode, hidden_states is [s, b, n*h] (multi-stream) and decoder_input
-        is [s, b, h] (single-stream embedding). Uses separate e_proj and h_proj.
-        In non-mHC mode, concatenates and projects with eh_proj as before.
+        In mHC mode, hidden_states is multi-stream ``[..., n*h]`` and
+        decoder_input is single-stream ``[..., h]``. Uses separate e_proj and
+        h_proj. In non-mHC mode, concatenates and projects with eh_proj as
+        before.
+
+        Layout contract for the leading two axes: seq-first ``[s, b, ...]``
+        when ``sequence_parallel`` is on, batch-first ``[b, s, ...]``
+        otherwise. ``GPTEmbedding`` establishes it -- both the erndata and the
+        ernie5 MTP branches permute to ``[S/TP, B, H]`` only under
+        ``sequence_parallel`` -- and the contract/split upstream preserves it.
+        The code below therefore keeps the leading axes opaque and only names
+        the seq axis where it actually matters (mask alignment, the
+        sequence-parallel gather/scatter and the h_proj reshape).
         """
         decoder_input = self.enorm(decoder_input)
 
         if self.mhc_enabled:
-            # mHC mode: hidden_states is [b, s, n*h] (batch-first; erndata
-            # embeddings and the backbone both use [b, s, ...]).
             n = self.config.num_residual_streams
             h = self.config.hidden_size
-            b, s, _ = hidden_states.shape
+            # d0/d1 are (seq, batch) under sequence_parallel and (batch, seq)
+            # otherwise; the reshape below is agnostic either way.
+            d0, d1, _ = hidden_states.shape
             if hidden_states.shape[-1] != n * h:
                 raise RuntimeError(
                     "mHC MTP _concat_embeddings requires multi-stream "
-                    f"hidden_states [b, s, {n * h}], got {tuple(hidden_states.shape)}. "
+                    f"hidden_states [..., {n * h}], got {tuple(hidden_states.shape)}. "
                     "The backbone contract layer must pass mhc_multistream and "
-                    "the erndata MTP forward must consume it (fix 6/7 wiring)."
+                    "the erndata MTP forward must consume it."
                 )
 
-            hs_streams = hidden_states.reshape([b, s, n, h])
+            hs_streams = hidden_states.reshape([d0, d1, n, h])
             hs_streams = self.hnorm(hs_streams)
 
             # Apply mask if needed
             if mtp_hidden_inputs_mask is not None:
-                # [B, 1, S] (batch-first layout), broadcast over the n streams.
-                mask = mtp_hidden_inputs_mask.astype(hs_streams.dtype)
+                # [B, 1, S] -> [B, S, 1]
+                mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.transpose(
+                    [0, 2, 1]
+                ).astype(hs_streams.dtype)
                 if (
                     get_context_parallel_world_size() > 1
                     and self.config.experimental_dataflow
                 ):
-                    mask = ContextParallelScatterOp.apply(
-                        mask,
-                        axis=2,
+                    mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
+                        mtp_hidden_inputs_mask,
+                        axis=1,
                         mode=self.config.cp_balance_mode,
                     )
-                # when sp enable: scatter seq axis (axis 2 here) and transpose
-                # back to [b, 1, s/tp] before the multiply below.
+                # when sp enable: hs_streams is seq-first, so bring the mask to
+                # [S/CP, B, 1] before scattering the seq axis.
                 if self.sequence_parallel:
-                    mask = mask.transpose([2, 1, 0])  # [s, 1, b]
-                    mask = scatter_to_sequence_parallel_region(mask)
-                    mask = mask.transpose([2, 1, 0])  # [b, 1, s/tp]
-                hs_streams = hs_streams * mask.transpose([0, 2, 1]).unsqueeze(
-                    -1
-                )
+                    # [B, S/CP, 1] -> [S/CP, B, 1]
+                    mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.transpose(
+                        [1, 0, 2]
+                    )
+                    # [S/CP, B, 1] -> [S/CP/TP, B, 1]
+                    mtp_hidden_inputs_mask = (
+                        scatter_to_sequence_parallel_region(
+                            mtp_hidden_inputs_mask
+                        )
+                    )
+                hs_streams = hs_streams * mtp_hidden_inputs_mask.unsqueeze(-1)
 
             # e_proj: [.., h] -> [.., h/tp]
             e_out, _ = self.e_proj(decoder_input)
             # h_proj: applied per-stream [.., n, h] -> [.., n, h/tp]
-            # 4D tensor [b,s,n,h] causes .t() error in backward; reshape to 3D first
-            orig_shape = list(hs_streams.shape)  # [b, s, n, h]
+            # 4D tensor causes .t() error in backward; reshape to 3D first.
+            orig_shape = list(hs_streams.shape)
             if self.tensor_parallel > 1 and self.sequence_parallel:
-                orig_shape[1] = orig_shape[1] * self.tensor_parallel
+                # Sequence-parallel linear all-gathers the seq axis, which is
+                # axis 0 in the seq-first layout that sequence_parallel implies.
+                orig_shape[0] = orig_shape[0] * self.tensor_parallel
             hs_flat = hs_streams.reshape([-1, orig_shape[-1]])  # [s/sp*b*n, h]
             h_out, _ = self.h_proj(hs_flat)  # [s*b*n, h/tp]
             h_out = h_out.reshape([*orig_shape[:-1], -1])  # [s, b, n, h/tp]
@@ -977,14 +1004,10 @@ class MultiTokenPredictionLayer(FleetLayer):
             hidden_states = hidden_states.reshape([*leading, n * h])
 
             if self.sequence_parallel:
-                # scatter_to_sequence_parallel_region splits along the first
-                # dim, but our layout is batch-first [b, s, n*h]: move seq to
-                # the front, scatter, and put it back.
-                hidden_states = hidden_states.transpose([1, 0, 2])
+                # Splits axis 0, which is the seq axis in the seq-first layout.
                 hidden_states = scatter_to_sequence_parallel_region(
                     hidden_states
                 )
-                hidden_states = hidden_states.transpose([1, 0, 2])
         else:
             hidden_states = self.hnorm(hidden_states)
             # Apply mtp_hidden_inputs_mask to mask out hidden state contributions
@@ -1924,25 +1947,37 @@ class MultiTokenPredictionLayer(FleetLayer):
                 if getattr(self.config, "sequence_parallel", False)
                 else dict_args["hidden_states"].shape[0]
             )
+            # ``input_ids`` is the canonical [B, L] tensor on this path (the
+            # guard above enforces ndim == 2), so it is the only SP/CP-agnostic
+            # source of the per-sample length L. hidden_states cannot be used:
+            # under sequence_parallel its seq axis already holds S/TP.
+            # Without L the builder cannot tell a per-sample cu from a
+            # batch-flat one, so it falls back to per-sample semantics.
+            seq_len = None if input_ids is None else input_ids.shape[1]
             dict_args["attn_mask_startend_row_indices"] = (
                 build_startend_row_indices_from_cu_seqlens(
                     cu_seqlens_q,
                     batch_size,
                     include_position_axis=include_pos,
+                    seq_len=seq_len,
                 )
             )
 
         # Run transformer layer.
         hidden_states = self._proj_and_transformer_layer(**dict_args)
 
-        # mHC: the shared block outputs multi-stream; contract it back to
-        # single-stream so the carrier concat below stays width-uniform
-        # (every slot is [B, S, h]). The multi-stream chunk list is re-added
-        # untouched (legacy behavior), so deeper MTP depths / the LMHead keep
-        # receiving the same mhc_multistream channel.
+        # mHC: the shared block emits multi-stream output. Same contract as the
+        # legacy magic-send / separate_mtp_input branch above: publish it as
+        # this depth's multi-stream slot so depth k+1 consumes depth k's output
+        # (leaving the backbone-generated chunk in place would break the chain
+        # for K > 1), and contract it to single-stream for the carrier concat
+        # so every slot stays width-uniform. Only forward the channel while a
+        # deeper MTP layer still needs it.
         if mhc_chunks is not None:
+            mhc_chunks[self.layer_number + 1] = hidden_states
             hidden_states = self._postprocess(hidden_states)
-            dict_args["mhc_multistream"] = paddle.concat(mhc_chunks)
+            if self.layer_number < num_nextn - 1:
+                dict_args["mhc_multistream"] = paddle.concat(mhc_chunks)
 
         # Store back into the pipeline concat tensor at slot k+1.
         tensor_list[self.layer_number + 1] = hidden_states
