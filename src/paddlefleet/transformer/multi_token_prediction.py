@@ -1942,18 +1942,26 @@ class MultiTokenPredictionLayer(FleetLayer):
                     self.config, "gpt_model_use_experimental_version", False
                 )
             )
-            batch_size = (
-                dict_args["hidden_states"].shape[1]
-                if getattr(self.config, "sequence_parallel", False)
-                else dict_args["hidden_states"].shape[0]
-            )
-            # ``input_ids`` is the canonical [B, L] tensor on this path (the
-            # guard above enforces ndim == 2), so it is the only SP/CP-agnostic
-            # source of the per-sample length L. hidden_states cannot be used:
-            # under sequence_parallel its seq axis already holds S/TP.
-            # Without L the builder cannot tell a per-sample cu from a
-            # batch-flat one, so it falls back to per-sample semantics.
-            seq_len = None if input_ids is None else input_ids.shape[1]
+            # Recover the GLOBAL per-sample length L from this rank's shard.
+            # ``input_ids`` must not be used: GPTEmbedding publishes it as
+            # ``input_ids_for_moe_mask``, which stays None under plain
+            # use_erndata with expert_model_parallel_size == 1 and
+            # gpt_model_use_experimental_version == False, so the key is absent
+            # here. Scale the local seq axis back up by the parallel degrees,
+            # exactly the way the KDA branch of GPTEmbedding.forward does for
+            # its own cu_seqlens (gpt_embedding.py, build_cu_seqlens call site):
+            # the mask lives in global sequence coordinates while hidden_states
+            # is the rank-local shard. Layout is seq-first iff sequence_parallel.
+            cp_size = max(get_context_parallel_world_size(), 1)
+            if getattr(self.config, "sequence_parallel", False):
+                # [s/tp, b, h]
+                local_seq_len, batch_size = dict_args["hidden_states"].shape[:2]
+                sp_size = self.config.tensor_model_parallel_size
+            else:
+                # [b, s, h]
+                batch_size, local_seq_len = dict_args["hidden_states"].shape[:2]
+                sp_size = 1
+            seq_len = local_seq_len * sp_size * cp_size
             dict_args["attn_mask_startend_row_indices"] = (
                 build_startend_row_indices_from_cu_seqlens(
                     cu_seqlens_q,

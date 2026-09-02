@@ -317,5 +317,101 @@ class TestErndataMhcMultiDepthChain(unittest.TestCase):
             layer.forward({"hidden_states": carrier, "context": None})
 
 
+def _make_mask_layer(
+    K: int,
+    *,
+    layer_number: int = 0,
+    sequence_parallel: bool = False,
+    tp_size: int = 1,
+):
+    """Non-mHC layer used to exercise the mask-derivation fallback only."""
+    layer = MultiTokenPredictionLayer.__new__(MultiTokenPredictionLayer)
+    cfg = MagicMock()
+    cfg.use_erndata = True
+    cfg.enable_mtp_magic_send = False
+    cfg.num_nextn_predict_layers = K
+    cfg.gpt_model_use_experimental_version = False
+    cfg.sequence_parallel = sequence_parallel
+    cfg.tensor_model_parallel_size = tp_size
+    layer.config = cfg
+    layer.layer_number = layer_number
+    layer.mhc_enabled = False
+
+    recorded = {}
+
+    def _stub_proj(hidden_states, decoder_input, **kwargs):
+        am = kwargs.get("attn_mask_startend_row_indices")
+        recorded["attn_mask"] = am
+        recorded["attn_mask_shape"] = None if am is None else list(am.shape)
+        return decoder_input
+
+    layer._proj_and_transformer_layer = _stub_proj
+    return layer, recorded
+
+
+class TestMaskFallbackWithoutInputIds(unittest.TestCase):
+    """The fallback must not depend on the optional ``input_ids`` key.
+
+    ``GPTEmbedding`` publishes ``input_ids`` as ``input_ids_for_moe_mask``,
+    which stays None under plain ``use_erndata`` with
+    ``expert_model_parallel_size == 1`` and
+    ``gpt_model_use_experimental_version == False`` -- the key is then absent
+    from ``dict_args``. The per-sample length must instead be recovered from
+    the rank-local hidden_states shape and the parallel degrees.
+    """
+
+    def test_batch_flat_cu_without_input_ids(self) -> None:
+        """B=2, L=4, batch-flat cu, no input_ids -> [2, 1, 4, 1] mask.
+
+        Deriving L from a missing ``input_ids`` would fall back to per-sample
+        semantics and emit a length-8 mask, which mismatches the length-4
+        sequence attention actually sees.
+        """
+        K, B, L, h = 1, 2, 4, 2
+        layer, rec = _make_mask_layer(K)
+        # Carrier: K+1 slots concatenated along the batch axis, [ (K+1)*B, L, h ]
+        carrier = paddle.zeros([(K + 1) * B, L, h], dtype="float32")
+        cu = paddle.to_tensor([0, 2, 4, 7, 8], dtype="int32")
+        layer._forward_megatron_style(
+            {"hidden_states": carrier, "cu_seqlens_q": cu, "context": None}
+        )
+        self.assertEqual(rec["attn_mask_shape"], [B, 1, L, 1])
+        self.assertEqual(_ends(rec["attn_mask"], 0), [2, 2, 4, 4])
+        self.assertEqual(_ends(rec["attn_mask"], 1), [3, 3, 3, 4])
+
+    def test_per_sample_cu_without_input_ids(self) -> None:
+        """A per-sample cu keeps the shared length-L layout for both samples."""
+        K, B, L, h = 1, 2, 4, 2
+        layer, rec = _make_mask_layer(K)
+        carrier = paddle.zeros([(K + 1) * B, L, h], dtype="float32")
+        cu = paddle.to_tensor([0, 3, 4], dtype="int32")
+        layer._forward_megatron_style(
+            {"hidden_states": carrier, "cu_seqlens_q": cu, "context": None}
+        )
+        self.assertEqual(rec["attn_mask_shape"], [B, 1, L, 1])
+        self.assertEqual(_ends(rec["attn_mask"], 0), [3, 3, 3, 4])
+        self.assertEqual(_ends(rec["attn_mask"], 1), [3, 3, 3, 4])
+
+    def test_sequence_parallel_scales_local_seq_back_up(self) -> None:
+        """Under SP the seq axis holds L/TP; the mask must still cover L.
+
+        Layout is seq-first, so the carrier concat is along the seq axis:
+        [ (K+1)*L/TP, B, h ]. With TP=2 and local 4 the global L is 8, so a
+        batch-flat cu spanning B*L=16 must be recognized. Forgetting the TP
+        factor would make the span match neither reading and raise.
+        """
+        K, B, L, h, tp = 1, 2, 8, 2, 2
+        local = L // tp
+        layer, rec = _make_mask_layer(K, sequence_parallel=True, tp_size=tp)
+        carrier = paddle.zeros([(K + 1) * local, B, h], dtype="float32")
+        cu = paddle.to_tensor([0, 5, 8, 12, 16], dtype="int32")
+        layer._forward_megatron_style(
+            {"hidden_states": carrier, "cu_seqlens_q": cu, "context": None}
+        )
+        self.assertEqual(rec["attn_mask_shape"], [B, 1, L, 1])
+        self.assertEqual(_ends(rec["attn_mask"], 0), [5, 5, 5, 5, 5, 8, 8, 8])
+        self.assertEqual(_ends(rec["attn_mask"], 1), [4, 4, 4, 4, 8, 8, 8, 8])
+
+
 if __name__ == "__main__":
     unittest.main()
