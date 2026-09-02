@@ -335,6 +335,30 @@ class TestGlm52OfficialDsaHfFields(TestCase):
         self.assertTrue(official_mtp[1])
         self.assertEqual(official_mtp[3], 2)
 
+    def test_head_empty_offset_uses_logical_decoder_index(self):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_empty_layers_add_in_head=2,
+            dsa_indexer_types=["full", "shared", "full", "shared"],
+        )
+        first = resolve_dsa_indexer_layout(config, 2)
+        second = resolve_dsa_indexer_layout(config, 3)
+        self.assertEqual(first[0], "full")
+        self.assertFalse(first[1])
+        self.assertTrue(first[2])
+        self.assertEqual(first[3], 0)
+        self.assertEqual(second[0], "shared")
+        self.assertTrue(second[1])
+        self.assertEqual(second[3], 0)
+        with self.assertRaises(IndexError):
+            resolve_dsa_indexer_layout(config, 0)
+
     def test_index_share_holder_is_created_on_config_when_mask_is_none(self):
         from paddlefleet.transformer.dsa_attention import DSAttention
 
@@ -346,4 +370,37 @@ class TestGlm52OfficialDsaHfFields(TestCase):
         self.assertEqual(holder, {})
         self.assertIs(getattr(attn.config, DSAttention._HOLDER_ATTR), holder)
         holder[2] = "indices"
-        self.assertEqual(attn._get_index_share_topk_holder(None)[2], "indices")
+        cloned_mask = object()
+        self.assertEqual(
+            attn._get_index_share_topk_holder(cloned_mask)[2], "indices"
+        )
+
+    def test_shared_consumer_reads_producer_holder_key(self):
+        from paddlefleet.transformer.dsa_attention import DSAttention
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            dsa_indexer_topk_freq=4,
+        )
+        producer = DSAttention.__new__(DSAttention)
+        producer.config = config
+        producer.layer_number = 0
+        producer.skip_topk = False
+        producer.index_share = True
+        producer.source_layer = 0
+        consumer = DSAttention.__new__(DSAttention)
+        consumer.config = config
+        consumer.layer_number = 1
+        consumer.skip_topk = True
+        consumer.index_share = True
+        consumer.source_layer = 0
+        holder = producer._get_index_share_topk_holder(object())
+        holder[producer.layer_number] = "topk"
+        self.assertEqual(
+            consumer._get_index_share_topk_holder(object())[
+                consumer.source_layer
+            ],
+            "topk",
+        )
