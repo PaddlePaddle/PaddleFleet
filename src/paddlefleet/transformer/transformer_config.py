@@ -1486,28 +1486,41 @@ class TransformerConfig(ModelParallelConfig):
     dsa_indexer_topk_freq: int = 1
     """Frequency of DSA indexer top-k computation across layers.
 
-    Official GLM-5.2 config.json field ``index_topk_freq``. Values greater
-    than one enable cross-layer top-k sharing.
+    Official GLM-5.2 config.json field ``index_topk_freq``. Must be a
+    positive integer. Values greater than one enable periodic skip when
+    ``dsa_indexer_types`` is unset: every ``index_topk_freq`` layers after
+    ``index_skip_topk_offset`` reuse the preceding full indexer's top-k.
+    Default 1 keeps the previous always-compute-topk behaviour.
     """
 
     dsa_indexer_skip_topk_offset: int = 0
     """One-indexed layer offset at which periodic DSA top-k computation starts.
 
-    Official GLM-5.2 config.json field ``index_skip_topk_offset``.
+    Official GLM-5.2 config.json field ``index_skip_topk_offset``. Must be
+    a non-negative integer. 0 is treated as 1 at the skip-layer helper so
+    layer 1 always computes. Default 0 keeps the previous always-compute
+    behaviour when ``dsa_indexer_topk_freq`` is 1.
     """
 
     dsa_indexer_types: list[str] | None = None
     """Optional per-layer DSA indexer layout (``full`` or ``shared``).
 
-    Official GLM-5.2 config.json field ``indexer_types``.
+    Official GLM-5.2 config.json field ``indexer_types``. Decoder-only:
+    length must equal ``num_hidden_layers`` when set. Each entry is
+    ``full`` (owns an indexer) or ``shared`` (reuses the last preceding
+    ``full`` layer's top-k). MTP layers are not in this list; they use
+    ``dsa_index_share_for_mtp_iteration``. Default None falls back to
+    ``index_topk_freq`` / ``index_skip_topk_offset``.
     """
 
     dsa_index_share_for_mtp_iteration: bool = False
     """Whether MTP iterations reuse top-k indices from the final decoder layer.
 
     Official GLM-5.2 config.json field ``index_share_for_mtp_iteration``.
-    This is the HF-name mapping only; consumers that honour the flag land in
-    follow-up PRs.
+    False (default) keeps an independent MTP indexer. True makes each MTP
+    layer a shared consumer of the last decoder layer's top-k, so that
+    decoder layer must itself be a producer (``full``, or the last layer
+    when ``indexer_types`` is unset).
     """
 
     dsa_indexer_loss_coeff: float = 0.0
@@ -2008,6 +2021,81 @@ class TransformerConfig(ModelParallelConfig):
         # "disabled" and collapses to 0.0, so this config object never exposes
         # None and consumers can key on ``> 0`` instead of ``is not None``.
         self.dsa_indexer_loss_coeff = float(self.dsa_indexer_loss_coeff or 0.0)
+
+        if not isinstance(self.dsa_indexer_topk_freq, int) or isinstance(
+            self.dsa_indexer_topk_freq, bool
+        ):
+            raise ValueError(
+                "dsa_indexer_topk_freq must be a positive int, got "
+                f"{self.dsa_indexer_topk_freq!r}."
+            )
+        if self.dsa_indexer_topk_freq < 1:
+            raise ValueError(
+                "dsa_indexer_topk_freq must be >= 1, got "
+                f"{self.dsa_indexer_topk_freq}."
+            )
+        if not isinstance(self.dsa_indexer_skip_topk_offset, int) or isinstance(
+            self.dsa_indexer_skip_topk_offset, bool
+        ):
+            raise ValueError(
+                "dsa_indexer_skip_topk_offset must be a non-negative int, got "
+                f"{self.dsa_indexer_skip_topk_offset!r}."
+            )
+        if self.dsa_indexer_skip_topk_offset < 0:
+            raise ValueError(
+                "dsa_indexer_skip_topk_offset must be >= 0, got "
+                f"{self.dsa_indexer_skip_topk_offset}."
+            )
+        if self.dsa_indexer_types is not None:
+            if not isinstance(self.dsa_indexer_types, list) or not all(
+                isinstance(item, str) for item in self.dsa_indexer_types
+            ):
+                raise ValueError(
+                    "dsa_indexer_types must be None or a list of strings, got "
+                    f"{self.dsa_indexer_types!r}."
+                )
+            unknown_types = [
+                item
+                for item in self.dsa_indexer_types
+                if item not in {"full", "shared"}
+            ]
+            if unknown_types:
+                raise ValueError(
+                    "dsa_indexer_types entries must be 'full' or 'shared', got "
+                    f"{unknown_types} in {self.dsa_indexer_types!r}."
+                )
+            if len(self.dsa_indexer_types) != self.num_hidden_layers:
+                raise ValueError(
+                    "dsa_indexer_types length must equal num_hidden_layers "
+                    f"({self.num_hidden_layers}), got "
+                    f"{len(self.dsa_indexer_types)}."
+                )
+            if self.dsa_indexer_types and self.dsa_indexer_types[0] != "full":
+                raise ValueError(
+                    "dsa_indexer_types[0] must be 'full' so shared layers have "
+                    f"a source indexer, got {self.dsa_indexer_types[0]!r}."
+                )
+        if self.dsa_index_share_for_mtp_iteration:
+            if (self.num_nextn_predict_layers or 0) < 1:
+                raise ValueError(
+                    "dsa_index_share_for_mtp_iteration=True requires "
+                    "num_nextn_predict_layers >= 1, got "
+                    f"{self.num_nextn_predict_layers}."
+                )
+            if self.num_hidden_layers < 1:
+                raise ValueError(
+                    "dsa_index_share_for_mtp_iteration=True requires "
+                    "num_hidden_layers >= 1 so MTP can reuse a decoder indexer."
+                )
+            if (
+                self.dsa_indexer_types is not None
+                and "full" not in self.dsa_indexer_types
+            ):
+                raise ValueError(
+                    "dsa_index_share_for_mtp_iteration=True requires at least "
+                    "one decoder 'full' indexer to publish top-k, got "
+                    f"{self.dsa_indexer_types!r}."
+                )
 
         if self.p2p_overlap_dw_calc is not None:
             if isinstance(self.p2p_overlap_dw_calc, str):
