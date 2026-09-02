@@ -1530,6 +1530,92 @@ def source_dsa_compute_layer(
     return layer_number - ((layer_number - skip_topk_offset) % topk_freq)
 
 
+def decoder_dsa_topk_producer_layer(config, layer_number: int) -> int:
+    """Return the 0-based decoder layer that actually computes this layer's top-k."""
+    index_topk_freq = getattr(config, "dsa_indexer_topk_freq", None) or 1
+    index_skip_topk_offset = (
+        getattr(config, "dsa_indexer_skip_topk_offset", 0) or 0
+    )
+    indexer_types = getattr(config, "dsa_indexer_types", None)
+    if indexer_types is not None:
+        if not 0 <= layer_number < len(indexer_types):
+            raise ValueError(
+                f"Decoder layer {layer_number} is outside dsa_indexer_types "
+                f"length {len(indexer_types)}."
+            )
+        if indexer_types[layer_number] == "full":
+            return layer_number
+        full_layers = [
+            index
+            for index, layer_type in enumerate(indexer_types[:layer_number])
+            if layer_type == "full"
+        ]
+        if not full_layers:
+            raise ValueError(
+                f"Shared DSA layer {layer_number} has no preceding full indexer layer."
+            )
+        return full_layers[-1]
+    if index_topk_freq > 1 and is_dsa_skip_topk_layer(
+        layer_number + 1,
+        index_skip_topk_offset,
+        index_topk_freq,
+    ):
+        return (
+            source_dsa_compute_layer(
+                layer_number + 1,
+                index_skip_topk_offset,
+                index_topk_freq,
+            )
+            - 1
+        )
+    return layer_number
+
+
+def _decoder_layer_publishes_shared_topk(config, layer_number: int) -> bool:
+    """Whether a computing decoder layer must publish top-k for a later consumer."""
+    if layer_number < 0:
+        return False
+    index_topk_freq = getattr(config, "dsa_indexer_topk_freq", None) or 1
+    index_skip_topk_offset = (
+        getattr(config, "dsa_indexer_skip_topk_offset", 0) or 0
+    )
+    indexer_types = getattr(config, "dsa_indexer_types", None)
+    share_for_mtp_iteration = bool(
+        getattr(config, "dsa_index_share_for_mtp_iteration", False)
+    )
+    num_hidden_layers = getattr(config, "num_hidden_layers", 0) or 0
+    if indexer_types is not None:
+        for later, layer_type in enumerate(
+            indexer_types[layer_number + 1 :], start=layer_number + 1
+        ):
+            if layer_type == "shared" and (
+                decoder_dsa_topk_producer_layer(config, later) == layer_number
+            ):
+                return True
+    elif index_topk_freq > 1:
+        for later in range(layer_number + 1, num_hidden_layers):
+            if is_dsa_skip_topk_layer(
+                later + 1,
+                index_skip_topk_offset,
+                index_topk_freq,
+            ) and (
+                source_dsa_compute_layer(
+                    later + 1,
+                    index_skip_topk_offset,
+                    index_topk_freq,
+                )
+                - 1
+                == layer_number
+            ):
+                return True
+    if share_for_mtp_iteration and num_hidden_layers >= 1:
+        return (
+            decoder_dsa_topk_producer_layer(config, num_hidden_layers - 1)
+            == layer_number
+        )
+    return False
+
+
 def resolve_dsa_indexer_layout(
     config,
     layer_number: int,
@@ -1543,12 +1629,11 @@ def resolve_dsa_indexer_layout(
     GPT layer specs pass 0-based ``layer_number`` (decoder index, or MTP
     depth). Periodic skip helpers stay 1-indexed, matching the official
     ``index_skip_topk_offset`` numbering.
+
+    Holder keys are the 0-based producer layer. Shared consumers, including
+    MTP when ``index_share_for_mtp_iteration`` is set, look up that producer
+    rather than their own index.
     """
-    index_topk_freq = getattr(config, "dsa_indexer_topk_freq", None) or 1
-    index_skip_topk_offset = (
-        getattr(config, "dsa_indexer_skip_topk_offset", 0) or 0
-    )
-    indexer_types = getattr(config, "dsa_indexer_types", None)
     share_for_mtp_iteration = bool(
         getattr(config, "dsa_index_share_for_mtp_iteration", False)
     )
@@ -1556,9 +1641,31 @@ def resolve_dsa_indexer_layout(
     if is_mtp_layer:
         # Official GLM-5.2 checkpoints still ship a full MTP indexer.
         # Training honours share-for-MTP by skipping that indexer and
-        # reusing the last decoder layer's top-k, matching the HF field.
+        # reusing the last decoder's producer top-k, matching the HF field.
         indexer_type = "shared" if share_for_mtp_iteration else "full"
-    elif indexer_types is not None and 0 <= layer_number < len(indexer_types):
+        if indexer_type not in {"full", "shared"}:
+            raise ValueError(
+                f"Unsupported DSA indexer type {indexer_type!r} for layer {layer_number}."
+            )
+        skip_topk = indexer_type == "shared"
+        if skip_topk:
+            if num_hidden_layers < 1:
+                raise ValueError(
+                    "An MTP shared indexer requires a preceding decoder layer."
+                )
+            source_layer = decoder_dsa_topk_producer_layer(
+                config, num_hidden_layers - 1
+            )
+        else:
+            source_layer = layer_number
+        return indexer_type, skip_topk, skip_topk, source_layer
+
+    index_topk_freq = getattr(config, "dsa_indexer_topk_freq", None) or 1
+    index_skip_topk_offset = (
+        getattr(config, "dsa_indexer_skip_topk_offset", 0) or 0
+    )
+    indexer_types = getattr(config, "dsa_indexer_types", None)
+    if indexer_types is not None and 0 <= layer_number < len(indexer_types):
         indexer_type = indexer_types[layer_number]
     else:
         indexer_type = (
@@ -1576,48 +1683,13 @@ def resolve_dsa_indexer_layout(
             f"Unsupported DSA indexer type {indexer_type!r} for layer {layer_number}."
         )
     skip_topk = indexer_type == "shared"
-    index_share = (
-        skip_topk
-        or (
-            indexer_types is not None
-            and not is_mtp_layer
-            and "shared" in indexer_types[layer_number + 1 :]
-        )
-        or (
-            share_for_mtp_iteration
-            and not is_mtp_layer
-            and layer_number == num_hidden_layers - 1
-        )
-    )
     if skip_topk:
-        if is_mtp_layer and share_for_mtp_iteration:
-            if num_hidden_layers < 1:
-                raise ValueError(
-                    "An MTP shared indexer requires a preceding decoder layer."
-                )
-            source_layer = num_hidden_layers - 1
-        elif indexer_types is not None:
-            full_layers = [
-                index
-                for index, layer_type in enumerate(indexer_types[:layer_number])
-                if layer_type == "full"
-            ]
-            if not full_layers:
-                raise ValueError(
-                    f"Shared DSA layer {layer_number} has no preceding full indexer layer."
-                )
-            source_layer = full_layers[-1]
-        else:
-            source_layer = (
-                source_dsa_compute_layer(
-                    layer_number + 1,
-                    index_skip_topk_offset,
-                    index_topk_freq,
-                )
-                - 1
-            )
+        source_layer = decoder_dsa_topk_producer_layer(config, layer_number)
     else:
         source_layer = layer_number
+    index_share = skip_topk or _decoder_layer_publishes_shared_topk(
+        config, layer_number
+    )
     return indexer_type, skip_topk, index_share, source_layer
 
 
