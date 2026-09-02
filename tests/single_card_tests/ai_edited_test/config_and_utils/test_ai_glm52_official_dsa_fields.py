@@ -120,7 +120,8 @@ class TestGlm52OfficialDsaHfFields(TestCase):
         ):
             TransformerConfig(dsa_indexer_topk_freq=True)
         with self.assertRaisesRegex(
-            ValueError, "dsa_indexer_skip_topk_offset must be a non-negative int"
+            ValueError,
+            "dsa_indexer_skip_topk_offset must be a non-negative int",
         ):
             TransformerConfig(dsa_indexer_skip_topk_offset=1.5)
         with self.assertRaisesRegex(
@@ -231,8 +232,12 @@ class TestGlm52OfficialDsaHfFields(TestCase):
             source_dsa_compute_layer,
         )
 
-        self.assertFalse(is_dsa_skip_topk_layer(1, skip_topk_offset=0, topk_freq=4))
-        self.assertTrue(is_dsa_skip_topk_layer(2, skip_topk_offset=0, topk_freq=4))
+        self.assertFalse(
+            is_dsa_skip_topk_layer(1, skip_topk_offset=0, topk_freq=4)
+        )
+        self.assertTrue(
+            is_dsa_skip_topk_layer(2, skip_topk_offset=0, topk_freq=4)
+        )
         self.assertEqual(
             source_dsa_compute_layer(2, skip_topk_offset=0, topk_freq=4), 1
         )
