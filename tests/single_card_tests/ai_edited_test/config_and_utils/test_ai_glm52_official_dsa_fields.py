@@ -404,3 +404,96 @@ class TestGlm52OfficialDsaHfFields(TestCase):
             ],
             "topk",
         )
+
+    def test_source_layer_at_or_before_skip_offset_is_itself(self):
+        from paddlefleet.transformer.dsa_attention import (
+            source_dsa_compute_layer,
+        )
+
+        self.assertEqual(
+            source_dsa_compute_layer(3, skip_topk_offset=3, topk_freq=4), 3
+        )
+        self.assertEqual(
+            source_dsa_compute_layer(2, skip_topk_offset=3, topk_freq=4), 2
+        )
+
+    def test_logical_mtp_layer_keeps_physical_index(self):
+        from paddlefleet.transformer.dsa_attention import (
+            decoder_dsa_logical_layer,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_empty_layers_add_in_head=2,
+        )
+        self.assertEqual(
+            decoder_dsa_logical_layer(config, 7, is_mtp_layer=True), 7
+        )
+
+    def test_producer_rejects_layer_outside_indexer_types(self):
+        from paddlefleet.transformer.dsa_attention import (
+            decoder_dsa_topk_producer_layer,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            dsa_indexer_types=["full", "full", "full", "shared"],
+        )
+        with self.assertRaisesRegex(ValueError, "outside dsa_indexer_types"):
+            decoder_dsa_topk_producer_layer(config, 4)
+
+    def test_periodic_producer_without_indexer_types(self):
+        from paddlefleet.transformer.dsa_attention import (
+            decoder_dsa_topk_producer_layer,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            dsa_indexer_topk_freq=4,
+            dsa_indexer_skip_topk_offset=0,
+        )
+        self.assertEqual(decoder_dsa_topk_producer_layer(config, 0), 0)
+        self.assertEqual(decoder_dsa_topk_producer_layer(config, 3), 0)
+
+    def test_negative_layer_does_not_publish_shared_topk(self):
+        from paddlefleet.transformer.dsa_attention import (
+            _decoder_layer_publishes_shared_topk,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64, num_attention_heads=2, num_hidden_layers=4
+        )
+        self.assertFalse(_decoder_layer_publishes_shared_topk(config, -1))
+
+    def test_mtp_shared_indexer_requires_a_decoder(self):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64, num_attention_heads=2, num_hidden_layers=4
+        )
+        config.num_hidden_layers = 0
+        config.dsa_index_share_for_mtp_iteration = True
+        with self.assertRaisesRegex(ValueError, "preceding decoder layer"):
+            resolve_dsa_indexer_layout(config, 0, is_mtp_layer=True)
+
+    def test_skip_consumer_holder_does_not_contain_source_until_producer_runs(
+        self,
+    ):
+        from paddlefleet.transformer.dsa_attention import DSAttention
+
+        attn = DSAttention.__new__(DSAttention)
+        attn.config = TransformerConfig(
+            hidden_size=64, num_attention_heads=2, num_hidden_layers=4
+        )
+        attn.source_layer = 0
+        holder = attn._get_index_share_topk_holder(None)
+        self.assertEqual(holder, {})
+        self.assertNotIn(attn.source_layer, holder)
