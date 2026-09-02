@@ -1,0 +1,81 @@
+# GLM-4.5-Air tiny 2-layer EP2 accuracy-alignment configuration.
+# Model and data paths are replaced by run_paddle_glm45.sh at runtime.
+use_template: false
+truncation_strategy: right
+dataset_type: map
+random_shuffle: false
+packing: false
+truncate_packing: false
+
+train_dataset_type: messages
+eval_dataset_type: messages
+train_dataset_path: /home/.cache/PaddleFormers/GLM-4.5-Air-tiny-2L/alignment_paddle.jsonl
+train_dataset_prob: "1.0"
+eval_dataset_path: /home/.cache/PaddleFormers/GLM-4.5-Air-tiny-2L/alignment_paddle.jsonl
+eval_dataset_prob: "1.0"
+
+max_seq_len: 8192
+mix_strategy: concat
+dataloader_shuffle: false
+dataloader_num_workers: 4
+
+model_name_or_path: /home/.cache/PaddleFormers/GLM-4.5-Air-tiny-2L
+_attn_implementation: eager
+
+stage: SFT
+fine_tuning: full
+seed: 42
+do_train: true
+do_eval: false
+per_device_eval_batch_size: 1
+per_device_train_batch_size: 1
+num_train_epochs: 1
+max_steps: 10
+eval_steps: 1000
+evaluation_strategy: steps
+save_steps: 200
+save_strategy: steps
+logging_steps: 1
+gradient_accumulation_steps: 1
+logging_dir: ./logs/paddle/default/vdl
+output_dir: ./logs/paddle/default/trainer
+disable_tqdm: true
+
+tensor_model_parallel_size: 1
+pipeline_model_parallel_size: 1
+sequence_parallel: false
+use_expert_parallel: true
+expert_model_parallel_size: 2
+
+moe_router_load_balancing_type: seq_aux_loss
+moe_shared_expert_overlap: false
+router_aux_loss_coef: 1.0e-4
+moe_expert_fusion: false
+moe_token_dispatcher_type: alltoall
+
+weight_decay: 0.1
+adam_beta2: 0.95
+learning_rate: 5.0e-5
+warmup_steps: 0
+min_lr: 1.0e-5
+lr_scheduler_type: cosine
+
+recompute_granularity: full
+recompute_method: uniform
+recompute_num_layers: 1
+fp32_residual_connection: false
+
+bf16: true
+amp_master_grad: true
+fp16_opt_level: O2
+fa_version: 3
+save_checkpoint_format: flex_checkpoint
+load_checkpoint_format: flex_checkpoint
+continue_training: true
+convert_from_hf: true
+dataloader_num_workers: 4
+use_accuracy_compatible: true
+
+# The checkpoint advertises one MTP layer, but this baseline intentionally
+# keeps MTP disabled on both frameworks.
+num_nextn_predict_layers: 0
