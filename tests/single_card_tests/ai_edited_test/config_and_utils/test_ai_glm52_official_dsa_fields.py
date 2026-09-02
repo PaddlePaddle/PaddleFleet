@@ -163,8 +163,9 @@ class TestGlm52OfficialDsaHfFields(TestCase):
         )
         self.assertEqual(indexer_type, "full")
         self.assertFalse(skip_topk)
-        # Later shared layers reuse this layer, so it must publish top-k.
-        self.assertTrue(index_share)
+        # Later shared layers reuse the last preceding full layer (2), not
+        # layer 0, so this producer does not publish a holder key.
+        self.assertFalse(index_share)
         self.assertEqual(source_layer, 0)
 
     def test_defaults_do_not_skip_indexer(self):
@@ -202,7 +203,9 @@ class TestGlm52OfficialDsaHfFields(TestCase):
         self.assertEqual(indexer_type, "shared")
         self.assertTrue(skip_topk)
         self.assertTrue(index_share)
-        self.assertEqual(source_layer, 3)
+        # Last decoder is shared, so MTP must read that layer's producer (2),
+        # not the last decoder's own index (3).
+        self.assertEqual(source_layer, 2)
 
     def test_last_decoder_publishes_topk_when_mtp_share_is_set(self):
         from paddlefleet.transformer.dsa_attention import (
@@ -255,13 +258,18 @@ class TestGlm52OfficialDsaHfFields(TestCase):
             dsa_indexer_topk_freq=4,
             dsa_indexer_skip_topk_offset=0,
         )
-        indexer_type, skip_topk, index_share, source_layer = (
-            resolve_dsa_indexer_layout(config, 1)
+        layouts = [
+            resolve_dsa_indexer_layout(config, layer) for layer in range(4)
+        ]
+        self.assertEqual(
+            [(item[1], item[2], item[3]) for item in layouts],
+            [
+                (False, True, 0),
+                (True, True, 0),
+                (True, True, 0),
+                (True, True, 0),
+            ],
         )
-        self.assertEqual(indexer_type, "shared")
-        self.assertTrue(skip_topk)
-        self.assertTrue(index_share)
-        self.assertEqual(source_layer, 0)
 
     def test_unsupported_indexer_type_and_missing_full_source_raise(self):
         from paddlefleet.transformer.dsa_attention import (
@@ -278,6 +286,54 @@ class TestGlm52OfficialDsaHfFields(TestCase):
         config.dsa_indexer_types = ["shared", "shared"]
         with self.assertRaisesRegex(ValueError, "no preceding full indexer"):
             resolve_dsa_indexer_layout(config, 1)
+
+    def test_producer_and_consumer_holder_keys_match_for_legal_share_layouts(
+        self,
+    ):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        periodic = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_nextn_predict_layers=1,
+            dsa_indexer_topk_freq=4,
+            dsa_index_share_for_mtp_iteration=True,
+        )
+        published = {
+            layer: resolve_dsa_indexer_layout(periodic, layer)
+            for layer in range(4)
+        }
+        mtp = resolve_dsa_indexer_layout(periodic, 0, is_mtp_layer=True)
+        self.assertFalse(published[0][1])
+        self.assertTrue(published[0][2])
+        self.assertEqual(published[0][3], 0)
+        self.assertEqual(published[1][3], 0)
+        self.assertTrue(mtp[1])
+        self.assertEqual(mtp[3], 0)
+
+        official = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_nextn_predict_layers=1,
+            dsa_indexer_types=["full", "full", "full", "shared"],
+            dsa_index_share_for_mtp_iteration=True,
+        )
+        last_full = resolve_dsa_indexer_layout(official, 2)
+        last_decoder = resolve_dsa_indexer_layout(official, 3)
+        official_mtp = resolve_dsa_indexer_layout(
+            official, 0, is_mtp_layer=True
+        )
+        self.assertFalse(last_full[1])
+        self.assertTrue(last_full[2])
+        self.assertEqual(last_full[3], 2)
+        self.assertTrue(last_decoder[1])
+        self.assertEqual(last_decoder[3], 2)
+        self.assertTrue(official_mtp[1])
+        self.assertEqual(official_mtp[3], 2)
 
     def test_index_share_holder_is_created_on_config_when_mask_is_none(self):
         from paddlefleet.transformer.dsa_attention import DSAttention
