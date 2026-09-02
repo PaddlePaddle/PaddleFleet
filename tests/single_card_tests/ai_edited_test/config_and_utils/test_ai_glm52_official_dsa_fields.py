@@ -115,6 +115,18 @@ class TestGlm52OfficialDsaHfFields(TestCase):
             TransformerConfig(
                 num_hidden_layers=2, dsa_indexer_types=["shared", "full"]
             )
+        with self.assertRaisesRegex(
+            ValueError, "dsa_indexer_topk_freq must be a positive int"
+        ):
+            TransformerConfig(dsa_indexer_topk_freq=True)
+        with self.assertRaisesRegex(
+            ValueError, "dsa_indexer_skip_topk_offset must be a non-negative int"
+        ):
+            TransformerConfig(dsa_indexer_skip_topk_offset=1.5)
+        with self.assertRaisesRegex(
+            ValueError, "dsa_indexer_types must be None or a list of strings"
+        ):
+            TransformerConfig(num_hidden_layers=1, dsa_indexer_types="full")
 
     def test_shared_layer_skips_indexer_construction(self):
         from paddlefleet.transformer.dsa_attention import (
@@ -211,3 +223,67 @@ class TestGlm52OfficialDsaHfFields(TestCase):
         self.assertFalse(skip_topk)
         self.assertTrue(index_share)
         self.assertEqual(source_layer, 2)
+
+    def test_periodic_skip_helpers_and_freq_layout(self):
+        from paddlefleet.transformer.dsa_attention import (
+            is_dsa_skip_topk_layer,
+            resolve_dsa_indexer_layout,
+            source_dsa_compute_layer,
+        )
+
+        self.assertFalse(is_dsa_skip_topk_layer(1, skip_topk_offset=0, topk_freq=4))
+        self.assertTrue(is_dsa_skip_topk_layer(2, skip_topk_offset=0, topk_freq=4))
+        self.assertEqual(
+            source_dsa_compute_layer(2, skip_topk_offset=0, topk_freq=4), 1
+        )
+        with self.assertRaisesRegex(ValueError, "1-indexed"):
+            is_dsa_skip_topk_layer(0, 0, 4)
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            is_dsa_skip_topk_layer(1, -1, 4)
+        with self.assertRaisesRegex(ValueError, "positive"):
+            is_dsa_skip_topk_layer(1, 0, 0)
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            dsa_indexer_topk_freq=4,
+            dsa_indexer_skip_topk_offset=0,
+        )
+        indexer_type, skip_topk, index_share, source_layer = (
+            resolve_dsa_indexer_layout(config, 1)
+        )
+        self.assertEqual(indexer_type, "shared")
+        self.assertTrue(skip_topk)
+        self.assertTrue(index_share)
+        self.assertEqual(source_layer, 0)
+
+    def test_unsupported_indexer_type_and_missing_full_source_raise(self):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64, num_attention_heads=2, num_hidden_layers=2
+        )
+        config.dsa_indexer_types = ["full", "sparse"]
+        with self.assertRaisesRegex(ValueError, "Unsupported DSA indexer type"):
+            resolve_dsa_indexer_layout(config, 1)
+
+        config.dsa_indexer_types = ["shared", "shared"]
+        with self.assertRaisesRegex(ValueError, "no preceding full indexer"):
+            resolve_dsa_indexer_layout(config, 1)
+
+    def test_index_share_holder_is_created_on_config_when_mask_is_none(self):
+        from paddlefleet.transformer.dsa_attention import DSAttention
+
+        attn = DSAttention.__new__(DSAttention)
+        attn.config = TransformerConfig(
+            hidden_size=64, num_attention_heads=2, num_hidden_layers=4
+        )
+        attn._HOLDER_ATTR = "_dsa_index_share_topk"
+        holder = attn._get_index_share_topk_holder(None)
+        self.assertEqual(holder, {})
+        self.assertIs(getattr(attn.config, attn._HOLDER_ATTR), holder)
+        holder[2] = "indices"
+        self.assertEqual(attn._get_index_share_topk_holder(None)[2], "indices")
