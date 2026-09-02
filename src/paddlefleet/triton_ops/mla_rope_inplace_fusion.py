@@ -101,6 +101,7 @@ def _cos_sin_kernel(
 @triton.jit
 def _rope_mla_inplace_fwd_kernel(
     T,
+    T_OUT,
     COS,
     SIN,
     nope_dim,
@@ -109,8 +110,19 @@ def _rope_mla_inplace_fwd_kernel(
     stride_x_seq,
     stride_x_nheads,
     BLOCK_H: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    OUT_OF_PLACE: tl.constexpr,
 ):
-    """Forward: rotate t[..., nope_dim:] in place (interleaved in/out)."""
+    """Forward: rotate t[..., nope_dim:] (interleaved in/out).
+
+    Reads from ``T`` and writes to ``T_OUT``. With ``OUT_OF_PLACE=False`` the
+    caller passes the same pointer for both and the kernel behaves exactly as
+    the original in-place version: the nope channels are never touched, so
+    there is no extra traffic and no extra allocation. With
+    ``OUT_OF_PLACE=True`` the nope channels are additionally copied across,
+    which lets the caller keep the input buffer intact without paying for a
+    separate ``clone()`` pass over the whole tensor.
+    """
     pid_m = tl.program_id(axis=0).to(tl.int64)
     pid_head = tl.program_id(axis=1).to(tl.int64)
 
@@ -130,19 +142,32 @@ def _rope_mla_inplace_fwd_kernel(
 
     # Pointer to the start of this token's (head_block_first) row, then advance
     # past the nope channels to land on the rope slice.
-    T = T + pid_m * stride_x_seq + pid_head * BLOCK_H * stride_x_nheads
+    row_off = pid_m * stride_x_seq + pid_head * BLOCK_H * stride_x_nheads
+    T = T + row_off
+    T_OUT = T_OUT + row_off
+    head_off = tl.arange(0, BLOCK_H)[:, None] * stride_x_nheads.to(tl.int64)
+    head_mask = (pid_head * BLOCK_H + tl.arange(0, BLOCK_H))[:, None] < head_num
+
+    # Out-of-place only: carry the untouched nope channels over to the output
+    # buffer. BLOCK_D is next_power_of_2(nope_dim) on the host, so this is a
+    # single masked pass; the in-place path compiles this branch away entirely.
+    if OUT_OF_PLACE:
+        offs_d = tl.arange(0, BLOCK_D)
+        nope_off = head_off + offs_d[None, :]
+        nope_mask = head_mask & (offs_d[None, :] < nope_dim)
+        tl.store(
+            T_OUT + nope_off,
+            tl.load(T + nope_off, mask=nope_mask),
+            mask=nope_mask,
+        )
+
     # Offsets into the rope slice: [BLOCK_H, pe_dim] with last dim STRIDE=1.
     # We deliberately load the whole pe_dim contiguously instead of poking
     # at 2k / 2k+1 with stride-2 offsets — Triton's lowering for stride-2
     # int64 offsets has historically been flaky (extra sector requests, no
     # vectorization), and explicit contiguous loads compile down to
     # `ld.global.v4.b32` which is the theoretical optimum for bf16.
-    flat_off = (
-        tl.arange(0, BLOCK_H)[:, None] * stride_x_nheads.to(tl.int64)
-        + nope_dim
-        + tl.arange(0, pe_dim)[None, :]
-    )
-    head_mask = (pid_head * BLOCK_H + tl.arange(0, BLOCK_H))[:, None] < head_num
+    flat_off = head_off + nope_dim + tl.arange(0, pe_dim)[None, :]
 
     # One contiguous load per program, then de-interleave in registers.
     x = tl.load(T + flat_off, mask=head_mask)  # [BLOCK_H, pe_dim] bf16
@@ -166,7 +191,7 @@ def _rope_mla_inplace_fwd_kernel(
     # same 2k / 2k+1 positions) and store in one contiguous write.
     y = tl.join(y_left, y_right)  # [BLOCK_H, half, 2]
     y = tl.reshape(y, (BLOCK_H, pe_dim))
-    tl.store(T + flat_off, y, mask=head_mask)
+    tl.store(T_OUT + flat_off, y, mask=head_mask)
 
 
 @triton.jit
@@ -228,8 +253,6 @@ class RoPEMLAInplaceFusion(paddle.autograd.PyLayer):
 
     @staticmethod
     def forward(ctx, t, cos, sin, nope_dim, pe_dim, clone_input):
-        # Clone input if the upstream depends on it.
-        t = t.clone() if clone_input else t
         assert t.stride(-1) == 1
         assert cos.is_contiguous()
         assert sin.is_contiguous()
@@ -246,9 +269,21 @@ class RoPEMLAInplaceFusion(paddle.autograd.PyLayer):
             f"head_num must be divisible by BLOCK_H ({BLOCK_H}), got {H}"
         )
 
+        # When the upstream still needs `t`, write to a fresh buffer instead of
+        # cloning first: `clone()` would read+write the whole tensor and the
+        # kernel would then read+write the rope slice again. Letting the kernel
+        # read `t` and write `out` (carrying the nope channels across on the
+        # way) is a single pass, and leaves `t` untouched just the same.
+        # clone_input=False keeps the true in-place behaviour: same pointer in
+        # and out, nope branch compiled away, no allocation.
+        out = paddle.empty(t.shape, dtype=t.dtype) if clone_input else t
+        out_flat = out.reshape([B * S, H, D]) if clone_input else t_flat
+        BLOCK_D = triton.next_power_of_2(max(nope_dim, 1))
+
         grid = (B * S, triton.cdiv(H, BLOCK_H))
         _rope_mla_inplace_fwd_kernel[grid](
             t_flat,
+            out_flat,
             cos,
             sin,
             nope_dim,
@@ -257,6 +292,8 @@ class RoPEMLAInplaceFusion(paddle.autograd.PyLayer):
             t_flat.stride(0),
             t_flat.stride(1),
             BLOCK_H,
+            BLOCK_D,
+            clone_input,
         )
 
         ctx.save_for_backward(cos, sin)
@@ -264,8 +301,9 @@ class RoPEMLAInplaceFusion(paddle.autograd.PyLayer):
         ctx.pe_dim = pe_dim
         ctx.block_h = BLOCK_H
         ctx.shape = (B, S, H, D)
-        # Return the reshape-back view; storage is identical to input t.
-        return t
+        # clone_input=False returns the reshape-back view of the input, whose
+        # storage is identical to `t`; clone_input=True returns the new buffer.
+        return out
 
     @staticmethod
     def backward(ctx, grad):
@@ -343,17 +381,21 @@ def fused_apply_mla_rope_inplace(
 
     Args:
         t: [B, S, H, nope_dim + pe_dim], contiguous, bf16 (or fp16/fp32).
-            Mutated in place.
+            Mutated in place unless clone_input=True.
         freqs: [B, S, 1, pe_dim], fp32 angle tensor. May be non-contiguous.
         nope_dim: number of leading nope channels left untouched.
         mscale: scaling factor for rotary embedding.
         inverse: if True, apply the inverse rotation (used by the
             inv_rope post-attention canonicalisation step).
-        clone_input: if True, clone the input t before applying rope.
+        clone_input: if True, leave `t` untouched and return a new tensor
+            instead (needed when the upstream still reads `t`, e.g. an
+            attention output that its own backward has saved).
 
     Returns:
-        t (same storage as the input). Channels [..., :nope_dim] are
-        unchanged; channels [..., nope_dim:] are rotated.
+        With clone_input=False, `t` itself (same storage as the input).
+        With clone_input=True, a freshly allocated tensor; `t` is not
+        modified. Either way channels [..., :nope_dim] carry the input's
+        nope values unchanged and [..., nope_dim:] are rotated.
     """
     # Check t
     assert t.is_contiguous(), (
@@ -427,6 +469,7 @@ def _rope_cat_key_fwd_kernel(
     stride_kpe,
     stride_out,
     stride_pe_out,
+    ADJACENT_IN: tl.constexpr,
     BLOCK_L: tl.constexpr,
 ):
     """Forward: OUT[:latent] = KV, OUT[latent:] = PE_OUT = rotate_half(KPE)."""
@@ -446,8 +489,14 @@ def _rope_cat_key_fwd_kernel(
     sin_right = tl.load(SIN + pid * pe_dim + half + tl.arange(0, half))
 
     h = tl.arange(0, half)
-    x_1 = tl.load(KPE + pid * stride_kpe + h)
-    x_2 = tl.load(KPE + pid * stride_kpe + half + h)
+    if ADJACENT_IN:
+        # Adjacent source pairing; see ``_rope_half_out_fwd_kernel``. The stores
+        # below are untouched, so the output stays half-split.
+        x_1 = tl.load(KPE + pid * stride_kpe + 2 * h)
+        x_2 = tl.load(KPE + pid * stride_kpe + 2 * h + 1)
+    else:
+        x_1 = tl.load(KPE + pid * stride_kpe + h)
+        x_2 = tl.load(KPE + pid * stride_kpe + half + h)
 
     y_left = _mul_round_bf16(x_1, cos_left).to(tl.float32) - _mul_round_bf16(
         x_2, sin_left
@@ -482,6 +531,7 @@ def _rope_cat_key_bwd_kernel(
     stride_out,
     stride_pe_out,
     HAS_DPE_OUT: tl.constexpr,
+    ADJACENT_IN: tl.constexpr,
     BLOCK_L: tl.constexpr,
 ):
     """Backward: split DOUT, passing the latent part through unchanged."""
@@ -522,15 +572,21 @@ def _rope_cat_key_bwd_kernel(
         g1, sin_left
     ).to(tl.float32)
 
-    tl.store(DKPE + pid * stride_kpe + h, dx_1)
-    tl.store(DKPE + pid * stride_kpe + half + h, dx_2)
+    if ADJACENT_IN:
+        # Mirrors the forward gather; the DOUT/DPE_OUT reads above follow the
+        # output layout and are unaffected.
+        tl.store(DKPE + pid * stride_kpe + 2 * h, dx_1)
+        tl.store(DKPE + pid * stride_kpe + 2 * h + 1, dx_2)
+    else:
+        tl.store(DKPE + pid * stride_kpe + h, dx_1)
+        tl.store(DKPE + pid * stride_kpe + half + h, dx_2)
 
 
 class RoPECatKeyFusion(paddle.autograd.PyLayer):
     """PyLayer wrapping the rope+concat absorbed-key kernels."""
 
     @staticmethod
-    def forward(ctx, kv, kpe, cos, sin, latent_dim, pe_dim):
+    def forward(ctx, kv, kpe, cos, sin, latent_dim, pe_dim, adjacent_in):
         # Input validation via explicit exceptions (not ``assert``): this is the
         # PyLayer behind the public ``fused_rope_cat_key`` entry, so under
         # ``python -O`` a stripped assert would let a wrong shape / non-contiguous
@@ -580,11 +636,13 @@ class RoPECatKeyFusion(paddle.autograd.PyLayer):
             kpe_flat.stride(0),
             out.stride(0),
             pe_out.stride(0),
+            adjacent_in,
             BLOCK_L,
         )
 
         ctx.save_for_backward(cos, sin)
         ctx.dims = (latent_dim, pe_dim, BLOCK_L)
+        ctx.adjacent_in = adjacent_in
         ctx.kv_shape = kv.shape
         ctx.kpe_shape = kpe.shape
         b, s = kv.shape[0], kv.shape[1]
@@ -624,6 +682,7 @@ class RoPECatKeyFusion(paddle.autograd.PyLayer):
             dout_flat.stride(0),
             dpe_flat.stride(0),
             has_dpe,
+            ctx.adjacent_in,
             BLOCK_L,
         )
         return (
@@ -641,6 +700,7 @@ def fused_rope_cat_key(
     latent_dim: int,
     pe_dim: int,
     mscale: float = 1.0,
+    adjacent_in: bool = False,
 ) -> tuple[paddle.Tensor, paddle.Tensor]:
     """Build the absorbed-MQA key: rotate ``k_pos_emb`` and concat, in one pass.
 
@@ -674,6 +734,10 @@ def fused_rope_cat_key(
         latent_dim: width of the value/nope block that leads the key.
         pe_dim: width of the rope block that trails it.
         mscale: scaling factor; must be 1.0 when ``freqs`` is not fp32.
+        adjacent_in: pair ``k_pos_emb``'s source channels ``(2k, 2k+1)`` instead
+            of ``(k, k+half)``. Must match the q side's ``adjacent_in``, since
+            the two meet in ``q @ k^T``. Default False leaves existing callers
+            unchanged.
 
     Returns:
         (key, k_pe) where key is [b, s, 1, latent_dim + pe_dim] with the
@@ -719,7 +783,7 @@ def fused_rope_cat_key(
 
     cos, sin = _fused_cos_sin(freqs, mscale, False, kv_compressed.dtype)
     return RoPECatKeyFusion.apply(
-        kv_compressed, k_pos_emb, cos, sin, latent_dim, pe_dim
+        kv_compressed, k_pos_emb, cos, sin, latent_dim, pe_dim, adjacent_in
     )
 
 
@@ -791,6 +855,7 @@ def _rope_half_out_fwd_kernel(
     stride_o_seq,
     stride_o_nheads,
     COPY_OTHER: tl.constexpr,
+    ADJACENT_IN: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
@@ -830,8 +895,19 @@ def _rope_half_out_fwd_kernel(
         )
         tl.store(OUT + os + d, tl.load(X + xs + d, mask=other), mask=other)
 
-    off_l = xs + pe_offset + tl.arange(0, half)[None, :]
-    off_r = off_l + half
+    if ADJACENT_IN:
+        # The pair sharing a frequency is adjacent in the *source*, as in
+        # ``rotary_fwd_q_kernel`` in ``fused_mla_yarn_rope_apply.py``. Only
+        # the gather positions move: cos/sin indexing, the arithmetic below, the
+        # rounding and the half-split store positions are all unchanged, which
+        # is what keeps this bit-exact with the eager
+        # ``multi_latent_attention=True, mla_output_remove_interleaving=False``
+        # pair. 32 strided loads, no register shuffle.
+        off_l = xs + pe_offset + tl.arange(0, half)[None, :] * 2
+        off_r = off_l + 1
+    else:
+        off_l = xs + pe_offset + tl.arange(0, half)[None, :]
+        off_r = off_l + half
     out_l = os + pe_offset + tl.arange(0, half)[None, :]
     out_r = out_l + half
 
@@ -866,6 +942,7 @@ def _rope_half_out_bwd_kernel(
     stride_x_seq,
     stride_x_nheads,
     COPY_OTHER: tl.constexpr,
+    ADJACENT_IN: tl.constexpr,
     BLOCK_D: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
@@ -904,8 +981,16 @@ def _rope_half_out_bwd_kernel(
 
     off_l = os + pe_offset + tl.arange(0, half)[None, :]
     off_r = off_l + half
-    dx_l = xs + pe_offset + tl.arange(0, half)[None, :]
-    dx_r = dx_l + half
+    if ADJACENT_IN:
+        # ``off_l``/``off_r`` follow the *output* layout, which ADJACENT_IN does
+        # not change; only the input-gradient scatter does, mirroring the
+        # forward gather. Together they still cover every channel of the block
+        # exactly once, so ``dx`` stays fully written.
+        dx_l = xs + pe_offset + tl.arange(0, half)[None, :] * 2
+        dx_r = dx_l + 1
+    else:
+        dx_l = xs + pe_offset + tl.arange(0, half)[None, :]
+        dx_r = dx_l + half
 
     g1 = tl.load(DO + off_l, mask=head_mask)
     g2 = tl.load(DO + off_r, mask=head_mask)
@@ -925,7 +1010,7 @@ class RoPEHalfOutFusion(paddle.autograd.PyLayer):
     """PyLayer wrapping the out-of-place rotate_half fwd/bwd kernels."""
 
     @staticmethod
-    def forward(ctx, t, cos, sin, pe_dim, pe_offset):
+    def forward(ctx, t, cos, sin, pe_dim, pe_offset, adjacent_in):
         # Input validation via explicit exceptions (not ``assert``): this is the
         # PyLayer behind the public ``fused_apply_rope_half`` entry, so under
         # ``python -O`` a stripped assert would let a wrong shape / non-contiguous
@@ -976,6 +1061,7 @@ class RoPEHalfOutFusion(paddle.autograd.PyLayer):
             o_flat.stride(0),
             o_flat.stride(1),
             copy_other,
+            adjacent_in,
             block_d,
             BLOCK_H,
         )
@@ -986,6 +1072,7 @@ class RoPEHalfOutFusion(paddle.autograd.PyLayer):
         ctx.block_h = BLOCK_H
         ctx.block_d = block_d
         ctx.copy_other = copy_other
+        ctx.adjacent_in = adjacent_in
         ctx.shape = (B, S, H, D)
         return out
 
@@ -1011,6 +1098,7 @@ class RoPEHalfOutFusion(paddle.autograd.PyLayer):
             dx.stride(0),
             dx.stride(1),
             ctx.copy_other,
+            ctx.adjacent_in,
             ctx.block_d,
             BLOCK_H,
         )
@@ -1023,6 +1111,7 @@ def fused_apply_rope_half(
     pe_dim: int,
     mscale: float = 1.0,
     pe_offset: int = 0,
+    adjacent_in: bool = False,
 ) -> paddle.Tensor:
     """Out-of-place RoPE on a contiguous rope block, rotate_half convention.
 
@@ -1045,6 +1134,13 @@ def fused_apply_rope_half(
             *already rounded* bf16 cosine by mscale while this kernel scales
             in fp32.  Those agree only at mscale == 1.0.
         pe_offset: channel offset of the rope block inside each head.
+        adjacent_in: pair source channels ``(2k, 2k+1)`` instead of
+            ``(k, k+half)``. The output still lands in halves, so this is
+            bit-exact with the eager ``multi_latent_attention=True,
+            mla_output_remove_interleaving=False`` pair (and with
+            ``fused_apply_mla_rope_for_q``) rather than with the default's
+            ``multi_latent_attention=False``. Default False leaves every
+            existing caller, including the DSA indexer, unchanged.
 
     Returns:
         A new [B, S, H, D] tensor: [..., pe_offset : pe_offset + pe_dim] is
@@ -1094,4 +1190,4 @@ def fused_apply_rope_half(
 
     cos, sin = _fused_cos_sin(freqs, mscale, False, t.dtype)
 
-    return RoPEHalfOutFusion.apply(t, cos, sin, pe_dim, pe_offset)
+    return RoPEHalfOutFusion.apply(t, cos, sin, pe_dim, pe_offset, adjacent_in)

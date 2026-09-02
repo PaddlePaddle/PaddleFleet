@@ -155,6 +155,13 @@ def sparse_mqa_fwd(
                 for h_i, d_i in T.Parallel(H_per_block, D):
                     acc_o[h_i, d_i] = acc_o[h_i, d_i] * alpha[h_i]
 
+                # The shared-memory allocator may alias `S_shared` onto the
+                # cross-warp reduction workspace used by the reduce_max /
+                # reduce_sum above (it does for topk=128, block_I=64). Without a
+                # barrier the store below can clobber the workspace while other
+                # warps are still reading it -- a WAR race that silently
+                # corrupts `sumexp`.
+                T.sync_threads()
                 T.copy(acc_s, S_shared)
                 T.gemm(
                     S_shared, KV_shared, acc_o, policy=T.GemmWarpPolicy.FullRow

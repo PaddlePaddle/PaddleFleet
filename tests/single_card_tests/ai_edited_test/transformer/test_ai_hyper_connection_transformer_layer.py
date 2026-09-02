@@ -106,13 +106,40 @@ def _make_hc_config(**overrides):
     return _make_config(**hc_defaults)
 
 
-def _make_hc_layer(config, layer_number=1):
+def _make_hc_layer(config, layer_number=1, is_mtp_layer=False):
     spec = get_gpt_layer_local_spec(config)
     return HyperConnectionTransformerLayer(
         config=config,
         sublayers_spec=spec.sublayers_spec,
         layer_number=layer_number,
+        is_mtp_layer=is_mtp_layer,
     )
+
+
+# Both supported stream counts, for the ``mhc_single_stream_init`` home-stream
+# assertions. n = 2 is not redundant: the sub-layer numbering 2*index /
+# 2*index + 1 makes the rotation degenerate there -- every attention sub-layer
+# lands on stream 0 and every MLP sub-layer on stream 1, so the home stream is
+# decided by the sub-layer type alone and no longer distinguishes layers.
+_MHC_NS = (2, 4)
+
+
+def _home_stream(case, hc, n):
+    """Return ``hc``'s home stream, checking b_pre is -3 everywhere else.
+
+    The whole segment is validated rather than just its argmax: at n = 2 an
+    index written out of range leaves b_pre at [-3, -3], whose argmax is 0 --
+    the expected answer for every even sub-layer index.
+    """
+    b = hc.bias[:n].astype("float32").numpy().tolist()
+    case.assertEqual(b.count(3.0), 1, b)
+    case.assertEqual(b.count(-3.0), n - 1, b)
+    return b.index(3.0)
+
+
+def _assert_home_stream(case, hc, n, sublayer_index):
+    """Assert ``hc``'s b_pre puts its +3 on ``sublayer_index % n``."""
+    case.assertEqual(_home_stream(case, hc, n), sublayer_index % n)
 
 
 # ==============================================================================
@@ -235,31 +262,23 @@ class TestHyperConnectionModule(unittest.TestCase):
         self.assertEqual(list(h_post.shape), [10, self.n])
 
     def test_forward_high_precision_mhc_switch(self):
-        """high_precision_mhc should choose float32 or bfloat16 compute output."""
-        cases = (
-            (True, paddle.float32),
-            (False, paddle.bfloat16),
+        """high_precision_mhc keeps the mHC compute output in float32."""
+        config = _make_hc_config(high_precision_mhc=True)
+        module = HyperConnectionModule(config=config, layer_number=1)
+        module = paddle.amp.decorate(
+            models=module, level="O2", dtype="bfloat16"
         )
-        for high_precision_mhc, expected_dtype in cases:
-            with self.subTest(high_precision_mhc=high_precision_mhc):
-                config = _make_hc_config(high_precision_mhc=high_precision_mhc)
-                module = HyperConnectionModule(config=config, layer_number=1)
-                module = paddle.amp.decorate(
-                    models=module, level="O2", dtype="bfloat16"
-                )
-                x = paddle.randn([2, 4, self.n * self.C]).astype("bfloat16")
+        x = paddle.randn([2, 4, self.n * self.C]).astype("bfloat16")
 
-                aggregated, h_res, h_post = module(x)
+        aggregated, h_res, h_post = module(x)
 
-                self.assertEqual(
-                    module.config.high_precision_mhc, high_precision_mhc
-                )
-                self.assertEqual(aggregated.dtype, expected_dtype)
-                self.assertEqual(h_res.dtype, expected_dtype)
-                self.assertEqual(h_post.dtype, expected_dtype)
-                self.assertEqual(list(aggregated.shape), [2, 4, self.C])
-                self.assertEqual(list(h_res.shape), [2, 4, self.n, self.n])
-                self.assertEqual(list(h_post.shape), [2, 4, self.n])
+        self.assertTrue(module.config.high_precision_mhc)
+        self.assertEqual(aggregated.dtype, paddle.float32)
+        self.assertEqual(h_res.dtype, paddle.float32)
+        self.assertEqual(h_post.dtype, paddle.float32)
+        self.assertEqual(list(aggregated.shape), [2, 4, self.C])
+        self.assertEqual(list(h_res.shape), [2, 4, self.n, self.n])
+        self.assertEqual(list(h_post.shape), [2, 4, self.n])
 
     # ---------- compute_mappings ----------
 
@@ -443,42 +462,32 @@ class TestHyperConnectionModule(unittest.TestCase):
         self.assertFalse(paddle.isnan(result).any().item())
 
     def test_fused_h_res_h_post_bda_high_precision_fast_path(self):
-        """high_precision_mhc should choose float32 or bfloat16 BDA output."""
+        """high_precision_mhc keeps the BDA output in float32."""
         B, S = 2, 4
-        cases = (
-            (True, paddle.float32),
-            (False, paddle.bfloat16),
+        config = _make_hc_config(high_precision_mhc=True)
+        module = HyperConnectionModule(config=config, layer_number=1)
+        module = paddle.amp.decorate(
+            models=module, level="O2", dtype="bfloat16"
         )
-        for high_precision_mhc, expected_dtype in cases:
-            with self.subTest(high_precision_mhc=high_precision_mhc):
-                config = _make_hc_config(high_precision_mhc=high_precision_mhc)
-                module = HyperConnectionModule(config=config, layer_number=1)
-                module = paddle.amp.decorate(
-                    models=module, level="O2", dtype="bfloat16"
-                )
-                x = paddle.randn([B, S, self.n * self.C]).astype("bfloat16")
-                _, h_res, h_post = module(x)
-                layer_output = paddle.randn([B, S, self.C]).astype("bfloat16")
-                bias = paddle.randn([self.C]).astype("bfloat16")
+        x = paddle.randn([B, S, self.n * self.C]).astype("bfloat16")
+        _, h_res, h_post = module(x)
+        layer_output = paddle.randn([B, S, self.C]).astype("bfloat16")
+        bias = paddle.randn([self.C]).astype("bfloat16")
 
-                result = module.fused_h_res_h_post_bda(
-                    h_res=h_res,
-                    original_residual=x,
-                    h_post=h_post,
-                    layer_output_with_bias=(layer_output, bias),
-                    dropout_prob=0.0,
-                    training=False,
-                    fused=False,
-                )
+        result = module.fused_h_res_h_post_bda(
+            h_res=h_res,
+            original_residual=x,
+            h_post=h_post,
+            layer_output_with_bias=(layer_output, bias),
+            dropout_prob=0.0,
+            training=False,
+            fused=False,
+        )
 
-                self.assertEqual(
-                    module.config.high_precision_mhc, high_precision_mhc
-                )
-                self.assertEqual(result.dtype, expected_dtype)
-                self.assertEqual(list(result.shape), [B, S, self.n * self.C])
-                self.assertFalse(
-                    paddle.isnan(result.astype("float32")).any().item()
-                )
+        self.assertTrue(module.config.high_precision_mhc)
+        self.assertEqual(result.dtype, paddle.float32)
+        self.assertEqual(list(result.shape), [B, S, self.n * self.C])
+        self.assertFalse(paddle.isnan(result.astype("float32")).any().item())
 
     # ---------- input_expand / output_contract ----------
 
@@ -719,6 +728,65 @@ class TestHyperConnectionTransformerLayerConstruction(unittest.TestCase):
             layer.self_attention_hyper_connection, HyperConnectionModule
         )
         self.assertIsInstance(layer.mlp_hyper_connection, HyperConnectionModule)
+
+    def test_attention_and_mlp_are_numbered_as_two_mhc_layers(self):
+        """mHC counts attention and MLP as independent layers (paper Fig. 3).
+
+        ``mhc_single_stream_init`` rotates the one-hot H_pre bias with this
+        index, so the two modules must get consecutive numbers. Sharing one
+        would halve the rotation period and leave half of the residual streams
+        without a sub-layer that reads them.
+        """
+        config = _make_hc_config()
+        for i in range(3):
+            layer = _make_hc_layer(config, layer_number=i)
+            self.assertEqual(
+                layer.self_attention_hyper_connection.layer_number, 2 * i
+            )
+            self.assertEqual(layer.mlp_hyper_connection.layer_number, 2 * i + 1)
+
+    def test_the_two_sublayers_read_different_home_streams(self):
+        for n in _MHC_NS:
+            with self.subTest(n=n):
+                config = _make_hc_config(
+                    mhc_single_stream_init=True, num_residual_streams=n
+                )
+                # up to sub-layer index 5, so the rotation wraps for both n
+                for i in range(3):
+                    layer = _make_hc_layer(config, layer_number=i)
+                    _assert_home_stream(
+                        self,
+                        layer.self_attention_hyper_connection,
+                        n,
+                        2 * i,
+                    )
+                    _assert_home_stream(
+                        self, layer.mlp_hyper_connection, n, 2 * i + 1
+                    )
+
+    def test_empty_head_layers_do_not_shift_the_rotation(self):
+        """``layer_number`` counts the empty layers added in the head.
+
+        Those carry no mHC sub-layer, so the rotation phase has to be taken
+        from the logical decoder index instead, or inserting them would
+        renumber every home stream.
+        """
+        for n in _MHC_NS:
+            with self.subTest(n=n):
+                config = _make_hc_config(
+                    num_empty_layers_add_in_head=1,
+                    mhc_single_stream_init=True,
+                    num_residual_streams=n,
+                )
+                # layer_number 1 is logical decoder 0, so this must match what
+                # decoder 0 gets without empty head layers
+                layer = _make_hc_layer(config, layer_number=1)
+                attn = layer.self_attention_hyper_connection
+                mlp = layer.mlp_hyper_connection
+                self.assertEqual(attn.layer_number, 0)
+                self.assertEqual(mlp.layer_number, 1)
+                _assert_home_stream(self, attn, n, 0)
+                _assert_home_stream(self, mlp, n, 1)
 
     def test_raises_without_hc_spec(self):
         """Should raise if sublayers_spec has IdentityOp for hyper connections."""
@@ -1519,6 +1587,54 @@ class TestMTPLayerWithHCConstruction(unittest.TestCase):
         self.assertIsNone(layer.e_proj)
         self.assertIsNone(layer.h_proj)
         self.assertFalse(layer.mhc_enabled)
+
+    def test_mhc_sublayers_continue_the_decoder_rotation(self):
+        """Built through the real spec path, which is where the trap is.
+
+        ``get_gpt_mtp_layers_spec`` numbers MTP layers by their own 0-based
+        index, with no num_empty_layers_add_in_head offset -- unlike
+        ``get_gpt_decoder_layers_spec``. Applying the decoder's subtraction here
+        would shift the phase and, with empty head layers, drive the index
+        negative, silently picking the wrong home stream.
+        """
+        for n in _MHC_NS:
+            with self.subTest(n=n):
+                config = _make_mtp_hc_config(
+                    mhc_single_stream_init=True,
+                    num_empty_layers_add_in_head=1,
+                    num_residual_streams=n,
+                )
+                n_decoder = config.num_hidden_layers
+                for i in range(2):
+                    inner = _make_mtp_layer(
+                        config, layer_number=i
+                    ).transformer_layer
+                    attn = inner.self_attention_hyper_connection
+                    mlp = inner.mlp_hyper_connection
+                    base = 2 * (n_decoder + i)
+                    self.assertEqual(attn.layer_number, base)
+                    self.assertEqual(mlp.layer_number, base + 1)
+                    _assert_home_stream(self, attn, n, base)
+                    _assert_home_stream(self, mlp, n, base + 1)
+
+    def test_the_mhc_seam_does_not_repeat_a_home_stream(self):
+        """The first MTP sub-layer picks up where the last decoder one left off."""
+        for n in _MHC_NS:
+            with self.subTest(n=n):
+                config = _make_mtp_hc_config(
+                    mhc_single_stream_init=True,
+                    num_empty_layers_add_in_head=1,
+                    num_residual_streams=n,
+                )
+                # last decoder layer: layer_number = index + head offset
+                last_decoder = _make_hc_layer(
+                    config, layer_number=config.num_hidden_layers
+                )
+                mtp0 = _make_mtp_layer(config, layer_number=0).transformer_layer
+                self.assertNotEqual(
+                    _home_stream(self, last_decoder.mlp_hyper_connection, n),
+                    _home_stream(self, mtp0.self_attention_hyper_connection, n),
+                )
 
 
 class TestMTPLayerWithHCConcatEmbeddings(unittest.TestCase):

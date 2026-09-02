@@ -74,6 +74,21 @@ class TestParallelState(unittest.TestCase):
             f"Expected pp group rank: {expected_pp_group}, got {pp_group.ranks}"
         )
 
+        # The pp rank must follow the real pp group. While it was hardcoded to 0,
+        # every stage derived the same RNG seeds in _set_random_seed and so
+        # initialised same-shaped parameters to the same values.
+        pp_world_size = ps.get_pipeline_model_parallel_world_size()
+        assert pp_world_size == 2, (
+            f"Expected pp world size: 2, got {pp_world_size}"
+        )
+        expected_pp_rank = 0 if rank < 4 else 1
+        pp_rank = ps.get_pipeline_model_parallel_rank()
+        assert pp_rank == expected_pp_rank, (
+            f"Expected pp rank: {expected_pp_rank}, got {pp_rank}"
+        )
+        assert ps.is_pipeline_first_stage() == (expected_pp_rank == 0)
+        assert ps.is_pipeline_last_stage() == (expected_pp_rank == 1)
+
         expected_dp_group_map = {
             0: [0, 2],
             1: [1, 3],

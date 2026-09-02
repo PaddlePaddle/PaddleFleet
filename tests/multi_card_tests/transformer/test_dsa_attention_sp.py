@@ -321,6 +321,8 @@ class TestDSAttentionPgCollectionNone(unittest.TestCase):
         from paddlefleet.transformer.enums import AttnMaskType
 
         config = _create_dsa_config(sequence_parallel=False)
+        # None must be normalized to 0.0 (disabled) instead of taking a
+        # ``is not None`` branch -- DSAttention.__init__ must not crash here.
         config.dsa_indexer_loss_coeff = None
         sublayers = DSAIndexerSublayersSpec(
             linear_wq_b=BiasedLinear,

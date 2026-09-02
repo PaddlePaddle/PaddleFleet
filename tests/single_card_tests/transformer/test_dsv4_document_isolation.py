@@ -39,6 +39,7 @@ from paddlefleet.transformer.csa_attention import (
 from paddlefleet.transformer.dsv4_hybrid_attention import (
     _pack_dsv4_logical_batch,
     _unpack_dsv4_logical_batch,
+    pack_dsv4_docmask,
 )
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
@@ -866,6 +867,30 @@ class TestCompressorForwardBoundary(unittest.TestCase):
 class TestPackUnpackGuardInvariants(unittest.TestCase):
     """Test the guard/error conditions from work item 1."""
 
+    def test_guards_non_rank3_hidden_states(self):
+        # The rank check is the only guard left in _pack_dsv4_logical_batch
+        # itself; everything below it now lives in pack_dsv4_docmask.
+        startend = _make_startend_equal(2, 8)
+        for shape in ([2, 8], [2, 1, 8, 16]):
+            with self.subTest(shape=shape):
+                hs = paddle.randn(shape, dtype="bfloat16")
+                with self.assertRaisesRegex(ValueError, "rank-3"):
+                    _pack_dsv4_logical_batch(
+                        hs, startend, cp_size=1, dense_mode=True
+                    )
+
+    def test_batch_one_is_passed_through_unchanged(self):
+        # b == 1 returns before pack_dsv4_docmask: the mask is already in its
+        # packed form, so both tensors come back as the same objects.
+        startend = _make_startend_equal(1, 8)
+        hs = paddle.randn([1, 8, 16], dtype="bfloat16")
+        out_hs, out_se, b, s = _pack_dsv4_logical_batch(
+            hs, startend, cp_size=1, dense_mode=True, max_sequence_length=8
+        )
+        self.assertEqual((b, s), (1, 8))
+        self.assertIs(out_hs, hs)
+        self.assertIs(out_se, startend)
+
     def test_guards_batch_gt_one_non_dense(self):
         startend = _make_startend_equal(2, 8)
         hs = paddle.randn([2, 8, 16], dtype="bfloat16")
@@ -920,6 +945,49 @@ class TestPackUnpackGuardInvariants(unittest.TestCase):
         with self.assertRaises(ValueError):
             _pack_dsv4_logical_batch(
                 hs, startend, cp_size=1, dense_mode=True, max_sequence_length=16
+            )
+
+
+class TestPackDocmaskParity(unittest.TestCase):
+    """``pack_dsv4_docmask`` is what the layer packs with, byte for byte.
+
+    The ``csa_share_docmask_meta`` prebuild calls the standalone helper while the
+    layer reaches it through ``_pack_dsv4_logical_batch``. The registry only
+    compares ``(ratio, batch_size, seqlen)``, so a divergence in the offset rule
+    would leave every shape intact and silently serve document boundaries from
+    the wrong sample -- hence a parity test rather than a shape test.
+    """
+
+    def test_matches_logical_batch_packing(self):
+        startend = _make_startend_internal_padding([5, 8, 3, 8], 8)
+        hs = paddle.randn([4, 8, 16], dtype="bfloat16")
+        _, via_layer, _, _ = _pack_dsv4_logical_batch(
+            hs, startend, cp_size=1, dense_mode=True, max_sequence_length=8
+        )
+        via_helper = pack_dsv4_docmask(
+            startend, 4, 8, cp_size=1, dense_mode=True, max_sequence_length=8
+        )
+        self.assertEqual(list(via_helper.shape), [1, 1, 32, 1])
+        self.assertEqual(
+            via_helper.numpy().tolist(), via_layer.numpy().tolist()
+        )
+
+    def test_guards_match_layer_path(self):
+        startend = _make_startend_equal(2, 8)
+        with self.assertRaises(NotImplementedError):
+            pack_dsv4_docmask(startend, 2, 8, cp_size=1, dense_mode=False)
+        with self.assertRaises(NotImplementedError):
+            pack_dsv4_docmask(startend, 2, 8, cp_size=2, dense_mode=True)
+        with self.assertRaises(ValueError):
+            pack_dsv4_docmask(None, 2, 8, cp_size=1, dense_mode=True)
+        with self.assertRaises(ValueError):
+            pack_dsv4_docmask(
+                startend,
+                2,
+                8,
+                cp_size=1,
+                dense_mode=True,
+                max_sequence_length=16,
             )
 
 

@@ -24,6 +24,9 @@ import random
 import numpy as np
 import paddle
 from paddle.distributed.fleet.layers.mpu.random import get_rng_state_tracker
+from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
+    RecomputeStore,
+)
 from paddle.distributed.fleet.recompute.recompute import (
     custom_state_manager,
     detach_variable,
@@ -542,6 +545,13 @@ class RecomputeWithoutOutput:
 
     def _recompute(self, grad):
         """Re-run the saved forward under restored states when the backward hook is triggered."""
+        # Also reachable through run_recompute_now(), so this can be entered a
+        # second time: the grad hook cannot be unregistered (register_hook's
+        # handle is discarded below), and Paddle may fire it for a tensor that
+        # collects gradient from several branches. Both cases are no-ops here.
+        if self.ctx is None:
+            return
+        RecomputeStore.drop(self)
         if self.preserve_rng_state:
             rng_ctx = switch_rng_state_tracker(
                 self.fw_rng_state,
@@ -581,6 +591,16 @@ class RecomputeWithoutOutput:
         self.ctx = None
         self.run_function = None
 
+    def run_recompute_now(self):
+        """Run the recompute ahead of the backward, e.g. inside a p2p window.
+
+        Nothing here reads the incoming gradient -- ``_recompute`` replays the
+        forward from ``ctx.saved_tensor()`` alone -- so this only moves the work
+        earlier. The cost is that the refilled activation buffer becomes
+        resident from now until the backward consumes it.
+        """
+        self._recompute(None)
+
     def discard_output_and_register_recompute(self, hook_tensor):
         """Clear saved output data and register the recomputation hook on the target tensor."""
         for output in self.outputs:
@@ -589,3 +609,7 @@ class RecomputeWithoutOutput:
 
         if not hook_tensor.stop_gradient:
             hook_tensor.register_hook(self._recompute)
+            if RecomputeStore.enabled:
+                # Offer this span to the pp scheduler as p2p filler. If it is
+                # never taken, the hook above still runs it at the normal time.
+                RecomputeStore.put(self)

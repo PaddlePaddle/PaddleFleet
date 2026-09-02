@@ -44,6 +44,7 @@ from paddlefleet.fusions.fused_bias_swiglu import (
     weighted_bias_swiglu_impl,
 )
 from paddlefleet.transformer.activations import situ, situ_glu
+from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
@@ -150,6 +151,11 @@ class MLPSublayersSpec:
 
 
 class MLP(FleetLayer):
+    # p2p_overlap_dw_calc 的延后点名。基类留空表示"这个调用点没有延后点"，
+    # 子类（目前只有 StandardMLPSharedExpert）覆盖成具体名字。
+    _dw_up_gate_point = None
+    _dw_down_point = None
+
     """
     MLP will take the input with h hidden state, project it to 4*h
     hidden dimension, perform nonlinear transformation, and project the
@@ -305,8 +311,11 @@ class MLP(FleetLayer):
                 )
             )
         else:
-            intermediate_parallel, bias_parallel = self.up_gate_proj(
-                hidden_states
+            intermediate_parallel, bias_parallel = deferrable_linear(
+                self.config,
+                self._dw_up_gate_point,
+                self.up_gate_proj,
+                hidden_states,
             )
         nvtx_range_pop(suffix="up_gate_proj")
 
@@ -480,7 +489,12 @@ class MLP(FleetLayer):
                 self.down_proj, intermediate_parallel
             )
         else:
-            output, output_bias = self.down_proj(intermediate_parallel)
+            output, output_bias = deferrable_linear(
+                self.config,
+                self._dw_down_point,
+                self.down_proj,
+                intermediate_parallel,
+            )
         nvtx_range_pop(suffix="down_proj")
 
         if per_token_scale is not None and output_bias is not None:

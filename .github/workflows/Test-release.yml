@@ -155,6 +155,7 @@ jobs:
             -e UV_HTTP_TIMEOUT \
             -e PR_ID \
             -e COMMIT_ID \
+            -e NCCL_NVLS_ENABLE=0 \
             -e PADDLE_CUDA_ARCH_LIST="8.0;9.0" \
             -e BRANCH \
             -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
@@ -292,7 +293,12 @@ jobs:
         run: |
           container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
           echo "container_name=${container_name}" >> ${{ github.env }}
-          docker pull $docker_image
+          for i in 1 2 3; do
+            docker pull $docker_image && break
+            [ $i -eq 3 ] && { echo "::error::docker pull $docker_image failed after 3 attempts"; exit 1; }
+            echo "docker pull failed (attempt $i/3), retry in $((i * 15))s"
+            sleep $((i * 15))
+          done
           docker run -d -t --name ${container_name} --gpus "\"device=${GPU_DEVICES}\"" --shm-size=32G \
             -v "/dev/shm:/dev/shm"  \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
@@ -309,6 +315,7 @@ jobs:
             -e CI_name \
             -e PIP_CACHE_DIR \
             -e work_dir \
+            -e NCCL_NVLS_ENABLE=0 \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
@@ -317,7 +324,12 @@ jobs:
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e repo_flag="paddlefleet" \
+            -e BASH_ENV=/etc/ci_env.sh \
             -w /paddle --network host ${docker_image}
+          docker exec ${container_name} /bin/bash -c 'cat > /etc/ci_env.sh <<"EOS"
+          [ -n "${CI_LD_PATH_SET:-}" ] || { export LD_LIBRARY_PATH=/usr/local/cuda-12.9/targets/x86_64-linux/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH; export CI_LD_PATH_SET=1; }
+          EOS
+          '
 
       - name: Install PaddleFleet
         run: |
@@ -397,7 +409,13 @@ jobs:
         run: |
           container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
           echo "container_name=${container_name}" >> ${{ github.env }}
-          docker pull $docker_image
+
+          for i in 1 2 3; do
+            docker pull $docker_image && break
+            [ $i -eq 3 ] && { echo "::error::docker pull $docker_image failed after 3 attempts"; exit 1; }
+            echo "docker pull failed (attempt $i/3), retry in $((i * 15))s"
+            sleep $((i * 15))
+          done
           docker run -d -t --gpus all --name ${container_name} \
             -v "/dev/shm:/dev/shm"  \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
@@ -414,6 +432,7 @@ jobs:
             -e CI_name \
             -e PIP_CACHE_DIR \
             -e work_dir \
+            -e NCCL_NVLS_ENABLE=0 \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
@@ -423,7 +442,12 @@ jobs:
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e repo_flag="paddlefleet" \
+            -e BASH_ENV=/etc/ci_env.sh \
             -w /paddle --network host ${docker_image}
+          docker exec ${container_name} /bin/bash -c 'cat > /etc/ci_env.sh <<"EOS"
+          [ -n "${CI_LD_PATH_SET:-}" ] || { export LD_LIBRARY_PATH=/usr/local/cuda-12.9/targets/x86_64-linux/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH; export CI_LD_PATH_SET=1; }
+          EOS
+          '
 
       - name: Clone PaddleFleet
         run: |
@@ -511,7 +535,13 @@ jobs:
         run: |
           container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
           echo "container_name=${container_name}" >> ${{ github.env }}
-          docker pull $docker_image
+
+          for i in 1 2 3; do
+            docker pull $docker_image && break
+            [ $i -eq 3 ] && { echo "::error::docker pull $docker_image failed after 3 attempts"; exit 1; }
+            echo "docker pull failed (attempt $i/3), retry in $((i * 15))s"
+            sleep $((i * 15))
+          done
           set -x
           docker run -d -t --name ${container_name} --gpus "\"device=${GPU_DEVICES}\"" --shm-size=32G \
             -v "/dev/shm:/dev/shm"  \
@@ -529,6 +559,7 @@ jobs:
             -e formers_branch \
             -e CI_name \
             -e PIP_CACHE_DIR \
+            -e NCCL_NVLS_ENABLE=0 \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
@@ -539,7 +570,12 @@ jobs:
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
+            -e BASH_ENV=/etc/ci_env.sh \
             -w /workspace --network host ${docker_image}
+          docker exec ${container_name} /bin/bash -c 'cat > /etc/ci_env.sh <<"EOS"
+          [ -n "${CI_LD_PATH_SET:-}" ] || { export LD_LIBRARY_PATH=/usr/local/cuda-12.9/targets/x86_64-linux/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH; export CI_LD_PATH_SET=1; }
+          EOS
+          '
 
       - name: Install PaddleFleet
         run: |
@@ -695,7 +731,13 @@ jobs:
         run: |
           container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
           echo "container_name=${container_name}" >> ${{ github.env }}
-          docker pull $docker_image
+
+          for i in 1 2 3; do
+            docker pull $docker_image && break
+            [ $i -eq 3 ] && { echo "::error::docker pull $docker_image failed after 3 attempts"; exit 1; }
+            echo "docker pull failed (attempt $i/3), retry in $((i * 15))s"
+            sleep $((i * 15))
+          done
           docker run -d -t --name ${container_name} --gpus all --shm-size=32G \
             -v "/dev/shm:/dev/shm"  \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
@@ -712,6 +754,7 @@ jobs:
             -e CI_name \
             -e formers_branch \
             -e PIP_CACHE_DIR \
+            -e NCCL_NVLS_ENABLE=0 \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
@@ -722,7 +765,12 @@ jobs:
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
+            -e BASH_ENV=/etc/ci_env.sh \
             -w /workspace --network host ${docker_image}
+          docker exec ${container_name} /bin/bash -c 'cat > /etc/ci_env.sh <<"EOS"
+          [ -n "${CI_LD_PATH_SET:-}" ] || { export LD_LIBRARY_PATH=/usr/local/cuda-12.9/targets/x86_64-linux/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH; export CI_LD_PATH_SET=1; }
+          EOS
+          '
 
       - name: Install PaddleFleet
         run: |
@@ -1054,7 +1102,13 @@ jobs:
         run: |
           container_name=${TASK}-$(date +%Y%m%d-%H%M%S)
           echo "container_name=${container_name}" >> ${{ github.env }}
-          docker pull $docker_image
+
+          for i in 1 2 3; do
+            docker pull $docker_image && break
+            [ $i -eq 3 ] && { echo "::error::docker pull $docker_image failed after 3 attempts"; exit 1; }
+            echo "docker pull failed (attempt $i/3), retry in $((i * 15))s"
+            sleep $((i * 15))
+          done
           docker run -d -t --name ${container_name} --gpus all --shm-size=32G \
             -v "/dev/shm:/dev/shm"  \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
@@ -1071,6 +1125,7 @@ jobs:
             -e CI_name \
             -e formers_branch \
             -e PIP_CACHE_DIR \
+            -e NCCL_NVLS_ENABLE=0 \
             -e GITHUB_SHA="${{ github.event.pull_request.head.sha }}" \
             -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
             -e GITHUB_BASE_SHA="${{ github.event.pull_request.base.sha }}" \
@@ -1081,7 +1136,12 @@ jobs:
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
+            -e BASH_ENV=/etc/ci_env.sh \
             -w /workspace --network host ${docker_image}
+          docker exec ${container_name} /bin/bash -c 'cat > /etc/ci_env.sh <<"EOS"
+          [ -n "${CI_LD_PATH_SET:-}" ] || { export LD_LIBRARY_PATH=/usr/local/cuda-12.9/targets/x86_64-linux/lib:/usr/lib/x86_64-linux-gnu:$LD_LIBRARY_PATH; export CI_LD_PATH_SET=1; }
+          EOS
+          '
 
       - name: alignment_model_accuracy
         if: success() || failure()
@@ -1097,6 +1157,8 @@ jobs:
           cd -
           export PADDLEFLEET_WHEEL_PATH="/workspace/PaddleFleet/dist/${{ needs.build_whl.outputs.root_whl_name }}"
           export PADDLEFLEET_OPS_WHEEL_PATH="/workspace/PaddleFleet/dist/${{ needs.build_whl.outputs.ops_whl_name }}"
+          export MEGATRON_CORE_WHEEL_PATH="https://paddle-github-action.bj.bcebos.com/whl/megatron_core-0.0.0-cp312-cp312-linux_x86_64.whl"
+          export MS_SWIFT_WHEEL_PATH="https://paddle-github-action.bj.bcebos.com/whl/ms_swift-0.0.0-py3-none-any.whl"
           bash -x PaddleFleet/scripts/alignment_model_accuracy/run_alignment_test.sh
           model_acc_align_exit_code=$?
           if [[ "$model_acc_align_exit_code" != "0" ]]; then

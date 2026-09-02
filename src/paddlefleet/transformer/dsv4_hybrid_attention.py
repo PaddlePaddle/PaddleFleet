@@ -47,13 +47,16 @@ from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
 )
 from paddlefleet.recompute_utils import (
     keep_indexer_grad_path,
-    need_recompute_in_block,
-    need_recompute_in_first_n,
+    module_needs_recompute,
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.csa_attention import (
     CSADocMaskMetadata,
+)
+from paddlefleet.transformer.dw_overlap import (
+    deferrable_linear,
+    deferred_grouped_dw_accumulator,
 )
 
 if TYPE_CHECKING:
@@ -364,25 +367,27 @@ def _validate_dsv4_boundary_values(
             )
 
 
-def _pack_dsv4_logical_batch(
-    hidden_states: Tensor,
+def pack_dsv4_docmask(
     startend_row_indices: Tensor | None,
+    batch_size: int,
+    seqlen: int,
     *,
     cp_size: int,
     dense_mode: bool,
     max_sequence_length: int | None = None,
-) -> tuple[Tensor, Tensor | None, int, int]:
-    """Pack a logical batch into the single-sequence DSV4 representation."""
-    if len(hidden_states.shape) != 3:
-        raise ValueError(
-            "DSv4HybridAttention expects rank-3 hidden_states [B, S, H], "
-            f"got shape {hidden_states.shape}"
-        )
+) -> Tensor:
+    """Rebase a ``[b, 1, s, 1]`` document mask onto the packed ``[1, 1, b*s, 1]``.
 
-    batch_size, seqlen, _ = hidden_states.shape
-    if batch_size <= 1:
-        return hidden_states, startend_row_indices, batch_size, seqlen
+    The mask half of ``_pack_dsv4_logical_batch``, guards included, factored out
+    because the ``csa_share_docmask_meta`` prebuild has to produce exactly the
+    layout the layers will look up. A second copy of the offset arithmetic there
+    would be invisible to the registry's consistency check, which compares
+    ``(ratio, batch_size, seqlen)`` only: a drifted offset rule keeps every shape
+    right and silently serves the wrong document boundaries.
 
+    ``batch_size > 1`` is the caller's precondition -- at 1 there is nothing to
+    rebase and the mask is already in its packed form.
+    """
     if not dense_mode:
         raise NotImplementedError(
             "DSv4HybridAttention only supports batch_size > 1 in dense mode; "
@@ -432,6 +437,36 @@ def _pack_dsv4_logical_batch(
         startend_row_indices,
         batch_size * seqlen,
         "packed",
+    )
+    return startend_row_indices
+
+
+def _pack_dsv4_logical_batch(
+    hidden_states: Tensor,
+    startend_row_indices: Tensor | None,
+    *,
+    cp_size: int,
+    dense_mode: bool,
+    max_sequence_length: int | None = None,
+) -> tuple[Tensor, Tensor | None, int, int]:
+    """Pack a logical batch into the single-sequence DSV4 representation."""
+    if len(hidden_states.shape) != 3:
+        raise ValueError(
+            "DSv4HybridAttention expects rank-3 hidden_states [B, S, H], "
+            f"got shape {hidden_states.shape}"
+        )
+
+    batch_size, seqlen, _ = hidden_states.shape
+    if batch_size <= 1:
+        return hidden_states, startend_row_indices, batch_size, seqlen
+
+    startend_row_indices = pack_dsv4_docmask(
+        startend_row_indices,
+        batch_size,
+        seqlen,
+        cp_size=cp_size,
+        dense_mode=dense_mode,
+        max_sequence_length=max_sequence_length,
     )
 
     hidden_states = hidden_states.reshape([1, batch_size * seqlen, -1])
@@ -770,14 +805,12 @@ class DSv4HybridAttention(Attention):
 
         self.recompute_gated_attn = (
             config.recompute_granularity == "selective"
-            and config.recompute_modules is not None
-            and "gated_attn" in config.recompute_modules
+            and module_needs_recompute("gated_attn", self.layer_number, config)
         )
 
         self.recompute_full_attn = (
             config.recompute_granularity == "selective"
-            and config.recompute_modules is not None
-            and "full_attn" in config.recompute_modules
+            and module_needs_recompute("full_attn", self.layer_number, config)
         )
         self._full_attn_recompute = None
         self._gate_recompute = None
@@ -833,33 +866,12 @@ class DSv4HybridAttention(Attention):
                 default_initializer=nn.initializer.Constant(0.0),
             )
         # Selective recompute for the VHA postmix scatter chain (independently
-        # configurable via the "vha_postmix" entry in recompute_modules). Only
-        # list configuration is supported; honours recompute_num_layers +
-        # recompute_method (first_n / block) like the other selective modules.
-        modules = config.recompute_modules
-        self.recompute_vha_postmix = False
-        if config.recompute_granularity == "selective" and modules is not None:
-            if isinstance(modules, dict) and "vha_postmix" in modules:
-                raise ValueError(
-                    "recompute_modules['vha_postmix'] only supports list "
-                    "configuration"
-                )
-            if isinstance(modules, list) and "vha_postmix" in modules:
-                n = config.recompute_num_layers
-                if n is None:
-                    self.recompute_vha_postmix = True
-                elif config.recompute_method == "block":
-                    self.recompute_vha_postmix = need_recompute_in_block(
-                        self.layer_number, config, n
-                    )
-                elif config.recompute_method == "first_n":
-                    self.recompute_vha_postmix = need_recompute_in_first_n(
-                        self.layer_number, config, n
-                    )
-                else:
-                    raise ValueError(
-                        "recompute_method must be 'first_n' or 'block'"
-                    )
+        # configurable via the "vha_postmix" entry in recompute_modules),
+        # configured like every other selective submodule.
+        self.recompute_vha_postmix = (
+            config.recompute_granularity == "selective"
+            and module_needs_recompute("vha_postmix", self.layer_number, config)
+        )
 
     def forward(
         self,
@@ -986,7 +998,9 @@ class DSv4HybridAttention(Attention):
             )
 
             # Output projection
-            output, bias = self.o_proj(core_attn_out)
+            output, bias = deferrable_linear(
+                self.config, "attn_out_proj", self.o_proj, core_attn_out
+            )
 
             # Discard full_attn output (core_attn_out) — frees ~512 MB
             self._full_attn_recompute.discard_output_and_register_recompute(
@@ -1006,7 +1020,9 @@ class DSv4HybridAttention(Attention):
             )
 
             # Output projection
-            output, bias = self.o_proj(core_attn_out)
+            output, bias = deferrable_linear(
+                self.config, "attn_out_proj", self.o_proj, core_attn_out
+            )
 
             # Discard gated_attn output if it was independently recomputed
             if (
@@ -1077,6 +1093,7 @@ class DSv4HybridAttention(Attention):
         b, sq, _ = core_attn_out.shape
         pos_dim = self.qk_pos_emb_head_dim
         nope_dim = self.v_head_dim - pos_dim
+        postmix_done = False
 
         if pos_dim > 0:
             core_attn_out = core_attn_out.reshape(
@@ -1091,7 +1108,16 @@ class DSv4HybridAttention(Attention):
             # DSv4 reference uses pure norm-preserving RoPE; YaRN's mscale is not applied.
             mscale = 1.0
 
-            if (
+            if self._can_fuse_inv_rope_postmix(_in_full_recompute):
+                # Fused inverse RoPE + ungrouped VHA postmix. Bitwise identical
+                # to running the two separately, but never materialises the
+                # full-width rotated output. It consumes the postmix, so the
+                # standalone postmix block below must be skipped.
+                core_attn_out = self._apply_inv_rope_vha_postmix(
+                    core_attn_out, freqs, nope_dim, pos_dim, mscale
+                )
+                postmix_done = True
+            elif (
                 self.config.apply_rope_fusion
                 and not self.config.high_precision_rope
             ):
@@ -1127,7 +1153,7 @@ class DSv4HybridAttention(Attention):
         # output projection. When the whole block is already wrapped in a
         # full_attn RecomputeWithoutOutput, skip the nested selective recompute
         # (the full block recompute already frees these activations).
-        if self.use_vha_postmix:
+        if self.use_vha_postmix and not postmix_done:
             if (
                 self.recompute_vha_postmix
                 and self.training
@@ -1154,12 +1180,30 @@ class DSv4HybridAttention(Attention):
                 self.config.fp8_wgrad,
             )
         else:
-            wo_a_weight = self.linear_o_group_proj.reshape(
-                [self.o_local_groups, self.config.o_lora_rank, -1]
-            )
+            group_shape = [
+                self.o_local_groups,
+                self.config.o_lora_rank,
+                self.linear_o_group_proj.shape[-1],
+            ]
             from paddlefleet.triton_ops import fused_grouped_matmul
 
-            core_attn_out = fused_grouped_matmul(core_attn_out, wo_a_weight)
+            dw_acc = deferred_grouped_dw_accumulator(
+                self.config, "attn_o_group_proj", self.linear_o_group_proj
+            )
+            if dw_acc is None:
+                core_attn_out = fused_grouped_matmul(
+                    core_attn_out, self.linear_o_group_proj.reshape(group_shape)
+                )
+            else:
+                # Hand in the leaf parameter, not a reshaped view: the deferred path
+                # returns None for the weight grad, which would cut the chain back
+                # to the parameter if the input were a non-leaf view.
+                core_attn_out = fused_grouped_matmul(
+                    core_attn_out,
+                    self.linear_o_group_proj,
+                    dw_accumulator=dw_acc,
+                    group_shape=group_shape,
+                )
             core_attn_out = core_attn_out.reshape([b, sq, -1])
 
         # Apply gated attention
@@ -1188,7 +1232,9 @@ class DSv4HybridAttention(Attention):
         return core_attn_out
 
     def _gate(self, gate_source: Tensor, core_attn_out: Tensor) -> Tensor:
-        gate, _ = self.gate_proj(gate_source)
+        gate, _ = deferrable_linear(
+            self.config, "attn_gate_proj", self.gate_proj, gate_source
+        )
         if getattr(self.config, "sigmoid_gate_fusion", False):
             from paddlefleet.triton_ops import SigmoidGateFusionTriton
 
@@ -1196,6 +1242,59 @@ class DSv4HybridAttention(Attention):
         else:
             core_attn_out = core_attn_out * paddle.nn.functional.sigmoid(gate)
         return core_attn_out
+
+    def _can_fuse_inv_rope_postmix(self, in_full_recompute: bool) -> bool:
+        """Whether the inverse RoPE can be folded into the postmix GEMM.
+
+        Every rejected case falls back to the unfused pair, so this is a pure
+        performance switch: the eager RoPE path, high_precision_rope, the
+        grouped postmix topology (einsum, no [nh,nh] GEMM to split) and the
+        postmix's own selective recompute wrapper all keep working unchanged.
+        """
+        if not getattr(self.config, "fuse_inv_rope_into_vha_postmix", False):
+            return False
+        if not self.use_vha_postmix or self.vha_postmix_grouped:
+            return False
+        if not self.config.apply_rope_fusion:
+            return False
+        if self.config.high_precision_rope:
+            return False
+        # Re-entering the fused PyLayer from a nested recompute wrapper buys
+        # nothing (the fusion already avoids the intermediate it would free).
+        if (
+            self.recompute_vha_postmix
+            and self.training
+            and not in_full_recompute
+        ):
+            return False
+        return True
+
+    def _apply_inv_rope_vha_postmix(
+        self,
+        attn_out: Tensor,
+        freqs: Tensor,
+        nope_dim: int,
+        pe_dim: int,
+        mscale: float,
+    ) -> Tensor:
+        """Inverse RoPE + ungrouped VHA postmix in one pass.
+
+        attn_out: [b, sq, nh, v_head_dim]. Returns [b, sq, nh * v_head_dim],
+        matching what the unfused RoPE followed by ``_apply_vha_postmix`` would
+        return, bit for bit. The postmix matrix is rebuilt inside the fused op
+        exactly as ``_apply_vha_postmix``'s ungrouped branch builds it.
+        """
+        from paddlefleet.triton_ops import fused_inv_rope_vha_postmix
+
+        return fused_inv_rope_vha_postmix(
+            attn_out,
+            freqs,
+            self.vha_postmix_U,
+            self.vha_postmix_V,
+            nope_dim,
+            pe_dim,
+            mscale,
+        )
 
     def _apply_vha_postmix(self, attn_out: Tensor) -> Tensor:
         """Low-rank cross-head mixing of the attention output.
@@ -1483,8 +1582,8 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         b, sq, _ = hidden_states.shape
 
         # Q path
-        q_compressed, _ = self.linear_q_down_proj(
-            hidden_states
+        q_compressed, _ = deferrable_linear(
+            self.config, "attn_q_proj", self.linear_q_down_proj, hidden_states
         )  # [b, sq, q_lora_rank]
         q_compressed = self.q_layernorm(q_compressed)
 
@@ -1500,8 +1599,8 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             )  # [b, sq, k, g_q, q_head_dim]
             q = q.reshape([b, sq, self.num_attention_heads, self.v_head_dim])
         else:
-            q, _ = self.linear_q_up_proj(
-                q_compressed
+            q, _ = deferrable_linear(
+                self.config, "attn_q_proj", self.linear_q_up_proj, q_compressed
             )  # [b, sq, n * v_head_dim]
             q = q.reshape([b, sq, self.num_attention_heads, self.v_head_dim])
         q = _q_rms_norm(
@@ -1512,7 +1611,9 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         )
 
         # KV path
-        kv, _ = self.linear_kv_proj(hidden_states)  # [b, sq, v_head_dim]
+        kv, _ = deferrable_linear(
+            self.config, "attn_kv_proj", self.linear_kv_proj, hidden_states
+        )  # [b, sq, v_head_dim]
 
         if self.config.swa_high_precision_norm:
             kv = self.kv_layernorm(

@@ -169,6 +169,46 @@ def _apply_repetition_penalty(
     return logits
 
 
+def _resolve_logprob_start_len(
+    logprob_start_len: int | None, prompt_len: int
+) -> int:
+    """Normalise ``logprob_start_len`` into an absolute start position.
+
+    ``None`` means "generated tokens only", i.e. ``prompt_len``. Position 0 has
+    no preceding context and can never be scored, so 0 is clamped to 1.
+    """
+    if logprob_start_len is None:
+        return prompt_len
+    if logprob_start_len < 0:
+        raise ValueError("logprob_start_len must be >= 0")
+    return max(logprob_start_len, 1)
+
+
+def _collect_prompt_log_probs(
+    logits: paddle.Tensor,
+    input_ids: paddle.Tensor,
+    start: int,
+    prompt_len: int,
+    log_probs_per_batch: list[list[float]],
+) -> None:
+    """Append prompt-token log-probs for absolute positions ``[start, prompt_len)``.
+
+    ``logits[:, p - 1]`` predicts the token at position ``p``, so scoring
+    position ``p`` reads the logits one step to its left.
+    """
+    if start >= prompt_len:
+        return
+    sliced = logits[:, start - 1 : prompt_len - 1].cast("float32")
+    targets = input_ids[:, start:prompt_len]
+    gathered = paddle.take_along_axis(
+        paddle.nn.functional.log_softmax(sliced, axis=-1),
+        targets.unsqueeze(-1),
+        axis=-1,
+    ).squeeze(-1)  # [B, prompt_len - start]
+    for b in range(len(log_probs_per_batch)):
+        log_probs_per_batch[b].extend(gathered[b].tolist())
+
+
 # ---------------------------------------------------------------------------
 # KV cache
 # ---------------------------------------------------------------------------
@@ -458,6 +498,8 @@ class GreedyGenerator:
         top_p: float,
         return_log_probs: bool,
         log_probs_per_batch: list[list[float]] | None,
+        prompt_len: int,
+        logprob_start_len: int,
     ) -> paddle.Tensor | tuple[paddle.Tensor, list[list[float]]]:
         """No-KVCache generation: each step runs a full prefill."""
         bsz = generated.shape[0]
@@ -529,11 +571,29 @@ class GreedyGenerator:
                 logits = _apply_repetition_penalty(
                     logits, generated, repetition_penalty
                 )
+                if (
+                    step == 0
+                    and return_log_probs
+                    and log_probs_per_batch is not None
+                ):
+                    _collect_prompt_log_probs(
+                        logits,
+                        generated,
+                        logprob_start_len,
+                        prompt_len,
+                        log_probs_per_batch,
+                    )
                 last_logits = logits[:, -1]  # [B, vocab]
                 next_tok = _sample_next_token(
                     last_logits, temperature, top_k, top_p
                 )
-                if return_log_probs and log_probs_per_batch is not None:
+                # Token sampled this step sits at absolute position ``cur_len``;
+                # skip it until that position reaches ``logprob_start_len``.
+                if (
+                    return_log_probs
+                    and log_probs_per_batch is not None
+                    and cur_len >= logprob_start_len
+                ):
                     step_log_probs = paddle.nn.functional.log_softmax(
                         last_logits.cast("float32"), axis=-1
                     )  # [B, vocab]
@@ -580,6 +640,7 @@ class GreedyGenerator:
         top_k: int = 0,
         top_p: float = 0.0,
         return_log_probs: bool = False,
+        logprob_start_len: int | None = None,
         no_cache: bool = False,
     ) -> paddle.Tensor | tuple[paddle.Tensor, list[list[float]]]:
         """Run auto-regressive decoding with optional sampling.
@@ -600,24 +661,31 @@ class GreedyGenerator:
                 at the same time as top_k; whichever is set takes effect first
                 (top_k then top_p are applied sequentially when both are set).
             return_log_probs: If True, also return the log-probabilities of
-                each generated token. Default: False.
+                the tokens selected by ``logprob_start_len``. Default: False.
 
                 **Semantics**: the log-prob at each step is computed as
                 ``log_softmax`` over the logits *after* repetition-penalty
                 but *before* temperature scaling / top-k / top-p filtering.
                 This is the model's raw (penalised) distribution, not the
                 actual sampling distribution used to draw the token.
+            logprob_start_len: Absolute position in the full sequence
+                (prompt + generated) from which log-probs are collected.
+                ``None`` (default) means ``prompt_len``, i.e. generated tokens
+                only. ``0`` scores the prompt as well, starting from position 1
+                (position 0 has no preceding context, so it is never scored).
+                Ignored when ``return_log_probs=False``.
 
         Returns:
             If ``return_log_probs=False``: Tensor of shape
             ``[B, L + num_generated]`` containing the prompt plus generated
             tokens.
 
-            If ``return_log_probs=True``: A tuple
-            ``(generated, output_log_probs)`` where ``generated`` is as above
-            and ``output_log_probs`` is a list of length ``B``, each element
-            being a list of per-step log-probs for the generated tokens only
-            (length = actual number of generated tokens for that sequence).
+            If ``return_log_probs=True``: A tuple ``(generated, log_probs)``
+            where ``generated`` is as above and ``log_probs`` is a list of
+            length ``B``. Each element is a single flat list holding the
+            log-prob of the token at every absolute position from
+            ``logprob_start_len`` onwards -- prompt positions first, then the
+            generated ones -- so prefill and decode scores share one list.
         """
         if input_ids.ndim != 2:
             raise ValueError("input_ids must be [B, L]")
@@ -627,8 +695,13 @@ class GreedyGenerator:
 
         bsz, prompt_len = input_ids.shape
         generated = input_ids.clone()
+        # Ignored when log-probs are not requested, so only validate it then.
+        if return_log_probs:
+            logprob_start_len = _resolve_logprob_start_len(
+                logprob_start_len, prompt_len
+            )
 
-        # Per-batch list to accumulate generated-token log-probs
+        # Per-batch list accumulating log-probs from ``logprob_start_len`` on
         log_probs_per_batch: list[list[float]] | None = (
             [[] for _ in range(bsz)] if return_log_probs else None
         )
@@ -649,6 +722,8 @@ class GreedyGenerator:
                 top_p=top_p,
                 return_log_probs=return_log_probs,
                 log_probs_per_batch=log_probs_per_batch,
+                prompt_len=prompt_len,
+                logprob_start_len=logprob_start_len,
             )
 
         self.cache.reset()
@@ -716,11 +791,25 @@ class GreedyGenerator:
             logits = _apply_repetition_penalty(
                 logits, generated, repetition_penalty
             )
+            if return_log_probs and log_probs_per_batch is not None:
+                _collect_prompt_log_probs(
+                    logits,
+                    input_ids,
+                    logprob_start_len,
+                    prompt_len,
+                    log_probs_per_batch,
+                )
             last_logits = logits[:, -1]  # [B, vocab]
             next_tok = _sample_next_token(
                 last_logits, temperature, top_k, top_p
             )
-            if return_log_probs and log_probs_per_batch is not None:
+            # First generated token sits at absolute position ``prompt_len``;
+            # skip it until that position reaches ``logprob_start_len``.
+            if (
+                return_log_probs
+                and log_probs_per_batch is not None
+                and prompt_len >= logprob_start_len
+            ):
                 step_log_probs = paddle.nn.functional.log_softmax(
                     last_logits.cast("float32"), axis=-1
                 )  # [B, vocab]
@@ -769,7 +858,14 @@ class GreedyGenerator:
                 next_tok = _sample_next_token(
                     last_logits, temperature, top_k, top_p
                 )
-                if return_log_probs and log_probs_per_batch is not None:
+                # Token sampled this step sits at absolute position
+                # ``prompt_len + 1 + step``; skip it until that position
+                # reaches ``logprob_start_len``.
+                if (
+                    return_log_probs
+                    and log_probs_per_batch is not None
+                    and prompt_len + 1 + step >= logprob_start_len
+                ):
                     step_log_probs = paddle.nn.functional.log_softmax(
                         last_logits.cast("float32"), axis=-1
                     )  # [B, vocab]

@@ -309,7 +309,6 @@ def _make_csa_config():
     config = TransformerConfig(
         num_hidden_layers=1,
         num_nextn_predict_layers=1,
-        mtp_num_layers=1,
         hidden_size=128,
         num_attention_heads=4,
         params_dtype=paddle.bfloat16,

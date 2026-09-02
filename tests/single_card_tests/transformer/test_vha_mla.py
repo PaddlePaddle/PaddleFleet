@@ -268,17 +268,46 @@ class TestMLAPostmixInit(unittest.TestCase):
         )
         self.assertFalse(attn.recompute_vha_postmix)
 
-    def test_recompute_dict_config_raises(self):
-        # dict recompute_modules is rejected for vha_postmix (a valid method is
-        # supplied so the base Attention dict-assert passes and control reaches
-        # the vha_postmix guard).
-        with self.assertRaises(ValueError):
+    def test_recompute_dict_layer_count(self):
+        # dict recompute_modules now selects layers per submodule: first_n with
+        # n=1 covers layer 0 only.
+        self.assertTrue(
             _build_mla(
+                layer_number=0,
                 use_vha_attention=True,
                 recompute_granularity="selective",
                 recompute_modules={"vha_postmix": 1},
                 recompute_method="first_n",
-            )
+            ).recompute_vha_postmix
+        )
+        self.assertFalse(
+            _build_mla(
+                layer_number=1,
+                use_vha_attention=True,
+                recompute_granularity="selective",
+                recompute_modules={"vha_postmix": 1},
+                recompute_method="first_n",
+            ).recompute_vha_postmix
+        )
+
+    def test_recompute_dict_layer_list(self):
+        # An explicit layer list needs no recompute_method.
+        self.assertTrue(
+            _build_mla(
+                layer_number=1,
+                use_vha_attention=True,
+                recompute_granularity="selective",
+                recompute_modules={"vha_postmix": [1]},
+            ).recompute_vha_postmix
+        )
+        self.assertFalse(
+            _build_mla(
+                layer_number=0,
+                use_vha_attention=True,
+                recompute_granularity="selective",
+                recompute_modules={"vha_postmix": [1]},
+            ).recompute_vha_postmix
+        )
 
 
 # ===========================================================================

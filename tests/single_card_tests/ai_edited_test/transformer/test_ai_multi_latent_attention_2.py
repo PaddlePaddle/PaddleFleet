@@ -28,8 +28,8 @@ from unittest.mock import MagicMock, patch
 
 import paddle
 
+from paddlefleet.transformer.dw_overlap import DeferredWeightGradLinear
 from paddlefleet.transformer.multi_latent_attention import (
-    FP8OverlapProj,
     MultiLatentAttention,
     _ec_compatible_rope_apply,
 )
@@ -56,7 +56,7 @@ class TestMLASelfAttentionBackwardDW(unittest.TestCase):
         config.rotary_scaling_factor = 1.0
         config.mscale_all_dim = False
         config.gated_attention = False
-        config.dw_p2p_overlap = False
+        config.p2p_overlap_dw_calc = None
         config.use_bias = True
         config.recompute_granularity = None
         config.recompute_modules = None
@@ -115,16 +115,16 @@ class TestMLASelfAttentionBackwardDW(unittest.TestCase):
         mla.o_proj.backward_dw.assert_called_once()
 
 
-class TestFP8OverlapProjBackward(unittest.TestCase):
-    """Tests for FP8OverlapProj backward pass."""
+class TestDeferredWeightGradLinearBackward(unittest.TestCase):
+    """Tests for DeferredWeightGradLinear backward pass."""
 
     def test_backward_with_stop_gradient_weight(self):
-        """Test FP8OverlapProj backward with weight that has stop_gradient."""
+        """Test DeferredWeightGradLinear backward with weight that has stop_gradient."""
         x = paddle.randn([2, 4, 8])
         weight = paddle.randn([8, 4])
         weight.stop_gradient = True
 
-        out = FP8OverlapProj.apply(x, weight)
+        out = DeferredWeightGradLinear.apply(x, weight)
         self.assertEqual(out.shape, [2, 4, 4])
 
 
@@ -137,7 +137,7 @@ class TestMultiLatentAttentionGate(unittest.TestCase):
         config.sequence_parallel = False
         config.recompute_granularity = None
         config.gated_attention = True
-        config.dw_p2p_overlap = False
+        config.p2p_overlap_dw_calc = None
         config.use_bias = True
         config.sigmoid_gate_fusion = False
 
@@ -849,7 +849,7 @@ class TestForwardDiscardOutputAndRegisterRecompute(unittest.TestCase):
         instance.gated_attention = False
         instance.use_vha_postmix = False
         instance.recompute_vha_postmix = False
-        instance.config.dw_p2p_overlap = False
+        instance.config.p2p_overlap_dw_calc = None
         instance.config.use_bias = True
 
         # Mock core_attention to return a tensor

@@ -28,3 +28,6 @@
 [submodule "packages/paddlefleet_ops/third_party/flash-linear-attention"]
 	path = packages/paddlefleet_ops/third_party/flash-linear-attention
 	url = https://github.com/PFCCLab/flash-linear-attention.git
+[submodule "packages/paddlefleet_ops/third_party/MoonEP"]
+	path = packages/paddlefleet_ops/third_party/MoonEP
+	url = https://github.com/PFCCLab/MoonEP.git

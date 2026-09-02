@@ -26,15 +26,13 @@ readonly MCORE_BRIDGE_VERSION="1.4.3"
 readonly TE_VERSION="2.17.1"
 readonly PADDLE_INDEX_URL="https://www.paddlepaddle.org.cn/packages/stable/cu130/"
 readonly NIGHTLY_WHL_BASE="https://paddle-whl.bj.bcebos.com/nightly/cu130"
-# readonly FLEET_WHL_BASE="https://paddle-github-action.bj.bcebos.com/whl/"
-readonly FLEET_WHL_BASE=https://paddle-qa.bj.bcebos.com/paddlefleet/whl/
 # readonly PADDLE_VERSION="xx"
 # PaddleFleet will install default paddle"
 readonly PADDLEFLEET_WHEEL="${PADDLEFLEET_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/paddlefleet/paddlefleet-0.4.0.dev20260807+d01517879a3-py3-none-any.whl}"
 readonly PADDLEFLEET_OPS_WHEEL="${PADDLEFLEET_OPS_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/paddlefleet-ops/paddlefleet_ops-0.4.0.dev20260807+d0151787-cp312-cp312-linux_x86_64.whl}"
 readonly PADDLEFORMERS_WHEEL="${NIGHTLY_WHL_BASE}/paddleformers/paddleformers-0.0.0.dev-py3-none-any.whl"
-readonly MEGATRON_CORE_WHEEL="${MEGATRON_CORE_WHEEL_PATH:-${FLEET_WHL_BASE}/megatron_core-0.19.0+f2706b6f3-cp312-cp312-linux_x86_64.whl}"
-readonly MS_SWIFT_WHEEL="${MS_SWIFT_WHEEL_PATH:-${FLEET_WHL_BASE}/ms_swift-4.5.0.dev0-py3-none-any.whl}"
+readonly MEGATRON_CORE_WHEEL="${MEGATRON_CORE_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/megatron_core-0.19.0+f2706b6f3-cp312-cp312-linux_x86_64.whl}"
+readonly MS_SWIFT_WHEEL="${MS_SWIFT_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/ms_swift-4.5.0.dev0-py3-none-any.whl}"
 readonly NO_PROXY_LIST="localhost,127.0.0.1,0.0.0.0,bj.bcebos.com,su.bcebos.com,paddle-ci.gz.bcebos.com,baidu-int.com,.baidu.com,.bcebos.com"
 # readonly PROXY_URL="set your proxy"
 readonly UV_BIN_DIR="/home/.local/bin"
@@ -102,7 +100,7 @@ setup_torch_venv() {
         "setuptools>=66.1.0" pip wheel packaging cmake "ninja==1.11.1.1" \
         "pybind11[global]>=2.13,<3" Pillow
 
-    uv pip install --python "${torch_py}" --index-strategy unsafe-best-match \
+    UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --python "${torch_py}" --index-strategy unsafe-best-match \
         --force-reinstall --no-deps \
         "${MEGATRON_CORE_WHEEL}" "${MS_SWIFT_WHEEL}"
 

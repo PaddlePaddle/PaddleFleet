@@ -24,7 +24,6 @@ sys.path.insert(
 )
 
 import unittest
-import warnings
 
 
 class TestParallelStateGetters(unittest.TestCase):
@@ -82,23 +81,23 @@ class TestParallelStateGetters(unittest.TestCase):
         self.assertEqual(result, 1)
 
     def test_get_pipeline_model_parallel_rank_returns_zero(self):
-        """Test get_pipeline_model_parallel_rank returns 0 with warning."""
+        """Test get_pipeline_model_parallel_rank returns 0 without a group."""
         from paddlefleet import parallel_state
 
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            result = parallel_state.get_pipeline_model_parallel_rank()
-            self.assertEqual(result, 0)
-            self.assertTrue(len(w) > 0)
+        self.assertEqual(parallel_state.get_pipeline_model_parallel_rank(), 0)
 
     def test_set_pipeline_model_parallel_world_size(self):
         """Test setting pipeline model parallel world size."""
         from paddlefleet import parallel_state
 
+        original = parallel_state._PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+        self.addCleanup(
+            parallel_state.set_pipeline_model_parallel_world_size, original
+        )
         parallel_state.set_pipeline_model_parallel_world_size(4)
-        # Note: get_pipeline_model_parallel_world_size() always returns 1
-        # due to a hardcoded early return in the source code
-        # Just verify the setter does not raise
+        self.assertEqual(
+            parallel_state.get_pipeline_model_parallel_world_size(), 4
+        )
 
     def test_get_context_parallel_group_default(self):
         """Test get_context_parallel_group returns None by default."""

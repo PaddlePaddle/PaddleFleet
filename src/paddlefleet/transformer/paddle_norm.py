@@ -67,7 +67,6 @@ class _AccuracyCompatibleRMSNormFunction(paddle.autograd.PyLayer):
         )
 
 
-
 if TYPE_CHECKING:
     from paddle import Tensor
 
@@ -311,7 +310,10 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
             and not self.config.mtp_load_weight_only
             and not (
                 not self.config.gpt_model_use_experimental_version
-                and self.config.enable_mtp_magic_send
+                and (
+                    self.config.enable_mtp_magic_send
+                    or self.config.separate_mtp_input
+                )
             )
         ):
             hidden_states_concat = dict_args["hidden_states"]
@@ -329,7 +331,10 @@ class WrappedPaddleNormPipe(paddle.nn.Layer):
             and not self.config.mtp_load_weight_only
             and not (
                 not self.config.gpt_model_use_experimental_version
-                and self.config.enable_mtp_magic_send
+                and (
+                    self.config.enable_mtp_magic_send
+                    or self.config.separate_mtp_input
+                )
             )
         ):
             # normalize MTP hidden_states

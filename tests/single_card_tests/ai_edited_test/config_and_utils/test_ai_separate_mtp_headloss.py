@@ -28,7 +28,6 @@ class TestSeparateMtpHeadlossValidation(unittest.TestCase):
             "intermediate_size": 256,
             "num_hidden_layers": 1,
             "separate_mtp_headloss": True,
-            # MTP enabled via num_nextn_predict_layers (mtp_num_layers stays 0).
             "num_nextn_predict_layers": 1,
             "pipeline_model_parallel_size": 4,
             "num_empty_layers_add_in_head": 0,
@@ -66,7 +65,7 @@ class TestSeparateMtpHeadlossValidation(unittest.TestCase):
         """Line 1507: MTP not enabled (no mtp / nextn layers) -> force-disable."""
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            config = self._build(num_nextn_predict_layers=0, mtp_num_layers=0)
+            config = self._build(num_nextn_predict_layers=0)
         self.assertFalse(config.separate_mtp_headloss)
         self.assertTrue(
             any("both MTP and pipeline" in str(w.message) for w in caught)

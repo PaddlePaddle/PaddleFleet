@@ -14,6 +14,7 @@
 
 import importlib
 import math
+import subprocess
 import sys
 import types
 import unittest
@@ -28,6 +29,62 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 
 strategy = paddle.distributed.fleet.DistributedStrategy()
 initialize_fleet(strategy=strategy)
+
+
+class TestP2POverlapDwCalcValidation(unittest.TestCase):
+    def test_unknown_point_raises_value_error_with_details(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"unknown p2p_overlap_dw_calc entries \['not_a_real_point'\]",
+        ) as context:
+            TransformerConfig(p2p_overlap_dw_calc=["not_a_real_point"])
+        self.assertIn("attn_q_proj", str(context.exception))
+
+    def test_unknown_point_raises_under_python_optimize(self):
+        code = """
+from paddlefleet.transformer.transformer_config import TransformerConfig
+
+try:
+    TransformerConfig(p2p_overlap_dw_calc=["not_a_real_point"])
+except ValueError as exc:
+    if "not_a_real_point" not in str(exc) or "attn_q_proj" not in str(exc):
+        raise RuntimeError(f"incomplete validation error: {exc}")
+else:
+    raise RuntimeError("unknown p2p_overlap_dw_calc point was accepted")
+"""
+        result = subprocess.run(
+            [sys.executable, "-O", "-c", code],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
+
+    def test_deferral_rejects_pp_without_interleaved_scheduler(self):
+        for pp, vpp in ((1, None), (2, None), (2, 1)):
+            with (
+                self.subTest(pp=pp, vpp=vpp),
+                self.assertRaisesRegex(ValueError, "virtual_pipeline"),
+            ):
+                TransformerConfig(
+                    p2p_overlap_dw_calc=["moe_expert_up_gate_proj"],
+                    pipeline_model_parallel_size=pp,
+                    virtual_pipeline_model_parallel_size=vpp,
+                )
+
+    def test_deferral_accepts_interleaved_scheduler(self):
+        config = TransformerConfig(
+            p2p_overlap_dw_calc=["moe_expert_up_gate_proj"],
+            pipeline_model_parallel_size=2,
+            virtual_pipeline_model_parallel_size=2,
+        )
+        self.assertEqual(
+            config.p2p_overlap_dw_calc, ["moe_expert_up_gate_proj"]
+        )
 
 
 class TestMoeLayerFreqAndFirstKDenseReplace(unittest.TestCase):
@@ -223,6 +280,65 @@ class TestRoutedScalingFactorConfig(unittest.TestCase):
 
 
 class TestMoETokenDispatcherConfig(unittest.TestCase):
+    def test_default_dispatcher_type_is_alltoall(self):
+        # Pins the schema default: every dispatcher-specific branch in MoELayer
+        # keys off this field, so a silent change of default would reroute all
+        # MoE traffic.
+        field = TransformerConfig.__dataclass_fields__[
+            "moe_token_dispatcher_type"
+        ]
+        self.assertEqual(field.default, "alltoall")
+        self.assertEqual(
+            TransformerConfig(
+                num_hidden_layers=4, n_routed_experts=8
+            ).moe_token_dispatcher_type,
+            "alltoall",
+        )
+
+    def test_ringmoe_dispatcher_type_is_preserved(self):
+        # 'ringmoe' is accepted as a non-default value and survives
+        # __post_init__ unrewritten -- MoELayer decides the ring vs flat path
+        # from exactly this string.
+        config = TransformerConfig(
+            num_hidden_layers=4,
+            n_routed_experts=8,
+            moe_token_dispatcher_type="ringmoe",
+        )
+
+        self.assertEqual(config.moe_token_dispatcher_type, "ringmoe")
+        # The ring ignores the gate-overlap prefetch, but the flag keeps its
+        # default rather than being force-corrected behind the user's back.
+        self.assertTrue(config.moe_allgather_gate_overlap)
+
+    def test_documented_dispatcher_types_are_all_accepted(self):
+        """The field docstring is the only list of accepted values, so pin it.
+
+        Fails if a dispatcher is wired up without being documented, or
+        documented without being accepted by the schema.
+        """
+        import inspect
+        import re
+
+        # Field docstrings are not kept at runtime; read them from the source.
+        doc = re.search(
+            r'moe_token_dispatcher_type: str = "alltoall"\s*"""(.*?)"""',
+            inspect.getsource(TransformerConfig),
+            re.DOTALL,
+        )
+        self.assertIsNotNone(doc, "field docstring not found")
+        documented = set(re.findall(r"'([a-z0-9]+)'", doc.group(1)))
+        self.assertIn("ringmoe", documented)
+        for dispatcher_type in sorted(documented):
+            with self.subTest(dispatcher_type=dispatcher_type):
+                config = TransformerConfig(
+                    num_hidden_layers=4,
+                    n_routed_experts=8,
+                    moe_token_dispatcher_type=dispatcher_type,
+                )
+                self.assertEqual(
+                    config.moe_token_dispatcher_type, dispatcher_type
+                )
+
     def test_hybridep_dispatcher_type_is_preserved(self):
         config = TransformerConfig(
             num_hidden_layers=4,

@@ -49,6 +49,7 @@ from paddlefleet.tensor_parallel.mappings import (
     gather_from_sequence_parallel_region,
 )
 from paddlefleet.transformer.cp_utils import all_gather_cp
+from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -660,11 +661,15 @@ class DSAIndexer(paddle.nn.Layer):
             else freqs
         )
 
-        q, _ = self.wq_b(q_latent)  # [b, s, n_heads * head_dim]
+        q, _ = deferrable_linear(
+            self.config, "attn_indexer_q_proj", self.wq_b, q_latent
+        )  # [b, s, n_heads * head_dim]
         q = q.reshape([bsz, seqlen, self.n_heads, self.head_dim])
         q = self._apply_rope(q, freqs_q, mscale)
 
-        k, _ = self.wk(hidden_states)  # [b, s, head_dim]
+        k, _ = deferrable_linear(
+            self.config, "attn_indexer_k_proj", self.wk, hidden_states
+        )  # [b, s, head_dim]
         if cp_size > 1:
             k = all_gather_cp(k, dim=1, group=cp_group)  # [b, s_global, hd]
         k = self.k_norm(k)
@@ -674,7 +679,12 @@ class DSAIndexer(paddle.nn.Layer):
         q = rotate_activation(q, use_fast_hadamard=self.use_fast_hadamard)
         k = rotate_activation(k, use_fast_hadamard=self.use_fast_hadamard)
 
-        weights, _ = self.weights_proj(hidden_states)
+        weights, _ = deferrable_linear(
+            self.config,
+            "attn_indexer_weights_proj",
+            self.weights_proj,
+            hidden_states,
+        )
         weights = weights * (self.n_heads**-0.5) * self.softmax_scale
 
         return q, k, weights
@@ -1320,9 +1330,8 @@ class DSAIndexerLossLoggingHelper:
 
     @staticmethod
     def get_total_num_layers(config):
-        mtp_num_layers = getattr(config, "mtp_num_layers", 0) or 0
         nextn_num_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
-        return config.num_hidden_layers + (mtp_num_layers or nextn_num_layers)
+        return config.num_hidden_layers + nextn_num_layers
 
     @staticmethod
     def register_total_num_layers(config):
@@ -1521,6 +1530,97 @@ def source_dsa_compute_layer(
     return layer_number - ((layer_number - skip_topk_offset) % topk_freq)
 
 
+def resolve_dsa_indexer_layout(
+    config,
+    layer_number: int,
+    is_mtp_layer: bool = False,
+) -> tuple[str, bool, bool, int]:
+    """Resolve DSA indexer type / skip / share / source for one layer.
+
+    Official GLM-5.2 fields: ``indexer_types``, ``index_topk_freq``,
+    ``index_skip_topk_offset``, ``index_share_for_mtp_iteration``.
+    ``indexer_types`` is decoder-only (length ``num_hidden_layers``).
+    GPT layer specs pass 0-based ``layer_number`` (decoder index, or MTP
+    depth). Periodic skip helpers stay 1-indexed, matching the official
+    ``index_skip_topk_offset`` numbering.
+    """
+    index_topk_freq = getattr(config, "dsa_indexer_topk_freq", None) or 1
+    index_skip_topk_offset = (
+        getattr(config, "dsa_indexer_skip_topk_offset", 0) or 0
+    )
+    indexer_types = getattr(config, "dsa_indexer_types", None)
+    share_for_mtp_iteration = bool(
+        getattr(config, "dsa_index_share_for_mtp_iteration", False)
+    )
+    num_hidden_layers = getattr(config, "num_hidden_layers", 0) or 0
+    if is_mtp_layer:
+        # Official GLM-5.2 checkpoints still ship a full MTP indexer.
+        # Training honours share-for-MTP by skipping that indexer and
+        # reusing the last decoder layer's top-k, matching the HF field.
+        indexer_type = "shared" if share_for_mtp_iteration else "full"
+    elif indexer_types is not None and 0 <= layer_number < len(indexer_types):
+        indexer_type = indexer_types[layer_number]
+    else:
+        indexer_type = (
+            "shared"
+            if index_topk_freq > 1
+            and is_dsa_skip_topk_layer(
+                layer_number + 1,
+                index_skip_topk_offset,
+                index_topk_freq,
+            )
+            else "full"
+        )
+    if indexer_type not in {"full", "shared"}:
+        raise ValueError(
+            f"Unsupported DSA indexer type {indexer_type!r} for layer {layer_number}."
+        )
+    skip_topk = indexer_type == "shared"
+    index_share = (
+        skip_topk
+        or (
+            indexer_types is not None
+            and not is_mtp_layer
+            and "shared" in indexer_types[layer_number + 1 :]
+        )
+        or (
+            share_for_mtp_iteration
+            and not is_mtp_layer
+            and layer_number == num_hidden_layers - 1
+        )
+    )
+    if skip_topk:
+        if is_mtp_layer and share_for_mtp_iteration:
+            if num_hidden_layers < 1:
+                raise ValueError(
+                    "An MTP shared indexer requires a preceding decoder layer."
+                )
+            source_layer = num_hidden_layers - 1
+        elif indexer_types is not None:
+            full_layers = [
+                index
+                for index, layer_type in enumerate(indexer_types[:layer_number])
+                if layer_type == "full"
+            ]
+            if not full_layers:
+                raise ValueError(
+                    f"Shared DSA layer {layer_number} has no preceding full indexer layer."
+                )
+            source_layer = full_layers[-1]
+        else:
+            source_layer = (
+                source_dsa_compute_layer(
+                    layer_number + 1,
+                    index_skip_topk_offset,
+                    index_topk_freq,
+                )
+                - 1
+            )
+    else:
+        source_layer = layer_number
+    return indexer_type, skip_topk, index_share, source_layer
+
+
 # ---------------------------------------------------------------------------
 # DSAttention - Core Attention Component with DSA
 # ---------------------------------------------------------------------------
@@ -1563,59 +1663,12 @@ class DSAttention(FleetLayer):
         DSAIndexerLossLoggingHelper.register_total_num_layers(config)
         self.layer_number = layer_number
         self.attn_mask_type = attn_mask_type
-        self.index_topk_freq = config.dsa_indexer_topk_freq or 1
-        self.index_skip_topk_offset = config.dsa_indexer_skip_topk_offset or 0
-        indexer_types = config.dsa_indexer_types
-        if is_mtp_layer:
-            indexer_type = "full"
-        elif indexer_types is not None and layer_number < len(indexer_types):
-            indexer_type = indexer_types[layer_number]
-        else:
-            indexer_type = (
-                "shared"
-                if self.index_topk_freq > 1
-                and is_dsa_skip_topk_layer(
-                    layer_number + 1,
-                    self.index_skip_topk_offset,
-                    self.index_topk_freq,
-                )
-                else "full"
-            )
-        if indexer_type not in {"full", "shared"}:
-            raise ValueError(
-                f"Unsupported DSA indexer type {indexer_type!r} for layer {layer_number}."
-            )
-        self.skip_topk = indexer_type == "shared"
-        self.index_share = self.skip_topk or (
-            indexer_types is not None
-            and not is_mtp_layer
-            and "shared" in indexer_types[layer_number + 1 :]
-        )
-        if self.skip_topk:
-            if indexer_types is not None:
-                full_layers = [
-                    index
-                    for index, layer_type in enumerate(
-                        indexer_types[:layer_number]
-                    )
-                    if layer_type == "full"
-                ]
-                if not full_layers:
-                    raise ValueError(
-                        f"Shared DSA layer {layer_number} has no preceding full indexer layer."
-                    )
-                self.source_layer = full_layers[-1]
-            else:
-                self.source_layer = (
-                    source_dsa_compute_layer(
-                        layer_number + 1,
-                        self.index_skip_topk_offset,
-                        self.index_topk_freq,
-                    )
-                    - 1
-                )
-        else:
-            self.source_layer = layer_number
+        (
+            _indexer_type,
+            self.skip_topk,
+            self.index_share,
+            self.source_layer,
+        ) = resolve_dsa_indexer_layout(config, layer_number, is_mtp_layer)
 
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
@@ -1628,7 +1681,7 @@ class DSAttention(FleetLayer):
         else:
             self.softmax_scale = softmax_scale
 
-        # DSA Indexer - shared layers reuse top-k computed by a preceding layer.
+        # Shared layers reuse top-k computed by a preceding full indexer.
         self.indexer = None
         if not self.skip_topk:
             self.indexer = build_spec_layer(
@@ -1638,9 +1691,10 @@ class DSAttention(FleetLayer):
                 pg_collection=pg_collection,
             )
 
-        # DSA loss config
-        self.dsa_indexer_loss_coeff = getattr(
-            config, "dsa_indexer_loss_coeff", None
+        # DSA loss config; None is normalized to 0.0 (disabled), so all
+        # downstream checks can key on ``> 0`` instead of ``is not None``.
+        self.dsa_indexer_loss_coeff = float(
+            getattr(config, "dsa_indexer_loss_coeff", 0.0) or 0.0
         )
         self.dsa_indexer_use_sparse_loss = getattr(
             config, "dsa_indexer_use_sparse_loss", False
@@ -1760,7 +1814,7 @@ class DSAttention(FleetLayer):
             else None
         )
         if self.skip_topk:
-            if self.source_layer not in topk_holder:
+            if topk_holder is None or self.source_layer not in topk_holder:
                 raise RuntimeError(
                     "DSA index-share skip layer "
                     f"{self.layer_number} needs top-k indices from source layer "
@@ -1768,8 +1822,9 @@ class DSAttention(FleetLayer):
                 )
             topk_indices = topk_holder[self.source_layer]
             indexer_loss = None
-        # Training with indexer loss
-        elif self.training and self.dsa_indexer_loss_coeff is not None:
+        # Training with indexer loss (coeff is normalized to 0.0 when
+        # unset/None, so ``> 0`` is the single "enabled" check)
+        elif self.training and self.dsa_indexer_loss_coeff > 0:
             assert self.indexer is not None
             # Indexer forward_before_topk runs WITH gradient tracking
             # RoPE is computed internally by the indexer
@@ -1783,7 +1838,7 @@ class DSAttention(FleetLayer):
                 key.detach(),
                 self.softmax_scale,
                 self.indexer.index_topk,
-                float(self.dsa_indexer_loss_coeff),
+                self.dsa_indexer_loss_coeff,
                 indexer_float_mask,
                 bool(self.dsa_indexer_use_sparse_loss),
                 self.pg_collection.tp
@@ -1851,10 +1906,7 @@ class DSAttention(FleetLayer):
 
         # Attach indexer loss if training
         if self.training and indexer_loss is not None:
-            if (
-                self.dsa_indexer_loss_coeff is not None
-                and self.dsa_indexer_loss_coeff > 0
-            ):
+            if self.dsa_indexer_loss_coeff > 0:
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(
                     loss=indexer_loss,
                     layer_number=self.layer_number,

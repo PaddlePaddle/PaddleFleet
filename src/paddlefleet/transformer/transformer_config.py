@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Literal
 import paddle.nn.functional as F
 
 from ..model_parallel_config import ModelParallelConfig
+from ..recompute_utils import validate_recompute_modules
 from ..utils import (
     get_magic_init_method,
     init_method_normal,
@@ -38,6 +39,116 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
+
+# The weight-grad (dW) computations that can be deferred to cover p2p
+# communication. Each name is <subsystem>_<the projection whose weight grad is
+# deferred>, so it maps onto an identifier that exists in the model code:
+#   attn_q_proj             -> attention query projection, including both
+#                              low-rank factors when it is LoRA-factored
+#                              (q_a_proj/q_b_proj, linear_q_down/up_proj)
+#   attn_kv_proj            -> attention key/value projection. K and V are not
+#                              separable here: both MLA and the dsv4 hybrid
+#                              attention produce them from one shared
+#                              projection, so there is no attn_k/attn_v choice
+#   attn_out_proj           -> attention output projection (o_proj)
+#   attn_o_group_proj       -> dsv4 hybrid's grouped output projection
+#                              (linear_o_group_proj), a Triton grouped GEMM.
+#                              Largest single dW here, but also the largest
+#                              memory cost: the queued thunk pins x + dy per
+#                              layer per in-flight microbatch
+#   attn_gate_proj          -> gated-attention gate projection
+#   attn_compressor_proj    -> CSA/HCA compressor's linear_wkv + linear_wgate
+#   attn_indexer_q_proj     -> sparse-attention indexer q projection. Covers
+#                              both indexers: DSAIndexer.wq_b (latent-MQA
+#                              layers) and CSAIndexer.linear_wq_b (CSA
+#                              layers), same q_lora -> n_heads*head_dim shape
+#   attn_indexer_k_proj     -> DSAIndexer.wk. Tiny (hidden -> head_dim); the
+#                              CSA indexer has no counterpart, it builds K with
+#                              its own compressor instead
+#   attn_indexer_weights_proj
+#                           -> indexer per-head weight projection, both
+#                              DSAIndexer.weights_proj and
+#                              CSAIndexer.linear_weights_proj. Tiny
+#                              (hidden -> n_heads)
+#                              All three only produce a dW while the indexer
+#                              loss is on (dsa_indexer_loss_coeff > 0); the
+#                              indexer's inputs are detached from the backbone,
+#                              so they never affect the trunk gradient.
+#                              How many layers each covers depends on which
+#                              indexers the model builds: a CSAIndexer exists
+#                              only where 1 < compress_ratio < 128 and
+#                              csa_dense_mode is False, so an HCA-only model
+#                              (ratio 128, attend-to-all) has none and these
+#                              points reach the latent-MQA layers alone
+#   moe_router_gate         -> MoE router gate matmul
+#   moe_latent_proj         -> latent-MoE fc1_latent_proj + fc2_latent_proj
+#   moe_expert_up_gate_proj -> MoE routed expert up_gate_proj (a.k.a. w1)
+#   moe_expert_down_proj    -> MoE routed expert down_proj (a.k.a. w2). Costs
+#                              extra activation memory, see
+#                              fp8_utils.backward_impl_fp8
+#                              Both apply to the fp8_utils expert path and do
+#                              nothing when using_sonic_moe routes the experts
+#                              to SonicMoE -- use the two points below instead
+#   moe_sonic_expert_up_gate_proj / moe_sonic_expert_down_proj
+#                           -> SonicMoE routed expert w1 / w2. By far the
+#                              largest single dW blocks (topk expands the
+#                              GEMM's K), but the queued thunk pins the
+#                              column-major fp8 activations it reads, so each
+#                              costs a few hundred MiB per layer per in-flight
+#                              microbatch. fp8-wgrad path only
+#   moe_shared_expert_up_gate_proj / moe_shared_expert_down_proj
+#                           -> the shared expert's MLP. Its backward already
+#                              overlaps the combine collective, so selecting
+#                              these moves work between windows rather than
+#                              creating fill from nothing -- measure separately
+#   mtp_e_proj / mtp_h_proj -> multi-token-prediction input projections; one
+#                              instance, last stage only
+P2P_OVERLAP_DW_CALC_CHOICES = (
+    "attn_q_proj",
+    "attn_kv_proj",
+    "attn_out_proj",
+    "attn_o_group_proj",
+    "attn_gate_proj",
+    "attn_compressor_proj",
+    "attn_indexer_q_proj",
+    "attn_indexer_k_proj",
+    "attn_indexer_weights_proj",
+    "moe_router_gate",
+    "moe_latent_proj",
+    "moe_expert_up_gate_proj",
+    "moe_expert_down_proj",
+    "moe_sonic_expert_up_gate_proj",
+    "moe_sonic_expert_down_proj",
+    "moe_shared_expert_up_gate_proj",
+    "moe_shared_expert_down_proj",
+    "mtp_e_proj",
+    "mtp_h_proj",
+)
+
+
+def dw_overlap_scheduler_supported(config) -> bool:
+    """Whether the live PP scheduler consumes deferred dW work."""
+    vpp_size = getattr(config, "virtual_pipeline_model_parallel_size", None)
+    return (
+        getattr(config, "pipeline_model_parallel_size", 1) > 1
+        and vpp_size is not None
+        and vpp_size > 1
+    )
+
+
+def dw_overlap_enabled(config, point: str) -> bool:
+    """Whether `point`'s weight grad should be deferred to cover p2p comm.
+
+    Driven solely by config.p2p_overlap_dw_calc, the list of selected points.
+    Reads through getattr because callers include plain model configs that do
+    not carry the field.
+    """
+    selected = getattr(config, "p2p_overlap_dw_calc", None)
+    return (
+        bool(selected)
+        and point in selected
+        and dw_overlap_scheduler_supported(config)
+    )
 
 
 @dataclass
@@ -63,9 +174,6 @@ class TransformerConfig(ModelParallelConfig):
     mtp_distillation_loss: bool = False
     """Whether to use distillation MTP loss."""
 
-    mtp_num_layers: int = 0
-    """MTP Layer number."""
-
     mtp_loss_scaling_factor: float = 0.1
     """Weighting factor of Multi-Token Prediction (MTP) loss."""
 
@@ -89,11 +197,38 @@ class TransformerConfig(ModelParallelConfig):
     and re-embed there, instead of pre-computing shifted embeddings at first stage
     and concatenating them through the pipeline."""
 
+    separate_mtp_input: bool = False
+    """When True, the shifted MTP embeddings computed by GPTEmbedding are handed to the
+    MTP layer through a dedicated ``mtp_decoder_inputs`` entry in ``dict_args`` instead
+    of being concatenated into ``hidden_states``. This removes the per-layer
+    split/concat of the MTP chunks while leaving GPTEmbedding's shifted-embedding
+    computation (including its CP/SP scatter) untouched, so the MTP layer must not
+    re-scatter them. Intended for pipeline_model_parallel_size == 1, where there is no
+    P2P send for the embeddings to piggyback on; ``enable_mtp_magic_send`` covers the
+    PP > 1 case."""
+
     experimental_dataflow: bool = False
     """When True, use new experimental dataflow where mtp_startend_row_indices_all is passed as a
     separate input instead of being appended to attn_mask_startend_row_indices.
     The new dataflow requires: input_ids, labels, startend_row_indices (last dim=1, main seq only),
     mtp_startend_row_indices_all ([B, num_nextn, S, 1]), position_ids."""
+
+    use_erndata: bool = False
+    """Whether the training job is fed by the erndata (Energon) data pipeline.
+
+    This selects the MTP data-flow contract:
+
+    - False (default): the historical PaddleFleet MTP path — the data pipeline
+      constructs mtp_startend_row_indices_all, mtp_hidden_inputs_mask_all and
+      appends K MTP tokens to input_ids/labels/loss_mask.
+      MultiTokenPredictionLayer.forward consumes those pre-computed masks per
+      depth.
+
+    - True: the MCore-8c4df6b07 style. erndata emits only the main [L]-length
+      tensors plus ``cu_seqlens_q`` for packed doc boundaries; MTP shifting
+      happens inside MultiTokenPredictionLayer.forward via
+      ``roll_tensor(cu_seqlens_q=...)``.
+    """
 
     num_empty_layers_add_in_head: int = 0
     """Number of EmptyLayer before the Decoder Layer.
@@ -234,6 +369,31 @@ class TransformerConfig(ModelParallelConfig):
     full cross-head mixing over all num_attention_heads (the earlier VHA design).
     True: within-group block-diagonal mixing that only recombines heads inside each
     o_group (mixing stays within a group)."""
+
+    fuse_inv_rope_into_vha_postmix: bool = False
+    """Fuse the HCA inverse RoPE into the ungrouped VHA postmix GEMM (DSv4 hybrid).
+
+    The unfused path materialises ``inv_rope(O)`` as a full-width tensor and feeds
+    it to the postmix ``[nh,nh]`` GEMM, which costs one extra read+write of the
+    whole attention output plus a second live copy of it. Because RoPE only
+    touches the trailing ``qk_pos_emb_head_dim`` channels while the GEMM
+    contracts the head axis, the same result can be assembled from a full-width
+    GEMM on the *unrotated* output plus a narrow GEMM on the rotated pe channels,
+    which never needs the wide intermediate.
+
+    Bitwise identical to the unfused path -- forward, activation gradient and the
+    postmix U/V gradients -- and asserted as such in
+    ``tests/single_card_tests/test_inv_rope_vha_postmix_fusion.py``. Requires
+    ``use_vha_attention`` and ``apply_rope_fusion``, and is skipped for
+    ``vha_postmix_grouped``, ``high_precision_rope`` and when the postmix has its
+    own selective recompute wrapper.
+
+    Because every skip falls back silently, ``__post_init__`` refuses to start
+    when no layer could ever take the fused path (wrong
+    ``experimental_attention_variant``, only ``-2`` layers, no VHA postmix, the
+    grouped topology, no ``apply_rope_fusion``, ``high_precision_rope``, or
+    ``qk_pos_emb_head_dim`` unset) and warns when ``'vha_postmix'`` is in
+    ``recompute_modules``, which disables it per layer rather than globally."""
 
     use_vha_premix: bool = False
     """If True (and use_vha_attention is also True), replaces the DSv4 hybrid Q up-projection
@@ -470,6 +630,60 @@ class TransformerConfig(ModelParallelConfig):
     asserts itself.
     """
 
+    mqa_latent_rope_adjacent_pairing: bool = False
+    """Which RoPE channel pair shares a frequency in absorbed-MQA layers.
+
+    Values, both meaningful for every absorbed-MQA (``mqa_latent``) config:
+
+    - ``False`` (default) -- pair ``(k, k+half)``, exactly what both the eager
+      and the ``mqa_latent_rope_fusion`` branch have always done. The default
+      therefore leaves every pre-existing config bit-identical, and the DSA
+      indexer, which shares ``fused_apply_rope_half``, keeps this pairing too.
+      Choose it for a model trained from scratch with absorption on, or whenever
+      no checkpoint has to survive an absorption switch.
+    - ``True`` -- pair ``(2k, 2k+1)`` in the absorbed layers only. Choose it when
+      loading a checkpoint whose MLA layers were trained unabsorbed under
+      ``apply_rope_fusion``, above all when the backbone is frozen and cannot
+      adapt.
+
+    A **checkpoint-compatibility** switch, not a performance one: which two
+    channels share a frequency decides which frequency each learned channel of
+    ``q_b_proj`` / ``kv_a_proj`` gets, so the pairing is part of the meaning of
+    those weights.
+
+    An unabsorbed MLA layer under ``apply_rope_fusion`` runs
+    ``fused_apply_mla_rope_for_q`` / ``_for_kv``, which pair ``(2k, 2k+1)``.
+    Latent MQA makes the ``apply_rope_fusion and not self.mqa_latent`` test
+    in ``MLASelfAttention`` fall through, because ``_for_kv`` needs the
+    per-head K/V that absorption never materialises, and every path that
+    remains pairs
+    ``(k, k+half)``. Enabling absorption therefore silently permutes an MLA
+    checkpoint's channel-to-frequency map -- harmless where the backbone can
+    retrain, not harmless where it cannot (a frozen-backbone indexer warmup
+    distils a scrambled attention distribution; see ``train_indexer_only``).
+
+    Set it to keep the pairing across that switch. It reaches both paths: the
+    eager one via a per-call ``multi_latent_attention=True`` (passed only when
+    this flag is set, so the default path's call is unchanged; the config field
+    itself cannot be flipped, since it also drives layer-spec selection and
+    position-embedding construction), the fused one via ``adjacent_in=True`` on
+    ``fused_apply_rope_half`` / ``fused_rope_cat_key``. Only the gather
+    positions move, so the arithmetic, the bf16 rounding and the half-split
+    *output* layout are identical and the two paths stay bit-exact with each
+    other. Output layout is left at half-split on purpose: it is q/k-symmetric
+    and therefore invisible to ``q @ k^T``.
+
+    Pairing is a within-head_dim property, so this is orthogonal to TP, SP, CP,
+    PP and EP.
+
+    Inert, and rejected by ``__post_init__``, where it cannot take effect: no
+    absorbed layers, or ``gpt_model_use_experimental_version``. Also rejected
+    with ``rotary_interleaved``, which expresses the same pairing by building a
+    different ``freqs`` layout; combining them would rotate twice. The HCA/CSA
+    (``ratio != -2``) layers pair ``(2k, 2k+1)`` already, via
+    ``fused_apply_mla_rope_inplace``, and are not touched.
+    """
+
     sigmoid_gate_fusion: bool = False
     """If True, use Triton fused sigmoid gate kernel."""
 
@@ -536,9 +750,20 @@ class TransformerConfig(ModelParallelConfig):
     'selective' activation checkpointing."""
 
     recompute_modules: list[str] | dict = None
-    """The submodules to recompute.
-    list: contains all submodule need recompute
-    dict: keys contains all submodule need recompute, value means submodule in which layers need recompute
+    """Submodules to recompute under ``recompute_granularity="selective"``.
+
+    ``list[str]``: every listed submodule shares the layers picked by
+    ``recompute_num_layers`` + ``recompute_method`` (all layers if the count is
+    None). ``dict[str, spec]``: per-submodule, where ``spec`` is ``"all"``
+    (negative int / None equivalent), a list of global 0-based layer ids
+    (empty head/tail layers included), or a count resolved through
+    ``recompute_method``::
+
+        recompute_modules: {core_attn: [0, 1, 2], mlp: 2, moe_gate_up: all}
+
+    ``flash_attn`` / ``moe_combine`` are refined-recompute entries and invert
+    the spec: selected layers keep plain recompute, RR runs on the rest.
+    ``lm_head`` / ``loss_fn`` are single instances and reject a layer list.
     """
 
     decoderlayer_act_offload_settings: dict = None
@@ -585,7 +810,9 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_token_dispatcher_type: str = "alltoall"
     """The type of token dispatcher to use. The default is 'alltoall'.
-    Options are 'allgather', 'alltoall', 'deepep', and 'hybridep'."""
+    Options are 'allgather', 'alltoall', 'deepep', 'hybridep', 'ringmoe', and 'moonep'.
+    Call ``paddlefleet.transformer.moe.finalize_moonep`` before destroying
+    the process group when using MoonEP."""
 
     moe_allgather_gate_overlap: bool = True
     """Whether to issue the AllGather before the gate so it overlaps with gate
@@ -767,8 +994,35 @@ class TransformerConfig(ModelParallelConfig):
     fp8_wgrad: bool = True
     """Whether to use fp8 wgrad."""
 
-    dw_p2p_overlap: bool = False
-    """Whether to overlap p2p communication and matmul kernel in pp parallel on Blackwell."""
+    p2p_overlap_dw_calc: list[str] | None = None
+    """Which weight-grad (dW) computations to defer so they can cover p2p communication.
+
+    None or [] disables the feature. Each entry names one deferral point; see
+    P2P_OVERLAP_DW_CALC_CHOICES. Selecting points individually lets a model that
+    regresses on one of them keep the others. Requires a pp scheduler that
+    flushes and pops WeightGradStore, tensor_model_parallel_size == 1 and
+    pipeline_model_parallel_size > 1 and
+    virtual_pipeline_model_parallel_size > 1 (the interleaved/VPP scheduler).
+    """
+
+    p2p_overlap_recompute: bool = False
+    """Recompute the next backward chunk's spans inside an exposed p2p window.
+
+    Companion to p2p_overlap_dw_calc, for when the deferred dW does not fill the
+    window. A selective-recompute span replays its forward from inputs saved
+    during the original forward and never reads the incoming activation
+    gradient, so running it early is pure relocation.
+
+    No knob beyond on/off on purpose: only the chunk whose backward comes next is
+    ever run early, so at most one chunk's discarded activations are resident
+    early and the very next backward consumes them. If that chunk has no spans
+    (an EmptyLayer chunk) nothing runs -- those bubbles are a partitioning
+    problem, not something filler can reach.
+
+    Requires recompute_granularity == "selective",
+    pipeline_model_parallel_size > 1, and
+    virtual_pipeline_model_parallel_size > 1 (the interleaved/VPP scheduler).
+    """
 
     use_ue8m0: bool = False
     """Whether to use UE8M0 packed scaling factors for FP8 on Blackwell GPUs."""
@@ -862,6 +1116,20 @@ class TransformerConfig(ModelParallelConfig):
 
     high_precision_mhc: bool = True
     """Use high precision (float32) for mHC forward and backward computation."""
+
+    mhc_single_stream_init: bool = False
+    """Initialize the mHC mapping head so each sub-layer reads a single stream.
+
+    This is what the paper does. When True the dynamic mapping projection is
+    zero-initialized and the static bias gets the paper's A.6 values (b_pre = -3
+    except +3 on the sub-layer's home stream, b_post = 0, b_res = 6I - 3), so at
+    step 0 H_pre is one-hot on the home stream, H_post = 1 and H_res ~= I --
+    equivalent to a standard residual connection, and token-independent.
+
+    When False (the historical behaviour) the projection is Xavier-uniform and
+    the bias stays at zero, which makes H_pre = sigmoid(~0) = 0.5 and H_res a
+    uniform doubly-stochastic matrix: every sub-layer reads and writes an
+    averaged mixture of the n residual streams from step 0."""
 
     ####################
     # miscellaneous
@@ -1218,17 +1486,48 @@ class TransformerConfig(ModelParallelConfig):
     dsa_indexer_topk_freq: int = 1
     """Frequency of DSA indexer top-k computation across layers.
 
-    Values greater than one enable cross-layer top-k sharing.
+    Official GLM-5.2 config.json field ``index_topk_freq``. Must be a
+    positive integer. Values greater than one enable periodic skip when
+    ``dsa_indexer_types`` is unset: every ``index_topk_freq`` layers after
+    ``index_skip_topk_offset`` reuse the preceding full indexer's top-k.
+    Default 1 keeps the previous always-compute-topk behaviour.
     """
 
     dsa_indexer_skip_topk_offset: int = 0
-    """One-indexed layer offset at which periodic DSA top-k computation starts."""
+    """One-indexed layer offset at which periodic DSA top-k computation starts.
+
+    Official GLM-5.2 config.json field ``index_skip_topk_offset``. Must be
+    a non-negative integer. 0 is treated as 1 at the skip-layer helper so
+    layer 1 always computes. Default 0 keeps the previous always-compute
+    behaviour when ``dsa_indexer_topk_freq`` is 1.
+    """
 
     dsa_indexer_types: list[str] | None = None
-    """Optional per-layer DSA indexer layout (``full`` or ``shared``)."""
+    """Optional per-layer DSA indexer layout (``full`` or ``shared``).
+
+    Official GLM-5.2 config.json field ``indexer_types``. Decoder-only:
+    length must equal ``num_hidden_layers`` when set. Each entry is
+    ``full`` (owns an indexer) or ``shared`` (reuses the last preceding
+    ``full`` layer's top-k). MTP layers are not in this list; they use
+    ``dsa_index_share_for_mtp_iteration``. Default None falls back to
+    ``index_topk_freq`` / ``index_skip_topk_offset``.
+    """
+
+    dsa_index_share_for_mtp_iteration: bool = False
+    """Whether MTP iterations reuse top-k indices from the final decoder layer.
+
+    Official GLM-5.2 config.json field ``index_share_for_mtp_iteration``.
+    False (default) keeps an independent MTP indexer. True makes each MTP
+    layer a shared consumer of the last decoder layer's top-k, so that
+    decoder layer must itself be a producer (``full``, or the last layer
+    when ``indexer_types`` is unset).
+    """
 
     dsa_indexer_loss_coeff: float = 0.0
     """KL loss coefficient for DSA Indexer training. 0 disables the KL loss.
+
+    ``None`` is normalized to 0.0 (disabled) both in ``__post_init__`` and at
+    every read site, so downstream code must never branch on ``is None``.
 
     Note: This field corresponds to the HuggingFace config.json field "indexer_loss_coeff".
     The mapping from HuggingFace field name to PaddleFleet internal field name is handled
@@ -1241,6 +1540,50 @@ class TransformerConfig(ModelParallelConfig):
     Note: This field corresponds to the HuggingFace config.json field "indexer_use_sparse_loss".
     The mapping from HuggingFace field name to PaddleFleet internal field name is handled
     by TransformerConfig.transform_rules.
+    """
+
+    dsa_indexer_loss_bwd_p2p_overlap: bool = False
+    """Run the DSA indexer-loss branch inside the pipeline's forward send/recv.
+
+    ``False`` (default) leaves the in-place behaviour untouched: the KL target,
+    the KL and ``TileLangCSAIndexerLossAutoScaler`` all run in the grad-enabled
+    forward of the ``-2`` layer, and that PyLayer's backward produces the indexer
+    gradients.
+
+    ``True`` moves the branch out of the layer. It is sound because the branch is
+    a *leaf subgraph*: ``_indexer_projections`` detaches ``x`` / ``qr``, the loss
+    PyLayer is an identity on ``output``, and ``csa_indexer_bwd`` never reads
+    ``grad_output`` -- so nothing in the main backward waits on it and its only
+    effect is a gradient on the ``DSAIndexer`` weights. The layer enqueues its
+    inputs on whichever forward pass belongs to the pipeline's forward phase (the
+    no-grad one when the layer body is recompute-wrapped, the only one when it is
+    not), and Paddle's ``P2P_ISSUED`` callback drains the queue after the schedule
+    has issued that micro-step's p2p and before it waits on the handles, so the
+    branch runs on the compute stream while the transfer is in flight.
+    Independent of ``recompute_granularity``.
+
+    The callback must fire *after* the issue: ``isend`` / ``irecv`` gate the NCCL
+    kernel on an event recorded on the calculation stream at issue time, so
+    anything queued earlier -- as a ``FORWARD_END`` placement would be -- is
+    inside that event's reach and the send waits for it instead of running
+    alongside. ``FORWARD_END`` is still registered as a self-disarming fallback
+    for schedules that raise no ``P2P_ISSUED``.
+
+    Requires ``indexer_loss_overlap.register_pipeline_hooks(...)`` on the
+    pipeline-parallel model; without it only the ``drain_all()`` safety net drains
+    the queue and nothing is overlapped (the result is numerically identical
+    either way). The overlap also needs the p2p off the compute stream, which
+    ``overlap_p2p_comm=True`` arranges by forcing ``batch_p2p_comm`` off. The last
+    pipeline stage's steady-1F1B micro-steps have no window at all, because both
+    ``send_forward`` and ``recv_backward`` are no-ops there.
+
+    ``indexer_loss_overlap.validate_config`` refuses to start where the flag would
+    be dead or lossy: ``pipeline_model_parallel_size == 1``, a model that builds
+    no ``DSAIndexer``, ``dsa_indexer_loss_coeff <= 0``, and
+    ``dsa_indexer_use_sparse_loss=False`` (the warmup phase has no enqueue path,
+    so the loss would be dropped silently). ``overlap_p2p_comm=False`` /
+    ``batch_p2p_comm=True`` only warn: the maths is unchanged, there is just
+    nothing to overlap with.
     """
 
     dsa_indexer_rope_fusion: bool = False
@@ -1291,7 +1634,7 @@ class TransformerConfig(ModelParallelConfig):
 
     csa_compress_ratios: list | None = None
     """Per-layer attention-kind assignment for the DSv4 hybrid attention stack.
-    Length must equal num_hidden_layers (+ mtp_num_layers if present).
+    Length must equal num_hidden_layers (+ num_nextn_predict_layers if present).
     Each entry encodes the layer kind via its integer ratio value:
       - -2: MLA layer — multi-head latent attention. How it actually runs is
         chosen by ``hybrid_mla_attention`` (``"mha"`` / ``"mqa_dsa"`` /
@@ -1430,6 +1773,31 @@ class TransformerConfig(ModelParallelConfig):
     the switch otherwise rather than let it be a silent no-op.
     """
 
+    sparse_attn_global_kv_idx_remap_fusion: bool = False
+    """Whether to fuse the per-batch-local -> flat-global KV column index remap
+    (``idx + b * seqlen_kv``) consumed by the cuDNN / FlashMLA sparse-attention
+    kernels (``csa_sparse_attn_utils._local_to_global_flat``).
+
+    Not about MoE routing: these are KV *column* indices of the sparse-attention
+    support (window + compressed slots), not expert top-k ids.
+
+    The eager version spends seven elementwise kernels on the full
+    ``[b * sq, topk]`` table (``full`` + ``greater_equal`` + ``arange`` +
+    ``expand`` + ``scale`` + ``add`` + ``where``) to express a single pass; the
+    Triton kernel does it in one. The result is bit-identical, so this only
+    trades kernel count for a Triton dependency and can be flipped freely.
+
+    Scope: every ``_local_to_global_flat`` call site -- the ``"cudnn"``
+    sparse-attention forward and backward of both
+    ``CompressedSparseAttention`` (HCA ``ratio=128`` and CSA/DSA
+    ``1 < ratio < 128`` layers) and ``MQALatentAttention``. No effect on the
+    ``"tilelang"`` / ``"unfused"`` backends, which never build the flat global
+    index table, nor on ``block_sparse_mqa_attention_dsa``, which leaves it at
+    the default. ``MQALatentAttention``'s forward is always FlashMLA, so it
+    remaps regardless of ``mqa_sparse_attn_backward_backend``; only its
+    backward follows that switch.
+    """
+
     stage1_overlap: bool = False
     """
     overlap backward with sharding gradient reduce for non-pipeline parallelism
@@ -1510,6 +1878,7 @@ class TransformerConfig(ModelParallelConfig):
         "index_topk_freq": "dsa_indexer_topk_freq",
         "index_skip_topk_offset": "dsa_indexer_skip_topk_offset",
         "indexer_types": "dsa_indexer_types",
+        "index_share_for_mtp_iteration": "dsa_index_share_for_mtp_iteration",
         "indexer_loss_coeff": "dsa_indexer_loss_coeff",
         "indexer_use_sparse_loss": "dsa_indexer_use_sparse_loss",
         "indexer_rotary_interleaved": "dsa_indexer_rotary_interleaved",
@@ -1551,6 +1920,30 @@ class TransformerConfig(ModelParallelConfig):
         ),
         "csa_train_indexer_only": "Use train_indexer_only instead.",
         "csa_indexer_init_from_scratch": "Use indexer_init_from_scratch instead.",
+        "dw_p2p_overlap": "Use p2p_overlap_dw_calc instead.",
+    }
+
+    # Same intent as ``renamed_config_keys``, but only rejected when the stale
+    # key carries a value that would change behaviour. A falsy value means the
+    # feature is off in both spellings, so nothing is lost by absorbing it.
+    #
+    # ``mtp_num_layers`` needs this weaker form because PaddleFormers still owns
+    # a field of that name: ``LlmMetaConfig.mtp_attributes`` and
+    # ``TrainingArguments`` both declare it (default 0), so *every* PaddleFormers
+    # config hands it to ``register_attributes`` whether or not MTP is used.
+    # Rejecting it outright would make every Fleet-provider model in that repo
+    # fail to build. Its ">1 means autoregressive MTP" semantics there also mean
+    # ``sft/workflow.py`` swaps the value into ``num_nextn_predict_layers``
+    # before the provider is constructed, so a legitimate MTP run arrives here
+    # with ``mtp_num_layers == 0`` already.
+    renamed_config_keys_when_set = {
+        "mtp_num_layers": (
+            "Use num_nextn_predict_layers instead: it is the only field every "
+            "MTP consumer reads (GPTEmbedding's K+1 embedding chunks, the MTP "
+            "forward's hidden_states split, LanguageLoss's per-depth labels). "
+            "Set num_nextn_predict_layers to the value mtp_num_layers used to "
+            "carry, and drop mtp_num_layers."
+        ),
     }
 
     @classmethod
@@ -1604,6 +1997,13 @@ class TransformerConfig(ModelParallelConfig):
                 f"{self.renamed_config_keys[key]} Update the config that still "
                 f"sets {key}; it would otherwise be silently ignored."
             )
+        elif key in self.renamed_config_keys_when_set and value:
+            raise ValueError(
+                f"{key} was renamed and is no longer supported. "
+                f"{self.renamed_config_keys_when_set[key]} Update the config "
+                f"that still sets {key}={value!r}; it would otherwise be "
+                f"silently ignored."
+            )
         else:
             setattr(self, key, value)
 
@@ -1616,6 +2016,113 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        # Normalize the indexer loss coefficient: None (e.g. from a HuggingFace
+        # config.json ``"indexer_loss_coeff": null`` or explicit config) means
+        # "disabled" and collapses to 0.0, so this config object never exposes
+        # None and consumers can key on ``> 0`` instead of ``is not None``.
+        self.dsa_indexer_loss_coeff = float(self.dsa_indexer_loss_coeff or 0.0)
+
+        if not isinstance(self.dsa_indexer_topk_freq, int) or isinstance(
+            self.dsa_indexer_topk_freq, bool
+        ):
+            raise ValueError(
+                "dsa_indexer_topk_freq must be a positive int, got "
+                f"{self.dsa_indexer_topk_freq!r}."
+            )
+        if self.dsa_indexer_topk_freq < 1:
+            raise ValueError(
+                "dsa_indexer_topk_freq must be >= 1, got "
+                f"{self.dsa_indexer_topk_freq}."
+            )
+        if not isinstance(self.dsa_indexer_skip_topk_offset, int) or isinstance(
+            self.dsa_indexer_skip_topk_offset, bool
+        ):
+            raise ValueError(
+                "dsa_indexer_skip_topk_offset must be a non-negative int, got "
+                f"{self.dsa_indexer_skip_topk_offset!r}."
+            )
+        if self.dsa_indexer_skip_topk_offset < 0:
+            raise ValueError(
+                "dsa_indexer_skip_topk_offset must be >= 0, got "
+                f"{self.dsa_indexer_skip_topk_offset}."
+            )
+        if self.dsa_indexer_types is not None:
+            if not isinstance(self.dsa_indexer_types, list) or not all(
+                isinstance(item, str) for item in self.dsa_indexer_types
+            ):
+                raise ValueError(
+                    "dsa_indexer_types must be None or a list of strings, got "
+                    f"{self.dsa_indexer_types!r}."
+                )
+            unknown_types = [
+                item
+                for item in self.dsa_indexer_types
+                if item not in {"full", "shared"}
+            ]
+            if unknown_types:
+                raise ValueError(
+                    "dsa_indexer_types entries must be 'full' or 'shared', got "
+                    f"{unknown_types} in {self.dsa_indexer_types!r}."
+                )
+            if len(self.dsa_indexer_types) != self.num_hidden_layers:
+                raise ValueError(
+                    "dsa_indexer_types length must equal num_hidden_layers "
+                    f"({self.num_hidden_layers}), got "
+                    f"{len(self.dsa_indexer_types)}."
+                )
+            if self.dsa_indexer_types and self.dsa_indexer_types[0] != "full":
+                raise ValueError(
+                    "dsa_indexer_types[0] must be 'full' so shared layers have "
+                    f"a source indexer, got {self.dsa_indexer_types[0]!r}."
+                )
+        if self.dsa_index_share_for_mtp_iteration:
+            if (self.num_nextn_predict_layers or 0) < 1:
+                raise ValueError(
+                    "dsa_index_share_for_mtp_iteration=True requires "
+                    "num_nextn_predict_layers >= 1, got "
+                    f"{self.num_nextn_predict_layers}."
+                )
+            if self.num_hidden_layers < 1:
+                raise ValueError(
+                    "dsa_index_share_for_mtp_iteration=True requires "
+                    "num_hidden_layers >= 1 so MTP can reuse a decoder indexer."
+                )
+            if (
+                self.dsa_indexer_types is not None
+                and "full" not in self.dsa_indexer_types
+            ):
+                raise ValueError(
+                    "dsa_index_share_for_mtp_iteration=True requires at least "
+                    "one decoder 'full' indexer to publish top-k, got "
+                    f"{self.dsa_indexer_types!r}."
+                )
+
+        if self.p2p_overlap_dw_calc is not None:
+            if isinstance(self.p2p_overlap_dw_calc, str):
+                self.p2p_overlap_dw_calc = [self.p2p_overlap_dw_calc]
+            unknown = [
+                p
+                for p in self.p2p_overlap_dw_calc
+                if p not in P2P_OVERLAP_DW_CALC_CHOICES
+            ]
+            if unknown:
+                raise ValueError(
+                    f"unknown p2p_overlap_dw_calc entries {unknown}, "
+                    f"expected a subset of {list(P2P_OVERLAP_DW_CALC_CHOICES)}"
+                )
+            if self.p2p_overlap_dw_calc and not dw_overlap_scheduler_supported(
+                self
+            ):
+                raise ValueError(
+                    "p2p_overlap_dw_calc requires pipeline_model_parallel_size "
+                    "> 1 and virtual_pipeline_model_parallel_size > 1 "
+                    "(the interleaved/VPP scheduler); got "
+                    f"pipeline_model_parallel_size="
+                    f"{self.pipeline_model_parallel_size}, "
+                    f"virtual_pipeline_model_parallel_size="
+                    f"{self.virtual_pipeline_model_parallel_size}"
+                )
+
         if self.mtp_shared_last_layer:
             # When MTP reuses the last backbone TransformerLayer's parameters,
             # the MTP transformer block must have an identical structure to the
@@ -1624,6 +2131,41 @@ class TransformerConfig(ModelParallelConfig):
             assert not self.use_dense_mtp, (
                 "mtp_shared_last_layer cannot be True if use_dense_mtp= True"
             )
+
+        if self.separate_mtp_input:
+            # Raise instead of assert: with ``python -O`` assertions are stripped,
+            # and an unsupported combination would then silently enter a path that
+            # only holds for the layout below -- or crash much later inside
+            # MultiTokenPredictionLayer with a missing ``mtp_decoder_inputs``.
+            if self.num_nextn_predict_layers != 1:
+                raise ValueError(
+                    "separate_mtp_input only supports "
+                    "num_nextn_predict_layers == 1, got "
+                    f"num_nextn_predict_layers={self.num_nextn_predict_layers}. "
+                    "The MTP input is consumed once and stripped from dict_args, "
+                    "so deeper MTP layers would not receive it."
+                )
+            if self.pipeline_model_parallel_size != 1:
+                raise ValueError(
+                    "separate_mtp_input requires pipeline_model_parallel_size "
+                    "== 1, got pipeline_model_parallel_size="
+                    f"{self.pipeline_model_parallel_size}. Use "
+                    "enable_mtp_magic_send for pipeline_model_parallel_size > 1."
+                )
+            if self.enable_mtp_magic_send:
+                raise ValueError(
+                    "separate_mtp_input and enable_mtp_magic_send are mutually "
+                    "exclusive, got separate_mtp_input=True and "
+                    "enable_mtp_magic_send=True. They are two transports for the "
+                    "same tensor; pick the one matching the pipeline degree."
+                )
+            if self.mtp_load_weight_only:
+                raise ValueError(
+                    "separate_mtp_input is incompatible with "
+                    "mtp_load_weight_only=True. GPTEmbedding does not build the "
+                    "shifted MTP embeddings in that mode, so separate_mtp_input "
+                    "would silently do nothing."
+                )
 
         if self.enable_mtp_magic_send:
             assert not getattr(self, "tie_word_embeddings", False), (
@@ -1666,6 +2208,55 @@ class TransformerConfig(ModelParallelConfig):
                 assert self.variable_seq_lengths, (
                     "enable_mtp_magic_send with vpp requires variable_seq_lengths=True"
                 )
+
+        if self.use_erndata and self.num_nextn_predict_layers > 0:
+            # erndata + MTP selects the packed-doc (MCore 8c4df6b07) contract.
+            if self.enable_mtp_magic_send:
+                raise ValueError(
+                    "use_erndata=True with MTP is incompatible with "
+                    "enable_mtp_magic_send=True."
+                )
+            if self.experimental_dataflow:
+                # experimental_dataflow specifically produces
+                # mtp_startend_row_indices_all as a separate input, which
+                # erndata does not produce.
+                raise ValueError(
+                    "use_erndata=True with MTP is incompatible with "
+                    "experimental_dataflow=True (which expects the legacy "
+                    "mtp_startend_row_indices_all payload)."
+                )
+            if self.separate_mtp_input:
+                # separate_mtp_input hands the shifted embeddings to the MTP
+                # layer through `mtp_decoder_inputs` and leaves hidden_states as
+                # the bare backbone chunk. `_forward_megatron_style` instead
+                # splits hidden_states into K+1 chunks and never reads
+                # `mtp_decoder_inputs`, so the combination would silently
+                # mis-slice the batch axis.
+                raise ValueError(
+                    "use_erndata=True with MTP is incompatible with "
+                    "separate_mtp_input=True (the erndata MTP forward reads "
+                    "the shifted embeddings from hidden_states, not from "
+                    "mtp_decoder_inputs)."
+                )
+            # PaddleFleet's `dualchunk_allgather` scatter layout is the only
+            # mode equivalent to MCore's zigzag balancing; the other two
+            # (`contiguous_allgather`, `contiguous_a2a`) are not covered by
+            # this path's MTP roll semantics.
+            if self.context_parallel_size > 1:
+                if self.cp_balance_mode != "dualchunk_allgather":
+                    raise ValueError(
+                        f"use_erndata=True with MTP + context_parallel_size>1 "
+                        f"requires cp_balance_mode='dualchunk_allgather', got "
+                        f"{self.cp_balance_mode!r}."
+                    )
+            # PP>1 is supported without any external dataloader help:
+            # cu_seqlens_q travels down the pipeline dict (like position_ids)
+            # to the last stage, and GPTLMHead.forward — which runs on the loss
+            # rank immediately before LanguageLoss — stashes it onto
+            # `LanguageLoss._cu_seqlens_q_stash` per micro-batch. GPTEmbedding
+            # writes the same stash on the PP=1 / first stage. If the stash is
+            # ever missing on the loss rank, LanguageLoss.forward raises rather
+            # than silently rolling labels across packed-doc boundaries.
 
         if self.intermediate_size is None:
             self.intermediate_size = 4 * self.hidden_size
@@ -1815,6 +2406,11 @@ class TransformerConfig(ModelParallelConfig):
                     "recompute_granularity must be one of full and selective"
                 )
 
+        # Checked outside the granularity branches: the refined-recompute
+        # entries and the lm_head / loss_fn entries are also read under
+        # recompute_granularity="full".
+        validate_recompute_modules(self)
+
         if self.use_truncated_normal_init or self.magic_init:
             self.output_layer_init_method = self.init_method
         elif self.output_layer_init_method is None:
@@ -1853,6 +2449,11 @@ class TransformerConfig(ModelParallelConfig):
             if not self.enable_hyper_connections:
                 raise ValueError(
                     "use_fused_mhc requires enable_hyper_connections=True."
+                )
+        if self.enable_hyper_connections:
+            if not self.high_precision_mhc:
+                raise ValueError(
+                    "enable_hyper_connections not support high_precision_mhc=False yet."
                 )
 
         # ``hybrid_mla_attention`` is validated unconditionally, i.e. outside the
@@ -2008,6 +2609,131 @@ class TransformerConfig(ModelParallelConfig):
                     "MLA and build no MQADocMeta, so the switch would be a silent "
                     "no-op. Use csa_share_docmask_meta for the HCA/CSA layers."
                 )
+        if self.mqa_latent_rope_adjacent_pairing:
+            # Every failure mode here is silent: a config with no absorbed
+            # layers never reads the flag, and ``rotary_interleaved`` already
+            # expresses the same pairing through the ``freqs`` layout, so
+            # combining them rotates the (2k, 2k+1) pair twice and produces a
+            # plausible-looking but wrong result. Checked once, here.
+            ratios = [int(r) for r in (self.csa_compress_ratios or [])]
+            has_latent_mqa = (
+                self.hybrid_mla_attention in ("mqa_dsa", "mqa_full_causal")
+                and -2 in ratios
+            )
+            if not has_latent_mqa:
+                raise ValueError(
+                    "mqa_latent_rope_adjacent_pairing applies to the absorbed "
+                    "(latent) MQA layers, i.e. csa_compress_ratios entries "
+                    "equal to -2 under hybrid_mla_attention='mqa_dsa' or "
+                    "'mqa_full_causal', but this config has "
+                    f"hybrid_mla_attention={self.hybrid_mla_attention!r} and "
+                    f"{'some' if -2 in ratios else 'no'} -2 layers. Under "
+                    "'mha' those layers are unabsorbed MLA and already pair "
+                    "(2k, 2k+1) through apply_rope_fusion, so the switch would "
+                    "be a silent no-op."
+                )
+            if self.rotary_interleaved:
+                raise ValueError(
+                    "mqa_latent_rope_adjacent_pairing and rotary_interleaved "
+                    "both select the (2k, 2k+1) pairing, by different means: "
+                    "rotary_interleaved builds freqs so that channel i carries "
+                    "theta_(i//2) and _rotate_half slices 0::2 / 1::2, while "
+                    "this flag keeps the halved freqs layout and de-interleaves "
+                    "the input instead. Enabling both applies the rotation "
+                    "twice. Use rotary_interleaved alone if the whole model "
+                    "should be interleaved."
+                )
+            if self.gpt_model_use_experimental_version:
+                raise ValueError(
+                    "mqa_latent_rope_adjacent_pairing has no effect under "
+                    "gpt_model_use_experimental_version: that path routes the "
+                    "MLA layers through _ec_compatible_rope_apply, a complex "
+                    "rotation with its own pairing that neither branch of this "
+                    "switch reaches. It would be a silent no-op."
+                )
+        if self.fuse_inv_rope_into_vha_postmix:
+            # ``DSv4HybridAttention._can_fuse_inv_rope_postmix`` answers no by
+            # falling back to the unfused inverse-RoPE + postmix pair, which is
+            # bitwise identical. That is what makes a mis-set flag invisible:
+            # nothing fails, nothing warns, the run is simply as slow as it was
+            # before. So the conditions the predicate reads off the config are
+            # checked once here, where they can still be reported as a mistake.
+            unmet = []
+            if self.experimental_attention_variant != "dsv4_hybrid":
+                unmet.append(
+                    "experimental_attention_variant="
+                    f"{self.experimental_attention_variant!r}, but the fusion "
+                    "lives in DSv4HybridAttention, which no other variant "
+                    "builds"
+                )
+            elif all(int(r) == -2 for r in (self.csa_compress_ratios or [-2])):
+                # -2 is MLA, handled by MQALatentAttention; DSv4HybridAttention
+                # is never constructed for it, so no postmix exists to fuse into.
+                unmet.append(
+                    "every csa_compress_ratios entry is -2 (MLA), so no "
+                    "DSv4-hybrid layer is built: "
+                    f"csa_compress_ratios={self.csa_compress_ratios!r}"
+                )
+            if not self.use_vha_attention:
+                unmet.append(
+                    "use_vha_attention=False, so there is no VHA postmix GEMM "
+                    "to fold the inverse RoPE into"
+                )
+            if self.vha_postmix_grouped:
+                unmet.append(
+                    "vha_postmix_grouped=True mixes within each o_group via "
+                    "einsum; the fusion needs the ungrouped [nh, nh] GEMM it "
+                    "splits into a full-width and a pe-width part"
+                )
+            if not self.apply_rope_fusion:
+                unmet.append(
+                    "apply_rope_fusion=False keeps the eager RoPE, while the "
+                    "fusion is a Triton kernel"
+                )
+            if self.high_precision_rope:
+                unmet.append(
+                    "high_precision_rope=True computes the rotation in fp32, "
+                    "which the fused kernel does not implement"
+                )
+            if not (self.qk_pos_emb_head_dim or 0) > 0:
+                unmet.append(
+                    "qk_pos_emb_head_dim="
+                    f"{self.qk_pos_emb_head_dim!r} leaves no RoPE channels, so "
+                    "the whole inverse-RoPE step is skipped"
+                )
+            if unmet:
+                raise ValueError(
+                    "fuse_inv_rope_into_vha_postmix=True but the fusion can "
+                    "never trigger in this config, and the fallback is bitwise "
+                    "identical, so the flag would be a silent no-op: "
+                    + "; ".join(unmet)
+                    + ". Fix the listed fields or drop the flag."
+                )
+            if (
+                self.recompute_granularity == "selective"
+                and isinstance(self.recompute_modules, list)
+                and "vha_postmix" in self.recompute_modules
+            ):
+                # The postmix's own recompute wrapper would have to re-enter the
+                # fused PyLayer to save an intermediate the fusion never
+                # materialises, so those layers keep the unfused pair.
+                scope = (
+                    "every layer"
+                    if self.recompute_num_layers is None
+                    else f"the recompute_method={self.recompute_method!r} "
+                    f"window of {self.recompute_num_layers} layers"
+                )
+                logger.warning(
+                    "fuse_inv_rope_into_vha_postmix=True together with "
+                    "'vha_postmix' in recompute_modules: on the layers the "
+                    f"selective wrapper covers ({scope}) the inverse RoPE and "
+                    "the postmix stay unfused during training, because the "
+                    "fusion already avoids the intermediate that wrapper exists "
+                    "to free. Results are unaffected. Drop 'vha_postmix' from "
+                    "recompute_modules to fuse everywhere, or use "
+                    "recompute_granularity='full', under which the fusion runs "
+                    "inside the full-layer recompute."
+                )
 
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
@@ -2016,26 +2742,14 @@ class TransformerConfig(ModelParallelConfig):
                     "experimental_attention_variant='dsv4_hybrid' requires "
                     "csa_compress_ratios to be set."
                 )
-            mtp_num_layers = (
-                self.mtp_num_layers or self.num_nextn_predict_layers
-            )
-            if (
-                self.mtp_num_layers > 0
-                and self.num_nextn_predict_layers > 0
-                and self.mtp_num_layers != self.num_nextn_predict_layers
-            ):
-                raise ValueError(
-                    "mtp_num_layers and num_nextn_predict_layers must be equal when "
-                    f"both are positive, got {self.mtp_num_layers} and "
-                    f"{self.num_nextn_predict_layers}"
-                )
             if (
                 len(self.csa_compress_ratios)
-                != self.num_hidden_layers + mtp_num_layers
+                != self.num_hidden_layers + self.num_nextn_predict_layers
             ):
                 raise ValueError(
                     f"csa_compress_ratios length ({len(self.csa_compress_ratios)}) "
-                    f"must equal num_hidden_layers ({self.num_hidden_layers + mtp_num_layers})."
+                    f"must equal num_hidden_layers "
+                    f"({self.num_hidden_layers + self.num_nextn_predict_layers})."
                 )
             for i, r in enumerate(self.csa_compress_ratios):
                 # Accept python int and numpy integer scalars (a ratios list
@@ -2259,8 +2973,10 @@ class TransformerConfig(ModelParallelConfig):
                         "{'rope', 'yarn'} or None (keep default)."
                     )
             if self.train_indexer_only:
-                loss_coeff = getattr(self, "dsa_indexer_loss_coeff", None)
-                if not loss_coeff or float(loss_coeff) <= 0:
+                loss_coeff = float(
+                    getattr(self, "dsa_indexer_loss_coeff", 0.0) or 0.0
+                )
+                if loss_coeff <= 0:
                     raise ValueError(
                         "train_indexer_only=True requires a positive "
                         f"dsa_indexer_loss_coeff, got {loss_coeff!r}; otherwise the "
@@ -2612,10 +3328,8 @@ class TransformerConfig(ModelParallelConfig):
         if self.separate_mtp_headloss:
             import warnings as _warnings
 
-            # Resolve the effective number of MTP layers, following the same
-            # logic used elsewhere in __post_init__ (see the csa branch above).
-            mtp_num_layers = self.num_nextn_predict_layers
-            mtp_enabled = mtp_num_layers > 0
+            mtp_layers = self.num_nextn_predict_layers
+            mtp_enabled = mtp_layers > 0
             pp_enabled = self.pipeline_model_parallel_size > 1
 
             # 1. separate_mtp_headloss is only meaningful when both MTP and PP
@@ -2624,7 +3338,7 @@ class TransformerConfig(ModelParallelConfig):
                 _warnings.warn(
                     "separate_mtp_headloss=True requires both MTP and pipeline "
                     "parallel to be enabled "
-                    f"(mtp_num_layers={mtp_num_layers}, "
+                    f"(num_nextn_predict_layers={mtp_layers}, "
                     f"pipeline_model_parallel_size={self.pipeline_model_parallel_size}). "
                     "Forcing separate_mtp_headloss=False."
                 )
@@ -2664,14 +3378,14 @@ class TransformerConfig(ModelParallelConfig):
                     0, self.num_empty_layers_add_in_tail - 1
                 )
                 total_layers = (
-                    self.num_hidden_layers + mtp_num_layers + num_empty_layers
+                    self.num_hidden_layers + mtp_layers + num_empty_layers
                 )
                 denom = pp_degree * vpp_degree
                 if total_layers % denom != 0 or total_layers // denom != 1:
                     _warnings.warn(
                         "separate_mtp_headloss=True requires "
                         "(num_hidden_layers + num_mtp_layers + num_empty_layers) "
-                        f"({self.num_hidden_layers} + {mtp_num_layers} + "
+                        f"({self.num_hidden_layers} + {mtp_layers} + "
                         f"{num_empty_layers} = {total_layers}) to be divisible "
                         f"by pp_degree*vpp_degree ({pp_degree}*{vpp_degree} = "
                         f"{denom}) and the quotient to equal 1 (exactly one "

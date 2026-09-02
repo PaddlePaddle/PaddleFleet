@@ -125,6 +125,10 @@ class TestMoELayerInitExpertParallel(unittest.TestCase):
         layer = MoELayer.__new__(MoELayer)
         layer.config = config
         layer.moe_token_dispatcher_type = config.moe_token_dispatcher_type
+        # Derived in MoELayer.__init__; __new__ skips it, so mirror it here.
+        layer.use_intermediate_ep_sharding = (
+            config.moe_token_dispatcher_type in ("allgather", "ringmoe")
+        )
         layer.pg_collection = pg
         layer.moe_group = pg.ep
         layer.expert_model_parallel_size = 4
@@ -148,6 +152,9 @@ class TestMoELayerInitExpertParallel(unittest.TestCase):
         layer = MoELayer.__new__(MoELayer)
         layer.config = config
         layer.moe_token_dispatcher_type = config.moe_token_dispatcher_type
+        layer.use_intermediate_ep_sharding = (
+            config.moe_token_dispatcher_type in ("allgather", "ringmoe")
+        )
         layer.pg_collection = pg
         layer.moe_group = pg.ep
         layer.expert_model_parallel_size = 2
@@ -186,6 +193,7 @@ class TestMoELayerExpertForward(unittest.TestCase):
         layer.config = config
         layer.moe_rank = 0
         layer.num_experts_per_device = 4
+        layer._use_grouped_mlp_expert = False
         layer.experts = []
         for i in range(4):
             expert = MagicMock()
@@ -206,6 +214,7 @@ class TestMoELayerExpertForward(unittest.TestCase):
         layer.num_experts = 4
         layer.moe_rank = 0
         layer.num_experts_per_device = 4
+        layer._use_grouped_mlp_expert = False
         layer.experts = [MagicMock() for _ in range(4)]
 
         dispatched = paddle.randn([0, 64])
@@ -242,6 +251,9 @@ class TestMoELayerSetLayerNumber(unittest.TestCase):
 
     def test_set_layer_number(self):
         layer = MoELayer.__new__(MoELayer)
+        # set_layer_number re-resolves the layer-scoped recompute flags, which
+        # reads config.
+        layer.config = _make_config()
         layer.gate = MagicMock()
         # set_layer_number now colors expert params; EP=1 makes that a no-op.
         layer.expert_model_parallel_size = 1
@@ -253,6 +265,7 @@ class TestMoELayerSetLayerNumber(unittest.TestCase):
 
     def test_set_layer_number_no_set_method(self):
         layer = MoELayer.__new__(MoELayer)
+        layer.config = _make_config()
         layer.gate = MagicMock()
         layer.expert_model_parallel_size = 1
         del layer.gate.set_layer_number
