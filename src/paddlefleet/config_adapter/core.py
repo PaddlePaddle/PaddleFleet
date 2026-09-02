@@ -70,6 +70,13 @@ ADAPTER_CONTROLLED_FIELDS = frozenset(
 )
 
 
+def _yaml_truthy(value):
+    """Loose YAML bool: accepts real bools plus "true"/"yes"/"1" spellings."""
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "on", "1"}
+    return bool(value)
+
+
 class ConfigAdapter:
     """Rewrites one training YAML (and its model_config.json) for a scale."""
 
@@ -240,6 +247,8 @@ class ConfigAdapter:
         )
         if err:
             return False, f"{input_path.name}: {err}"
+
+        self._drop_stale_checkpoint_refs(config, log, dims_before, dims_after)
 
         # Nothing has touched the filesystem up to this point: every rewrite
         # above happened in memory, so a validation failure leaves both source
@@ -506,9 +515,19 @@ class ConfigAdapter:
                 f"GBS 由框架按实际卡数反推"
             )
         else:
+            # The trainer asserts GBS == micro_bs * acc * dataset_world_size,
+            # so batch fields must scale with the data-parallel width, not
+            # the card count (the two differ whenever EP/PP/CP change).
+            orig_units = self._dataset_ways(orig_cards, dims_before)
+            new_units = self._dataset_ways(self.target_cards, dims_after)
+            if orig_units and new_units:
+                unit = "数据并行路数"
+            else:
+                orig_units, new_units = orig_cards, self.target_cards
+                unit = "卡数"
             strategy = BATCH_STRATEGIES[self.options.batch_strategy]
             batch_map, reason, err = strategy(
-                gbs, grad_accum, orig_cards, self.target_cards
+                gbs, grad_accum, orig_units, new_units, unit=unit
             )
             if err:
                 return err
@@ -551,6 +570,37 @@ class ConfigAdapter:
                 "数据并行度由 sharding 承担",
             )
 
+        # muon_sharding_optimizer asserts that comm_group_call_opt is only
+        # enabled when EP is a multiple of gpus_per_node, moe_sharding > 1
+        # and TP == 1, and PaddleFormers' TrainingArguments additionally
+        # asserts optim == muon whenever the switch is on; a shrunk EP (or a
+        # non-Muon optimizer) easily violates that, so drop the switch
+        # instead of shipping a config that dies on these asserts at startup.
+        if _yaml_truthy(config.get("sharding_comm_group_call_opt")):
+            moe_sharding = self.target_cards // (pp * ep)
+            optim = str(config.get("optim") or "").strip().lower()
+            group_call_ok = (
+                optim == "muon"
+                and self.cards_per_node > 1
+                and ep % self.cards_per_node == 0
+                and moe_sharding > 1
+                and tp == 1
+            )
+            if not group_call_ok:
+                log.record(
+                    "yaml",
+                    self.yaml_writer.apply_config_map(
+                        config,
+                        {"sharding_comm_group_call_opt": False},
+                        protected=self.yaml_overrides,
+                    ),
+                    f"框架断言 comm_group_call_opt 只能在优化器为 muon、"
+                    f"EP 是每节点卡数的整数倍、moe_sharding>1 且 TP=1 时"
+                    f"开启；当前 optim={optim or '未设置'}、EP={ep}、每节点 "
+                    f"{self.cards_per_node} 卡、moe_sharding={moe_sharding}、"
+                    f"TP={tp} 不满足，关闭该优化以免启动即断言失败",
+                )
+
         # C4 was validated above, so both divisions are exact.
         switches = plan_sharding_shrink_switches(
             config,
@@ -568,6 +618,47 @@ class ConfigAdapter:
                 reason,
             )
         return None
+
+    def _drop_stale_checkpoint_refs(self, config, log, dims_before, dims_after):
+        """Drop checkpoint references once the model structure has shrunk.
+
+        Shrinking EP rescales ``n_routed_experts`` and shrinking PP rescales
+        ``num_hidden_layers``, so a checkpoint produced by the full-scale run
+        no longer matches the adapted model.  Loading it anyway yields a
+        silently corrupted model: the forward pass still runs (loss even looks
+        plausible), but gradients blow up to NaN on the very first step.
+        Dropping the reference falls back to random init, which is the only
+        well-defined starting point for a shrunk smoke test.
+        """
+        tp_b, pp_b, ep_b, cp_b, sep_b = dims_before
+        tp_a, pp_a, ep_a, cp_a, sep_a = dims_after
+        if ep_a >= ep_b and pp_a >= pp_b:
+            return
+        shrunk = []
+        if ep_a < ep_b:
+            shrunk.append(f"EP {ep_b}->{ep_a}（专家数等比缩减）")
+        if pp_a < pp_b:
+            shrunk.append(f"PP {pp_b}->{pp_a}（层数等比缩减）")
+        reason = (
+            f"{'、'.join(shrunk)}后模型结构与原 checkpoint 不再匹配，"
+            f"加载会得到权重错乱的模型（首步梯度即 NaN）；"
+            f"摘除加载入口，改用随机初始化"
+        )
+        for key in ("resume_from_checkpoint",):
+            if key in config and key not in self.yaml_overrides:
+                log.record_removed("yaml", key, config.pop(key), reason)
+        if _yaml_truthy(config.get("load_from_hf")) and (
+            "load_from_hf" not in self.yaml_overrides
+        ):
+            log.record(
+                "yaml",
+                self.yaml_writer.apply_config_map(
+                    config,
+                    {"load_from_hf": False},
+                    protected=self.yaml_overrides,
+                ),
+                reason,
+            )
 
     @staticmethod
     def _dataset_ways(cards, dims):
