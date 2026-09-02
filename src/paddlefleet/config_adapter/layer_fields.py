@@ -49,7 +49,13 @@ from collections import namedtuple
 LayerField = namedtuple("LayerField", ["aliases", "includes_mtp", "families"])
 
 LAYER_FIELDS = (
-    LayerField(("csa_compress_ratios",), includes_mtp=True, families=True),
+    # "compress_ratios" is the HF-style spelling: DeepseekV4ModelProvider
+    # transform_rules map it to csa_compress_ratios verbatim.
+    LayerField(
+        ("csa_compress_ratios", "compress_ratios"),
+        includes_mtp=True,
+        families=True,
+    ),
     LayerField(("window_attn_skip_freq",), includes_mtp=True, families=False),
     LayerField(("layer_types",), includes_mtp=False, families=False),
     LayerField(("moe_layer_freq",), includes_mtp=False, families=False),

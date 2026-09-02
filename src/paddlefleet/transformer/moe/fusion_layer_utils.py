@@ -980,15 +980,25 @@ class MlpNode:
         if isinstance(gemm_node, list):
             gemm_node = gemm_node[0] if gemm_node else None
         use_bf16_wgrad = getattr(gemm_node, "use_bf16_gemm_weight_grad", False)
-        # Mirror the actual swiglu-bwd op dispatch (see bwd_down_input_fp8):
-        #   clamp_value>0          -> fused_swiglu_weighted_clamp_bwd (out-of-place,
-        #                             do1 = empty_like(o1), a separate buffer)
-        #   USE_INPLACE_SWIGLU_BWD -> _fused_swiglu_probs_bwd inplace (do1 reuses o1)
-        #   otherwise              -> fused_swiglu_weighted_bwd (out-of-place)
-        # so clamp forces the out-of-place peak even when USE_INPLACE_SWIGLU_BWD.
+        # Mirror the actual bwd op dispatch (see bwd_down_input_fp8):
+        #   clamp_value>0  -> fused_swiglu_weighted_clamp_bwd (out-of-place,
+        #                     do1 = empty_like(o1), a separate buffer)
+        #   "situ"         -> situ_glu_scale_backward (out-of-place; do1 and
+        #                     o2_s are always freshly allocated)
+        #   USE_INPLACE... -> _fused_swiglu_probs_bwd inplace (do1 reuses o1)
+        #   otherwise      -> fused_swiglu_weighted_bwd (out-of-place)
+        # so clamp and SiTU both force the out-of-place peak even when
+        # USE_INPLACE_SWIGLU_BWD. activation_type comes off this node (always
+        # set by __init__ and forwarded unchanged to every child), not off
+        # gemm_node, whose fallback would have to answer "swiglu" and thereby
+        # underestimate the peak.
         clamp_value = getattr(gemm_node, "clamp_value", None)
         clamp_active = clamp_value is not None and clamp_value > 0
-        used_inplace = USE_INPLACE_SWIGLU_BWD and not clamp_active
+        used_inplace = (
+            USE_INPLACE_SWIGLU_BWD
+            and not clamp_active
+            and self.activation_type != "situ"
+        )
 
         if use_bf16_wgrad:
             if used_inplace:
@@ -3401,7 +3411,19 @@ def run_sonic_moe(
     fp8_combine_grad_handle=None,
     fp8_config=None,
     release_fp8_weights=False,
+    activation_type="swiglu",
 ):
+    # This is the in-tree fallback used only when paddlefleet_ops.sonicmoe
+    # cannot be imported; it predates the SiTU work and has no
+    # encoded-activation plumbing, so refuse rather than silently running
+    # SwiGLU numerics.
+    if activation_type != "swiglu":
+        raise NotImplementedError(
+            "paddlefleet.transformer.moe.fusion_layer_utils.run_sonic_moe is a "
+            "SwiGLU-only fallback and got activation_type="
+            f"{activation_type!r}; install a paddlefleet_ops build that exports "
+            "sonicmoe.run_sonic_moe."
+        )
     T = hidden_states.shape[0]
     stream_id = paddle.device.current_stream()
     topk_indices_i32 = (

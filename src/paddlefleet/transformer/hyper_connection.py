@@ -1107,8 +1107,9 @@ class HyperConnectionContractLayer(FleetLayer):
                     )
                 )
             else:
-                # Non-magic_send: backbone output is [backbone_chunk | mtp_chunks...] concatenated.
-                # Split, contract main backbone, slice MTP chunks.
+                # Non-magic_send: backbone output is [backbone_chunk | mtp_chunks...]
+                # concatenated along the seq axis; splitting yields
+                # [main(4-stream) | mtp_1(4-stream) ... mtp_k(4-stream)].
                 chunks = paddle.split(hidden_states, self.num_mtp + 1)
 
                 # Main backbone: learned contraction [s, b, n*h] -> [s, b, h]
@@ -1121,13 +1122,22 @@ class HyperConnectionContractLayer(FleetLayer):
                     self.config.rms_norm_eps,
                 )
 
-                # Expand to match expected layout [[s,b,h]...] for downstream MTP slicing
-                mtp_contracted = [
+                # MTP chunks stay multi-stream: MTP transformer blocks are the
+                # mHC blocks shared with the backbone last layer
+                # (mtp_shared_last_layer), which consume [s, b, n*h]. Hand the
+                # full multi-stream backbone output over through
+                # mhc_multistream (same K+1-slot layout as the magic-send /
+                # separate_mtp_input branch: MTP layers split it into one
+                # [s, b, n*h] slot per depth); the single-stream carrier below
+                # only acts as the per-depth embedding carrier that MTP layers
+                # read as decoder_input and later overwrite with their output.
+                dict_args["mhc_multistream"] = hidden_states
+                mtp_single = [
                     c[..., : c.shape[-1] // self.n] for c in chunks[1:]
                 ]
 
                 dict_args["hidden_states"] = paddle.concat(
-                    [main_contracted, *mtp_contracted]
+                    [main_contracted, *mtp_single]
                 )
 
         else:
