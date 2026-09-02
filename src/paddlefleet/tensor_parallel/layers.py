@@ -954,7 +954,10 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                     ),
                 )
             else:
-                grad_input, _ = general_gemm(grad_output, weight.t())
+                if ctx.use_accuracy_compatible:
+                    grad_input, _ = general_gemm(grad_output, weight.t().contiguous())
+                else:
+                    grad_input, _ = general_gemm(grad_output, weight.t())
         else:
             grad_input = None
 
