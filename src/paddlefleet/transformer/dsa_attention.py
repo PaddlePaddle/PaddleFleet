@@ -1530,6 +1530,23 @@ def source_dsa_compute_layer(
     return layer_number - ((layer_number - skip_topk_offset) % topk_freq)
 
 
+def decoder_dsa_logical_layer(
+    config, layer_number: int, is_mtp_layer: bool = False
+) -> int:
+    """Map a GPT physical layer id onto the decoder-only ``indexer_types`` index."""
+    if is_mtp_layer:
+        return layer_number
+    head_offset = getattr(config, "num_empty_layers_add_in_head", 0) or 0
+    logical_index = layer_number - head_offset
+    num_hidden_layers = getattr(config, "num_hidden_layers", 0) or 0
+    if num_hidden_layers and not 0 <= logical_index < num_hidden_layers:
+        raise IndexError(
+            f"decoder layer_number {layer_number} resolves to logical index "
+            f"{logical_index}, outside [0, {num_hidden_layers})"
+        )
+    return logical_index
+
+
 def decoder_dsa_topk_producer_layer(config, layer_number: int) -> int:
     """Return the 0-based decoder layer that actually computes this layer's top-k."""
     index_topk_freq = getattr(config, "dsa_indexer_topk_freq", None) or 1
@@ -1626,9 +1643,10 @@ def resolve_dsa_indexer_layout(
     Official GLM-5.2 fields: ``indexer_types``, ``index_topk_freq``,
     ``index_skip_topk_offset``, ``index_share_for_mtp_iteration``.
     ``indexer_types`` is decoder-only (length ``num_hidden_layers``).
-    GPT layer specs pass 0-based ``layer_number`` (decoder index, or MTP
-    depth). Periodic skip helpers stay 1-indexed, matching the official
-    ``index_skip_topk_offset`` numbering.
+    GPT layer specs pass a physical ``layer_number`` that already includes
+    ``num_empty_layers_add_in_head``. Decoder layout lookup subtracts that
+    offset so ``indexer_types`` stays decoder-only. Periodic skip helpers
+    stay 1-indexed, matching the official ``index_skip_topk_offset`` numbering.
 
     Holder keys are the 0-based producer layer. Shared consumers, including
     MTP when ``index_share_for_mtp_iteration`` is set, look up that producer
@@ -1638,6 +1656,8 @@ def resolve_dsa_indexer_layout(
         getattr(config, "dsa_index_share_for_mtp_iteration", False)
     )
     num_hidden_layers = getattr(config, "num_hidden_layers", 0) or 0
+    if not is_mtp_layer:
+        layer_number = decoder_dsa_logical_layer(config, layer_number)
     if is_mtp_layer:
         # Official GLM-5.2 checkpoints still ship a full MTP indexer.
         # Training honours share-for-MTP by skipping that indexer and
@@ -1775,11 +1795,15 @@ class DSAttention(FleetLayer):
     def _get_index_share_topk_holder(
         self, attention_mask: Tensor | None
     ) -> dict:
-        carrier = attention_mask if attention_mask is not None else self.config
-        holder = getattr(carrier, self._HOLDER_ATTR, None)
+        # Shared top-k must survive attention_mask.clone() in selective
+        # core-attn recompute. Keep the holder on the process-local config.
+        # Pipeline stages that split a producer from its consumer cannot
+        # share this Python dict; those layouts fail closed in forward.
+        del attention_mask
+        holder = getattr(self.config, self._HOLDER_ATTR, None)
         if holder is None:
             holder = {}
-            setattr(carrier, self._HOLDER_ATTR, holder)
+            setattr(self.config, self._HOLDER_ATTR, holder)
         return holder
 
     def forward(
