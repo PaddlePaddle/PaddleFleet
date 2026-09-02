@@ -286,9 +286,8 @@ class TestGlm52OfficialDsaHfFields(TestCase):
         attn.config = TransformerConfig(
             hidden_size=64, num_attention_heads=2, num_hidden_layers=4
         )
-        attn._HOLDER_ATTR = "_dsa_index_share_topk"
         holder = attn._get_index_share_topk_holder(None)
         self.assertEqual(holder, {})
-        self.assertIs(getattr(attn.config, attn._HOLDER_ATTR), holder)
+        self.assertIs(getattr(attn.config, DSAttention._HOLDER_ATTR), holder)
         holder[2] = "indices"
         self.assertEqual(attn._get_index_share_topk_holder(None)[2], "indices")
