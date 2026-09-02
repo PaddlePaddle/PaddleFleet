@@ -375,35 +375,158 @@ class TestGlm52OfficialDsaHfFields(TestCase):
             attn._get_index_share_topk_holder(cloned_mask)[2], "indices"
         )
 
-    def test_shared_consumer_reads_producer_holder_key(self):
+    def _bare_dsa_attention(
+        self,
+        config,
+        *,
+        layer_number,
+        skip_topk,
+        index_share,
+        source_layer,
+    ):
         from paddlefleet.transformer.dsa_attention import DSAttention
 
+        attn = DSAttention.__new__(DSAttention)
+        attn.config = config
+        attn.layer_number = layer_number
+        attn.skip_topk = skip_topk
+        attn.index_share = index_share
+        attn.source_layer = source_layer
+        return attn
+
+    def test_shared_consumer_reads_producer_holder_key(self):
         config = TransformerConfig(
             hidden_size=64,
             num_attention_heads=2,
             num_hidden_layers=4,
             dsa_indexer_topk_freq=4,
         )
-        producer = DSAttention.__new__(DSAttention)
-        producer.config = config
-        producer.layer_number = 0
-        producer.skip_topk = False
-        producer.index_share = True
-        producer.source_layer = 0
-        consumer = DSAttention.__new__(DSAttention)
-        consumer.config = config
-        consumer.layer_number = 1
-        consumer.skip_topk = True
-        consumer.index_share = True
-        consumer.source_layer = 0
+        producer = self._bare_dsa_attention(
+            config,
+            layer_number=0,
+            skip_topk=False,
+            index_share=True,
+            source_layer=0,
+        )
+        consumer = self._bare_dsa_attention(
+            config,
+            layer_number=1,
+            skip_topk=True,
+            index_share=True,
+            source_layer=0,
+        )
         holder = producer._get_index_share_topk_holder(object())
-        holder[producer.layer_number] = "topk"
+        producer._publish_index_share_topk(holder, "topk")
         self.assertEqual(
-            consumer._get_index_share_topk_holder(object())[
-                consumer.source_layer
-            ],
+            consumer._lookup_index_share_topk(
+                consumer._get_index_share_topk_holder(object())
+            ),
             "topk",
         )
+
+    def test_head_empty_producer_publishes_logical_source_layer_key(self):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_empty_layers_add_in_head=2,
+            dsa_indexer_types=["full", "shared", "full", "shared"],
+        )
+        producer_layout = resolve_dsa_indexer_layout(config, 2)
+        consumer_layout = resolve_dsa_indexer_layout(config, 3)
+        self.assertEqual(producer_layout[3], 0)
+        self.assertEqual(consumer_layout[3], 0)
+        producer = self._bare_dsa_attention(
+            config,
+            layer_number=2,
+            skip_topk=producer_layout[1],
+            index_share=producer_layout[2],
+            source_layer=producer_layout[3],
+        )
+        consumer = self._bare_dsa_attention(
+            config,
+            layer_number=3,
+            skip_topk=consumer_layout[1],
+            index_share=consumer_layout[2],
+            source_layer=consumer_layout[3],
+        )
+        holder = producer._get_index_share_topk_holder(None)
+        producer._publish_index_share_topk(holder, "logical-topk")
+        self.assertIn(consumer.source_layer, holder)
+        self.assertNotIn(producer.layer_number, holder)
+        self.assertEqual(
+            consumer._lookup_index_share_topk(holder), "logical-topk"
+        )
+
+    def test_official_last_full_producer_key_matches_decoder_and_mtp(
+        self,
+    ):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_nextn_predict_layers=1,
+            dsa_indexer_types=["full", "full", "full", "shared"],
+            dsa_index_share_for_mtp_iteration=True,
+        )
+        producer_layout = resolve_dsa_indexer_layout(config, 2)
+        decoder_layout = resolve_dsa_indexer_layout(config, 3)
+        mtp_layout = resolve_dsa_indexer_layout(config, 0, is_mtp_layer=True)
+        self.assertEqual(producer_layout[3], 2)
+        self.assertEqual(decoder_layout[3], 2)
+        self.assertEqual(mtp_layout[3], 2)
+        producer = self._bare_dsa_attention(
+            config,
+            layer_number=2,
+            skip_topk=producer_layout[1],
+            index_share=producer_layout[2],
+            source_layer=producer_layout[3],
+        )
+        last_decoder = self._bare_dsa_attention(
+            config,
+            layer_number=3,
+            skip_topk=decoder_layout[1],
+            index_share=decoder_layout[2],
+            source_layer=decoder_layout[3],
+        )
+        mtp = self._bare_dsa_attention(
+            config,
+            layer_number=0,
+            skip_topk=mtp_layout[1],
+            index_share=mtp_layout[2],
+            source_layer=mtp_layout[3],
+        )
+        holder = producer._get_index_share_topk_holder(None)
+        producer._publish_index_share_topk(holder, "official-topk")
+        self.assertEqual(
+            last_decoder._lookup_index_share_topk(holder), "official-topk"
+        )
+        self.assertEqual(mtp._lookup_index_share_topk(holder), "official-topk")
+
+    def test_skip_consumer_raises_when_source_key_is_missing(self):
+        config = TransformerConfig(
+            hidden_size=64, num_attention_heads=2, num_hidden_layers=4
+        )
+        consumer = self._bare_dsa_attention(
+            config,
+            layer_number=3,
+            skip_topk=True,
+            index_share=True,
+            source_layer=2,
+        )
+        holder = consumer._get_index_share_topk_holder(None)
+        with self.assertRaisesRegex(RuntimeError, "source layer 2"):
+            consumer._lookup_index_share_topk(holder)
+        with self.assertRaisesRegex(RuntimeError, "source layer 2"):
+            consumer._lookup_index_share_topk(None)
 
     def test_source_layer_at_or_before_skip_offset_is_itself(self):
         from paddlefleet.transformer.dsa_attention import (

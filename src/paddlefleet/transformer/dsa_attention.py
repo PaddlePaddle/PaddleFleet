@@ -1698,6 +1698,23 @@ class DSAttention(FleetLayer):
             setattr(self.config, self._HOLDER_ATTR, holder)
         return holder
 
+    def _publish_index_share_topk(
+        self, topk_holder: dict, topk_indices
+    ) -> None:
+        # Consumers look up source_layer from resolve_dsa_indexer_layout
+        # (logical producer id after num_empty_layers_add_in_head).
+        # Publishing the physical GPT layer_number would miss that lookup.
+        topk_holder[self.source_layer] = topk_indices
+
+    def _lookup_index_share_topk(self, topk_holder: dict | None):
+        if topk_holder is None or self.source_layer not in topk_holder:
+            raise RuntimeError(
+                "DSA index-share skip layer "
+                f"{self.layer_number} needs top-k indices from source layer "
+                f"{self.source_layer}, but the source layer did not run first."
+            )
+        return topk_holder[self.source_layer]
+
     def forward(
         self,
         query: Tensor,
@@ -1802,13 +1819,7 @@ class DSAttention(FleetLayer):
             else None
         )
         if self.skip_topk:
-            if topk_holder is None or self.source_layer not in topk_holder:
-                raise RuntimeError(
-                    "DSA index-share skip layer "
-                    f"{self.layer_number} needs top-k indices from source layer "
-                    f"{self.source_layer}, but the source layer did not run first."
-                )
-            topk_indices = topk_holder[self.source_layer]
+            topk_indices = self._lookup_index_share_topk(topk_holder)
             indexer_loss = None
         # Training with indexer loss (coeff is normalized to 0.0 when
         # unset/None, so ``> 0`` is the single "enabled" check)
@@ -1840,7 +1851,7 @@ class DSAttention(FleetLayer):
             indexer_loss = None
 
         if self.index_share and not self.skip_topk:
-            topk_holder[self.layer_number] = topk_indices
+            self._publish_index_share_topk(topk_holder, topk_indices)
 
         # Build sparse mask
         index_mask = paddle.full(
