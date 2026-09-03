@@ -19,9 +19,17 @@ import os
 from itertools import chain
 
 import paddle
-from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
-    RecomputeStore,
-)
+
+try:
+    from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
+        RecomputeStore,
+    )
+except ImportError:
+
+    class RecomputeStore:
+        """No-op stand-in when Paddle has not shipped RecomputeStore yet."""
+
+        enabled = False
 
 logger = logging.getLogger(__name__)
 
