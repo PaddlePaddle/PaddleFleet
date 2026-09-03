@@ -47,6 +47,7 @@ from paddlefleet.models.gpt.lm_head import (
 from paddlefleet.models.gpt.moe_layer_specs import (
     get_moe_layer_spec_for_backend,
 )
+from paddlefleet.recompute_utils import effective_mtp_layers
 from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
@@ -119,12 +120,7 @@ LNImpl = WrappedPaddleNorm
 
 
 def _get_effective_mtp_layers(config: TransformerConfig) -> int:
-    nextn_num_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
-    if not isinstance(nextn_num_layers, int) or isinstance(
-        nextn_num_layers, bool
-    ):
-        nextn_num_layers = 0
-    return nextn_num_layers
+    return effective_mtp_layers(config)
 
 
 def _get_dsv4_hybrid_attention_layer_type(

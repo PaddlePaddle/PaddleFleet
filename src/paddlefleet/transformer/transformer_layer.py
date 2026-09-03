@@ -360,7 +360,12 @@ class TransformerLayer(nn.Layer):
                 self.layer_number, self.config
             )
         elif self.config.recompute_granularity == "selective":
-            if module_needs_recompute("norm", self.layer_number, self.config):
+            if module_needs_recompute(
+                "norm",
+                self.layer_number,
+                self.config,
+                is_mtp_layer=self.is_mtp_layer,
+            ):
                 # Both norms share the "norm" entry; each is skipped when it has
                 # been specialised away to an IdentityOp.
                 self.recompute_input_layernorm = not isinstance(
@@ -370,7 +375,10 @@ class TransformerLayer(nn.Layer):
                     self.post_attention_layernorm, IdentityOp
                 )
             self.recompute_mlp = module_needs_recompute(
-                "mlp", self.layer_number, self.config
+                "mlp",
+                self.layer_number,
+                self.config,
+                is_mtp_layer=self.is_mtp_layer,
             )
 
         # [Layer 10: Block Attention Residuals] Optional
@@ -1667,7 +1675,12 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         # mHC forward recompute config
         self.recompute_mhc_forward = (
             config.recompute_granularity == "selective"
-            and module_needs_recompute("mhc_forward", self.layer_number, config)
+            and module_needs_recompute(
+                "mhc_forward",
+                self.layer_number,
+                config,
+                is_mtp_layer=self.is_mtp_layer,
+            )
         )
 
     def _fused_h_res_h_post_bda(
