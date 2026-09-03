@@ -413,6 +413,9 @@ class HyperConnectionModule(nn.Layer):
 
         # Choose implementation: fused kernels vs native reference.
         if config.use_fused_mhc:
+            assert not config.use_fused_mhc, (
+                "for fuse branch, hres transpose is not support for fused_h_post_bda now"
+            )
             from paddlefleet.fusions.fused_mhc_kernels import (
                 fused_compute_h,
                 fused_h_aggregate,
