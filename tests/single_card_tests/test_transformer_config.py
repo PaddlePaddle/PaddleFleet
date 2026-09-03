@@ -538,5 +538,64 @@ class TestYamlArguments(unittest.TestCase):
         self.assertEqual(config.deepep_buffer_configs, {"num_sms": 24})
 
 
+class TestFlashAttnFa3Backend(unittest.TestCase):
+    """``flash_attn_fa3_backend`` and its hand-off to the ops facade.
+
+    The facade resolves the choice once per process, so every test drops it again
+    to avoid leaking a backend -- or a conflict -- into the rest of the suite.
+    """
+
+    def setUp(self):
+        from paddlefleet_ops import flash_mask_facade
+
+        self.facade = flash_mask_facade
+        self.addCleanup(flash_mask_facade._reset_fa3_backend)
+        flash_mask_facade._reset_fa3_backend()
+
+    def test_default_selects_cutedsl(self):
+        config = TransformerConfig()
+
+        self.assertEqual(config.flash_attn_fa3_backend, "cutedsl")
+        self.assertTrue(self.facade.uses_cutedsl_backend(3))
+
+    def test_cpp_backend_is_pushed_down_to_facade(self):
+        TransformerConfig(flash_attn_fa3_backend="cpp")
+
+        # FA3 follows the switch; FA4 stays cutedsl-only and FA2 never uses it.
+        self.assertFalse(self.facade.uses_cutedsl_backend(3))
+        self.assertTrue(self.facade.uses_cutedsl_backend(4))
+        self.assertFalse(self.facade.uses_cutedsl_backend(2))
+
+    def test_repeating_the_same_backend_is_accepted(self):
+        TransformerConfig(flash_attn_fa3_backend="cpp")
+        TransformerConfig(flash_attn_fa3_backend="cpp")
+
+        self.assertFalse(self.facade.uses_cutedsl_backend(3))
+
+    def test_second_config_with_a_different_backend_raises(self):
+        TransformerConfig(flash_attn_fa3_backend="cpp")
+
+        with self.assertRaisesRegex(
+            ValueError, r"cannot change within a process"
+        ) as context:
+            TransformerConfig()
+        message = str(context.exception)
+        self.assertIn("'cpp'", message)
+        self.assertIn("'cutedsl'", message)
+        # The first choice stays in force rather than half-applying the second.
+        self.assertFalse(self.facade.uses_cutedsl_backend(3))
+
+    def test_unknown_backend_raises_value_error(self):
+        with self.assertRaisesRegex(
+            ValueError, r"flash_attn_fa3_backend must be one of"
+        ) as context:
+            TransformerConfig(flash_attn_fa3_backend="cute")
+        self.assertIn("'cute'", str(context.exception))
+
+    def test_set_fa3_backend_rejects_unknown_value(self):
+        with self.assertRaisesRegex(ValueError, r"unknown FA3 backend 'cute'"):
+            self.facade.set_fa3_backend("cute")
+
+
 if __name__ == "__main__":
     unittest.main()

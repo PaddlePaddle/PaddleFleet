@@ -28,7 +28,8 @@ Coverage map (see validation_reports/A7_recompute_mtp_ckpt.md for the analysis):
      re-derived bit-identically on the recompute forward (a mismatch would
      silently differentiate a different sparsity pattern).
   2. Refined recompute guard: ``RefinedRcomputeFlashMaskAttention`` raises for a
-     learnable sink unless ``fa_version==4``; production dims are not fa4.
+     learnable sink unless the cute backend serves the picked fa version; on
+     SM90 that means FA3 with ``FLASHMASK_FA3_USE_CUTEDSL`` on.
   3. MTP tracker slot arithmetic: MTP ``layer_number==0`` -> ``values[-1]`` is
      only accidentally correct for a 44-entry tracker; two MTP layers collide.
   4. Checkpoint key-set compat: MHA <-> MQA byte-identical; mqa_dsa adds the
@@ -69,6 +70,7 @@ from .hybrid_mla_utils import (
     _rel,
     _row_end,
     _try_use_cuda_device,
+    cpp_flashmask_backend,
 )
 
 _add_repo_root_to_sys_path()
@@ -79,9 +81,11 @@ _add_repo_root_to_sys_path()
 # ===========================================================================
 class TestRefinedRecomputeSinkGuard(unittest.TestCase):
     """``RefinedRcomputeFlashMaskAttention.forward`` refuses a learnable sink
-    unless the fa cute backend (version 4) is active. The guard sits at the top
-    of ``forward`` (flash_attn.py:665-674), before any kernel call, so it can be
-    exercised on tiny CPU tensors by forcing ``get_fa_version``'s return.
+    unless the cute backend is active. The guard sits at the top of ``forward``
+    (flash_attn.py:658-667), before any kernel call, so it can be exercised on
+    tiny CPU tensors by forcing ``get_fa_version``'s return. FA3 only misses the
+    sink while the hotfix switch routes it to the cpp kernel -- on cute it is
+    served, so version 3 is checked inside ``cpp_flashmask_backend()``.
     """
 
     def _forward_module(self):
@@ -91,7 +95,7 @@ class TestRefinedRecomputeSinkGuard(unittest.TestCase):
 
         return RefinedRcomputeFlashMaskAttention()
 
-    def test_guard_raises_for_non_fa4_versions(self):
+    def test_guard_raises_for_non_cute_versions(self):
         import paddlefleet.refined_recompute.flash_attn as fa_mod
 
         mod = self._forward_module()
@@ -101,11 +105,15 @@ class TestRefinedRecomputeSinkGuard(unittest.TestCase):
         sink = paddle.zeros([2])
         orig = fa_mod.get_fa_version
         try:
-            for version in (2, 3):
-                fa_mod.get_fa_version = lambda *a, **k_: version
-                with self.assertRaises(NotImplementedError) as ctx:
-                    mod.forward(q, k, v, None, learnable_sink=sink)
-                self.assertIn("fa_version==4", str(ctx.exception))
+            with cpp_flashmask_backend():
+                for version in (2, 3):
+                    fa_mod.get_fa_version = lambda *a, **k_: version
+                    with self.assertRaises(NotImplementedError) as ctx:
+                        mod.forward(q, k, v, None, learnable_sink=sink)
+                    self.assertIn(
+                        "learnable_sink is only supported on the cute backend",
+                        str(ctx.exception),
+                    )
         finally:
             fa_mod.get_fa_version = orig
 
@@ -135,25 +143,42 @@ class TestRefinedRecomputeSinkGuard(unittest.TestCase):
         finally:
             fa_mod.get_fa_version = orig
 
-    def test_production_dims_are_not_fa4(self):
-        """Under the default ``FLAGS_flash_attn_version`` the MHA sink path
-        (q_head_dim 256 or MLA 192, v_head_dim 128) resolves to a non-4 version,
-        so an ``mha`` + sink + refined-recompute run *would* raise. Skipped if
-        the facade cannot be imported/called on this box."""
+    def test_production_dims_sink_support_follows_the_backend(self):
+        """Under the production ``FLAGS_flash_attn_version`` the sink is served
+        exactly when the picked version lands on the cute backend.
+
+        On SM90 production picks FA3 and, with ``FLASHMASK_FA3_USE_CUTEDSL`` on
+        (the default), cute serves it -- so the MLA pair (192, 128) does get the
+        sink. (256, 128) is not in the cutedsl head-dim whitelist (256 requires
+        ``head_dim_v == 256``), so it degrades to FA2 and the guard fires.
+        Turning the hotfix switch off routes FA3 to Paddle's kernel, where the
+        sink does not exist at any head dim."""
         try:
-            from paddlefleet_ops.flash_mask_facade import get_fa_version
+            from paddlefleet_ops.flash_mask_facade import (
+                get_fa_version,
+                uses_cutedsl_backend,
+            )
         except Exception as exc:  # pragma: no cover - env dependent
             self.skipTest(f"flash_mask_facade unavailable: {exc}")
-        got = {}
-        for qd in (256, 192):
+        production = _production_fa_version()
+        if production == 2:
+            self.skipTest("FA2-only box: no cute backend to dispatch to")
+
+        def _cute(qd):
             try:
-                got[qd] = int(get_fa_version(qd, 128, None))
+                return uses_cutedsl_backend(get_fa_version(qd, 128, None))
             except Exception as exc:  # pragma: no cover
                 self.skipTest(f"get_fa_version({qd},128,None) failed: {exc}")
-        for qd, ver in got.items():
-            self.assertNotEqual(
-                ver, 4, f"q_head_dim {qd} unexpectedly resolved to fa_version 4"
-            )
+
+        with _flash_attn_version(production):
+            self.assertTrue(_cute(192), "(192, 128) should stay on cute")
+            self.assertFalse(_cute(256), "(256, 128) should degrade to FA2")
+            with cpp_flashmask_backend():
+                for qd in (192, 256):
+                    self.assertFalse(
+                        _cute(qd),
+                        f"({qd}, 128) must leave cute once the switch is off",
+                    )
 
 
 # ===========================================================================
@@ -622,9 +647,9 @@ class TestRecomputeEquivalence(unittest.TestCase):
         )
 
         # Pinned per call site rather than per module: the full-causal phase has
-        # exactly one backend and ``_assert_dense_fa4`` raises otherwise, but
-        # ``test_production_dims_are_not_fa4`` in this same file asserts on the
-        # *unpinned* resolution, so a module-wide pin would falsify it.
+        # exactly one backend and ``_assert_dense_fa4`` raises otherwise, while
+        # ``test_production_dims_sink_support_follows_the_backend`` pins the
+        # production version itself, so a module-wide pin would fight it.
         with _flash_attn_version(4):
             _CAPTURED.clear()
             out_off, g_off = self._run(

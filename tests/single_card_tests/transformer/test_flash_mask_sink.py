@@ -28,24 +28,42 @@ Covers PR "Support FA4 sink." (ab8c450) on the non-CP paths:
 
 import math
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 import paddle
-from paddlefleet_ops import is_flash_mask_available
+from paddlefleet_ops import flash_mask_facade, is_flash_mask_available
 
-# Force FA4 (cute) backend for the whole module: sink only exists there.
-paddle.set_flags({"FLAGS_flash_attn_version": 4})
+_FA_VERSION_KEY = "FLAGS_flash_attn_version"
+_SAVED_FA_VERSION = None
+
+
+def setUpModule():
+    """Force the FA4 (cute) backend for this module: sink only exists there.
+
+    ``FLAGS_flash_attn_version`` is process-global, so pinning it at import time
+    would leak into every other test file collected in the same process (a
+    ``get_fa_version`` there would see 4 no matter what that file expects).
+    """
+    global _SAVED_FA_VERSION
+    _SAVED_FA_VERSION = paddle.get_flags([_FA_VERSION_KEY])[_FA_VERSION_KEY]
+    paddle.set_flags({_FA_VERSION_KEY: 4})
+
+
+def tearDownModule():
+    """Hand the process-global flag back to whatever it was."""
+    if _SAVED_FA_VERSION is not None:
+        paddle.set_flags({_FA_VERSION_KEY: _SAVED_FA_VERSION})
+
 
 DTYPE = paddle.bfloat16
 SEED = 2026
 
-# FA4 attention-sink lives only in the cute backend, which is built solely for
-# compute capability >= 10 (sm100/Blackwell). Elsewhere the cute kernels are
-# absent and the facade falls back to a sink-less backend, so skip these tests.
+# FA4 attention-sink lives only in the cute backend, which paddlefleet_ops builds
+# for compute capability >= 9 (Hopper and Blackwell). Elsewhere the cute kernels
+# are absent, dispatch degrades to a sink-less backend, so skip these tests.
 _SINK_AVAILABLE = is_flash_mask_available()
-_SKIP_REASON = (
-    "FA4 attention-sink requires the cute backend (sm100, capability >= 10)"
-)
+_SKIP_REASON = "FA4 attention-sink requires the cute backend (capability >= 9)"
 
 
 def _startend_row_indices(batch_size, seq_len, causal):
@@ -693,8 +711,11 @@ class TestRefinedRecomputeFlashMaskSink(unittest.TestCase):
         self._run(causal=True, use_sink=True, sink_trainable=False)
 
     def test_rr_non_fa4_sink_raises(self):
-        # Sink is only supported on the fa_version==4 cute backend; forcing v3
-        # must make the rr entry point reject a non-None sink.
+        # Sink lives in the cute kernels only, and on SM90 those serve FA3 too,
+        # so pinning FLAGS_flash_attn_version=3 no longer means "no sink" by
+        # itself -- the cpp kernel is what cannot serve it. Turn the hotfix
+        # switch off as well so FA3 resolves to the cpp backend, which is the
+        # case the rr entry point must reject.
         from paddlefleet.refined_recompute.flash_attn import (
             RefinedRcomputeFlashMaskAttention,
         )
@@ -711,7 +732,12 @@ class TestRefinedRecomputeFlashMaskSink(unittest.TestCase):
         ]
         paddle.set_flags({"FLAGS_flash_attn_version": 3})
         try:
-            with self.assertRaises(NotImplementedError):
+            with (
+                patch.object(
+                    flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", False
+                ),
+                self.assertRaises(NotImplementedError),
+            ):
                 rr_attn.forward(q, q, q, idx, learnable_sink=sink)
         finally:
             paddle.set_flags({"FLAGS_flash_attn_version": old})

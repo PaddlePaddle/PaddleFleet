@@ -1610,6 +1610,40 @@ class TransformerConfig(ModelParallelConfig):
     forward kernel cannot accept ``d_qk=576`` (not a power of two).
     """
 
+    flash_attn_fa3_backend: str = "cutedsl"
+    """Kernel backend for FA3 FlashMask / FlashAttention.
+
+    One of {"cutedsl", "cpp"}:
+      * "cutedsl" (default): the CuTe DSL kernels shipped in
+        ``paddlefleet_ops.flash_mask``. Its backward has an
+        ordered-accumulation variant, so ``FLAGS_cudnn_deterministic`` holds for
+        every head dim in the cutedsl whitelist and FA3 needs no degrade to FA2
+        above ``head_dim`` 128.
+      * "cpp": the C++ FA3 kernels (flash-attention ``csrc/flash_attn_v3``)
+        reached through Paddle's built-in FlashMask op
+        (``paddle.nn.functional.flash_attention`` ->
+        ``_C_ops.flashmask_attention_v2``). Deterministic runs are limited to
+        ``head_dim <= 128``; larger head dims degrade to FA2.
+
+    Only FA3 is affected: FA4 is cutedsl-only and FA2 never uses cutedsl, so
+    this switch changes nothing for them. On devices where
+    ``paddlefleet_ops.is_flash_mask_available()`` is False the dispatch degrades
+    to FA2 before this switch is consulted.
+
+    This is a temporary rollback switch for the SM90 cutedsl enablement, not a
+    long-term user interface: once cutedsl is validated on SM90 in production,
+    this field and the cpp branches behind it should be deleted. Setting it to
+    "cpp" changes numerics -- the two kernels are not bitwise equal.
+
+    The kernel choice is resolved once per process, so every
+    ``TransformerConfig`` built in one process must agree on it: constructing a
+    second config with a different value raises ``ValueError``. Repeating the
+    same value is fine. A per-model choice is not possible today because
+    ``PyLayer.forward`` and ``PyLayer.backward`` read the resolved backend
+    independently, so letting it change mid-process would pair a forward with a
+    backward from the other kernel.
+    """
+
     csa_share_docmask_meta: bool = False
     """Share one ``CSADocMaskMetadata`` per (micro-batch, ratio, mask group).
 
@@ -3057,3 +3091,21 @@ class TransformerConfig(ModelParallelConfig):
                         "Forcing separate_mtp_headloss=False."
                     )
                     self.separate_mtp_headloss = False
+
+        # Hand the FA3 kernel choice over to paddlefleet_ops. The facade cannot
+        # read this config itself (it sits below paddlefleet in the dependency
+        # order), so the string is validated and pushed down here, once per
+        # config. Imported locally to keep paddlefleet_ops off this module's
+        # import path.
+        from paddlefleet_ops.flash_mask_facade import (
+            FA3_BACKEND_CHOICES,
+            set_fa3_backend,
+        )
+
+        if self.flash_attn_fa3_backend not in FA3_BACKEND_CHOICES:
+            raise ValueError(
+                "flash_attn_fa3_backend must be one of "
+                f"{list(FA3_BACKEND_CHOICES)}, got "
+                f"{self.flash_attn_fa3_backend!r}"
+            )
+        set_fa3_backend(self.flash_attn_fa3_backend)

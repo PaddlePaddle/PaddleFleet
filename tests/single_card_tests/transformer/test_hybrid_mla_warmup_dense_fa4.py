@@ -129,8 +129,9 @@ def _fa4_is_the_production_kernel():
 
 _FA4 = unittest.skipUnless(
     _fa4_is_the_production_kernel(),
-    "the dense warmup path needs the FA4 (cute) kernel, which production only "
-    "selects on SM100",
+    "the dense warmup path needs the FA4 (cute) kernel, which production selects "
+    "from the compute capability -- the cutedsl kernels are available from SM90 "
+    "on, but only SM100 derives FLAGS_flash_attn_version=4",
 )
 
 
