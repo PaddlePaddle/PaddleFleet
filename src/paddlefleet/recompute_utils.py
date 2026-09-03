@@ -30,6 +30,23 @@ except ImportError:
         """No-op stand-in when Paddle has not shipped RecomputeStore yet."""
 
         enabled = False
+        groups = {}
+
+        @classmethod
+        def put(cls, _span):
+            return None
+
+        @classmethod
+        def drop(cls, _span):
+            return None
+
+        @classmethod
+        def clear(cls):
+            cls.groups = {}
+
+        @classmethod
+        def pending(cls, _key):
+            return 0
 
 logger = logging.getLogger(__name__)
 
