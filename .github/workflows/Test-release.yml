@@ -739,7 +739,6 @@ jobs:
             sleep $((i * 15))
           done
           docker run -d -t --name ${container_name} --gpus all --shm-size=32G \
-            -v "/dev/shm:/dev/shm"  \
             -v ${{ github.workspace }}/../../..:${{ github.workspace }}/../../.. \
             -v ${{ github.workspace }}/../../..:/root \
             -v /ssd1/paddle-1/action_cache:/home/.cache \
