@@ -75,6 +75,10 @@ from paddlefleet.train_infer_consistent_ops.permute import (
     inspect_tensor_set_permute_index,
     scatter_canonical_rows,
 )
+from paddlefleet.train_infer_consistent_ops.slice_util import (
+    last_dim_segment,
+    scatter_last_dim_segment,
+)
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import init_method_normal, scaled_init_method_normal
@@ -777,23 +781,45 @@ class TestDispatchedHiddenProbe(ProbeEnvTestCase):
 
 
 class TestForceUnitProbs(ProbeEnvTestCase):
-    """Covers `inspect_tensor_force_unit_probs`."""
+    """Covers `inspect_tensor_force_unit_probs`.
+
+    The weights are only forced while the probe that needs it is live, so the tag
+    filters gate the rewrite exactly as they gate the probe itself.
+    """
+
+    TAG = "moe_act_quant_output"
 
     def test_none_probs_pass_through(self):
         self.enable()
-        self.assertIsNone(inspect_tensor_force_unit_probs(None))
+        self.assertIsNone(inspect_tensor_force_unit_probs(None, self.TAG))
 
     def test_disabled_is_the_identity(self):
         probs = paddle.to_tensor([[0.25, 0.75]])
-        self.assertIs(inspect_tensor_force_unit_probs(probs), probs)
+        self.assertIs(inspect_tensor_force_unit_probs(probs, self.TAG), probs)
 
     def test_enabled_forces_all_ones(self):
         self.enable()
         probs = paddle.to_tensor([[0.25, 0.75]], dtype="bfloat16")
-        out = inspect_tensor_force_unit_probs(probs)
+        out = inspect_tensor_force_unit_probs(probs, self.TAG)
         self.assertIsNot(out, probs)
         self.assertEqual(out.dtype, paddle.bfloat16)
         np.testing.assert_allclose(out.astype("float32").numpy(), [[1.0, 1.0]])
+
+    def test_a_whitelist_holding_the_tag_still_forces(self):
+        self.enable(ABLATION_TAG_WHITELIST=f"other,{self.TAG}")
+        probs = paddle.to_tensor([[0.25, 0.75]])
+        out = inspect_tensor_force_unit_probs(probs, self.TAG)
+        np.testing.assert_allclose(out.numpy(), [[1.0, 1.0]])
+
+    def test_a_whitelist_without_the_tag_leaves_the_math_alone(self):
+        self.enable(ABLATION_TAG_WHITELIST="mla_query_after_rope_pe")
+        probs = paddle.to_tensor([[0.25, 0.75]])
+        self.assertIs(inspect_tensor_force_unit_probs(probs, self.TAG), probs)
+
+    def test_a_blacklisted_tag_leaves_the_math_alone(self):
+        self.enable(ABLATION_TAG_BLACKLIST=self.TAG)
+        probs = paddle.to_tensor([[0.25, 0.75]])
+        self.assertIs(inspect_tensor_force_unit_probs(probs, self.TAG), probs)
 
 
 class TestDequantDispatchedHidden(ProbeEnvTestCase):
@@ -1203,7 +1229,7 @@ class TestForceUnitProbsExtra(ProbeEnvTestCase):
     def test_shape_and_dtype_survive(self):
         self.enable()
         probs = paddle.full([2, 3, 4], 0.125, dtype="float32")
-        out = inspect_tensor_force_unit_probs(probs)
+        out = inspect_tensor_force_unit_probs(probs, "moe_act_quant_output")
         self.assertEqual(list(out.shape), [2, 3, 4])
         self.assertEqual(out.dtype, paddle.float32)
         np.testing.assert_allclose(out.numpy(), np.ones([2, 3, 4]))
@@ -1228,6 +1254,137 @@ class TestInspectTensorContainersExtra(ProbeEnvTestCase):
         self.assertIs(result[0], bundle[0])
         self.assertIs(result[1], bundle[1])
         np.testing.assert_allclose(result[2].numpy(), [7.0, 8.0])
+
+
+class TestLastDimSegmentProbe(ProbeEnvTestCase):
+    """Covers `slice_util` and the MLA call sites built on it.
+
+    The segment is only ever a view handed to the probe, so with the probes off
+    nothing is sliced and nothing is written into the live buffer -- its dygraph
+    inplace version has to stay put. The `q[..., n:] = inspect_tensor(...)`
+    spelling this replaces bumped that version on every forward, probes off
+    included, which is what breaks backward / recompute.
+    """
+
+    def _buf(self):
+        return paddle.to_tensor([[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]])
+
+    def _probe(self, tag, tensor, start=0, end=None, layer_idx=0, save=False):
+        """The probe exactly as `multi_latent_attention.py` spells it.
+
+        `save` is off at the real call sites (the training side loads the other
+        side's dumps); the dump-content case below switches it on.
+        """
+        return inspect_tensor(
+            tag,
+            layer_idx,
+            tensor,
+            save=save,
+            pre_save_func=lambda t: last_dim_segment(t, start, end),
+            post_load_func=lambda seg, full=tensor: scatter_last_dim_segment(
+                full, seg, start, end
+            ),
+        )
+
+    def test_the_view_is_the_tail_segment(self):
+        seg = last_dim_segment(self._buf(), 2)
+        np.testing.assert_allclose(seg.numpy(), [[3.0, 4.0], [7.0, 8.0]])
+
+    def test_the_view_is_the_head_segment(self):
+        seg = last_dim_segment(self._buf(), 0, 2)
+        np.testing.assert_allclose(seg.numpy(), [[1.0, 2.0], [5.0, 6.0]])
+
+    def test_no_tensor_to_view_gives_up(self):
+        self.assertIsNone(last_dim_segment(None, 2))
+
+    def test_no_segment_leaves_the_buffer_alone(self):
+        buf = self._buf()
+        self.assertIs(scatter_last_dim_segment(buf, None, 2), buf)
+
+    def test_the_inverse_replaces_only_its_own_segment(self):
+        buf = self._buf()
+        seg = paddle.to_tensor([[30.0, 40.0], [70.0, 80.0]])
+        out = scatter_last_dim_segment(buf, seg, 2)
+        np.testing.assert_allclose(
+            out.numpy(), [[1.0, 2.0, 30.0, 40.0], [5.0, 6.0, 70.0, 80.0]]
+        )
+
+    def test_the_inverse_of_a_head_segment_keeps_the_tail(self):
+        buf = self._buf()
+        seg = paddle.to_tensor([[10.0, 20.0], [50.0, 60.0]])
+        out = scatter_last_dim_segment(buf, seg, 0, 2)
+        np.testing.assert_allclose(
+            out.numpy(), [[10.0, 20.0, 3.0, 4.0], [50.0, 60.0, 7.0, 8.0]]
+        )
+
+    def test_a_full_width_segment_is_the_buffer_itself(self):
+        buf = self._buf()
+        seg = paddle.zeros([2, 4])
+        out = scatter_last_dim_segment(buf, seg, 0, None)
+        np.testing.assert_allclose(out.numpy(), np.zeros([2, 4]))
+
+    def test_the_inverse_never_writes_into_the_live_buffer(self):
+        buf = self._buf()
+        version = buf.inplace_version
+        scatter_last_dim_segment(buf, paddle.zeros([2, 2]), 2)
+        self.assertEqual(buf.inplace_version, version)
+        np.testing.assert_allclose(
+            buf.numpy(), [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]
+        )
+
+    def test_the_probes_off_path_does_not_touch_the_buffer(self):
+        buf = self._buf()
+        version = buf.inplace_version
+        result = self._probe("mla_query_after_rope_pe", buf, start=2)
+        self.assertIs(result, buf)
+        self.assertEqual(buf.inplace_version, version)
+
+    def test_no_dump_does_not_touch_the_buffer(self):
+        self.enable(ABLATION_LOAD_TENSOR_PATH=self.load_dir)
+        buf = self._buf()
+        version = buf.inplace_version
+        result = self._probe("mla_query_after_rope_pe", buf, start=2)
+        self.assertIs(result, buf)
+        self.assertEqual(buf.inplace_version, version)
+
+    def test_only_the_segment_is_dumped(self):
+        self.enable(ABLATION_SAVE_TENSOR_PATH=self.save_dir)
+        self._probe(
+            "mla_key_pe_after_rope",
+            self._buf(),
+            start=2,
+            layer_idx=3,
+            save=True,
+        )
+        dumped = np.load(
+            self.dump_path(self.save_dir, "mla_key_pe_after_rope", 3)
+        )
+        np.testing.assert_allclose(dumped, [[3.0, 4.0], [7.0, 8.0]])
+
+    def test_a_loaded_dump_replaces_only_the_tail_segment(self):
+        self.write_dump(
+            "mla_query_after_rope_pe", 0, [[30.0, 40.0], [70.0, 80.0]]
+        )
+        self.enable(ABLATION_LOAD_TENSOR_PATH=self.load_dir)
+        buf = self._buf()
+        version = buf.inplace_version
+        result = self._probe("mla_query_after_rope_pe", buf, start=2)
+        self.assertIsNot(result, buf)
+        np.testing.assert_allclose(
+            result.numpy(), [[1.0, 2.0, 30.0, 40.0], [5.0, 6.0, 70.0, 80.0]]
+        )
+        self.assertEqual(buf.inplace_version, version)
+
+    def test_a_loaded_dump_replaces_only_the_head_segment(self):
+        self.write_dump(
+            "mla_query_after_rope_nope", 0, [[10.0, 20.0], [50.0, 60.0]]
+        )
+        self.enable(ABLATION_LOAD_TENSOR_PATH=self.load_dir)
+        buf = self._buf()
+        result = self._probe("mla_query_after_rope_nope", buf, end=2)
+        np.testing.assert_allclose(
+            result.numpy(), [[10.0, 20.0, 3.0, 4.0], [50.0, 60.0, 7.0, 8.0]]
+        )
 
 
 class TestMlpProbeTags(ProbeEnvTestCase):
