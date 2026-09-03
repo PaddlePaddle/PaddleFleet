@@ -3,7 +3,7 @@ name: Test-release
 on:
   pull_request:
     types: [opened, synchronize]
-    branches: [develop, release/**]
+    branches: [develop, glm52-structure, release/**]
 
 permissions: read-all
 
