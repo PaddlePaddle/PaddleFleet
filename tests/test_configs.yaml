@@ -82,89 +82,89 @@ tests:
   - test_case: [tests/multi_card_tests/moe/test_qb_callback_cp_sharding.py]
     products:
       - num_gpus: 8
-  # ai_edited_test: tensor_parallel (Pattern A/B, TP=4 sharding=2 -> 8 GPUs)
-  - test_case: [tests/multi_card_tests/ai_edited_test/tensor_parallel/test_ai_mappings.py]
+  # coverage_test: tensor_parallel (Pattern A/B, TP=4 sharding=2 -> 8 GPUs)
+  - test_case: [tests/multi_card_tests/coverage_test/tensor_parallel/test_ai_mappings.py]
     products:
       - num_gpus: 4
-  - test_case: [tests/multi_card_tests/ai_edited_test/tensor_parallel/test_ai_parallel_state.py]
+  - test_case: [tests/multi_card_tests/coverage_test/tensor_parallel/test_ai_parallel_state.py]
     products:
       - num_gpus: 4
-  # ai_edited_test: pipeline_parallel (Pattern C, PP=4)
-  - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_forward_backward_overlap_utils.py]
+  # coverage_test: pipeline_parallel (Pattern C, PP=4)
+  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_ai_forward_backward_overlap_utils.py]
     products:
       - num_gpus: 4
-  # ai_edited_test: transformer (Pattern D, TP=4 sharding=2 -> 8 GPUs)
-  - test_case: [tests/multi_card_tests/ai_edited_test/transformer/test_ai_transformer_layer.py]
+  # coverage_test: transformer (Pattern D, TP=4 sharding=2 -> 8 GPUs)
+  - test_case: [tests/multi_card_tests/coverage_test/transformer/test_ai_transformer_layer.py]
     products:
       - num_gpus: 8
-  - test_case: [tests/multi_card_tests/ai_edited_test/models/test_ai_gpt_builders_2.py]
+  - test_case: [tests/multi_card_tests/coverage_test/models/test_ai_gpt_builders_2.py]
     products:
       - num_gpus: 4
-  # ai_edited_test: moe (Pattern D, TP=4)
-  - test_case: [tests/multi_card_tests/ai_edited_test/moe/test_ai_gpt_layer_specs.py]
+  # coverage_test: moe (Pattern D, TP=4)
+  - test_case: [tests/multi_card_tests/coverage_test/moe/test_ai_gpt_layer_specs.py]
     products:
       - num_gpus: 4
-  - test_case: [tests/multi_card_tests/ai_edited_test/moe/test_ai_moe_utils.py]
+  - test_case: [tests/multi_card_tests/coverage_test/moe/test_ai_moe_utils.py]
     products:
       - num_gpus: 8
-  # ai_edited_test: models (Pattern C, PP=4)
-  - test_case: [tests/multi_card_tests/ai_edited_test/models/test_ai_gpt_model.py]
+  # coverage_test: models (Pattern C, PP=4)
+  - test_case: [tests/multi_card_tests/coverage_test/models/test_ai_gpt_model.py]
     products:
       - num_gpus: 4
-  - test_case: [tests/multi_card_tests/ai_edited_test/models/test_ai_gpt_builders.py]
+  - test_case: [tests/multi_card_tests/coverage_test/models/test_ai_gpt_builders.py]
     products:
       - num_gpus: 4
-  # ai_edited_test: pipeline_parallel advanced (Pattern B, PP=2)
-  - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_p2p_communication.py]
+  # coverage_test: pipeline_parallel advanced (Pattern B, PP=2)
+  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_ai_p2p_communication.py]
     products:
       - num_gpus: 2
-  - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_p2p_communication_2.py]
+  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_ai_p2p_communication_2.py]
     products:
       - num_gpus: 2
-  - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_p2p_communication_3.py]
+  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_ai_p2p_communication_3.py]
     products:
       - num_gpus: 2
-  - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_forward_backward_overlap_utils_2.py]
+  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_ai_forward_backward_overlap_utils_2.py]
     products:
       - num_gpus: 2
-  - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_four_directions_p2p_communication.py]
+  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_ai_four_directions_p2p_communication.py]
     products:
       - num_gpus: 2
-  - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_four_directions_p2p_communication_2.py]
+  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_ai_four_directions_p2p_communication_2.py]
     products:
       - num_gpus: 2
-  - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_four_directions_p2p_communication_3.py]
+  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_ai_four_directions_p2p_communication_3.py]
     products:
       - num_gpus: 4
-  - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_four_directions_p2p_communication_4.py]
+  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_ai_four_directions_p2p_communication_4.py]
     products:
       - num_gpus: 2
-  # ai_edited_test: tensor_parallel advanced (Pattern A/B, TP=4)
-  - test_case: [tests/multi_card_tests/ai_edited_test/tensor_parallel/test_ai_mappings_2.py]
+  # coverage_test: tensor_parallel advanced (Pattern A/B, TP=4)
+  - test_case: [tests/multi_card_tests/coverage_test/tensor_parallel/test_ai_mappings_2.py]
     products:
       - num_gpus: 4
-  - test_case: [tests/multi_card_tests/ai_edited_test/tensor_parallel/test_ai_layers.py]
+  - test_case: [tests/multi_card_tests/coverage_test/tensor_parallel/test_ai_layers.py]
     products:
       - num_gpus: 4
-  # ai_edited_test: transformer advanced (Pattern B/D, PP=2-4)
-  - test_case: [tests/multi_card_tests/ai_edited_test/pipeline_parallel/test_ai_vpp_simulator.py]
+  # coverage_test: transformer advanced (Pattern B/D, PP=2-4)
+  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_ai_vpp_simulator.py]
     products:
       - num_gpus: 4
-  - test_case: [tests/multi_card_tests/ai_edited_test/transformer/test_ai_transformer_encoder.py]
+  - test_case: [tests/multi_card_tests/coverage_test/transformer/test_ai_transformer_encoder.py]
     products:
       - num_gpus: 2
-  - test_case: [tests/multi_card_tests/ai_edited_test/moe/test_ai_gpt_layer_specs_2.py]
+  - test_case: [tests/multi_card_tests/coverage_test/moe/test_ai_gpt_layer_specs_2.py]
     products:
       - num_gpus: 4
-  # ai_edited_test: moe advanced (Pattern D, EP/TP=4)
-  - test_case: [tests/multi_card_tests/ai_edited_test/moe/test_ai_token_dispatcher.py]
+  # coverage_test: moe advanced (Pattern D, EP/TP=4)
+  - test_case: [tests/multi_card_tests/coverage_test/moe/test_ai_token_dispatcher.py]
     products:
       - num_gpus: 4
-  - test_case: [tests/multi_card_tests/ai_edited_test/moe/test_ai_moe_router.py]
+  - test_case: [tests/multi_card_tests/coverage_test/moe/test_ai_moe_router.py]
     products:
       - num_gpus: 4
-  # ai_edited_test: models advanced (Pattern B, PP=2)
-  - test_case: [tests/multi_card_tests/ai_edited_test/models/test_ai_language_loss.py]
+  # coverage_test: models advanced (Pattern B, PP=2)
+  - test_case: [tests/multi_card_tests/coverage_test/models/test_ai_language_loss.py]
     products:
       - num_gpus: 2
   # transformer: DSA sequence_parallel (TP=2)
