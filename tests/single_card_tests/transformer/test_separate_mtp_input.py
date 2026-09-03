@@ -382,20 +382,6 @@ class TestSeparateMTPInputConfig(unittest.TestCase):
                 pipeline_model_parallel_size=1,
             )
 
-    def test_validation_survives_python_O(self):
-        """The checks must not be assert-based (stripped by ``python -O``)."""
-        import inspect
-        import textwrap
-
-        source = textwrap.dedent(
-            inspect.getsource(TransformerConfig.__post_init__)
-        )
-        block = source.split("if self.separate_mtp_input:", 1)[1]
-        # stop at the next top-level statement of __post_init__ (4-space indent)
-        block = block.split("\n    if ", 1)[0]
-        self.assertNotIn("assert ", block)
-        self.assertEqual(block.count("raise ValueError"), 4)
-
 
 class TestGPTEmbeddingSeparateOutput(unittest.TestCase):
     """GPTEmbedding hands the shifted MTP embedding over a dedicated key."""

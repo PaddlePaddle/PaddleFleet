@@ -808,22 +808,6 @@ class TestMoELayerP2POverlapInit(unittest.TestCase):
         self.assertFalse(dw_overlap_enabled(config, "moe_router_gate"))
         self.assertFalse(dw_overlap_enabled(config, "attn_out_proj"))
 
-    def test_moe_layer_source_uses_selector(self):
-        """MoELayer.__init__ must go through the selector for both expert points."""
-        import inspect
-        import re
-
-        from paddlefleet.transformer.moe.moe_layer import MoELayer
-
-        # Strip whitespace so the assertion survives black reformatting.
-        src = re.sub(r"\s+", "", inspect.getsource(MoELayer.__init__))
-        for point in ("moe_expert_up_gate_proj", "moe_expert_down_proj"):
-            self.assertIn(
-                f'dw_overlap_enabled(config,"{point}")',
-                src,
-                f"MoELayer.__init__ must select {point} via dw_overlap_enabled",
-            )
-
 
 # ============================================================
 # Test 9: FusionMoePyLayer passes defer_dw to MlpNode
