@@ -1293,6 +1293,16 @@ class MlpNode:
             tokens_per_expert=self.tokens_per_expert,
             fill_output=fill_output,
         )
+        # Force unit routing weights while probing so this side's fused
+        # SwiGLU x probs x quant and the inference side's quant-then-weight
+        # order become comparable. Tied to the `moe_act_quant_output` probe, so a
+        # run narrowed to other tags leaves the MoE math alone. Done before the
+        # cache below, which the custom backward reads: an inspect run only
+        # compares the forward, but having backward differentiate the weights the
+        # forward actually used costs nothing here.
+        unzipped_probs = inspect_tensor_force_unit_probs(
+            unzipped_probs, "moe_act_quant_output"
+        )
         self.unzipped_probs = unzipped_probs
 
         # Row permutation that maps each (dispatched token, expert) pair into the
@@ -1301,10 +1311,6 @@ class MlpNode:
         # the canonical keying the inference side is re-keyed into, so publish it for
         # the expert-GEMM probes and dump it for offline checks.
         inspect_tensor_set_permute_index(zipped_expertwise_rowmap)
-        # Force unit routing weights while probing so this side's fused
-        # SwiGLU x probs x quant and the inference side's quant-then-weight
-        # order become comparable.
-        unzipped_probs = inspect_tensor_force_unit_probs(unzipped_probs)
         zipped_expertwise_rowmap = inspect_tensor(
             "moe_permute_index",
             get_current_layer(),

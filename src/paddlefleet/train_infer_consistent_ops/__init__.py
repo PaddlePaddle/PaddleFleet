@@ -20,6 +20,8 @@
   `scatter_canonical_rows`).
 * `ffn_act` -- the fused SwiGLU+fp8-quant activation: unit routing weights and
   the blockwise dequant back to bf16.
+* `slice_util` -- one segment of the last dim (`last_dim_segment` and its inverse
+  `scatter_last_dim_segment`), for the MLA nope / RoPE split.
 
 `inspect_tensor` is the only probe the network definition calls to compare a
 tensor; it takes an `index` when the tensor travels inside a tuple / list / dict,
@@ -35,6 +37,8 @@ Everything here is diagnostic. With `ABLATION_INSPECT_TENSOR` unset every entry
 point returns immediately without touching the network, so the network
 definition can call them unconditionally -- no `if inspect_enabled():` at the
 call site. Work that would
-have to happen *before* a probe (dequant, row gather) goes in through
-`inspect_tensor(..., pre_save_func=...)` so it is skipped too.
+have to happen *before* a probe (dequant, row gather, a slice of the last dim)
+goes in through `inspect_tensor(..., pre_save_func=...)` so it is skipped too --
+including the write-back, which a `post_load_func` turns into a fresh tensor
+instead of an in-place edit of the live buffer.
 """

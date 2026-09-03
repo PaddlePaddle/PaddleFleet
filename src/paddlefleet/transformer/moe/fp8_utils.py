@@ -1780,9 +1780,10 @@ class ExpertsGroupGemmContiguousNode:
         )
         # This side folds the routing weight into the SwiGLU kernel, so o3 is
         # only comparable with the inference side's down-GEMM output while that
-        # weight is forced to 1. `inspect_tensor_force_unit_probs()` switches on
-        # together with train_infer_consistent_inspect, so the o3 seen here is
-        # always that comparable one.
+        # weight is forced to 1. `inspect_tensor_force_unit_probs()` does that for
+        # the `moe_act_quant_output` probe, so o3 is the comparable one exactly in
+        # the runs where that tag is live -- whitelisting `moe_ffn2_output` alone
+        # leaves the weights in place and this dump incomparable.
         o3 = inspect_tensor(
             "moe_ffn2_output",
             self.layer_number,
