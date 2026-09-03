@@ -46,6 +46,7 @@ from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.utils import use_accuracy_compatible
 
 if TYPE_CHECKING:
     from paddlefleet.models.backends import BackendSpecProvider
@@ -774,10 +775,11 @@ class MultiTokenPredictionLayer(FleetLayer):
             # Learned contraction parameters for MTP output
             n = config.num_residual_streams
             hc_dim = config.hidden_size * n
-            # learned_output_contract() computes in fp32; store the parameters
-            # in fp32 too (Megatron marks hc_head_* keep_in_fp32).
-
-            hc_param_dtype = "float32"
+            # The canonical DSV4 replay stores these parameters in model dtype;
+            # learned_output_contract() still widens the computation internally.
+            hc_param_dtype = (
+                config.params_dtype if use_accuracy_compatible() else "float32"
+            )
             self.hc_head_fn = self.create_parameter(
                 shape=[hc_dim, n],
                 dtype=hc_param_dtype,
@@ -983,21 +985,31 @@ class MultiTokenPredictionLayer(FleetLayer):
                 hs_streams = hs_streams * mtp_hidden_inputs_mask.unsqueeze(-1)
 
             # e_proj: [.., h] -> [.., h/tp]
-            e_out, _ = deferrable_linear(
-                self.config, "mtp_e_proj", self.e_proj, decoder_input
-            )
-            # h_proj: applied per-stream [.., n, h] -> [.., n, h/tp]
-            # 4D tensor causes .t() error in backward; reshape to 3D first.
-            orig_shape = list(hs_streams.shape)
-            if self.tensor_parallel > 1 and self.sequence_parallel:
-                # Sequence-parallel linear all-gathers the seq axis, which is
-                # axis 0 in the seq-first layout that sequence_parallel implies.
-                orig_shape[0] = orig_shape[0] * self.tensor_parallel
-            hs_flat = hs_streams.reshape([-1, orig_shape[-1]])  # [s/sp*b*n, h]
-            h_out, _ = deferrable_linear(
-                self.config, "mtp_h_proj", self.h_proj, hs_flat
-            )  # [s*b*n, h/tp]
-            h_out = h_out.reshape([*orig_shape[:-1], -1])  # [s, b, n, h/tp]
+            if use_accuracy_compatible():
+                e_out, _ = self.e_proj(decoder_input)
+                hs_seqfirst = hs_streams.transpose([1, 0, 2, 3]).contiguous()
+                seqfirst_shape = hs_seqfirst.shape
+                hs_flat = hs_seqfirst.reshape([-1, seqfirst_shape[-1]])
+                h_out, _ = self.h_proj(hs_flat)
+                h_out = h_out.reshape([*seqfirst_shape[:-1], -1])
+                h_out = h_out.transpose([1, 0, 2, 3]).contiguous()
+            else:
+                e_out, _ = deferrable_linear(
+                    self.config, "mtp_e_proj", self.e_proj, decoder_input
+                )
+                # h_proj: applied per-stream [.., n, h] -> [.., n, h/tp]
+                # 4D tensor [b,s,n,h] causes .t() error in backward; reshape to 3D first
+                orig_shape = list(hs_streams.shape)  # [s/sp, b, n, h]
+                if self.tensor_parallel > 1 and self.sequence_parallel:
+                    # [s/sp, b, n, h] --> [s, b, n, h]
+                    orig_shape[0] = orig_shape[0] * self.tensor_parallel
+                hs_flat = hs_streams.reshape(
+                    [-1, orig_shape[-1]]
+                )  # [s/sp*b*n, h]
+                h_out, _ = deferrable_linear(
+                    self.config, "mtp_h_proj", self.h_proj, hs_flat
+                )  # [s*b*n, h/tp]
+                h_out = h_out.reshape([*orig_shape[:-1], -1])  # [s, b, n, h/tp]
             # Broadcast add before gather (saves one all-gather vs gathering separately)
             hidden_states = e_out.unsqueeze(-2) + h_out
             if self.tensor_parallel > 1:

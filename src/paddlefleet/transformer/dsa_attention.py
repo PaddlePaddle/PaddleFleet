@@ -51,6 +51,7 @@ from paddlefleet.transformer.cp_utils import all_gather_cp
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.utils import use_accuracy_compatible
 
 try:
     from paddlefleet_ops.fast_hadamard_transform import (
@@ -94,6 +95,11 @@ def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
     assert dim > 0 and (dim & (dim - 1)) == 0, (
         f"hadamard_transform requires dim to be a power of 2, got {dim}"
     )
+
+    if use_accuracy_compatible():
+        from paddlefleet.accuracy_compatible_patch import CompatibleHadamard
+
+        return CompatibleHadamard.apply(x, scale)
 
     # Megatron uses fast_hadamard_transform, whose bf16 path accumulates in fp32
     # and casts back to bf16. Keep the same numeric contract here.
@@ -1069,9 +1075,17 @@ def _bwd_fused_indexer_loss(
         "bsht,btd->bshd", grad_scores, k.cast("float32")
     )  # [b, sq, h, d]
     # ∂L/∂k = einsum('bsht,bshd->btd', grad_scores, q)
-    grad_k = paddle.einsum(
-        "bsht,bshd->btd", grad_scores, q.cast("float32")
-    )  # [b, sk, d]
+    if use_accuracy_compatible():
+        from paddlefleet.accuracy_compatible_patch import compatible_einsum
+
+        grad_k = compatible_einsum(
+            grad_scores.transpose([1, 0, 2, 3]).contiguous(),
+            q.transpose([1, 0, 2, 3]).contiguous(),
+        ).transpose([1, 0, 2])
+    else:
+        grad_k = paddle.einsum(
+            "bsht,bshd->btd", grad_scores, q.cast("float32")
+        )  # [b, sk, d]
     del grad_scores
 
     return (

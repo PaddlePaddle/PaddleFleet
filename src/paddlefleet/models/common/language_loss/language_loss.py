@@ -28,6 +28,7 @@ from paddle.distributed.fleet.meta_parallel import ScheduleNode
 from paddle.distributed.fleet.utils import recompute
 from paddle.distributed.fleet.utils.sequence_parallel_utils import AllGatherOp
 
+from paddlefleet.accuracy_compatible_patch import LossScaleBeforeBackward
 from paddlefleet.context_parallel_utils import (
     ContextParallelGatherOp,
     ContextParallelScatterOp,
@@ -43,6 +44,7 @@ from paddlefleet.recompute_utils import module_needs_recompute
 from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.utils import use_accuracy_compatible
 
 
 def _loss_md5_enabled() -> bool:
@@ -460,7 +462,11 @@ class LanguageLoss(FleetLayer):
                     (1 - is_invalid_line_float).sum() + 1e-6
                 )
             else:
-                if self.use_accuracy_compatible:
+                if (
+                    self.use_accuracy_compatible
+                    and self.config.experimental_attention_variant
+                    != "dsv4_hybrid"
+                ):
                     _flat = loss.cast(paddle.float32).reshape([-1]) * lossmask
                     loss_sum = (
                         _flat.cast(paddle.float64).sum().cast(paddle.float32)
@@ -940,7 +946,7 @@ class LanguageLoss(FleetLayer):
                     # This matches Megatron's behavior where MTP contributes to training
                     # gradients without affecting the reported loss value.
                     if self.config.add_mtp_loss:
-                        return main_loss + loss - loss.detach()
+                        return loss - loss.detach() + main_loss
                     else:
                         return main_loss
                 else:
@@ -984,10 +990,15 @@ class LanguageLoss(FleetLayer):
                     * sum(mtp_loss)
                     / len(mtp_loss),
                 )
+            if use_accuracy_compatible():
+                loss = LossScaleBeforeBackward.scale(loss)
 
             return loss
         else:
-            return self._forward(logits, labels)
+            loss = self._forward(logits, labels)
+            if use_accuracy_compatible():
+                loss = LossScaleBeforeBackward.scale(loss)
+            return loss
 
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="LanguageLoss")

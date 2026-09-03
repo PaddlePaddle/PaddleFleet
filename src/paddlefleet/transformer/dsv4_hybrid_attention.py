@@ -58,6 +58,7 @@ from paddlefleet.transformer.dw_overlap import (
     deferrable_linear,
     deferred_grouped_dw_accumulator,
 )
+from paddlefleet.utils import use_accuracy_compatible
 
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -94,6 +95,10 @@ def _q_rms_norm(
     use_fusion: bool = False,
 ) -> Tensor:
     """RMS normalization for query (no learnable weight)."""
+    if use_accuracy_compatible():
+        from paddlefleet.accuracy_compatible_patch import CompatibleQRMSNorm
+
+        return CompatibleQRMSNorm.apply(q, eps)
     if high_precision_norm:
         ori_dtype = q.dtype
         q = q.float()
@@ -448,6 +453,7 @@ def _pack_dsv4_logical_batch(
     cp_size: int,
     dense_mode: bool,
     max_sequence_length: int | None = None,
+    accuracy_compatible: bool = False,
 ) -> tuple[Tensor, Tensor | None, int, int]:
     """Pack a logical batch into the single-sequence DSV4 representation."""
     if len(hidden_states.shape) != 3:
@@ -457,6 +463,11 @@ def _pack_dsv4_logical_batch(
         )
 
     batch_size, seqlen, _ = hidden_states.shape
+    if accuracy_compatible:
+        # The Megatron-aligned indexer path treats each micro-batch row as an
+        # independent sequence and does not consume Paddle's document mask.
+        # Preserve that native layout and suppress the pack/unpack transform.
+        return hidden_states, None, 1, seqlen
     if batch_size <= 1:
         return hidden_states, startend_row_indices, batch_size, seqlen
 
@@ -922,6 +933,7 @@ class DSv4HybridAttention(Attention):
                 max_sequence_length=getattr(
                     self.config, "max_sequence_length", None
                 ),
+                accuracy_compatible=use_accuracy_compatible(),
             )
         )
         b, sq, _ = hidden_states.shape
@@ -1191,7 +1203,23 @@ class DSv4HybridAttention(Attention):
             "attn_o_group_proj_input", self.layer_number, core_attn_out
         )
         core_attn_out = core_attn_out.reshape([b, sq, self.o_local_groups, -1])
-        if (
+        if use_accuracy_compatible():
+            from paddlefleet.accuracy_compatible_patch import (
+                CompatibleOGroupProjection,
+            )
+
+            call_idx = getattr(self, "_ogroup_projection_call_idx", 0)
+            self._ogroup_projection_call_idx = call_idx + 1
+            core_attn_out = CompatibleOGroupProjection.apply(
+                core_attn_out,
+                self.linear_o_group_proj,
+                self.o_local_groups,
+                self.config.o_lora_rank,
+                self.layer_number,
+                call_idx,
+            )
+            core_attn_out = core_attn_out.reshape([b, sq, -1])
+        elif (
             self.config.fp8 is not None
             and self.config.full_fp8_computation
             and FLEET_FP8_WO_A_GEMM
