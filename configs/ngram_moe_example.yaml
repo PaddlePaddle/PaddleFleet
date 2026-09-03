@@ -1,0 +1,126 @@
+# =============================================================================
+# N-gram Embedding / MoE-Ngram 配置样例
+#
+# 本文件展示三个模块的全部 config 字段及其默认值。
+# 默认值退化到基线行为：不改配置 = 不改行为。
+# 三个模块可通过开关独立启停，互不依赖（MoE 模块依赖 ngram_embedding_enabled=True）。
+#
+# 模块层级：
+#   1. ngram_embedding_enabled   — 基础 N-gram Embedding（PR 956）
+#   2. ngram_monitor_enabled     — 使用/碰撞/信号/分布监控（叠在 1 或 3 上）
+#   3. ngram_moe_enabled         — MoE 路由版 N-gram（替代 1 的查表逻辑）
+# =============================================================================
+
+
+# ---------------------------------------------------------------------------
+# 模块 1：基础 N-gram Embedding（PR 956 原始实现）
+#    关闭时（False）模型行为与原始代码完全一致。
+# ---------------------------------------------------------------------------
+ngram_embedding_enabled: false       # 总开关，默认 false
+ngram_emb_neighbor_num: 3            # N-gram 阶数 N（使用 2..N-gram），默认 3
+ngram_pad_token_id: 0                # padding token id，用于前缀补零
+ngram_vocab_size_ratio: 12.2         # 子表行数 = ratio * vocab_size
+ngram_emb_split_num: 4               # K-split：每阶 K 张子表
+ngram_emb_dim: 0                     # embedding 维度，0 = hidden_size
+
+
+# ---------------------------------------------------------------------------
+# 模块 2：N-gram Monitor（使用/碰撞/信号/分布监控）
+#    叠加在模块 1 或 3 之上，关闭时不影响任何计算。
+# ---------------------------------------------------------------------------
+ngram_monitor_enabled: false         # 监控总开关，默认 false
+ngram_monitor_interval: 100          # 每 N 步采样一次
+ngram_monitor_usage: true            # 记录每个子表的行级使用计数
+ngram_monitor_collision: true        # 记录 hash 碰撞
+ngram_monitor_collision_max_rows: 0  # 碰撞表最大行数，0 = 全量
+ngram_monitor_signal: true           # 记录 ngram_signal 的统计量
+ngram_monitor_signal_rows: 1         # signal 采样行数
+ngram_monitor_per_table_metrics: true   # 是否按子表分别统计
+ngram_monitor_distribution: true     # 记录 per-bucket 分布
+ngram_monitor_stale_windows: 10      # 保留的滑动窗口数
+ngram_monitor_reduce_group: auto     # 分布式 reduce 组，auto = tp_group
+ngram_monitor_save_state: true       # 保存 monitor 状态到 checkpoint
+ngram_monitor_save_full_state: true  # 保存完整状态（含分布数据）
+ngram_monitor_jsonl: true            # 输出 JSONL 格式日志
+
+
+# ---------------------------------------------------------------------------
+# 模块 3：MoE 路由版 N-gram（替代模块 1 的查表逻辑）
+#    需要先开启 ngram_embedding_enabled=True。
+#    关闭时（false）回退到模块 1 的 K-split 实现。
+# ---------------------------------------------------------------------------
+ngram_moe_enabled: false             # MoE 路由总开关，默认 false
+
+# --- 子表布局 ---
+ngram_moe_tables_per_order: 16       # 每阶子表数 T
+ngram_moe_active_tables: 4           # 每 token 激活子表数 k（top-k）
+ngram_moe_table_rows_ratio: 0.0      # 单表行数 = ratio * vocab_size；0 = 从 K-split 推导
+ngram_moe_table_dim: 128             # 子表 embedding 维度
+
+# --- Router ---
+ngram_moe_router_dim: 64             # router 隐层维度（hidden_size → router_dim）
+ngram_moe_router_width: 32           # 因果深度卷积窗口宽度
+ngram_moe_shared_router: true        # true = 所有阶共享一个 router（向后兼容）
+                                      # false = per-order 独立 router（2-gram/3-gram 各自路由）
+
+# --- 负载均衡 Loss ---
+ngram_moe_load_balance_coef: 0.0     # L_aux 系数（Switch-Transformer 风格）
+                                      # 0.0 = 关闭，>0 = 开启
+                                      # forward 返回 (ngram_signal, aux_loss)
+                                      # aux_loss 由 trainer 侧加到总 loss
+ngram_moe_z_loss_coef: 0.0           # z-loss 系数（占位，暂未实现）
+
+
+# =============================================================================
+# 常见配置组合示例
+# =============================================================================
+
+# --- 示例 A：仅基础 N-gram（PR 956 行为）---
+# ngram_embedding_enabled: true
+# ngram_emb_neighbor_num: 3
+# ngram_pad_token_id: 0
+# ngram_vocab_size_ratio: 12.2
+# ngram_emb_split_num: 4
+# ngram_emb_dim: 0
+
+# --- 示例 B：MoE 路由 + 共享 router + 无负载均衡（向后兼容当前训练）---
+# ngram_embedding_enabled: true
+# ngram_moe_enabled: true
+# ngram_moe_tables_per_order: 16
+# ngram_moe_active_tables: 4
+# ngram_moe_table_rows_ratio: 12.2
+# ngram_moe_table_dim: 128
+# ngram_moe_router_dim: 64
+# ngram_moe_router_width: 32
+# ngram_moe_shared_router: true       # 共享 router
+# ngram_moe_load_balance_coef: 0.0    # 无 aux_loss
+
+# --- 示例 C：MoE 路由 + per-order 独立 router + 负载均衡 ---
+# ngram_embedding_enabled: true
+# ngram_moe_enabled: true
+# ngram_moe_tables_per_order: 16
+# ngram_moe_active_tables: 4
+# ngram_moe_table_rows_ratio: 12.2
+# ngram_moe_table_dim: 128
+# ngram_moe_router_dim: 64
+# ngram_moe_router_width: 32
+# ngram_moe_shared_router: false      # per-order 独立 router
+# ngram_moe_load_balance_coef: 0.01   # 开启 L_aux
+
+# --- 示例 D：全功能（MoE + per-order router + 负载均衡 + monitor）---
+# ngram_embedding_enabled: true
+# ngram_moe_enabled: true
+# ngram_moe_tables_per_order: 16
+# ngram_moe_active_tables: 4
+# ngram_moe_table_rows_ratio: 12.2
+# ngram_moe_table_dim: 128
+# ngram_moe_router_dim: 64
+# ngram_moe_router_width: 32
+# ngram_moe_shared_router: false
+# ngram_moe_load_balance_coef: 0.01
+# ngram_monitor_enabled: true
+# ngram_monitor_interval: 100
+# ngram_monitor_usage: true
+# ngram_monitor_collision: true
+# ngram_monitor_signal: true
+# ngram_monitor_distribution: true

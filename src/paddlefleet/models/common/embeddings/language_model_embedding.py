@@ -73,11 +73,22 @@ class LanguageModelEmbedding(FleetLayer):
                 "must be set to True."
             )
         self.tp_group = get_tensor_model_parallel_group_if_none(tp_group)
+
+        # N-gram Embedding flag (read early for reduce_scatter decision)
+        self.ngram_embedding_enabled = getattr(
+            config, "ngram_embedding_enabled", False
+        )
+
+        # When N-gram embedding is enabled, we must disable the early
+        # reduce_scatter inside VocabParallelEmbedding, because ngram signal
+        # is computed in [B, S, H] layout and must be fused before any
+        # transpose/scatter. The scatter will happen later in forward().
         self.reduce_scatter_embeddings = (
             (not self.add_position_embedding)
             and self.num_tokentypes <= 0
             and self.sequence_parallel
             and self.scatter_to_sequence_parallel
+            and not self.ngram_embedding_enabled
         )
 
         # Word embeddings (parallel).
@@ -113,6 +124,23 @@ class LanguageModelEmbedding(FleetLayer):
                 )
         else:
             self.tokentype_embeddings = None
+
+        # N-gram Embedding (LongCat-style, or the routed variant)
+        if self.ngram_embedding_enabled:
+            self.ngram_moe_enabled = getattr(config, "ngram_moe_enabled", False)
+            if self.ngram_moe_enabled:
+                from paddlefleet.models.common.embeddings.ngram_moe_embedding import (
+                    NgramMoeEmbedding,
+                )
+                self.ngram_embedding = NgramMoeEmbedding(
+                    config=config, vocab_size=self.vocab_size
+                )
+            else:
+                from paddlefleet.models.common.embeddings.ngram_embedding import NgramEmbedding
+                self.ngram_embedding = NgramEmbedding(
+                    config=config, vocab_size=self.vocab_size
+                )
+        self.ngram_aux_loss = None
 
         # Embeddings dropout
         self.embedding_dropout = paddle.nn.Dropout(
@@ -151,6 +179,27 @@ class LanguageModelEmbedding(FleetLayer):
             Tensor: The output embeddings
         """
         embed_tokens = self.embed_tokens(input_ids)
+
+        # N-gram Embedding injection with normalization
+        if self.ngram_embedding_enabled:
+            if self.ngram_moe_enabled:
+                # Side-channel: aux_loss is read by GPTEmbedding.forward via
+                # getattr(self, "ngram_aux_loss") immediately after this call,
+                # within the same forward pass.  Under recompute the forward
+                # may run twice, but the second pass overwrites with the same
+                # value, so the side-channel stays consistent.
+                ngram_signal, self.ngram_aux_loss = self.ngram_embedding(
+                    input_ids, embed_tokens
+                )
+            else:
+                ngram_signal = self.ngram_embedding(input_ids)
+            if self.ngram_embedding.monitor is not None:
+                self.ngram_embedding.monitor.observe_signal(
+                    embed_tokens, ngram_signal
+                )
+            normalizer = 1 + self.ngram_embedding.num_embedders
+            embed_tokens = (embed_tokens + ngram_signal) / normalizer
+
         if self.add_position_embedding:
             position_embeddings = self.position_embeddings(position_ids)
             embeddings = embed_tokens + position_embeddings
