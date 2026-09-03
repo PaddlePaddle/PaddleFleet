@@ -2768,6 +2768,19 @@ class CompressedSparseAttention(FleetLayer):
                 sparse_attn_score_recompute_wrapper,
             )
 
+            from paddlefleet.fusions.csa_sparse_attn import (
+                pad_score_target_heads,
+            )
+
+            # The kernel tiles its MMA ``M`` on the query-head count, which the
+            # attention path above never has to care about because it pads to a
+            # fixed 64/128 tile. Here the real head count reaches the kernel, so
+            # a non-power-of-two one has to be widened first. The output is
+            # head-reduced, so nothing is sliced back off.
+            query_mla, lse_indexer = pad_score_target_heads(
+                query_mla, lse_indexer
+            )
+
             target = sparse_attn_score_recompute_wrapper(
                 HashableTensor(query_mla),
                 HashableTensor(key_comp_mla),
