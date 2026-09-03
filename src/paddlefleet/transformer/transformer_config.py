@@ -1151,6 +1151,36 @@ class TransformerConfig(ModelParallelConfig):
     """Quantization format for quantizing weights, options are 32x32 and 1x32. Currently only used in SonicMoE."""
 
     ####################
+    # N-gram Embedding (LongCat-style)
+    ####################
+    ngram_embedding_enabled: bool = False
+    """Master switch for N-gram Embedding. When False, model degrades to baseline."""
+
+    ngram_vocab_size_ratio: float = 12.2
+    """Ratio multiplier: ngram_vocab_size = vocab_size * ngram_vocab_size_ratio."""
+
+    ngram_emb_neighbor_num: int = 3
+    """Max N-gram order. 3 means bigram + trigram."""
+
+    ngram_emb_split_num: int = 4
+    """Number of sub-tables (hash functions) per N-gram level."""
+
+    ngram_emb_dim: int = 0
+    """Sub-embedding dimension per table. 0 means auto (hidden_size // num_embedders)."""
+
+    ngram_pad_token_id: int = 0
+    """Token ID used for padding when shifting sequences for N-gram computation."""
+
+    ngram_gate_enabled: bool = False
+    """Enable context-aware gated N-gram embedding. Replaces simple averaging."""
+
+    ngram_gate_conv_kernel_size: int = 7
+    """Kernel size for causal depthwise dilated convolutions in gate."""
+
+    ngram_gate_route_scale: float = 1.0
+    """Scale factor for normalized gate weights."""
+
+    ####################
     # MLA
     ####################
     """Configuration object for paddlefleet Multi-Latent Attention (MLA) transformers.
