@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import os
 import sys
 import unittest
@@ -31,6 +32,11 @@ from paddlefleet.transformer.dsv4_hybrid_attention import (
 
 
 class _QKVProbe(paddle.nn.Layer):
+    """A qkv segment whose ``get_query_key_value_tensors`` takes exactly the
+    parameters ``DSv4HybridAttention`` declares -- no ``**kwargs`` to absorb an
+    extra keyword. Both branches read ``hidden_states``, which is what makes the
+    summation order into its gradient observable."""
+
     def __init__(self, width):
         super().__init__()
         self.q_weight = self.create_parameter([width, width], dtype="bfloat16")
@@ -39,15 +45,13 @@ class _QKVProbe(paddle.nn.Layer):
     def get_query_key_value_tensors(
         self,
         hidden_states,
+        startend_row_indices=None,
         position_offset=0,
         docmask_meta=None,
-        kv_hidden_states=None,
     ):
-        del position_offset, docmask_meta
-        if kv_hidden_states is None:
-            kv_hidden_states = hidden_states
+        del startend_row_indices, position_offset, docmask_meta
         query = paddle.matmul(hidden_states, self.q_weight)
-        key = paddle.matmul(kv_hidden_states, self.kv_weight).unsqueeze(2)
+        key = paddle.matmul(hidden_states, self.kv_weight).unsqueeze(2)
         q_compressed = hidden_states * 3
         return query, key, key, q_compressed, hidden_states
 
@@ -100,7 +104,7 @@ class TestDSv4FixedOrderQKV(unittest.TestCase):
 
     def test_recompute_replay_is_bitwise_identical(self):
         paddle.seed(2026)
-        module = _QKVProbe(32).astype("bfloat16")
+        module = _QKVProbe(32)
         hidden_states = paddle.randn([3, 2, 32]).astype("bfloat16")
         hidden_states.stop_gradient = False
 
@@ -120,6 +124,41 @@ class TestDSv4FixedOrderQKV(unittest.TestCase):
                     )
             else:
                 np.testing.assert_array_equal(direct_values, recomputed_values)
+
+    def test_segment_passes_only_the_declared_parameters(self):
+        """The segment must call the override through the base contract.
+
+        A subclass implementing exactly ``DSv4HybridAttention``'s signature has
+        no ``**kwargs`` to swallow an extra keyword, so an added one is a
+        TypeError -- on every differentiable call, since ``_qkv_forward``
+        branches on ``stop_gradient`` rather than on the recompute switch.
+        """
+        declared = set(
+            inspect.signature(
+                DSv4HybridAttention.get_query_key_value_tensors
+            ).parameters
+        )
+        probed = set(
+            inspect.signature(_QKVProbe.get_query_key_value_tensors).parameters
+        )
+        self.assertEqual(probed, declared)
+
+        seen = []
+        module = _QKVProbe(32)
+        original = module.get_query_key_value_tensors
+
+        def _recording(*args, **kwargs):
+            seen.append(set(kwargs))
+            return original(*args, **kwargs)
+
+        module.get_query_key_value_tensors = _recording
+
+        hidden_states = paddle.randn([3, 2, 32]).astype("bfloat16")
+        hidden_states.stop_gradient = False
+        module._qkv_forward(hidden_states, 0, None)
+
+        self.assertEqual(len(seen), 1)
+        self.assertLessEqual(seen[0], declared - {"self", "hidden_states"})
 
 
 if __name__ == "__main__":
