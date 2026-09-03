@@ -1151,6 +1151,18 @@ class TransformerConfig(ModelParallelConfig):
     """Quantization format for quantizing weights, options are 32x32 and 1x32. Currently only used in SonicMoE."""
 
     ####################
+    # Byte-Level Embedding
+    ####################
+    byte_embedding_enabled: bool = False
+    """Enable byte-level embedding fusion. Each token's constituent bytes are
+    looked up in a byte embedding table and mean-pooled into a signal that is
+    added to the token embedding before normalization."""
+
+    byte_embedding_tokenizer_path: str = ""
+    """Path to tokenizer for building token→bytes mapping.
+    Required when byte_embedding_enabled=True."""
+
+    ####################
     # MLA
     ####################
     """Configuration object for paddlefleet Multi-Latent Attention (MLA) transformers.
