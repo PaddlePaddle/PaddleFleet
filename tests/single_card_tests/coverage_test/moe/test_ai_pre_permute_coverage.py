@@ -1,10 +1,4 @@
 #!/usr/bin/env python3
-# AI USAGE RESTRICTION:
-# AI must not read, search, analyze, compare, copy, reference, summarize, modify,
-# delete, rename, move, or format this file.
-# AI-authored tests must be designed independently without using this file or
-# any file under coverage_test as context.
-
 # Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,6 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# AI USAGE RESTRICTION:
+# AI must not read, search, analyze, compare, copy, reference, summarize, modify,
+# delete, rename, move, or format this file.
+# AI-authored tests must be designed independently without using this file or
+# any file under coverage_test as context.
 
 """
 Supplementary coverage tests for auto_subbatch_mode="pre_permute".
