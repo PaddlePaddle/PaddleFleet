@@ -1151,6 +1151,15 @@ class TransformerConfig(ModelParallelConfig):
     """Quantization format for quantizing weights, options are 32x32 and 1x32. Currently only used in SonicMoE."""
 
     ####################
+    # SmearGate
+    ####################
+    smear_gate_enabled: bool = False
+    """Enable SmearGate: per-dim gated blending of current and previous token embeddings."""
+
+    smear_gate_init_value: float = 3.0
+    """Initial gate logit value. sigmoid(3.0) ≈ 0.95 (near-identity start)."""
+
+    ####################
     # MLA
     ####################
     """Configuration object for paddlefleet Multi-Latent Attention (MLA) transformers.

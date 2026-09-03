@@ -73,11 +73,21 @@ class LanguageModelEmbedding(FleetLayer):
                 "must be set to True."
             )
         self.tp_group = get_tensor_model_parallel_group_if_none(tp_group)
+
+        # SmearGate flag (read early for reduce_scatter decision)
+        self.smear_gate_enabled = getattr(config, "smear_gate_enabled", False)
+
+        # When SmearGate is enabled, we must disable the early reduce_scatter
+        # inside VocabParallelEmbedding, because SmearGate operates on [B, S, H]
+        # layout (shifts along sequence dim). If reduce_scatter runs first,
+        # the output becomes [S/TP, B, H] and SmearGate would incorrectly
+        # operate on the batch dimension.
         self.reduce_scatter_embeddings = (
             (not self.add_position_embedding)
             and self.num_tokentypes <= 0
             and self.sequence_parallel
             and self.scatter_to_sequence_parallel
+            and not self.smear_gate_enabled
         )
 
         # Word embeddings (parallel).
@@ -113,6 +123,14 @@ class LanguageModelEmbedding(FleetLayer):
                 )
         else:
             self.tokentype_embeddings = None
+
+        # SmearGate
+        if self.smear_gate_enabled:
+            from paddlefleet.models.common.embeddings.smear_gate import SmearGate
+            self.smear_gate = SmearGate(
+                hidden_size=config.hidden_size,
+                init_value=getattr(config, "smear_gate_init_value", 3.0),
+            )
 
         # Embeddings dropout
         self.embedding_dropout = paddle.nn.Dropout(
@@ -151,6 +169,11 @@ class LanguageModelEmbedding(FleetLayer):
             Tensor: The output embeddings
         """
         embed_tokens = self.embed_tokens(input_ids)
+
+        # SmearGate (applied before position embedding)
+        if self.smear_gate_enabled:
+            embed_tokens = self.smear_gate(embed_tokens)
+
         if self.add_position_embedding:
             position_embeddings = self.position_embeddings(position_ids)
             embeddings = embed_tokens + position_embeddings
