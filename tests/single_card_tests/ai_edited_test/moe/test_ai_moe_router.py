@@ -802,6 +802,28 @@ class TestHashRouter(unittest.TestCase):
         with self.assertRaises(ValueError):
             router(hidden, input_ids=input_ids)
 
+    def test_tid2eid_out_of_range_fails_fast(self):
+        """A pretrained tid2eid built for a larger expert count must raise
+        up front instead of crashing later in a device-side gather."""
+        router, _ = self._make_router(n_routed_experts=4, num_experts_per_tok=2)
+        # Simulate a full-size checkpoint table loaded into a shrunk model:
+        # expert id 7 is out of range for 4 routed experts.
+        router.tid2eid = paddle.full_like(router.tid2eid, 7)
+        hidden = self._dummy_hidden(1, 2)
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        with self.assertRaisesRegex(ValueError, "routed experts"):
+            router(hidden, input_ids=input_ids)
+
+    def test_tid2eid_negative_ids_fail_fast(self):
+        """Negative expert ids (e.g. sentinel values) must be rejected too:
+        they would silently gather the wrong expert instead of asserting."""
+        router, _ = self._make_router(n_routed_experts=4, num_experts_per_tok=2)
+        router.tid2eid = paddle.full_like(router.tid2eid, -1)
+        hidden = self._dummy_hidden(1, 2)
+        input_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        with self.assertRaisesRegex(ValueError, r"\[0, 3\]"):
+            router(hidden, input_ids=input_ids)
+
     def test_noaux_tc_drops_bias_buffers(self):
         """Hash layer with noaux_tc topk_method should delete
         e_score_correction_bias and expert_usage buffers."""

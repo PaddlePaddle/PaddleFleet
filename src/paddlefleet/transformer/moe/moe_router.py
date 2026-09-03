@@ -1306,6 +1306,29 @@ class StandardMoERouter(nn.Layer):
             raise ValueError(
                 "tid2eid buffer is not registered; hash routing is not initialized."
             )
+        if not getattr(self, "_tid2eid_range_checked", False):
+            # A pretrained tid2eid loaded from a checkpoint may target a
+            # larger expert count than this model (e.g. a full-size HF
+            # checkpoint loaded into a shrunk config). Out-of-range ids would
+            # otherwise surface as an undebuggable device-side gather assert
+            # (CUDA error 719) on some later async op, so fail fast here with
+            # the actual root cause. A no-op when the table already matches.
+            max_eid = int(self.tid2eid.max().item())
+            min_eid = int(self.tid2eid.min().item())
+            if min_eid < 0 or max_eid >= self.num_experts:
+                raise ValueError(
+                    f"tid2eid contains expert ids in [{min_eid}, {max_eid}] "
+                    f"but this model only accepts [0, {self.num_experts - 1}]"
+                    f" ({self.num_experts} routed experts): the pretrained "
+                    f"hash-routing table does not match this model's "
+                    f"structure (e.g. it was built for a larger expert "
+                    f"count, or it carries negative sentinel values). Fix "
+                    f"the config/checkpoint pairing (do not load a "
+                    f"full-size checkpoint into a shrunk model) or drop "
+                    f"resume_from_checkpoint/load_from_hf to start from "
+                    f"random init."
+                )
+            self._tid2eid_range_checked = True
         score_function = self.scoring_func
         orig_dtype = logits.dtype
         logits_fp32 = logits.cast("float32")

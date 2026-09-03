@@ -595,6 +595,9 @@ jobs:
       - name: Download arm wheel name from bos
         if: github.ref_type != 'tag' && matrix.flavor.label == 'arm'
         run: |
+          name_file="${{ matrix.flavor.name_key }}"
+          # Remove the canonical file and numeric wget leftovers from reused runners.
+          rm -f -- "${name_file}" "${name_file}".[0-9]*
           wget --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.flavor.name_key }} --no-check-certificate
 
       - name: Upload wheel to paddletest

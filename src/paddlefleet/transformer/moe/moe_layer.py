@@ -285,10 +285,34 @@ class MoELayer(nn.Layer):
         )
         self.moe_expert_fusion = config.moe_expert_fusion
         self._activation_type = "situ" if self.hidden_act == situ else "swiglu"
-        if self.hidden_act == situ and self.fp8:
+        # SiTU-GLU + fp8 is implemented on *both* fp8 expert paths, by different
+        # means:
+        #   SonicMoE -- the betas are encoded into the gated/dgated GEMM
+        #     activation string and baked into the epilogue as Constexpr (see
+        #     sonicmoe/quack_utils/activation_situ.py).
+        #   DeepGEMM -- ExpertsGroupGemmContiguousNode has no fused
+        #     activation+scale+quant kernel for SiTU, so it computes
+        #     SiTU-GLU x probs in bf16 and then runs the generic blockwise
+        #     quantizer (see fp8_utils.fwd_down_fp8 / bwd_down_input_fp8).
+        # SonicMoE's *bf16* path has no SiTU epilogue and raises from
+        # sonicmoe/functional/__init__.py::_gemm_activation_name, so nothing can
+        # silently degrade to SwiGLU there either.  fp8_wgrad remains
+        # unvalidated for SiTU on both backends and is rejected below.
+        if self.hidden_act == situ and self.fp8 and self.fp8_wgrad:
             raise ValueError(
-                "SiTU-GLU MoE fusion currently supports BF16 expert compute "
-                "only; please disable fp8."
+                "SiTU-GLU + fp8 does not support fp8 expert weight gradients "
+                "yet; please set fp8_wgrad=False so that dw1/dw2 are computed "
+                "in bf16."
+            )
+        if self.hidden_act == situ and self.use_w4a8:
+            # w4a8 short-circuits fwd_down_fp8 / bwd_down_input_fp8 into
+            # _fwd_down_w4a8 / _bwd_down_input_w4a8, which fold silu into the
+            # 1x32 quantization kernel and never read activation_type. Without
+            # this guard SiTU-GLU would silently be computed as SwiGLU.
+            raise ValueError(
+                "SiTU-GLU is not supported on the w4a8 expert path, whose "
+                "fused quantization kernels hardcode SwiGLU; please set "
+                "use_w4a8=False."
             )
         self.moe_subbatch_token_num_after_dispatch = (
             config.moe_subbatch_token_num_after_dispatch

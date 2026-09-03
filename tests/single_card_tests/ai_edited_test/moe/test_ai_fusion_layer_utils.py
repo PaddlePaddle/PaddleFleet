@@ -259,6 +259,9 @@ class TestFusionLayerUtils(unittest.TestCase):
         node = object.__new__(MlpNode)
         node.experts = None
         node.experts_group_gemm_node = None
+        # _bwd_pre_permute_feature_sizes reads activation_type off the node
+        # itself; __init__ always sets it, __new__ does not.
+        node.activation_type = "swiglu"
         for k, v in attrs.items():
             setattr(node, k, v)
         return node

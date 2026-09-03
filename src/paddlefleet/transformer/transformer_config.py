@@ -333,8 +333,11 @@ class TransformerConfig(ModelParallelConfig):
     activation_situ_linear_beta: float | None = None
     """Optional tanh scale applied to the linear branch of SiTU-GLU."""
 
-    situ_glu_fusion: bool = True
-    """Use fused Triton SiTU-GLU in FusionMoe BF16 routed experts."""
+    situ_glu_fusion: bool = False
+    """Opt into the fused Triton SiTU-GLU kernel in FusionMoe routed experts,
+    for both the BF16 and the FP8 expert path. Off by default, which runs
+    SiTU-GLU as separate ops; the fused kernel also falls back to those ops
+    when Triton is unavailable."""
 
     use_bias: bool = False
     """Include a bias term in all linear layers (QKV projections and Output projections, after core attention, and two in
