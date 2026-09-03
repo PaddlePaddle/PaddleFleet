@@ -21,6 +21,7 @@ import functools
 import inspect
 import math
 import operator
+import os
 import warnings
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -31,6 +32,10 @@ import paddle
 
 from paddlefleet import parallel_state
 from paddlefleet.context_parallel_utils import ContextParallelScatterOp
+
+_USE_ACCURACY_COMPATIBLE = (
+    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+)
 
 try:
     from packaging.version import Version as PkgVersion
@@ -568,3 +573,19 @@ def deprecate_inference_params(inference_context, inference_params):
         )
         return inference_params
     return inference_context
+
+
+def use_accuracy_compatible():
+    return _USE_ACCURACY_COMPATIBLE
+
+
+# Install before PaddleFormers constructs the Stage1 optimizer. Latest
+# PaddleFleet no longer necessarily calls a DSV4-specific module constructor
+# before optimizer setup, so a forward-time lazy install would be too late for
+# slice-shape bookkeeping.
+if _USE_ACCURACY_COMPATIBLE:
+    from paddlefleet.accuracy_compatible_patch import (
+        install_accuracy_compatible_paddle_patches,
+    )
+
+    install_accuracy_compatible_paddle_patches()

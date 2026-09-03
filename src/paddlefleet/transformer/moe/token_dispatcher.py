@@ -28,6 +28,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 from paddlefleet.transformer.utils import profile
+from paddlefleet.utils import use_accuracy_compatible
 
 from .fp8_utils import FP8_ALIGN
 from .fused_a2a import (
@@ -843,6 +844,7 @@ class _DeepEPManager(_DispatchManager):
         self.token_probs = None
         # Handle used for combine operation
         self.handle = None
+        self.global_input_probs = None
 
         if fused_dispatch is None:
             raise ImportError(
@@ -894,6 +896,7 @@ class _DeepEPManager(_DispatchManager):
         self.tokens_per_expert = states["tokens_per_expert"]
         self.dispatched_indices = states["dispatched_indices"]
         self.dispatched_probs = dispatched_probs
+        self.global_input_probs = None
 
         return hidden_states, scale
 
@@ -921,6 +924,7 @@ class _DeepEPManager(_DispatchManager):
         self.tokens_per_expert = states["tokens_per_expert"]
         self.dispatched_indices = states["dispatched_indices"]
         self.dispatched_probs = dispatched_probs
+        self.global_input_probs = None
 
         return hidden_states, scale
 
@@ -937,6 +941,13 @@ class _DeepEPManager(_DispatchManager):
                 - routing_map: Multihot vector.
                 - probs: Multihot probabilities.
         """
+        if use_accuracy_compatible():
+            from paddlefleet.accuracy_compatible_patch import (
+                indices_to_multihot,
+            )
+
+            return indices_to_multihot(indices, probs, self.num_local_experts)
+
         batch_size = indices.shape[0]
         multihot_routing_map = paddle.zeros(
             (batch_size, self.num_local_experts), dtype=paddle.int64
@@ -1015,6 +1026,12 @@ class _DeepEPManager(_DispatchManager):
                 self.dispatched_indices, self.dispatched_probs
             )
         )
+        if self.use_accuracy_compatible:
+            self.global_input_probs = (
+                self.dispatched_probs.T.contiguous().masked_select(
+                    self.dispatched_routing_map.T.contiguous().cast(paddle.bool)
+                )
+            )
         self.hidden_shape_before_permute = hidden_states.shape
         hidden_states, self.reversed_mapping_for_combine = permute(
             hidden_states,
@@ -1036,7 +1053,9 @@ class _DeepEPManager(_DispatchManager):
             self.reversed_mapping_for_combine,
             restore_shape=self.hidden_shape_before_permute,
             routing_map=self.dispatched_routing_map,
-            probs=self.dispatched_probs,
+            probs=(
+                None if self.use_accuracy_compatible else self.dispatched_probs
+            ),
             use_accuracy_compatible=self.use_accuracy_compatible,
         )
         return hidden_states.to(input_dtype)
@@ -1139,6 +1158,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         elif manager_cls is _DeepEPManager:
             manager_kwargs["use_accuracy_compatible"] = use_accuracy_compatible
         self._comm_manager = manager_cls(**manager_kwargs)
+        self.global_input_probs = None
 
     def bind_experts(self, grouped_experts) -> None:
         if isinstance(self._comm_manager, _MoonEPManager):
@@ -1160,6 +1180,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         topk_indices: paddle.Tensor | None = None,
     ):
         self.hidden_shape = hidden_states.shape
+        self.global_input_probs = None
         hidden_states = hidden_states.view([-1, self.hidden_shape[-1]])
         self._comm_manager.setup_metadata(
             routing_map, probs, topk_weights, topk_indices
@@ -1173,6 +1194,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         token_indices: paddle.Tensor,
     ):
         self.hidden_shape = hidden_states.shape
+        self.global_input_probs = None
         hidden_states = hidden_states.view([-1, self.hidden_shape[-1]])
         self._comm_manager.routing_map = None
         self._comm_manager.routing_probs = None
@@ -1222,6 +1244,9 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             self._comm_manager.get_permuted_hidden_states_by_experts(
                 hidden_states
             )
+        )
+        self.global_input_probs = getattr(
+            self._comm_manager, "global_input_probs", None
         )
         tokens_per_expert = self._comm_manager.get_number_of_tokens_per_expert()
 

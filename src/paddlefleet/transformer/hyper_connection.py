@@ -33,6 +33,7 @@ from paddle import Tensor, nn
 
 from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.utils import use_accuracy_compatible
 
 if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -102,7 +103,18 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
         Returns:
             H_res: [..., n, n] - doubly stochastic matrix
         """
-        M = SinkhornKnopp._sinkhorn_normalize(H_res_logits, num_iterations, eps)
+        if use_accuracy_compatible():
+            with paddle.amp.auto_cast(enable=False):
+                M = paddle.exp(
+                    H_res_logits - H_res_logits.max(axis=-1, keepdim=True)
+                )
+                for _ in range(num_iterations):
+                    M = M / M.sum(axis=-1, keepdim=True).clip(min=eps)
+                    M = M / M.sum(axis=-2, keepdim=True).clip(min=eps)
+        else:
+            M = SinkhornKnopp._sinkhorn_normalize(
+                H_res_logits, num_iterations, eps
+            )
 
         ctx.save_for_backward(H_res_logits)
         ctx.num_iterations = num_iterations
@@ -127,6 +139,15 @@ class SinkhornKnopp(paddle.autograd.PyLayer):
         (input_logits,) = ctx.saved_tensor()
         num_iterations = ctx.num_iterations
         eps = ctx.eps
+
+        if use_accuracy_compatible():
+            from paddlefleet.accuracy_compatible_patch import (
+                compatible_sinkhorn_backward,
+            )
+
+            return compatible_sinkhorn_backward(
+                input_logits, grad_output, num_iterations, eps
+            )
 
         with paddle.enable_grad():
             # Recompute forward with autograd enabled
@@ -363,13 +384,16 @@ class HyperConnectionModule(nn.Layer):
         # - H_pre: n values
         # - H_post: n values
         # - H_res: n^2 values (before Sinkhorn projection)
-        # The mHC mapping parameters are stored in FP32 (mirrors Megatron
-        # hyper_connection.py mark_keep_in_fp32 on mapping_proj.weight /
-        # alpha_* / bias, and the MoE gate fp32 storage in moe_router.py):
-        # they are tiny, and keeping them out of BF16 removes the parameter
-        # rounding error from the mHC gating computation.
+        # Megatron keeps these parameters in FP32 for its normal path, but its
+        # accuracy-compatible path deliberately leaves them in the model dtype.
+        # Keep the same contract here: the compatible projection is a BF16
+        # matmul and mixed FP32/BF16 operands are invalid when autocast is off.
         self._cast_to_low_precision = False
-        param_dtype = "float32"
+        param_dtype = (
+            config.params_dtype
+            if _use_accuracy_compatible_kernel()
+            else "float32"
+        )
         default_dtype = paddle.get_default_dtype()
         try:
             paddle.set_default_dtype(param_dtype)
@@ -531,7 +555,15 @@ class HyperConnectionModule(nn.Layer):
         Args:
             x: [..., n*C] - n-stream hidden states
         """
-        if _use_accuracy_compatible_kernel():
+        if use_accuracy_compatible():
+            from paddlefleet.accuracy_compatible_patch import (
+                compatible_projection_and_norm,
+            )
+
+            proj, r = compatible_projection_and_norm(
+                x, self.mapping_proj.weight, self.norm_eps
+            )
+        elif _use_accuracy_compatible_kernel():
             nC = x.shape[-1]
             weight = self.mapping_proj.weight
             r = x.norm(axis=-1, keepdim=True) / math.sqrt(nC)  # [..., 1]
@@ -584,7 +616,7 @@ class HyperConnectionModule(nn.Layer):
             self.alpha_res,
             self.bias,
             self.n,
-            self.compute_h_eps,
+            (0.0 if use_accuracy_compatible() else self.compute_h_eps),
         )
         if _use_accuracy_compatible_kernel():
             h_pre = h_pre.astype(proj.dtype)
@@ -667,7 +699,9 @@ class HyperConnectionModule(nn.Layer):
         C = self.hidden_size
         num_tokens = math.prod(leading_shape)
 
-        if _use_accuracy_compatible_kernel():
+        if use_accuracy_compatible():
+            h_res_batched = h_res.reshape([num_tokens, n, n])
+        elif _use_accuracy_compatible_kernel():
             # Megatron clean path applies H_res.T to residual.
             ndim = h_res.ndim
             perm = [*list(range(ndim - 2)), ndim - 1, ndim - 2]
@@ -860,6 +894,21 @@ class HyperConnectionModule(nn.Layer):
         base = base.astype("float32")
         scale = scale.astype("float32")
 
+        if use_accuracy_compatible():
+            from paddlefleet.accuracy_compatible_patch import (
+                CompatibleLearnedOutputContract,
+            )
+
+            return CompatibleLearnedOutputContract.apply(
+                hidden_states,
+                head_fn,
+                base,
+                scale,
+                n,
+                eps,
+                dtype,
+            )
+
         rsqrt = paddle.rsqrt(
             hidden_states.square().mean(-1, keepdim=True) + eps
         )
@@ -1049,9 +1098,11 @@ class HyperConnectionContractLayer(FleetLayer):
         # Learned contraction parameters (DSv4 style, always used)
         n = self.n
         hc_dim = config.hidden_size * n
-        # learned_output_contract() computes in fp32; store the parameters in
-        # fp32 as well (Megatron transformer_block.py marks hc_head_* keep_in_fp32).
-        hc_param_dtype = "float32"
+        # The canonical DSV4 replay stores these parameters in model dtype;
+        # learned_output_contract() still widens the computation internally.
+        hc_param_dtype = (
+            config.params_dtype if use_accuracy_compatible() else "float32"
+        )
         self.hc_head_fn = self.create_parameter(
             shape=[hc_dim, n],
             dtype=hc_param_dtype,

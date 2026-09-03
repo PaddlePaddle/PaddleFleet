@@ -147,8 +147,8 @@ class ThreePathCloneAlignMG(PyLayer):
 
     @staticmethod
     def backward(ctx, g_router, g_dispatcher, g_shared):
-        partial = g_dispatcher + g_shared
-        out = partial + g_router
+        partial = g_dispatcher + g_router
+        out = partial + g_shared
         return out
 
 
@@ -213,8 +213,6 @@ class MoELayer(nn.Layer):
             "ringmoe",
         )
         self.moe_allgather_gate_overlap = config.moe_allgather_gate_overlap
-        if self.use_accuracy_compatible:
-            self.moe_token_dispatcher_type = "alltoall"
         self.use_hybrid_ep_backend = False
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
@@ -862,14 +860,14 @@ class MoELayer(nn.Layer):
             per_token_scale = getattr(
                 self.token_dispatcher, "global_input_probs", None
             )
-            if per_token_scale is None:
-                raise RuntimeError(
-                    "FLAGS_use_accuracy_compatible_kernel requires dispatched "
-                    "router probabilities from the token dispatcher."
-                )
-            else:
+            # All-to-all may dispatch probabilities for expert-side scaling.
+            # DeepEP retains them in its communication manager and applies
+            # them exactly once during the aligned unpermute/combine path.
+            if per_token_scale is not None:
                 scale_chunks = paddle.split(
-                    per_token_scale, num_or_sections=tokens_per_expert, axis=0
+                    per_token_scale,
+                    num_or_sections=tokens_per_expert,
+                    axis=0,
                 )
         for i, chunk in enumerate(chunks):
             if tokens_per_expert[i] == 0:
@@ -879,6 +877,7 @@ class MoELayer(nn.Layer):
             expert = self.experts[current_expert_idx]
             if (
                 getattr(self, "use_accuracy_compatible", False)
+                and self.moe_token_dispatcher_type == "alltoall"
                 and 0 < int(chunk.shape[0]) < 17
             ):
                 num_rows = int(chunk.shape[0])
@@ -1680,6 +1679,14 @@ class MoELayer(nn.Layer):
             if residual is not None:
                 residual = GatherOp.apply(residual)
 
+        sequence_first_moe = (
+            self.use_accuracy_compatible and hidden_states.ndim == 3
+        )
+        if sequence_first_moe:
+            hidden_states = hidden_states.transpose([1, 0, 2]).contiguous()
+            if input_ids is not None and input_ids.ndim == 2:
+                input_ids = input_ids.transpose([1, 0]).contiguous()
+
         orig_shape = hidden_states.shape
         residuals = hidden_states
 
@@ -1819,6 +1826,8 @@ class MoELayer(nn.Layer):
 
         _log_moe_md5(output, "moe_final_output", layer_idx)
 
+        if sequence_first_moe:
+            output = output.transpose([1, 0, 2]).contiguous()
         if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             output = ScatterOp.apply(output)
         return output, None  # None is bias

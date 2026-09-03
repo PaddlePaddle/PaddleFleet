@@ -304,17 +304,28 @@ def unfused_compressed_sparse_attn(
         # Softmax with attention sink
         # sink: [np] -> [1, np, 1, 1]
         sink = attn_sink.reshape([1, np_heads, 1, 1])
-        # Compute stable softmax: max over scores and sink
-        scores_max = scores.max(axis=-1, keepdim=True)  # [b, np, sq, 1]
-        scores_max = paddle.maximum(scores_max, sink)
+        from paddlefleet.utils import use_accuracy_compatible
 
-        exp_scores = paddle.exp(scores - scores_max)  # [b, np, sq, topk]
-        exp_sink = paddle.exp(sink - scores_max)  # [b, np, sq, 1]
+        if use_accuracy_compatible():
+            from paddlefleet.accuracy_compatible_patch import (
+                CompatibleCSASinkSoftmax,
+            )
 
-        sum_exp = (
-            exp_scores.sum(axis=-1, keepdim=True) + exp_sink
-        )  # [b, np, sq, 1]
-        attn_weights = exp_scores / sum_exp  # [b, np, sq, topk]
+            attn_weights = CompatibleCSASinkSoftmax.apply(
+                scores, sink.cast("float32")
+            )
+        else:
+            # Compute stable softmax: max over scores and sink
+            scores_max = scores.max(axis=-1, keepdim=True)  # [b, np, sq, 1]
+            scores_max = paddle.maximum(scores_max, sink)
+
+            exp_scores = paddle.exp(scores - scores_max)  # [b, np, sq, topk]
+            exp_sink = paddle.exp(sink - scores_max)  # [b, np, sq, 1]
+
+            sum_exp = (
+                exp_scores.sum(axis=-1, keepdim=True) + exp_sink
+            )  # [b, np, sq, 1]
+            attn_weights = exp_scores / sum_exp  # [b, np, sq, topk]
 
         # Weighted sum: [b, np, sq, topk] x [b, sq, topk, hn] -> [b, np, sq, hn]
         output = paddle.einsum("bnsk,bskh->bnsh", attn_weights, kv_g)
