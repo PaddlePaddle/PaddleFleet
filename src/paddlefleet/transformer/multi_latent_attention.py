@@ -53,11 +53,11 @@ from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_sequence_parallel_region,
 )
+from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
-from paddlefleet.transformer.utils import inspect_tensor
 from paddlefleet.utils import get_pg_rank, get_pg_size
 
 logger = logging.getLogger(__name__)
@@ -1999,7 +1999,7 @@ class MLASelfAttention(MultiLatentAttention):
                 # Ablation boundary: query RoPE segment BEFORE the rotation
                 # ([..., qk_nope_head_dim:]). Pairs with
                 # mla_query_after_rope_pe to isolate the rotation itself.
-                inspect_tensor(
+                q[..., self.qk_nope_head_dim :] = inspect_tensor(
                     "mla_query_before_rope_pe",
                     self.layer_number,
                     q[..., self.qk_nope_head_dim :],
@@ -2018,12 +2018,12 @@ class MLASelfAttention(MultiLatentAttention):
                 # Ablation boundaries: query split along the last dim into the
                 # no_pe segment ([..., :qk_nope_head_dim], untouched by RoPE)
                 # and the RoPE segment ([..., qk_nope_head_dim:], rotated).
-                inspect_tensor(
+                query[..., : self.qk_nope_head_dim] = inspect_tensor(
                     "mla_query_after_rope_nope",
                     self.layer_number,
                     query[..., : self.qk_nope_head_dim],
                 )
-                inspect_tensor(
+                query[..., self.qk_nope_head_dim :] = inspect_tensor(
                     "mla_query_after_rope_pe",
                     self.layer_number,
                     query[..., self.qk_nope_head_dim :],
@@ -2048,7 +2048,7 @@ class MLASelfAttention(MultiLatentAttention):
                 # Ablation boundary: key RoPE segment only. The fused kernel
                 # lays key out as [..., k_dim + emb_dim] = nope part copied
                 # from kv, then the rotated part at offset qk_nope_head_dim.
-                inspect_tensor(
+                key[..., self.qk_nope_head_dim :] = inspect_tensor(
                     "mla_key_pe_after_rope",
                     self.layer_number,
                     key[..., self.qk_nope_head_dim :],

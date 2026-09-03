@@ -53,6 +53,7 @@ from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
     get_tensor_model_parallel_group,
 )
+from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
 from paddlefleet.transformer.transformer_config import dw_overlap_enabled
 
@@ -1665,6 +1666,17 @@ class TopKRouter(StandardMoERouter):
                     dw_overlap_enabled(self.config, "moe_router_gate"),
                     self.use_accuracy_compatible,
                 )
+
+                logits_0, logits_1 = inspect_tensor(
+                    "moe_gate_fused_logits",
+                    self._layer_number,
+                    (logits_0, logits_1),
+                    pre_save_func=lambda views: paddle.concat(views, axis=-1),
+                    post_load_func=lambda fused: (
+                        fused[:, : logits_0.shape[-1]],
+                        fused[:, logits_0.shape[-1] :],
+                    ),
+                )
                 # The two-view contract is sigmoid + sigmoid. scoring_func is
                 # guaranteed to be "sigmoid" here (validated above and in
                 # set_layer_number), so route both views through the shared
@@ -1739,6 +1751,10 @@ class TopKRouter(StandardMoERouter):
             gates = gates * valid_mask
 
         _log_moe_md5(gates, "gate_probs_sigmoid", self._layer_number)
+
+        gates = inspect_tensor(
+            "moe_gate_logits", self._layer_number, gates, load=True
+        )
 
         # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
         if self.use_accuracy_compatible and not use_split:
