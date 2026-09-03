@@ -221,6 +221,36 @@ REFINED_RECOMPUTE_MODULES = frozenset({"flash_attn", "moe_combine"})
 """RR modules: count-based selectors always use ``first_n``."""
 
 
+def effective_mtp_layers(config):
+    """MTP layer count the model actually builds."""
+    mtp_num_layers = getattr(config, "mtp_num_layers", 0) or 0
+    nextn_num_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
+    if not isinstance(mtp_num_layers, int) or isinstance(mtp_num_layers, bool):
+        mtp_num_layers = 0
+    if not isinstance(nextn_num_layers, int) or isinstance(
+        nextn_num_layers, bool
+    ):
+        nextn_num_layers = 0
+    if (
+        mtp_num_layers > 0
+        and nextn_num_layers > 0
+        and mtp_num_layers != nextn_num_layers
+    ):
+        raise ValueError(
+            "mtp_num_layers and num_nextn_predict_layers must be equal when "
+            f"both are positive, got {mtp_num_layers} and {nextn_num_layers}"
+        )
+    return mtp_num_layers if mtp_num_layers > 0 else nextn_num_layers
+
+
+def logical_layer_index(config, layer_number, is_mtp_layer=False):
+    """Map a physical ``layer_number`` to the config-facing layer index."""
+    if is_mtp_layer:
+        return config.num_hidden_layers + layer_number
+    head_offset = getattr(config, "num_empty_layers_add_in_head", 0) or 0
+    return layer_number - head_offset
+
+
 def _get_module_recompute_config(module_name, config):
     """Return whether ``module_name`` is configured, and its layer selector.
 
@@ -268,12 +298,14 @@ def _selector_matches_layer(
     config,
     module_name,
     defer_if_layer_unknown=False,
+    is_mtp_layer=False,
 ):
     """Whether ``layer_selector`` selects ``layer_number``.
 
     Selectors: ``None`` / ``"all"`` / negative int mean every layer; a list of
-    ints means those global 0-based layer ids; a non-negative int is a layer
-    count resolved through ``config.recompute_method``.
+    ints means those layer ids in the ``logical_layer_index`` space (the one
+    ``csa_compress_ratios`` uses); a non-negative int is a layer count resolved
+    through ``config.recompute_method`` over the physical layer number.
 
     ``layer_number`` is ``None`` for layer-agnostic modules and for MoE
     submodules before ``set_layer_number()``. A count then means every layer.
@@ -294,7 +326,9 @@ def _selector_matches_layer(
                 "layer number to filter on. Use "
                 f"'{RECOMPUTE_ALL_LAYERS}' to enable it everywhere."
             )
-        return layer_number in layer_ids
+        return (
+            logical_layer_index(config, layer_number, is_mtp_layer) in layer_ids
+        )
 
     if isinstance(layer_selector, bool) or not isinstance(layer_selector, int):
         raise ValueError(
@@ -320,13 +354,17 @@ def _selector_matches_layer(
 _logged_recompute_decisions = set()
 
 
-def _log_recompute_decision(kind, module_name, layer_number, enabled):
+def _log_recompute_decision(
+    kind, module_name, layer_number, enabled, is_mtp_layer=False
+):
     """Log one decision, deduped: MoE resolves its flags twice."""
-    key = (kind, module_name, layer_number)
+    key = (kind, module_name, layer_number, is_mtp_layer)
     if key in _logged_recompute_decisions:
         return
     _logged_recompute_decisions.add(key)
     layer_text = "n/a" if layer_number is None else str(layer_number)
+    if is_mtp_layer:
+        layer_text = f"mtp{layer_text}"
     logger.info(
         f"[RECOMPUTE-DECISION] kind={kind} module={module_name} "
         f"layer={layer_text} enabled={enabled}"
@@ -334,13 +372,20 @@ def _log_recompute_decision(kind, module_name, layer_number, enabled):
 
 
 def module_needs_recompute(
-    module_name, layer_number, config, defer_if_layer_unknown=False
+    module_name,
+    layer_number,
+    config,
+    defer_if_layer_unknown=False,
+    is_mtp_layer=False,
 ):
     """Whether ``module_name`` should be recomputed on layer ``layer_number``.
 
     Single entry point for every ``recompute_modules`` lookup. Only meaningful
     under ``recompute_granularity == "selective"``; ``lm_head`` and ``loss_fn``
     keep ignoring the granularity, as they always did.
+
+    ``layer_number`` is physical; ``is_mtp_layer`` routes layer lists through
+    ``logical_layer_index`` so MTP layers do not collide with backbone layer 0.
 
     Pass ``defer_if_layer_unknown=True`` when ``layer_number=None`` just means
     "not yet known" and the caller will ask again: a layer list then resolves to
@@ -362,12 +407,17 @@ def module_needs_recompute(
         config,
         module_name,
         defer_if_layer_unknown=defer_if_layer_unknown,
+        is_mtp_layer=is_mtp_layer,
     )
-    _log_recompute_decision("plain", module_name, layer_number, enabled)
+    _log_recompute_decision(
+        "plain", module_name, layer_number, enabled, is_mtp_layer
+    )
     return enabled
 
 
-def module_needs_refined_recompute(module_name, layer_number, config):
+def module_needs_refined_recompute(
+    module_name, layer_number, config, is_mtp_layer=False
+):
     """Whether ``module_name`` should use refined recompute (RR) on this layer.
 
     RR inverts the selector: selected layers keep the plain recompute path, RR
@@ -384,10 +434,14 @@ def module_needs_refined_recompute(module_name, layer_number, config):
     if not module_configured:
         return False
     if not isinstance(config.recompute_modules, dict):
-        _log_recompute_decision("rr", module_name, layer_number, True)
+        _log_recompute_decision(
+            "rr", module_name, layer_number, True, is_mtp_layer
+        )
         return True
     if layer_selector is None or layer_selector == RECOMPUTE_ALL_LAYERS:
-        _log_recompute_decision("rr", module_name, layer_number, False)
+        _log_recompute_decision(
+            "rr", module_name, layer_number, False, is_mtp_layer
+        )
         return False
     if isinstance(layer_selector, (list, tuple, set, frozenset)):
         layer_ids = normalize_recompute_layer_ids(layer_selector, module_name)
@@ -396,8 +450,13 @@ def module_needs_refined_recompute(module_name, layer_number, config):
                 f"recompute_modules['{module_name}'] was given an explicit "
                 f"layer list but no layer number is available"
             )
-        enabled = layer_number not in layer_ids
-        _log_recompute_decision("rr", module_name, layer_number, enabled)
+        enabled = (
+            logical_layer_index(config, layer_number, is_mtp_layer)
+            not in layer_ids
+        )
+        _log_recompute_decision(
+            "rr", module_name, layer_number, enabled, is_mtp_layer
+        )
         return enabled
     if isinstance(layer_selector, bool) or not isinstance(layer_selector, int):
         raise ValueError(
@@ -408,12 +467,16 @@ def module_needs_refined_recompute(module_name, layer_number, config):
         # Same as "all"/None. Handled here because need_recompute_in_first_n
         # selects no layer for a negative count, which would invert into "RR
         # everywhere" -- the exact opposite.
-        _log_recompute_decision("rr", module_name, layer_number, False)
+        _log_recompute_decision(
+            "rr", module_name, layer_number, False, is_mtp_layer
+        )
         return False
     enabled = not need_recompute_in_first_n(
         layer_number, config, layer_selector
     )
-    _log_recompute_decision("rr", module_name, layer_number, enabled)
+    _log_recompute_decision(
+        "rr", module_name, layer_number, enabled, is_mtp_layer
+    )
     return enabled
 
 
@@ -440,11 +503,9 @@ def validate_recompute_modules(config):
             f"{type(recompute_modules).__name__}"
         )
 
-    total_num_hidden_layers = (
-        config.num_empty_layers_add_in_head
-        + config.num_hidden_layers
-        + config.num_empty_layers_add_in_tail
-    )
+    # Layer lists live in the logical_layer_index space: backbone layers then
+    # MTP layers. Empty head/tail layers hold no module and are not addressable.
+    num_layer_ids = config.num_hidden_layers + effective_mtp_layers(config)
     for module_name, layer_selector in recompute_modules.items():
         if not isinstance(module_name, str):
             raise ValueError(
@@ -465,14 +526,15 @@ def validate_recompute_modules(config):
             out_of_range_layer_ids = [
                 layer_id
                 for layer_id in sorted(layer_ids)
-                if layer_id >= total_num_hidden_layers
+                if layer_id >= num_layer_ids
             ]
             if out_of_range_layer_ids:
                 raise ValueError(
                     f"recompute_modules['{module_name}'] layer ids "
                     f"{out_of_range_layer_ids} are "
-                    f"out of range for {total_num_hidden_layers} layers "
-                    "(global, 0-based, including empty head/tail layers)"
+                    f"out of range for {num_layer_ids} layer ids (0-based: "
+                    f"backbone layers 0..{config.num_hidden_layers - 1} "
+                    "excluding empty head/tail layers, then the MTP layers)"
                 )
             continue
         if isinstance(layer_selector, bool) or not isinstance(

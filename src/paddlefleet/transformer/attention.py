@@ -355,7 +355,10 @@ class Attention(FleetLayer, ABC):
         self.recompute_core_attention = False
         if self.config.recompute_granularity == "selective":
             self.recompute_core_attention = module_needs_recompute(
-                "core_attn", self.layer_number, self.config
+                "core_attn",
+                self.layer_number,
+                self.config,
+                is_mtp_layer=self.is_mtp_layer,
             )
         if (
             self.config.recompute_modules is not None
@@ -365,7 +368,10 @@ class Attention(FleetLayer, ABC):
                 "rr must be used when recompute is enabled"
             )
             self.use_rr_flash_attention = module_needs_refined_recompute(
-                "flash_attn", self.layer_number, self.config
+                "flash_attn",
+                self.layer_number,
+                self.config,
+                is_mtp_layer=self.is_mtp_layer,
             )
         # Output.
         self.o_proj = build_spec_layer(
@@ -384,7 +390,10 @@ class Attention(FleetLayer, ABC):
         self.recompute_gated_attn = (
             self.config.recompute_granularity == "selective"
             and module_needs_recompute(
-                "gated_attn", self.layer_number, self.config
+                "gated_attn",
+                self.layer_number,
+                self.config,
+                is_mtp_layer=self.is_mtp_layer,
             )
         )
 

@@ -49,6 +49,7 @@ from paddlefleet.models.gpt.moe_layer_specs import (
     get_moe_layer_spec_for_backend,
 )
 from paddlefleet.models.gpt.mtp_embedding_layer import MTPEmbeddingLayer
+from paddlefleet.recompute_utils import effective_mtp_layers
 from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
@@ -116,24 +117,7 @@ LNImpl = WrappedPaddleNorm
 
 
 def _get_effective_mtp_layers(config: TransformerConfig) -> int:
-    mtp_num_layers = getattr(config, "mtp_num_layers", 0) or 0
-    nextn_num_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
-    if not isinstance(mtp_num_layers, int) or isinstance(mtp_num_layers, bool):
-        mtp_num_layers = 0
-    if not isinstance(nextn_num_layers, int) or isinstance(
-        nextn_num_layers, bool
-    ):
-        nextn_num_layers = 0
-    if (
-        mtp_num_layers > 0
-        and nextn_num_layers > 0
-        and mtp_num_layers != nextn_num_layers
-    ):
-        raise ValueError(
-            "mtp_num_layers and num_nextn_predict_layers must be equal when "
-            f"both are positive, got {mtp_num_layers} and {nextn_num_layers}"
-        )
-    return mtp_num_layers if mtp_num_layers > 0 else nextn_num_layers
+    return effective_mtp_layers(config)
 
 
 def _get_dsv4_hybrid_attention_layer_type(

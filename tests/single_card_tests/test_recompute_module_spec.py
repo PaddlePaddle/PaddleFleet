@@ -139,14 +139,108 @@ class TestDictLayerList(unittest.TestCase):
             config = _config(recompute_modules={"mlp": spec})
             self.assertEqual(_hits("mlp", config), [1, 2], f"spec={spec!r}")
 
-    def test_layer_ids_are_global(self):
-        # Empty head layers shift every backbone layer id.
+    def test_layer_ids_skip_empty_head_layers(self):
+        # Layer ids are logical: id 0 is the first real backbone layer, whatever
+        # num_empty_layers_add_in_head is. Physical layer numbers are shifted.
         config = _config(
             num_hidden_layers=6,
             num_empty_layers_add_in_head=2,
             recompute_modules={"mlp": [0, 2]},
         )
-        self.assertEqual(_hits("mlp", config), [0, 2])
+        self.assertEqual(_hits("mlp", config, num_layers=8), [2, 4])
+
+    def test_layer_ids_match_csa_compress_ratios_indexing(self):
+        # The same index space per-layer model_config fields use, so
+        # csa_compress_ratios[i] and a layer id of i mean the same layer.
+        config = _config(num_hidden_layers=6, recompute_modules={"mlp": [0, 5]})
+        self.assertEqual(_hits("mlp", config, num_layers=6), [0, 5])
+
+
+class TestMTPLayers(unittest.TestCase):
+    """MTP layers are addressed after the backbone, not aliased onto layer 0.
+
+    An MTP layer is built with ``layer_number=i`` within the MTP block, so
+    without the logical mapping it would collide with backbone layer ``i``.
+    """
+
+    def test_mtp_layer_id_follows_the_backbone(self):
+        config = _config(
+            num_hidden_layers=6,
+            mtp_num_layers=1,
+            recompute_modules={"mlp": [6]},
+        )
+        self.assertTrue(
+            module_needs_recompute("mlp", 0, config, is_mtp_layer=True)
+        )
+        self.assertFalse(module_needs_recompute("mlp", 0, config))
+
+    def test_backbone_layer_zero_does_not_select_mtp(self):
+        config = _config(
+            num_hidden_layers=6,
+            mtp_num_layers=1,
+            recompute_modules={"mlp": [0]},
+        )
+        self.assertTrue(module_needs_recompute("mlp", 0, config))
+        self.assertFalse(
+            module_needs_recompute("mlp", 0, config, is_mtp_layer=True)
+        )
+
+    def test_multiple_mtp_layers_are_addressed_independently(self):
+        config = _config(
+            num_hidden_layers=6,
+            mtp_num_layers=2,
+            recompute_modules={"mlp": [7]},
+        )
+        self.assertFalse(
+            module_needs_recompute("mlp", 0, config, is_mtp_layer=True)
+        )
+        self.assertTrue(
+            module_needs_recompute("mlp", 1, config, is_mtp_layer=True)
+        )
+
+    def test_empty_head_layers_do_not_shift_mtp_ids(self):
+        config = _config(
+            num_hidden_layers=6,
+            num_empty_layers_add_in_head=2,
+            mtp_num_layers=1,
+            recompute_modules={"mlp": [6]},
+        )
+        self.assertTrue(
+            module_needs_recompute("mlp", 0, config, is_mtp_layer=True)
+        )
+
+    def test_rr_list_inverts_on_the_logical_id(self):
+        config = _config(
+            num_hidden_layers=6,
+            mtp_num_layers=1,
+            recompute_modules={"flash_attn": [6]},
+        )
+        self.assertFalse(
+            module_needs_refined_recompute(
+                "flash_attn", 0, config, is_mtp_layer=True
+            )
+        )
+        self.assertTrue(module_needs_refined_recompute("flash_attn", 0, config))
+
+    def test_mtp_id_is_valid_at_startup(self):
+        _config(
+            num_hidden_layers=6,
+            mtp_num_layers=1,
+            recompute_modules={"mlp": [6]},
+        )
+        with self.assertRaises(ValueError):
+            _config(
+                num_hidden_layers=6,
+                mtp_num_layers=1,
+                recompute_modules={"mlp": [7]},
+            )
+
+    def test_num_nextn_predict_layers_is_the_fallback(self):
+        _config(
+            num_hidden_layers=6,
+            num_nextn_predict_layers=1,
+            recompute_modules={"mlp": [6]},
+        )
 
 
 class TestRefinedRecompute(unittest.TestCase):
@@ -301,11 +395,21 @@ class TestValidation(unittest.TestCase):
         with self.assertRaises(ValueError):
             _config(num_hidden_layers=4, recompute_modules={"mlp": [0, 4]})
 
-    def test_empty_head_layers_extend_the_range(self):
-        # 4 backbone + 2 head layers -> id 4 is now valid.
+    def test_empty_head_layers_do_not_extend_the_range(self):
+        # Empty layers hold no recomputable module, so they are not addressable:
+        # 4 backbone layers means ids 0..3 whatever the head layer count is.
+        with self.assertRaises(ValueError):
+            _config(
+                num_hidden_layers=4,
+                num_empty_layers_add_in_head=2,
+                recompute_modules={"mlp": [0, 4]},
+            )
+
+    def test_mtp_layers_extend_the_range(self):
+        # 4 backbone + 1 MTP layer -> id 4 is the MTP layer.
         _config(
             num_hidden_layers=4,
-            num_empty_layers_add_in_head=2,
+            mtp_num_layers=1,
             recompute_modules={"mlp": [0, 4]},
         )
 

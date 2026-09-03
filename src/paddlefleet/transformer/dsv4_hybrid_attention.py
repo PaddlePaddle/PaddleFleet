@@ -346,6 +346,62 @@ class DSv4HybridSelfAttentionSublayersSpec:
     gate_proj: type | LayerSpec | None = None
 
 
+class _FixedOrderQKV(paddle.autograd.PyLayer):
+    """Q and KV read separate graph inputs so the two gradients into
+    ``hidden_states`` are summed in a fixed order, i.e. bitwise-stable replay."""
+
+    @staticmethod
+    def forward(
+        ctx, module, hidden_states, position_offset, docmask_meta, build_graph
+    ):
+        q_input = hidden_states.detach()
+        kv_input = hidden_states.detach()
+        q_input.stop_gradient = hidden_states.stop_gradient
+        kv_input.stop_gradient = hidden_states.stop_gradient
+
+        with paddle.set_grad_enabled(build_graph):
+            query, key, _value, q_compressed, _kv_compressed = (
+                module.get_query_key_value_tensors(
+                    q_input,
+                    position_offset=position_offset,
+                    docmask_meta=docmask_meta,
+                    kv_hidden_states=kv_input,
+                )
+            )
+
+        ctx.hidden_stop_gradient = hidden_states.stop_gradient
+        ctx.build_graph = build_graph
+        if build_graph:
+            ctx.save_for_backward(q_input, kv_input, query, key, q_compressed)
+        return query.detach(), key.detach(), q_compressed.detach()
+
+    @staticmethod
+    def backward(ctx, *output_grads):
+        if ctx.hidden_stop_gradient or not ctx.build_graph:
+            return None
+
+        q_input, kv_input, *outputs = ctx.saved_tensor()
+        pairs = [
+            (output, grad)
+            for output, grad in zip(outputs, output_grads)
+            if grad is not None
+        ]
+        if pairs:
+            with paddle.amp.auto_cast(enable=False):
+                paddle.autograd.backward(
+                    [output for output, _ in pairs],
+                    [grad for _, grad in pairs],
+                )
+
+        q_grad = q_input.grad
+        kv_grad = kv_input.grad
+        if q_grad is None:
+            return kv_grad
+        if kv_grad is None:
+            return q_grad
+        return q_grad + kv_grad
+
+
 # ---------------------------------------------------------------------------
 # DSv4HybridAttention
 # ---------------------------------------------------------------------------
@@ -552,15 +608,52 @@ class DSv4HybridAttention(Attention):
 
         self.recompute_gated_attn = (
             config.recompute_granularity == "selective"
-            and module_needs_recompute("gated_attn", self.layer_number, config)
+            and module_needs_recompute(
+                "gated_attn",
+                self.layer_number,
+                config,
+                is_mtp_layer=self.is_mtp_layer,
+            )
         )
 
         self.recompute_full_attn = (
             config.recompute_granularity == "selective"
-            and module_needs_recompute("full_attn", self.layer_number, config)
+            and module_needs_recompute(
+                "full_attn",
+                self.layer_number,
+                config,
+                is_mtp_layer=self.is_mtp_layer,
+            )
+        )
+        # The qkv segment alone, the DSv4 counterpart of MLA's
+        # "mla_qkv_recompute". Separate from full_attn, whose price is dominated
+        # by core_attention: the qkv chain saves far more per millisecond
+        # (profiled: 1.67GB/3.99ms vs core_attn 0.54GB/4.14ms).
+        self.recompute_qkv = (
+            config.recompute_granularity == "selective"
+            and module_needs_recompute(
+                "dsv4_hybrid_attn_qkv",
+                self.layer_number,
+                config,
+                is_mtp_layer=self.is_mtp_layer,
+            )
+        )
+        # Inverse RoPE + VHA postmix + grouped output projection. One switch for
+        # all three because the inverse RoPE and the postmix fuse into a single
+        # kernel when `fuse_inv_rope_into_vha_postmix` is on.
+        self.recompute_post_core = (
+            config.recompute_granularity == "selective"
+            and module_needs_recompute(
+                "dsv4_hybrid_attn_post_core",
+                self.layer_number,
+                config,
+                is_mtp_layer=self.is_mtp_layer,
+            )
         )
         self._full_attn_recompute = None
         self._gate_recompute = None
+        self._qkv_recompute = None
+        self._post_core_recompute = None
 
         # VHA postmix: low-rank cross-head mixing of the attention output, applied
         # after inverse RoPE (head space) and before the grouped output projection.
@@ -617,7 +710,12 @@ class DSv4HybridAttention(Attention):
         # configured like every other selective submodule.
         self.recompute_vha_postmix = (
             config.recompute_granularity == "selective"
-            and module_needs_recompute("vha_postmix", self.layer_number, config)
+            and module_needs_recompute(
+                "vha_postmix",
+                self.layer_number,
+                config,
+                is_mtp_layer=self.is_mtp_layer,
+            )
         )
 
     def forward(
@@ -756,6 +854,24 @@ class DSv4HybridAttention(Attention):
                 self.config, "attn_out_proj", self.o_proj, core_attn_out
             )
 
+            # Registered BEFORE the gated_attn one: with gated_attn_use_q_lora
+            # that segment saves q_compressed, which this segment produces and
+            # clears, so this one must replay first. Paddle fires the hooks on a
+            # tensor in registration order.
+            if self._qkv_recompute is not None:
+                self._qkv_recompute.discard_output_and_register_recompute(
+                    output
+                )
+                self._qkv_recompute = None
+
+            # Before the gated_attn one too: that segment saves this segment's
+            # output as its input.
+            if self._post_core_recompute is not None:
+                self._post_core_recompute.discard_output_and_register_recompute(
+                    output
+                )
+                self._post_core_recompute = None
+
             # Discard gated_attn output if it was independently recomputed
             if (
                 hasattr(self, "_gate_recompute")
@@ -787,13 +903,29 @@ class DSv4HybridAttention(Attention):
         and will be freed after this function returns during forward, then recomputed
         during backward.
         """
-        query, key, value, q_compressed, kv_compressed = (
-            self.get_query_key_value_tensors(
-                hidden_states=hidden_states,
-                position_offset=position_offset,
-                docmask_meta=docmask_meta,
+        if self.recompute_qkv and self.training and not _in_full_recompute:
+            self._qkv_recompute = RecomputeWithoutOutput()
+            query, key, q_compressed = self._qkv_recompute.recompute(
+                self._qkv_forward,
+                # As with full_attn: this segment feeds core_attention, whose CSA
+                # Indexer has a side-attached loss. A detached hidden_states
+                # would make q_compressed non-differentiable and silently starve
+                # the Indexer of gradient.
+                keep_indexer_grad_path(hidden_states, self.config),
+                position_offset,
+                docmask_meta,
+                preserve_rng_state=False,
+                share_grad_holder=True,
             )
-        )
+            # value is an alias of key, checked in _qkv_forward.
+            value = key
+        else:
+            query, key, q_compressed = self._qkv_forward(
+                hidden_states,
+                position_offset,
+                docmask_meta,
+            )
+            value = key
 
         # Core attention (CompressedSparseAttention)
         core_attn_out = self.core_attention(
@@ -808,7 +940,86 @@ class DSv4HybridAttention(Attention):
         )
         # core_attn_out: [b, sq, np * v_head_dim]
 
-        # Inverse RoPE on last qk_pos_emb_head_dim of each head
+        if (
+            self.recompute_post_core
+            and self.training
+            and not _in_full_recompute
+        ):
+            self._post_core_recompute = RecomputeWithoutOutput()
+            core_attn_out = self._post_core_recompute.recompute(
+                self._post_core_forward,
+                core_attn_out,
+                position_offset,
+                docmask_meta,
+                True,  # in_outer_recompute
+                preserve_rng_state=False,
+                share_grad_holder=True,
+            )
+        else:
+            core_attn_out = self._post_core_forward(
+                core_attn_out,
+                position_offset,
+                docmask_meta,
+                _in_full_recompute,
+            )
+
+        # Apply gated attention
+        if self.gated_attention:
+            gate_source = (
+                q_compressed if self.gated_attn_use_q_lora else hidden_states
+            )
+            # When NOT inside full_attn recompute, gated_attn can have its own
+            # independent RecomputeWithoutOutput wrapper for lighter memory saving.
+            if (
+                self.recompute_gated_attn
+                and self.training
+                and not _in_full_recompute
+            ):
+                self._gate_recompute = RecomputeWithoutOutput()
+                core_attn_out = self._gate_recompute.recompute(
+                    self._gate,
+                    gate_source,
+                    core_attn_out,
+                    preserve_rng_state=False,
+                    share_grad_holder=True,
+                )
+            else:
+                core_attn_out = self._gate(gate_source, core_attn_out)
+
+        return core_attn_out
+
+    def _post_core_forward(
+        self,
+        core_attn_out: Tensor,
+        position_offset: int,
+        docmask_meta: CSADocMaskMetadata | None,
+        in_outer_recompute: bool = False,
+    ) -> Tensor:
+        """Core attention output -> gate input, the ``post_core`` segment.
+
+        Inverse RoPE, the VHA postmix and the grouped output projection. One
+        input, one output, no aliasing: unlike the qkv segment this can be handed
+        to ``RecomputeWithoutOutput`` as is. The CSA Indexer lives upstream in
+        ``core_attention``, so ``keep_indexer_grad_path`` is not needed here.
+
+        ``in_outer_recompute`` says an outer wrapper already replays everything
+        in here, so the nested per-block switches must stand down.
+        """
+        core_attn_out = self._inv_rope_postmix_forward(
+            core_attn_out, position_offset, docmask_meta, in_outer_recompute
+        )
+        return self._o_group_proj_forward(core_attn_out)
+
+    def _inv_rope_postmix_forward(
+        self,
+        core_attn_out: Tensor,
+        position_offset: int,
+        docmask_meta: CSADocMaskMetadata | None,
+        in_outer_recompute: bool,
+    ) -> Tensor:
+        """Inverse RoPE on the last ``qk_pos_emb_head_dim`` of each head, then
+        the VHA postmix. One method because the two can fuse into a single
+        kernel, in which case ``postmix_done`` is already set."""
         b, sq, _ = core_attn_out.shape
         pos_dim = self.qk_pos_emb_head_dim
         nope_dim = self.v_head_dim - pos_dim
@@ -827,7 +1038,7 @@ class DSv4HybridAttention(Attention):
             # DSv4 reference uses pure norm-preserving RoPE; YaRN's mscale is not applied.
             mscale = 1.0
 
-            if self._can_fuse_inv_rope_postmix(_in_full_recompute):
+            if self._can_fuse_inv_rope_postmix(in_outer_recompute):
                 # Fused inverse RoPE + ungrouped VHA postmix. Bitwise identical
                 # to running the two separately, but never materialises the
                 # full-width rotated output. It consumes the postmix, so the
@@ -869,22 +1080,28 @@ class DSv4HybridAttention(Attention):
 
         # VHA postmix: low-rank cross-head mixing while still in head space
         # ([b, sq, nh, v_head_dim]), after inverse RoPE and before the grouped
-        # output projection. When the whole block is already wrapped in a
-        # full_attn RecomputeWithoutOutput, skip the nested selective recompute
-        # (the full block recompute already frees these activations).
+        # output projection. Skipped when an outer wrapper already replays this,
+        # since that wrapper has freed these activations anyway.
         if self.use_vha_postmix and not postmix_done:
             if (
                 self.recompute_vha_postmix
                 and self.training
-                and not _in_full_recompute
+                and not in_outer_recompute
             ):
                 core_attn_out = recompute(
                     self._apply_vha_postmix, core_attn_out
                 )
             else:
                 core_attn_out = self._apply_vha_postmix(core_attn_out)
+        return core_attn_out
 
-        # Grouped output projection
+    def _o_group_proj_forward(self, core_attn_out: Tensor) -> Tensor:
+        """The grouped output projection.
+
+        ``core_attn_out`` may arrive 3D or 4D depending on which inverse-RoPE
+        branch ran, so b/sq are read by index rather than unpacked.
+        """
+        b, sq = core_attn_out.shape[0], core_attn_out.shape[1]
         core_attn_out = core_attn_out.reshape([b, sq, self.o_local_groups, -1])
         group_shape = [
             self.o_local_groups,
@@ -910,32 +1127,35 @@ class DSv4HybridAttention(Attention):
                 dw_accumulator=dw_acc,
                 group_shape=group_shape,
             )
-        core_attn_out = core_attn_out.reshape([b, sq, -1])
+        return core_attn_out.reshape([b, sq, -1])
 
-        # Apply gated attention
-        if self.gated_attention:
-            gate_source = (
-                q_compressed if self.gated_attn_use_q_lora else hidden_states
-            )
-            # When NOT inside full_attn recompute, gated_attn can have its own
-            # independent RecomputeWithoutOutput wrapper for lighter memory saving.
-            if (
-                self.recompute_gated_attn
-                and self.training
-                and not _in_full_recompute
-            ):
-                self._gate_recompute = RecomputeWithoutOutput()
-                core_attn_out = self._gate_recompute.recompute(
-                    self._gate,
-                    gate_source,
-                    core_attn_out,
-                    preserve_rng_state=False,
-                    share_grad_holder=True,
+    def _qkv_forward(self, hidden_states, position_offset, docmask_meta):
+        """The qkv segment, for the ``dsv4_hybrid_attn_qkv`` recompute switch."""
+        if hidden_states.stop_gradient:
+            query, key, _value, q_compressed, _kv_compressed = (
+                self.get_query_key_value_tensors(
+                    hidden_states=hidden_states,
+                    position_offset=position_offset,
+                    docmask_meta=docmask_meta,
                 )
-            else:
-                core_attn_out = self._gate(gate_source, core_attn_out)
+            )
+        else:
+            query, key, q_compressed = _FixedOrderQKV.apply(
+                self,
+                hidden_states,
+                position_offset,
+                docmask_meta,
+                paddle.is_grad_enabled(),
+            )
+            _value = key
 
-        return core_attn_out
+        if _value is not key:
+            raise ValueError(
+                f"{type(self).__name__}.get_query_key_value_tensors returned a "
+                "`value` that is not `key`; dsv4_hybrid_attn_qkv recompute "
+                "rebuilds the alias outside the segment and must be updated"
+            )
+        return query, key, q_compressed
 
     def _gate(self, gate_source: Tensor, core_attn_out: Tensor) -> Tensor:
         gate, _ = deferrable_linear(
@@ -1263,6 +1483,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         startend_row_indices: Tensor | None = None,
         position_offset: int = 0,
         docmask_meta: CSADocMaskMetadata | None = None,
+        kv_hidden_states: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Derive query, key, value from hidden_states.
 
@@ -1284,6 +1505,8 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             kv_compressed: [b, sq, hidden_size] (== hidden_states)
         """
         b, sq, _ = hidden_states.shape
+        if kv_hidden_states is None:
+            kv_hidden_states = hidden_states
 
         # Q path
         q_compressed, _ = deferrable_linear(
@@ -1316,7 +1539,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
 
         # KV path
         kv, _ = deferrable_linear(
-            self.config, "attn_kv_proj", self.linear_kv_proj, hidden_states
+            self.config, "attn_kv_proj", self.linear_kv_proj, kv_hidden_states
         )  # [b, sq, v_head_dim]
 
         if self.config.swa_high_precision_norm:

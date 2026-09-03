@@ -98,7 +98,15 @@ def _make_dsv4_instance(
         and recompute_modules is not None
         and "full_attn" in recompute_modules
     )
+    inst.recompute_qkv = (
+        recompute_granularity == "selective"
+        and recompute_modules is not None
+        and "dsv4_hybrid_attn_qkv" in recompute_modules
+    )
+    inst.recompute_post_core = False
     inst._full_attn_recompute = None
+    inst._qkv_recompute = None
+    inst._post_core_recompute = None
     inst._gate_recompute = None
 
     # VHA postmix disabled for these recompute-path tests (forward() reads
@@ -168,7 +176,7 @@ def _make_dsv4_instance(
         b, s, _ = hidden_states.shape
         q = paddle.randn([b, s, np_, v_dim])
         k = paddle.randn([b, s, 1, v_dim])
-        v_ = paddle.randn([b, s, 1, v_dim])
+        v_ = k
         q_compressed = paddle.randn([b, s, config.q_lora_rank])
         kv_compressed = paddle.randn([b, s, v_dim])
         return q, k, v_, q_compressed, kv_compressed
@@ -179,6 +187,16 @@ def _make_dsv4_instance(
     inst.forward = types.MethodType(DSv4HybridAttention.forward, inst)
     inst._full_attn_forward = types.MethodType(
         DSv4HybridAttention._full_attn_forward, inst
+    )
+    inst._qkv_forward = types.MethodType(DSv4HybridAttention._qkv_forward, inst)
+    inst._post_core_forward = types.MethodType(
+        DSv4HybridAttention._post_core_forward, inst
+    )
+    inst._inv_rope_postmix_forward = types.MethodType(
+        DSv4HybridAttention._inv_rope_postmix_forward, inst
+    )
+    inst._o_group_proj_forward = types.MethodType(
+        DSv4HybridAttention._o_group_proj_forward, inst
     )
     inst._gate = types.MethodType(DSv4HybridAttention._gate, inst)
     # _full_attn_forward consults this before the inverse-RoPE block. Bind the

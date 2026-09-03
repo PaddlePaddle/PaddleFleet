@@ -625,6 +625,7 @@ class MoELayer(nn.Layer):
         list resolves to False; the second call settles both.
         """
         layer_number = getattr(self, "layer_number", None)
+        is_mtp_layer = getattr(self, "is_mtp_layer", False)
         selective = self.config.recompute_granularity == "selective"
         self.recompute_moe_gate_up = getattr(
             self.config, "recompute_moe_gate_up", False
@@ -635,6 +636,7 @@ class MoELayer(nn.Layer):
                 layer_number,
                 self.config,
                 defer_if_layer_unknown=True,
+                is_mtp_layer=is_mtp_layer,
             )
         )
         self.recompute_moe_premute = getattr(
@@ -646,13 +648,16 @@ class MoELayer(nn.Layer):
                 layer_number,
                 self.config,
                 defer_if_layer_unknown=True,
+                is_mtp_layer=is_mtp_layer,
             )
         )
         experts = getattr(self, "grouped_gemm_experts", None)
         if experts is not None and hasattr(
             experts, "update_activation_recompute"
         ):
-            experts.update_activation_recompute(layer_number)
+            experts.update_activation_recompute(
+                layer_number, is_mtp_layer=is_mtp_layer
+            )
 
     def rr_recompute_update(self, in_full_recompute, in_mlp_recompute):
         if (
@@ -687,7 +692,10 @@ class MoELayer(nn.Layer):
                         "Ensure set_layer_number() is called first."
                     )
             self.use_rr_deepep_combine = module_needs_refined_recompute(
-                "moe_combine", getattr(self, "layer_number", None), self.config
+                "moe_combine",
+                getattr(self, "layer_number", None),
+                self.config,
+                is_mtp_layer=getattr(self, "is_mtp_layer", False),
             )
         if (
             (not in_full_recompute)
