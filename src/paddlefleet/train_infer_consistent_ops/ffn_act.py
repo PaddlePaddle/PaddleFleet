@@ -35,7 +35,9 @@ from __future__ import annotations
 
 import paddle
 
-from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_enabled
+from paddlefleet.train_infer_consistent_ops.inspect_util import (
+    inspect_tag_enabled,
+)
 from paddlefleet.train_infer_consistent_ops.permute import (
     scatter_canonical_rows,
 )
@@ -116,17 +118,26 @@ def requant_swiglu_output(o2_fp8, o2_scale, canon, use_ue8m0):
 # ---------------------------------------------------------------------------
 
 
-def inspect_tensor_force_unit_probs(probs):
-    """All-ones routing weights while probing, else `probs` untouched.
+def inspect_tensor_force_unit_probs(probs, tag):
+    """All-ones routing weights while `tag` is being probed, else `probs` as is.
 
-    This is the one helper that really changes what the model computes, hence it
-    is confined to train_infer_consistent_inspect mode: without it the expert
-    tail cannot be compared operator by operator (this side folds the weight into
-    the SwiGLU+fp8-quant kernel, the inference side multiplies after the down
-    GEMM, and under pow2/ue8m0 block scales the two orders do not cancel). The
-    logprobs of such a run are diagnostic output anyway, and nothing changes
-    while `ABLATION_INSPECT_TENSOR` is unset.
+    This is the one helper that really changes what the model computes, so it is
+    gated on the probe that needs it rather than on the mode as a whole: `tag` has
+    to be live under the ABLATION_TAG_WHITELIST / BLACKLIST filters, otherwise a
+    run narrowed to unrelated tags would still rewrite the MoE math. Without it
+    the expert tail cannot be compared operator by operator (this side folds the
+    weight into the SwiGLU+fp8-quant kernel, the inference side multiplies after
+    the down GEMM, and under pow2/ue8m0 block scales the two orders do not
+    cancel). The logprobs of such a run are diagnostic output anyway, and nothing
+    changes while `ABLATION_INSPECT_TENSOR` is unset.
+
+    Args:
+        probs: the live routing weights.
+        tag: the probe whose comparability this buys -- `moe_act_quant_output`,
+            the fused SwiGLU x probs x quant output in `fp8_utils.py`. The down
+            GEMM output (`moe_ffn2_output`) inherits the same weighting, so it is
+            only comparable in a run where this tag is live too.
     """
-    if probs is None or not inspect_enabled():
+    if probs is None or not inspect_tag_enabled(tag):
         return probs
     return paddle.ones_like(probs)

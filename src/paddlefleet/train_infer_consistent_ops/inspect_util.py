@@ -94,6 +94,20 @@ def inspect_enabled():
     return _ENABLED
 
 
+def inspect_tag_enabled(tag):
+    """True when the probes are on *and* `tag` survives the tag filters.
+
+    The same gate `inspect_tensor` applies in its stage 1, exposed for the one
+    helper that has to change what the model computes to make a probe comparable
+    (`inspect_tensor_force_unit_probs`). That change has to follow the filters
+    too: narrowing a run down to a few tags must not keep rewriting the math
+    behind a probe nobody asked for.
+    """
+    return _ENABLED and not (
+        (_WHITELIST and tag not in _WHITELIST) or tag in _BLACKLIST
+    )
+
+
 # ---------------------------------------------------------------------------
 # Current-layer context
 #
@@ -325,7 +339,7 @@ def inspect_tensor(
         return tensor
     # Whitelist first (when non-empty only its tags survive), then blacklist;
     # both gate the whole function, hooks included.
-    if (_WHITELIST and tag not in _WHITELIST) or tag in _BLACKLIST:
+    if not inspect_tag_enabled(tag):
         return tensor
 
     # --- 2. snapshot: the comparable view; feeds info/save/load, never the
