@@ -78,6 +78,7 @@ from paddlefleet.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,
     _initialize_affine_weight_gpu,
 )
+from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.identity_op import IdentityOp
 
 
@@ -265,6 +266,8 @@ class GPTLMHead(ColumnParallelLinear):
 
             return (hidden_states, self.weight, self.bias)
 
+        hidden_states = inspect_tensor("lm_head_input", -1, hidden_states)
+
         if module_needs_recompute("lm_head", None, self.config):
             recompute_func = super().forward
 
@@ -280,6 +283,8 @@ class GPTLMHead(ColumnParallelLinear):
             and self.config.sequence_parallel
         ):
             logits = logits.transpose([1, 0, 2]).contiguous()
+
+        logits = inspect_tensor("lm_head_logits", -1, logits)
 
         # Multimax lm_head (unfused path): apply learnable SegLU modulation on
         # logits before softmax/cross-entropy. SegLU is element-wise so it works
@@ -304,6 +309,7 @@ class GPTLMHead(ColumnParallelLinear):
             logits = recompute(
                 SegLU, logits, self.multimax_ranges, self.multimax_ts
             )
+            logits = inspect_tensor("lm_head_seglu_output", -1, logits)
 
         return logits
 

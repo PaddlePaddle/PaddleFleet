@@ -44,6 +44,10 @@ from paddlefleet.recompute_utils import (
     need_full_recompute,
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
+from paddlefleet.train_infer_consistent_ops.inspect_util import (
+    inspect_tensor,
+    inspect_tensor_set_current_layer,
+)
 from paddlefleet.transformer.dsv4_hybrid_attention import DSv4HybridAttention
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.mlp import MLP
@@ -332,6 +336,8 @@ class TransformerLayer(nn.Layer):
                     "TP process group is required for MLP in TransformerLayer"
                 )
                 additional_mlp_kwargs["tp_group"] = pg_collection.tp
+
+                additional_mlp_kwargs["inspect_name"] = "dense_mlp"
             else:
                 log_single_rank(
                     logger,
@@ -346,7 +352,6 @@ class TransformerLayer(nn.Layer):
             self.mlp.set_layer_number(
                 self.layer_number, is_mtp_layer=self.is_mtp_layer
             )
-
         # [Layer 9: BiasDropoutFusion]
         self.mlp_bda = build_spec_layer(sublayers_spec.mlp_bda)
 
@@ -878,6 +883,9 @@ class TransformerLayer(nn.Layer):
             output = partial_block + mlp_out
         else:
             self._log_md5(hidden_states, "input", self.layer_number)
+            hidden_states = inspect_tensor(
+                "layer_input", self.layer_number, hidden_states
+            )
             with profile("attn"):
                 if need_do_attention():
                     hidden_states, context = self._forward_attention(
@@ -910,6 +918,7 @@ class TransformerLayer(nn.Layer):
                     origin_input_ids=origin_input_ids,
                 )
             self._log_md5(output, "layer_output", self.layer_number)
+            output = inspect_tensor("layer_output", self.layer_number, output)
         if context is not None:
             return output, context
         return output
@@ -1520,6 +1529,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         self._log_md5(
             input_layernorm_output, "input_layernorm_out", self.layer_number
         )
+        input_layernorm_output = inspect_tensor(
+            "Attn_input", self.layer_number, input_layernorm_output
+        )
 
         # Self-attention
         extra_kwargs = {}
@@ -1579,6 +1591,12 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             )
 
         # mHC: fused H_res + H_post + bias-dropout-add
+        attention_output_with_bias = inspect_tensor(
+            "Attn_output",
+            self.layer_number,
+            attention_output_with_bias,
+            index=0,
+        )
         hidden_states, fused_span = self._fused_h_res_h_post_bda(
             self.self_attention_hyper_connection,
             h_res,
@@ -1666,6 +1684,12 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         )
 
         # MLP
+        inspect_tensor_set_current_layer(self.layer_number)
+        post_attention_layernorm_output = inspect_tensor(
+            "moe_or_dense_input",
+            self.layer_number,
+            post_attention_layernorm_output,
+        )
         if self.recompute_mlp:
             _mlp_input_ids = (
                 input_ids if isinstance(self.mlp, MoELayer) else None
@@ -1701,6 +1725,12 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
 
         # mHC: fused H_res + H_post + bias-dropout-add
+        mlp_output_with_bias = inspect_tensor(
+            "moe_or_dense_output",
+            self.layer_number,
+            mlp_output_with_bias,
+            index=0,
+        )
         hidden_states, fused_span = self._fused_h_res_h_post_bda(
             self.mlp_hyper_connection,
             h_res,

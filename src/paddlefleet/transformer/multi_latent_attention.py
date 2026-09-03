@@ -53,6 +53,7 @@ from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_sequence_parallel_region,
 )
+from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
@@ -1811,6 +1812,14 @@ class MLASelfAttention(MultiLatentAttention):
                         f"length to match q_len, got cos={cos.shape}, "
                         f"sin={sin.shape}, q_len={q_len}."
                     )
+                # Ablation boundary: query RoPE segment BEFORE the rotation
+                # ([..., qk_nope_head_dim:]). Pairs with
+                # mla_query_after_rope_pe to isolate the rotation itself.
+                q[..., self.qk_nope_head_dim :] = inspect_tensor(
+                    "mla_query_before_rope_pe",
+                    self.layer_number,
+                    q[..., self.qk_nope_head_dim :],
+                )
                 query = fused_apply_mla_rope_for_q(
                     q,
                     cos,
@@ -1820,6 +1829,25 @@ class MLASelfAttention(MultiLatentAttention):
                     cu_seqlens_q,
                     cp_rank,
                     cp_size,
+                )
+
+                # Ablation boundaries: query split along the last dim into the
+                # no_pe segment ([..., :qk_nope_head_dim], untouched by RoPE)
+                # and the RoPE segment ([..., qk_nope_head_dim:], rotated).
+                query[..., : self.qk_nope_head_dim] = inspect_tensor(
+                    "mla_query_after_rope_nope",
+                    self.layer_number,
+                    query[..., : self.qk_nope_head_dim],
+                )
+                query[..., self.qk_nope_head_dim :] = inspect_tensor(
+                    "mla_query_after_rope_pe",
+                    self.layer_number,
+                    query[..., self.qk_nope_head_dim :],
+                )
+
+                # Ablation boundary: RoPE-applied query (fused MLA path).
+                query = inspect_tensor(
+                    "mla_query_after_rope", self.layer_number, query
                 )
                 key, value = fused_apply_mla_rope_for_kv(
                     kv,
@@ -1832,6 +1860,14 @@ class MLASelfAttention(MultiLatentAttention):
                     cu_seqlens_kv,
                     cp_rank,
                     cp_size,
+                )
+                # Ablation boundary: key RoPE segment only. The fused kernel
+                # lays key out as [..., k_dim + emb_dim] = nope part copied
+                # from kv, then the rotated part at offset qk_nope_head_dim.
+                key[..., self.qk_nope_head_dim :] = inspect_tensor(
+                    "mla_key_pe_after_rope",
+                    self.layer_number,
+                    key[..., self.qk_nope_head_dim :],
                 )
 
                 k_pe = None

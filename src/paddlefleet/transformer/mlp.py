@@ -42,6 +42,10 @@ from paddlefleet.fusions.fused_bias_swiglu import (
     bias_swiglu_impl,
     weighted_bias_swiglu_impl,
 )
+from paddlefleet.train_infer_consistent_ops.inspect_util import (
+    get_current_layer,
+    inspect_tensor,
+)
 from paddlefleet.transformer.activations import situ, situ_glu
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.layer import FleetLayer
@@ -101,10 +105,13 @@ class MLP(FleetLayer):
         intermediate_size: int | None = None,
         hidden_size: int | None = None,
         tp_group=None,
+        inspect_name: str = "moe_shared",
     ):
         super().__init__(config=config)
 
         self.config: TransformerConfig = config
+
+        self.inspect_name = inspect_name
 
         self.input_size = (
             input_size if input_size is not None else self.config.hidden_size
@@ -209,6 +216,12 @@ class MLP(FleetLayer):
             hidden_states,
         )
         nvtx_range_pop(suffix="up_gate_proj")
+
+        intermediate_parallel = inspect_tensor(
+            f"{self.inspect_name}_ffn1_output",
+            get_current_layer(),
+            intermediate_parallel,
+        )
 
         nvtx_range_push(suffix="activation")
 
@@ -343,6 +356,12 @@ class MLP(FleetLayer):
                 intermediate_parallel = intermediate_parallel.to(original_dtype)
         nvtx_range_pop(suffix="activation")
 
+        intermediate_parallel = inspect_tensor(
+            f"{self.inspect_name}_swiglu_output",
+            get_current_layer(),
+            intermediate_parallel,
+        )
+
         # [s, b, h]
         nvtx_range_push(suffix="down_proj")
         output, output_bias = deferrable_linear(
@@ -352,6 +371,9 @@ class MLP(FleetLayer):
             intermediate_parallel,
         )
         nvtx_range_pop(suffix="down_proj")
+        output = inspect_tensor(
+            f"{self.inspect_name}_ffn2_output", get_current_layer(), output
+        )
 
         if per_token_scale is not None and output_bias is not None:
             # if this MLP is an expert, and bias is required, we add the bias to output directly

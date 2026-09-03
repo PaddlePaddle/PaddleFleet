@@ -38,6 +38,7 @@ from paddlefleet.parallel_state import (
 from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
+from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
@@ -157,6 +158,7 @@ class GPTEmbedding(FleetLayer):
                     "multi_latent_attention is not supported when gpt_model_use_experimental_version=True and sequence_parallel=True"
                 )
         input_ids = dict_args["input_ids"]
+        input_ids = inspect_tensor("embedding_input", -1, input_ids)
         labels = dict_args.get("labels", None)
         if labels is not None:
             labels = labels.cuda()
@@ -204,6 +206,9 @@ class GPTEmbedding(FleetLayer):
                 position_ids=None
                 if self.multimodal_embedding
                 else position_ids,
+            )
+            decoder_input = inspect_tensor(
+                "embedding_output", -1, decoder_input
             )
             # Padding-Token is 0，avoiding Grad updating (ernie_core fill_feature func）
             if (
