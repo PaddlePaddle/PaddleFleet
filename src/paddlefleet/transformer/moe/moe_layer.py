@@ -2012,6 +2012,39 @@ class MoELayer(nn.Layer):
 
             return
 
+        if hasattr(self, "grouped_gemm_experts"):
+            if batch_mode:
+                expert_w1 = self.grouped_gemm_experts.weight1
+                expert_w2 = self.grouped_gemm_experts.weight2
+                local_expert_num = expert_w1.shape[0]
+                expert_w1_list = [
+                    expert_w1[i, :, :] for i in range(local_expert_num)
+                ]
+                expert_w2_list = [
+                    expert_w2[i, :, :] for i in range(local_expert_num)
+                ]
+
+                # Batch mode: process all experts' weights together
+                if expert_w1_list:
+                    quantize_weights(
+                        expert_w1_list,
+                        self.grouped_gemm_experts.weight1,
+                        quant_transpose,
+                    )
+                if expert_w2_list:
+                    quantize_weights(
+                        expert_w2_list,
+                        self.grouped_gemm_experts.weight2,
+                        quant_transpose,
+                    )
+
+            else:
+                raise NotImplementedError(
+                    "Not support individual mode for fuse_expert_fp8_weight_quant yet."
+                )
+
+            return
+
         if batch_mode:
             # Batch mode: process all experts' weights together
             expert_w1_list = [
