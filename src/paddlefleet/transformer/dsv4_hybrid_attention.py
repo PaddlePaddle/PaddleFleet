@@ -601,8 +601,8 @@ class DSv4HybridSelfAttentionSublayersSpec:
 
 
 class _FixedOrderQKV(paddle.autograd.PyLayer):
-    """Q and KV read separate graph inputs so the two gradients into
-    ``hidden_states`` are summed in a fixed order, i.e. bitwise-stable replay."""
+    """Q and KV behind one autograd node, so their gradients into
+    ``hidden_states`` merge as they do under replay, i.e. bitwise-stable."""
 
     @staticmethod
     def forward(
