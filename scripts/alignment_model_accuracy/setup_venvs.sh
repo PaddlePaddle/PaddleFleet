@@ -169,6 +169,22 @@ setup_paddle_venv() {
     # uv pip install --python "${paddle_py}" -v -e ./PaddleFormers
 }
 
+print_installed_versions() {
+    local torch_py="$1"
+    local pkg line version
+
+    echo "[setup_venvs] installed versions (venv/torch):"
+    for pkg in megatron-core ms-swift mcore-bridge; do
+        version=""
+        while IFS= read -r line; do
+            case "${line}" in
+                "Version: "*) version="${line#Version: }" ;;
+            esac
+        done < <(uv pip show --python "${torch_py}" "${pkg}" 2>/dev/null)
+        printf '  %-14s %s\n' "${pkg}" "${version:-not installed}"
+    done
+}
+
 main() {
     if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
         usage
@@ -190,6 +206,8 @@ main() {
 
     setup_torch_venv "${WORKSPACE_DIR}/venv/torch/bin/python"
     setup_paddle_venv "${WORKSPACE_DIR}/venv/paddle/bin/python"
+
+    print_installed_versions "${WORKSPACE_DIR}/venv/torch/bin/python"
 }
 
 main "$@"
