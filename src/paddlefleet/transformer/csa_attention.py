@@ -77,6 +77,11 @@ from paddlefleet.transformer.cp_utils import (
 # attends to all preceding original KV positions of its own document.
 CSA_MQA_RATIO = -1
 
+# Smallest ``config.csa_compress_ratios`` entry that makes a layer an HCA one:
+# at or above it the compressor pools without overlap, so a query reads raw KV
+# only through its sliding window and needs no Indexer.
+CSA_HCA_MIN_RATIO = 128
+
 
 def _normalize_csa_docmask_args(
     ratio: int,
@@ -463,6 +468,15 @@ class CSADocMaskMetadata:
     # window/compressed layout does not reuse a stale entry. Layer-independent,
     # so the compaction sort runs once per batch and all HCA layers reuse it.
     _compacted_attn_topk: dict | None = None
+    # Cached HCA FlashMask column bounds, the ``csa_hca_use_flashmask``
+    # counterpart of ``_compacted_attn_topk``: same layer-independent layout,
+    # same once-per-batch reuse. Two levels -- the global row bounds, which know
+    # nothing about CP and so can be warmed before the forward, and the table
+    # localised to one rank, keyed by the whole geometry tuple.
+    _hca_global_row_bounds: tuple[Tensor, Tensor] | None = None
+    _hca_global_window_size: int | None = None
+    _hca_flashmask_bounds: Tensor | None = None
+    _hca_flashmask_key: tuple[int, ...] | None = None
 
     @classmethod
     def build(
@@ -673,6 +687,98 @@ class CSADocMaskMetadata:
             self._compress_offset = key
         return self._compress_topk_idxs
 
+    def get_hca_global_row_bounds(
+        self, window_size: int
+    ) -> tuple[Tensor, Tensor]:
+        """Cached ``build_hca_global_row_bounds`` for this document layout.
+
+        The expensive half of the ``csa_hca_use_flashmask`` table: it depends on
+        this metadata, ``ratio`` and ``window_size`` only, so a CP rank can be
+        served from it with a slice and a clip. Being geometry-free is what lets
+        ``DocMaskMetaRegistry._warm`` force it before the forward -- the CP
+        geometry (``seqlen_local``, ``position_offset``) never reaches
+        ``preload``.
+
+        Keyed by ``window_size``, like ``get_window_topk_idxs``. Its size is
+        ``O(seqlen)``, so warming it costs far less than the index tables
+        ``_warm`` already builds.
+        """
+        window_size = int(window_size)
+        if (
+            self._hca_global_row_bounds is None
+            or self._hca_global_window_size != window_size
+        ):
+            self._hca_global_row_bounds = build_hca_global_row_bounds(
+                self.ratio, window_size, self.seqlen, self
+            )
+            self._hca_global_window_size = window_size
+        return self._hca_global_row_bounds
+
+    def get_hca_flashmask_bounds(
+        self,
+        n_raw: int,
+        n_compressed: int,
+        window_size: int,
+        seqlen_global: int,
+        seqlen_local: int,
+        position_offset: int,
+        batch_size: int,
+    ) -> Tensor:
+        """Cached ``build_hca_flashmask_bounds`` for this document layout.
+
+        The ``csa_hca_use_flashmask`` counterpart of ``compact_attn_topk_idxs``,
+        and cached for the same reason: the column bounds come from the document
+        ends, ``ratio``, ``window_size`` and the CP geometry only -- nothing
+        layer-specific -- so every HCA layer of a micro-batch asks for the exact
+        same table. With ``csa_share_docmask_meta`` this object outlives the layer
+        loop, so one build serves all ``n_hca_layers x (forward + recompute
+        replay)`` reads instead of each paying its own on the pipeline's critical
+        path.
+
+        Sharing the tensor is safe: the kernel only reads
+        ``startend_row_indices``, and every consumer saves the same one for
+        backward, so the table is also stored once rather than per layer.
+
+        Keyed by the full geometry tuple, like ``get_compress_topk_idxs``, so a
+        differently shaped layout cannot read a stale entry. ``ratio`` is absent
+        because it is this object's own. The document-dependent half underneath
+        is cached separately by ``get_hca_global_row_bounds``, so a geometry
+        change only redoes the slice-and-clip.
+        """
+        if int(seqlen_global) != self.seqlen:
+            # The global halves are indexed by global row, so a caller whose
+            # sequence is not the one this metadata was built from would slice
+            # the wrong columns.
+            raise ValueError(
+                "get_hca_flashmask_bounds: metadata holds seqlen "
+                f"{self.seqlen} but the layer asked for {int(seqlen_global)}"
+            )
+        key = (
+            int(n_raw),
+            int(n_compressed),
+            int(window_size),
+            int(seqlen_global),
+            int(seqlen_local),
+            int(position_offset),
+            int(batch_size),
+        )
+        if self._hca_flashmask_key != key:
+            raw_global, comp_global = self.get_hca_global_row_bounds(
+                window_size
+            )
+            self._hca_flashmask_bounds = localise_hca_flashmask_bounds(
+                raw_global,
+                comp_global,
+                n_raw,
+                n_compressed,
+                seqlen_global,
+                seqlen_local,
+                position_offset,
+                batch_size,
+            )
+            self._hca_flashmask_key = key
+        return self._hca_flashmask_bounds
+
     def compact_attn_topk_idxs(self, topk_idxs: Tensor):
         """Densify HCA attention indices once per batch (cached, layer-shared).
 
@@ -844,6 +950,245 @@ def get_window_topk_idxs(
         1, batch_size, seqlen, startend_row_indices, seqlen
     )
     return docmask_meta.get_window_topk_idxs(window_size)
+
+
+def build_hca_global_row_bounds(
+    ratio: int,
+    window_size: int,
+    seqlen_global: int,
+    docmask_meta: CSADocMaskMetadata | None = None,
+) -> tuple[Tensor, Tensor]:
+    """Global, CP-independent halves of the HCA FlashMask table.
+
+    Returns ``(raw_global, comp_global)``, both int32 ``[*, 2]`` row bounds in
+    *global* row coordinates:
+
+    * ``raw_global`` is ``[seqlen_global, 2]``, one entry per original KV
+      position: ``(min(pos + window_size, doc_end_pos), pos)``.
+    * ``comp_global`` is ``[seqlen_global // ratio, 2]``, one entry per
+      compressor output slot in the compressor's own ordering, with the slots
+      past ``actual_n_compressed`` filled with ``seqlen_global`` so that they
+      collapse to an empty interval once localised.
+
+    Split out of ``build_hca_flashmask_bounds`` so that the expensive part --
+    everything that touches the document layout -- depends on nothing but this
+    metadata, ``ratio`` and ``window_size``. That makes it warmable before the
+    forward (``DocMaskMetaRegistry._warm``) even though the CP geometry is not
+    known there: a rank turns these into its own table with a slice, a subtract
+    and a clip, which is what ``localise_hca_flashmask_bounds`` does.
+
+    See ``build_hca_flashmask_bounds`` for why these bounds describe the HCA
+    column set and how the kernel reads the ``(LTS, UTE)`` pair.
+    """
+    if docmask_meta is not None:
+        ratio = docmask_meta.ratio
+        # The bounds are derived from one document layout and then tiled over the
+        # batch, so anything but the single packed sequence the rest of
+        # ``CSADocMaskMetadata`` assumes (it flattens across the batch too) would
+        # silently apply batch 0's documents to every item.
+        expected = [1, 1, seqlen_global, 1]
+        got = list(docmask_meta.startend_row_indices.shape)
+        if got != expected:
+            raise ValueError(
+                "build_hca_global_row_bounds needs startend_row_indices of "
+                f"shape {expected}, got {got}"
+            )
+
+    # One ``(LTS, UTE)`` row per global position: the rows that could read a KV
+    # column sitting there if only the document mask constrained it. ``UTE`` is
+    # the position itself (nothing before a column may read it) and ``LTS`` its
+    # document's exclusive end row, which is exactly ``startend_row_indices``.
+    pos = paddle.arange(seqlen_global, dtype="int32")
+    doc_end = (
+        paddle.full_like(pos, seqlen_global)
+        if docmask_meta is None
+        else docmask_meta.startend_row_indices.flatten().cast("int32")
+    )
+    table = paddle.stack([doc_end, pos], axis=-1)
+
+    # A raw column is read only by its own sliding window, so its interval is
+    # the document one cut down to ``window_size`` rows.
+    raw_global = paddle.stack(
+        [paddle.minimum(pos + window_size, doc_end), pos], axis=-1
+    )
+
+    # Compressed columns are every ``ratio``-th row of the same table: a slot
+    # pools ``ratio`` tokens and becomes readable once its last one is in the
+    # past, i.e. with that token's bounds and no window. The compressor pools in
+    # ``cutoff_gather_indices`` order, so the table is put in that order first --
+    # under a document mask the slots do not line up with plain strides of the
+    # position axis (the metadata's own example, doc_lens ``[5, 14, 3, 8]`` at
+    # ratio 4, pools last tokens 3, 8, 12, 16, 25, 29, not 3, 7, 11, ...).
+    if docmask_meta is not None:
+        table = paddle.gather(
+            table, docmask_meta.cutoff_gather_indices.cast("int32")
+        )
+    n_slots = seqlen_global // ratio
+    comp_global = table[ratio - 1 :: ratio]
+    if comp_global.shape[0] < n_slots:
+        # The compressor's output is zero-padded up to ``sq // ratio`` columns
+        # whenever the document cutoff drops whole pooling groups, and that tail
+        # holds no real KV. ``seqlen_global`` clips to ``LTS == UTE`` in
+        # ``localise_hca_flashmask_bounds``: an empty interval.
+        comp_global = paddle.concat(
+            [
+                comp_global,
+                paddle.full(
+                    [n_slots - comp_global.shape[0], 2],
+                    seqlen_global,
+                    dtype="int32",
+                ),
+            ]
+        )
+    return raw_global, comp_global
+
+
+def localise_hca_flashmask_bounds(
+    raw_global: Tensor,
+    comp_global: Tensor,
+    n_raw: int,
+    n_compressed: int,
+    seqlen_global: int,
+    seqlen_local: int,
+    position_offset: int,
+    batch_size: int,
+) -> Tensor:
+    """Cut ``build_hca_global_row_bounds`` down to one rank's ``kv_full``.
+
+    Selects the columns this rank actually holds and rebases their row bounds
+    onto its own query rows. Cheap by construction -- a slice, a subtract and a
+    clip -- which is the point of keeping the global halves geometry-free.
+
+    Returns ``[batch_size, 1, n_raw + n_compressed, 2]`` int32.
+    """
+    # Raw columns are the global table cut down to this rank's window reach.
+    # Under CP ``prepend_prev_window`` glues ``window_size`` columns of the
+    # previous rank in front of this rank's own tokens, so the block starts that
+    # far ahead of the first query row; without CP there is no prefix and it
+    # starts at the query row itself. Either way it ends flush with this rank's
+    # last query row -- a column further right is causally unreadable by every
+    # row here, and the last query reads itself -- which is what makes the prefix
+    # width readable off ``n_raw`` instead of needing a separate argument.
+    n_window_prefix = n_raw - seqlen_local  # ``window_size`` under CP, else 0
+    raw_base = position_offset - n_window_prefix
+    raw = raw_global[max(raw_base, 0) : raw_base + n_raw]
+    if raw_base < 0:
+        # Rank 0's ``prepend_prev_window`` prefix is zeros standing in for
+        # positions before the sequence start, so no row may read it: equal
+        # bounds, which the clip below preserves as an empty interval.
+        before = paddle.arange(raw_base, 0, dtype=raw_global.dtype)
+        raw = paddle.concat([paddle.stack([before, before], axis=-1), raw])
+
+    comp = comp_global[:n_compressed]
+    if comp.shape[0] < n_compressed:
+        comp = paddle.concat(
+            [
+                comp,
+                paddle.full(
+                    [n_compressed - comp.shape[0], 2],
+                    seqlen_global,
+                    dtype=comp_global.dtype,
+                ),
+            ]
+        )
+
+    # Global rows -> this rank's rows. Clipping to [0, seqlen_local] is exact in
+    # both non-overlap directions: an interval entirely before this shard
+    # collapses to [0, 0) and one entirely after it to
+    # [seqlen_local, seqlen_local).
+    bounds = paddle.clip(
+        paddle.concat([raw, comp]) - position_offset, 0, seqlen_local
+    )
+    bounds = bounds.cast("int32").reshape([1, 1, n_raw + n_compressed, 2])
+    if batch_size > 1:
+        bounds = paddle.tile(bounds, [batch_size, 1, 1, 1])
+    return bounds
+
+
+def build_hca_flashmask_bounds(
+    n_raw: int,
+    n_compressed: int,
+    ratio: int,
+    window_size: int,
+    seqlen_global: int,
+    seqlen_local: int,
+    position_offset: int,
+    batch_size: int,
+    docmask_meta: CSADocMaskMetadata | None = None,
+) -> Tensor:
+    """FlashMask column bounds for the HCA column set.
+
+    Same visible ``(query, key)`` pairs the HCA branch spells out as an explicit
+    ``topk_idxs`` table for ``csa_sparse_attn``, expressed instead as one row
+    interval per KV column. Every HCA column has exactly one such interval,
+    which is why two bound vectors are enough:
+
+    * a raw column ``j`` is read only by its own sliding window, so by rows
+      ``[j, min(j + window_size, doc_end_j))``;
+    * a compressed column pools ``ratio`` consecutive tokens of one document and
+      is readable once *all* of them are in the past, so by rows
+      ``[last_token, doc_end_last_token)``.
+
+    Both need only one document fact, ``doc_end``, and that is exactly the
+    incoming ``startend_row_indices``: entry ``t`` is the exclusive end row of
+    ``t``'s document. So the whole table is ``startend_row_indices`` plus
+    ``window_size``, ``ratio`` and the compressor's token ordering
+    (``cutoff_gather_indices``, which says which tokens each compressed slot
+    actually pooled and so cannot be re-derived from the row indices alone
+    without duplicating the compressor's own compaction).
+
+    ``flashmask_attention`` with ``causal=False`` and two vectors reads them as
+    ``[LTS, UTE]`` and masks ``row >= LTS or row < UTE``, i.e. keeps exactly
+    ``[UTE, LTS)`` -- so the returned last dimension is ``(interval end,
+    interval start)`` in that order. A 2-vector table also keeps the call FA4
+    eligible; a 4-vector one is demoted to FA2 by ``get_fa_version``.
+
+    Padding needs no special case. A padding column's document has already ended
+    (``doc_end_j <= j``), which collapses its interval to empty, and a padding
+    row sits at or past ``LTS`` of every column of the preceding documents and
+    below ``UTE`` of every later one, so it attends to nothing and falls back to
+    the sink -- matching the all-``-1`` row the index table produces for it.
+
+    A convenience composition of ``build_hca_global_row_bounds`` (the geometry-
+    free part, warmable and cacheable) and ``localise_hca_flashmask_bounds``
+    (this rank's slice of it). Callers that hold a ``CSADocMaskMetadata`` should
+    go through ``CSADocMaskMetadata.get_hca_flashmask_bounds`` instead, which
+    caches both halves.
+
+    Args:
+        n_raw: raw KV columns in ``kv_full``: ``seqlen_local`` without CP,
+            ``window_size + seqlen_local`` with it because of
+            ``prepend_prev_window``. They always end flush with this rank's last
+            query row, which is what pins their global start position.
+        n_compressed: compressed columns in ``kv_full``, the compressor's zero
+            padding included; the padded tail is masked off entirely.
+        ratio: compression ratio (overridden by ``docmask_meta.ratio``).
+        window_size: sliding window size.
+        seqlen_global: full sequence length in rows
+            (``seqlen_local * cp_size``).
+        seqlen_local: this rank's query rows, the row-clip ceiling.
+        position_offset: global row of this rank's first query
+            (``cp_rank * seqlen_local``, ``0`` without CP).
+        batch_size: batch dimension of the returned table.
+        docmask_meta: document metadata, or ``None`` for plain causal mode.
+
+    Returns:
+        ``[batch_size, 1, n_raw + n_compressed, 2]`` int32 row bounds, already
+        localised to this rank's rows.
+    """
+    raw_global, comp_global = build_hca_global_row_bounds(
+        ratio, window_size, seqlen_global, docmask_meta
+    )
+    return localise_hca_flashmask_bounds(
+        raw_global,
+        comp_global,
+        n_raw,
+        n_compressed,
+        seqlen_global,
+        seqlen_local,
+        position_offset,
+        batch_size,
+    )
 
 
 def get_mqa_causal_topk_idxs(
@@ -2282,7 +2627,10 @@ class CompressedSparseAttention(FleetLayer):
         # Conditionally build Indexer for CSA layers (1 < ratio < 128) and not dense_mode.
         # ratio 128 (HCA) intentionally falls through to the attend-to-all path.
         # Keep this in sync with dsa_attention.py indexer-layer count.
-        if 1 < self.compress_ratio < 128 and not config.csa_dense_mode:
+        if (
+            1 < self.compress_ratio < CSA_HCA_MIN_RATIO
+            and not config.csa_dense_mode
+        ):
             self.indexer = build_spec_layer(
                 sublayers_spec.indexer,
                 config=config,
@@ -2291,6 +2639,16 @@ class CompressedSparseAttention(FleetLayer):
             )
         else:
             self.indexer = None
+
+        # FlashMask replacement for the HCA column set. Only meaningful where
+        # every column's visible row set is one interval, which is exactly the
+        # HCA layers (non-overlapping compressor, no learned Indexer); the flag
+        # is a no-op on every other layer kind of the same model.
+        self.use_hca_flashmask = (
+            bool(getattr(config, "csa_hca_use_flashmask", False))
+            and self.is_hca_layer
+            and self.indexer is None
+        )
 
         self.sparse_attn_backend = getattr(
             config, "csa_sparse_attn_backend", "tilelang"
@@ -2730,6 +3088,16 @@ class CompressedSparseAttention(FleetLayer):
             kv_full = kv
             n_compressed = 0
 
+        if self.use_hca_flashmask:
+            return self._hca_flashmask_attn(
+                query,
+                kv_full,
+                n_compressed=n_compressed,
+                seqlen_global=sq,
+                position_offset=0,
+                docmask_meta=docmask_meta,
+            )
+
         offset = sq  # compressed indices start after original positions
 
         # Step 3: Window indices
@@ -2893,7 +3261,11 @@ class CompressedSparseAttention(FleetLayer):
             position_offset, position_offset + sq, dtype="int64"
         )
         # Step 1: Window topk (CP-aware: uses global q_positions)
-        if docmask_meta is None:
+        # The FlashMask path expresses the window as column bounds instead, so
+        # it needs no index table at all.
+        if self.use_hca_flashmask:
+            window_idxs = None
+        elif docmask_meta is None:
             window_idxs = get_window_topk_idxs_cp(
                 q_positions, self.window_size, b, sq_global
             )
@@ -2917,12 +3289,14 @@ class CompressedSparseAttention(FleetLayer):
                 kv_local, self.window_size, self.cp_group
             )
             kv_base = position_offset - self.window_size
-            window_idxs = paddle.where(
-                window_idxs >= 0, window_idxs - kv_base, window_idxs
-            )
+            if window_idxs is not None:
+                window_idxs = paddle.where(
+                    window_idxs >= 0, window_idxs - kv_base, window_idxs
+                )
         else:
             kv_reach = all_gather_cp(kv_local, dim=1, group=self.cp_group)
-        window_idxs = window_idxs.astype("int32").contiguous()
+        if window_idxs is not None:
+            window_idxs = window_idxs.astype("int32").contiguous()
 
         compressed_kv_global = None
         n_compressed_local = 0
@@ -2962,6 +3336,16 @@ class CompressedSparseAttention(FleetLayer):
             kv_full = paddle.concat([kv_reach, compressed_kv_global], axis=1)
         else:
             kv_full = kv_reach
+
+        if self.use_hca_flashmask:
+            return self._hca_flashmask_attn(
+                query,
+                kv_full,
+                n_compressed=kv_full.shape[1] - kv_reach.shape[1],
+                seqlen_global=sq_global,
+                position_offset=position_offset,
+                docmask_meta=docmask_meta,
+            )
 
         # Step 3: Compressed topk + optional fused indexer loss
         indexer_loss = None
@@ -3261,6 +3645,131 @@ class CompressedSparseAttention(FleetLayer):
             output = DSAIndexerLossAutoScaler.apply(output, indexer_loss)
 
         return output
+
+    @staticmethod
+    def _assert_hca_flashmask_fa4(
+        q_dim: int, v_dim: int, bounds: Tensor
+    ) -> None:
+        """Refuse to run the HCA FlashMask path on anything but FA4.
+
+        The CSA geometry is ``q_head_dim == v_head_dim == v_head_dim`` (512 on
+        the production config), which only FA4's cute-DSL kernels accept;
+        ``get_fa_version`` answers 2 for it otherwise and FA2 would then either
+        reject the head dim or silently pad. ``get_fa_version`` also consults
+        ``FLAGS_flash_attn_version`` (production derives 4 from SM100) and
+        ``FLAGS_cudnn_deterministic`` (FA4 has no deterministic backward at this
+        head dim), so all three inputs go into the message. Checked per forward
+        because those flags are settable at any time and the check is a
+        whitelist lookup.
+        """
+        from paddlefleet_ops.flash_mask_facade import get_fa_version
+
+        fa_version = get_fa_version(q_dim, v_dim, bounds)
+        if fa_version != 4:
+            flags = paddle.get_flags(
+                ["FLAGS_flash_attn_version", "FLAGS_cudnn_deterministic"]
+            )
+            raise RuntimeError(
+                "csa_hca_use_flashmask=True requires FA4 flashmask, but head "
+                f"dims ({q_dim}, {v_dim}) resolve to FA{fa_version}. "
+                "FLAGS_flash_attn_version="
+                f"{flags['FLAGS_flash_attn_version']}, "
+                "FLAGS_cudnn_deterministic="
+                f"{flags['FLAGS_cudnn_deterministic']}. Run on a device whose "
+                "compute capability selects FA4 (SM100+), leave "
+                "FLAGS_flash_attn_version at the value the trainer derives and "
+                "keep FLAGS_cudnn_deterministic off, or set "
+                "csa_hca_use_flashmask=False to fall back to "
+                "csa_sparse_attn."
+            )
+
+    def _hca_flashmask_attn(
+        self,
+        query: Tensor,
+        kv_full: Tensor,
+        n_compressed: int,
+        seqlen_global: int,
+        position_offset: int,
+        docmask_meta: CSADocMaskMetadata | None = None,
+    ) -> Tensor:
+        """HCA attention over ``kv_full`` via FlashMask instead of ``csa_sparse_attn``.
+
+        Computes the same softmax over the same column set the index-table
+        kernel would, but keeps the window/compressed/document structure in a
+        ``[n_kv, 2]`` column-bound table instead of materialising a
+        ``[b, sq, window + n_compressed]`` index table.
+
+        ``kv_full`` feeds both key and value, so it is unsqueezed twice: two
+        separate autograd nodes whose grads Paddle accumulates back into it,
+        which is what ``dkv = dk + dv`` means here.
+        """
+        from paddlefleet_ops.flash_mask_facade import flashmask_attention
+
+        from paddlefleet.transformer.mqa_latent_attention import (
+            _dense_pylayer_inputs,
+        )
+
+        b, sq_local = query.shape[0], query.shape[1]
+        n_raw = kv_full.shape[1] - n_compressed
+        if docmask_meta is None:
+            bounds = build_hca_flashmask_bounds(
+                n_raw,
+                n_compressed,
+                self.compress_ratio,
+                self.window_size,
+                seqlen_global,
+                sq_local,
+                position_offset,
+                b,
+            )
+        else:
+            # Layer-independent table, so read it from the metadata's cache:
+            # every HCA layer of this micro-batch wants the same one.
+            bounds = docmask_meta.get_hca_flashmask_bounds(
+                n_raw,
+                n_compressed,
+                self.window_size,
+                seqlen_global,
+                sq_local,
+                position_offset,
+                b,
+            )
+        self._assert_hca_flashmask_fa4(
+            int(query.shape[-1]), self.v_head_dim, bounds
+        )
+        # ``attn_sink`` is deliberately a fp32 parameter (``_cast_to_low_precision
+        # = False``), but ``flashmask_attention`` asserts a bf16
+        # ``learnable_sink``, so the forward reads a bf16-rounded sink here.
+        # Autograd routes the grad back through the cast, so the fp32 master
+        # value still accumulates full-precision updates -- the same arrangement
+        # every bf16 weight in the model already has.
+        #
+        # This is a real difference from ``csa_sparse_attn``, which keeps the sink
+        # in fp32 all the way into the kernel unless
+        # FLAGS_use_accuracy_compatible_kernel=1 makes it round through bf16 too
+        # (see ``compressed_sparse_attn``). The bf16 requirement is the kernel's,
+        # not just the Python assert's: ``flash_bwd_sink.py`` raises
+        # ``TypeError("sink tensor must be BFloat16")`` on anything else, and the
+        # forward compile cache keys only on ``learnable_sink is not None``, so an
+        # fp32 sink would reuse a bf16-typed artifact. Keeping the sink out of the
+        # kernel entirely (``return_softmax_lse`` plus a post-hoc
+        # ``out * sigmoid(lse - sink)`` rescale) is the only fp32-safe route.
+        query, key, value, sink = _dense_pylayer_inputs(
+            query,
+            kv_full.unsqueeze(2),
+            kv_full.unsqueeze(2),
+            self.attn_sink.cast("bfloat16"),
+        )
+        core_out = flashmask_attention(
+            query,
+            key,
+            value,
+            startend_row_indices=bounds,
+            causal=False,
+            learnable_sink=sink,
+            softmax_scale=self.softmax_scale,
+        )
+        return core_out.reshape([b, sq_local, -1])
 
     def compressed_sparse_attn(
         self,

@@ -211,6 +211,49 @@ class TestDocMaskMetaRegistry(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.reg.get(1, 4, 2, 16, ("main",))
 
+    def test_hca_ratio_warms_the_global_flashmask_bounds(self):
+        """``csa_hca_use_flashmask``'s CP-independent halves are prebuilt.
+
+        The per-rank table needs ``seqlen_local`` / ``position_offset``, which
+        ``preload`` never sees, so only the global halves can be warmed -- and
+        they are the expensive part.
+        """
+        seqlen, ratio = 256, 128
+        self.reg.preload(
+            0,
+            ratio,
+            1,
+            seqlen,
+            _csa_mask([100, 156], seqlen),
+            dense_mode=True,
+            mask_group=("main",),
+            window_size=8,
+        )
+        meta = self.reg.get(0, ratio, 1, seqlen, ("main",))
+        self.assertIsNotNone(meta._hca_global_row_bounds)
+        self.assertEqual(meta._hca_global_window_size, 8)
+        raw_global, comp_global = meta._hca_global_row_bounds
+        self.assertEqual(raw_global.shape, [seqlen, 2])
+        self.assertEqual(comp_global.shape, [seqlen // ratio, 2])
+        # Only the global halves: no rank has asked for a localised table yet.
+        self.assertIsNone(meta._hca_flashmask_bounds)
+
+    def test_non_hca_ratio_does_not_warm_flashmask_bounds(self):
+        # A window+Indexer layer never takes the FlashMask path, so warming its
+        # bounds would be pure waste.
+        self.reg.preload(
+            0,
+            4,
+            1,
+            16,
+            self.csa_mask,
+            dense_mode=False,
+            mask_group=("main",),
+            window_size=3,
+        )
+        meta = self.reg.get(0, 4, 1, 16, ("main",))
+        self.assertIsNone(meta._hca_global_row_bounds)
+
     # ------------------------------------------------------------------
     # forward counter (advance / audit)
     # ------------------------------------------------------------------
