@@ -608,25 +608,22 @@ class _FixedOrderQKV(paddle.autograd.PyLayer):
     def forward(
         ctx, module, hidden_states, position_offset, docmask_meta, build_graph
     ):
-        q_input = hidden_states.detach()
-        kv_input = hidden_states.detach()
-        q_input.stop_gradient = hidden_states.stop_gradient
-        kv_input.stop_gradient = hidden_states.stop_gradient
+        segment_input = hidden_states.detach()
+        segment_input.stop_gradient = hidden_states.stop_gradient
 
         with paddle.set_grad_enabled(build_graph):
             query, key, _value, q_compressed, _kv_compressed = (
                 module.get_query_key_value_tensors(
-                    q_input,
+                    segment_input,
                     position_offset=position_offset,
                     docmask_meta=docmask_meta,
-                    kv_hidden_states=kv_input,
                 )
             )
 
         ctx.hidden_stop_gradient = hidden_states.stop_gradient
         ctx.build_graph = build_graph
         if build_graph:
-            ctx.save_for_backward(q_input, kv_input, query, key, q_compressed)
+            ctx.save_for_backward(segment_input, query, key, q_compressed)
         return query.detach(), key.detach(), q_compressed.detach()
 
     @staticmethod
@@ -634,7 +631,7 @@ class _FixedOrderQKV(paddle.autograd.PyLayer):
         if ctx.hidden_stop_gradient or not ctx.build_graph:
             return None
 
-        q_input, kv_input, *outputs = ctx.saved_tensor()
+        segment_input, *outputs = ctx.saved_tensor()
         pairs = [
             (output, grad)
             for output, grad in zip(outputs, output_grads)
@@ -647,13 +644,7 @@ class _FixedOrderQKV(paddle.autograd.PyLayer):
                     [grad for _, grad in pairs],
                 )
 
-        q_grad = q_input.grad
-        kv_grad = kv_input.grad
-        if q_grad is None:
-            return kv_grad
-        if kv_grad is None:
-            return q_grad
-        return q_grad + kv_grad
+        return segment_input.grad
 
 
 # ---------------------------------------------------------------------------
@@ -1812,7 +1803,6 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         startend_row_indices: Tensor | None = None,
         position_offset: int = 0,
         docmask_meta: CSADocMaskMetadata | None = None,
-        kv_hidden_states: Tensor | None = None,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Derive query, key, value from hidden_states.
 
@@ -1834,8 +1824,6 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             kv_compressed: [b, sq, hidden_size] (== hidden_states)
         """
         b, sq, _ = hidden_states.shape
-        if kv_hidden_states is None:
-            kv_hidden_states = hidden_states
 
         # Every op boundary is probed once, on the *output* side: op N's output
         # tensor is exactly op N+1's input, so a single probe covers both the
@@ -1885,7 +1873,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
 
         # KV path
         kv, _ = deferrable_linear(
-            self.config, "attn_kv_proj", self.linear_kv_proj, kv_hidden_states
+            self.config, "attn_kv_proj", self.linear_kv_proj, hidden_states
         )  # [b, sq, v_head_dim]
         kv = inspect_tensor("attn_kv_proj_output", self.layer_number, kv)
 
