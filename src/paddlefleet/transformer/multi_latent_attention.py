@@ -50,6 +50,8 @@ from paddlefleet.recompute_utils import (
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
+    reduce_from_tensor_model_parallel_region,
+    reduce_scatter_to_sequence_parallel_region,
     scatter_to_sequence_parallel_region,
 )
 from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
@@ -100,8 +102,25 @@ class _AccuracyCompatibleLinearInputGrad(paddle.autograd.PyLayer):
 
 
 def _accuracy_compatible_q_up_projection(projection, hidden_states):
-    """Preserve native parameter gradients while controlling q-up input dgrad."""
+    """Preserve native parameter gradients while controlling q-up input dgrad.
+
+    ColumnParallelLinear under SP all-gathers first so F.linear sees the
+    fused-linear sequence, matching E-062 / q-down. The caller keeps the
+    local output shard (gather_output is false on q_b_proj).
+    """
     output_bias = projection.bias if projection.skip_bias_add else None
+    if (
+        getattr(projection, "sequence_parallel", False)
+        and get_pg_size(getattr(projection, "tp_group", None)) > 1
+    ):
+        from paddlefleet.tensor_parallel.mappings import (
+            gather_from_sequence_parallel_region,
+        )
+
+        hidden_states = gather_from_sequence_parallel_region(
+            hidden_states, group=projection.tp_group
+        )
+        hidden_states = hidden_states.contiguous()
     parameter_path, _ = projection(hidden_states.detach())
     input_path = _AccuracyCompatibleLinearInputGrad.apply(
         hidden_states, projection.weight.detach()
@@ -111,10 +130,24 @@ def _accuracy_compatible_q_up_projection(projection, hidden_states):
 
 
 def _accuracy_compatible_projection(projection, hidden_states):
-    """Apply a projection with Torch-aligned strided-transpose GEMM formulation."""
+    """Apply a projection with Torch-aligned strided-transpose GEMM formulation.
+
+    RowParallelLinear o_proj: local F.linear, then TP reduce or SP
+    reduce-scatter so the residual layout matches the fused layer.
+    """
     output_bias = projection.bias if projection.skip_bias_add else None
     bias = None if projection.skip_bias_add else projection.bias
     output = paddle.nn.functional.linear(hidden_states, projection.weight, bias)
+    tp_group = getattr(projection, "tp_group", None)
+    if get_pg_size(tp_group) > 1:
+        if getattr(projection, "sequence_parallel", False):
+            output = reduce_scatter_to_sequence_parallel_region(
+                output, group=tp_group
+            )
+        else:
+            output = reduce_from_tensor_model_parallel_region(
+                output, group=tp_group
+            )
     return output, output_bias
 
 
@@ -1284,10 +1317,7 @@ class MultiLatentAttention(Attention):
             "mla_gate_output", layer_num, core_attn_out
         )
 
-        if (
-            _ACCURACY_COMPATIBLE_KERNEL
-            and get_pg_size(self.pg_collection.tp) == 1
-        ):
+        if _ACCURACY_COMPATIBLE_KERNEL:
             output, bias = _accuracy_compatible_projection(
                 self.o_proj, core_attn_out
             )
@@ -2056,10 +2086,7 @@ class MLASelfAttention(MultiLatentAttention):
             if self.q_lora_rank is not None:
                 # q_compressed: [num_tokens, q_lora_rank]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
-                if (
-                    _ACCURACY_COMPATIBLE_KERNEL
-                    and get_pg_size(self.pg_collection.tp) == 1
-                ):
+                if _ACCURACY_COMPATIBLE_KERNEL:
                     q, _ = _accuracy_compatible_q_up_projection(
                         self.q_b_proj, q_compressed
                     )

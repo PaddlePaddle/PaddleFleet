@@ -187,6 +187,39 @@ class TestAccuracyCompatibleProjection(unittest.TestCase):
         self.assertTrue(paddle.equal_all(output, expected).item())
         self.assertIsNone(output_bias)
 
+    def test_tp_gt1_reduce_scatters_under_sequence_parallel(self):
+        import paddle
+
+        hidden = paddle.randn([1, 3, 4])
+        weight = paddle.randn([4, 6])
+        tp_group = MagicMock()
+        projection = MagicMock(
+            weight=weight,
+            bias=None,
+            skip_bias_add=True,
+            sequence_parallel=True,
+            tp_group=tp_group,
+        )
+        reduced = paddle.randn([1, 3, 6])
+        with (
+            patch(
+                "paddlefleet.transformer.multi_latent_attention.get_pg_size",
+                return_value=2,
+            ),
+            patch(
+                "paddlefleet.transformer.multi_latent_attention.reduce_scatter_to_sequence_parallel_region",
+                return_value=reduced,
+            ) as mock_rs,
+            patch(
+                "paddlefleet.transformer.multi_latent_attention.reduce_from_tensor_model_parallel_region"
+            ) as mock_reduce,
+        ):
+            output, _ = _accuracy_compatible_projection(projection, hidden)
+        mock_rs.assert_called_once()
+        self.assertIs(mock_rs.call_args.kwargs["group"], tp_group)
+        mock_reduce.assert_not_called()
+        self.assertTrue(paddle.equal_all(output, reduced).item())
+
 
 class TestAccuracyCompatibleQUpProjection(unittest.TestCase):
     def test_preserves_forward_weight_grad_and_materialized_input_dgrad(self):
@@ -223,6 +256,39 @@ class TestAccuracyCompatibleQUpProjection(unittest.TestCase):
         self.assertTrue(paddle.equal_all(hidden.grad, expected_input_grad))
         self.assertTrue(paddle.equal_all(weight.grad, expected_weight_grad))
         self.assertIsNone(output_bias)
+
+    def test_column_parallel_gathers_sequence_before_linear(self):
+        import paddle
+
+        hidden = paddle.randn([1, 3, 4])
+        gathered = paddle.randn([1, 6, 4])
+        weight = paddle.randn([4, 6])
+        tp_group = MagicMock()
+        projection = MagicMock(
+            weight=weight,
+            bias=None,
+            skip_bias_add=True,
+            sequence_parallel=True,
+            tp_group=tp_group,
+        )
+        projection.side_effect = lambda value: (
+            paddle.nn.functional.linear(value, weight),
+            None,
+        )
+        with (
+            patch(
+                "paddlefleet.transformer.multi_latent_attention.get_pg_size",
+                return_value=2,
+            ),
+            patch(
+                "paddlefleet.tensor_parallel.mappings.gather_from_sequence_parallel_region",
+                return_value=gathered,
+            ) as mock_gather,
+        ):
+            output, _ = _accuracy_compatible_q_up_projection(projection, hidden)
+        mock_gather.assert_called_once()
+        expected = paddle.nn.functional.linear(gathered, weight)
+        self.assertTrue(paddle.equal_all(output, expected).item())
 
 
 class TestAccuracyCompatibleQDownProjection(unittest.TestCase):
