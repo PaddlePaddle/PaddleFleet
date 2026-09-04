@@ -536,6 +536,8 @@ def register_indexcache_pipeline_adapter(config) -> bool:
 
     meta_parallel.dict_to_tuple_helper = _dict_to_tuple_helper
     meta_parallel.tuple_to_dict_helper = _tuple_to_dict_helper
+    pipeline_parallel.dict_to_tuple_helper = _dict_to_tuple_helper
+    pipeline_parallel.tuple_to_dict_helper = _tuple_to_dict_helper
 
     fbo.detach_and_requires_grad = _detach_and_requires_grad
     fbo.clone_and_clear_dataptr = clone_and_clear_dataptr
