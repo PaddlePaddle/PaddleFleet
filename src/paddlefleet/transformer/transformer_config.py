@@ -1187,6 +1187,16 @@ class TransformerConfig(ModelParallelConfig):
     uniform doubly-stochastic matrix: every sub-layer reads and writes an
     averaged mixture of the n residual streams from step 0."""
 
+    enable_identity_hyper_connections: bool = False
+    """Enable iHC (Identity Hyper-Connections) residual connections.
+
+    iHC fixes H_res as the identity matrix and removes the learned H_res
+    mapping (no Sinkhorn projection, no n*n mapping head): only H_pre and
+    H_post remain dynamic and learnable, which makes the initial state a
+    standard residual connection while the mapping head only spans 2n logits
+    per token instead of n*n+2n.
+    """
+
     ####################
     # miscellaneous
     ####################

@@ -23,6 +23,7 @@ Reference: mHC paper - Manifold-Constrained Hyper-Connections for transformers.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from typing import TYPE_CHECKING
@@ -1153,3 +1154,501 @@ class HyperConnectionContractLayer(FleetLayer):
                 )
             )
         return dict_args
+
+class IdentityHyperConnectionModule(nn.Layer):
+    """
+    Identity Hyper-Connections (iHC) module.
+
+    Implements iHC propagation where H_res is fixed as the identity matrix:
+        x_{l+1} = I @ x_l + H_post^T @ F(H_pre @ x_l)
+                = x_l + H_post^T @ F(H_pre @ x_l)
+
+    Compared to HyperConnectionModule (mHC), iHC:
+    - Removes the learned H_res mapping (no alpha_res, no n*n projection head)
+    - Removes Sinkhorn-Knopp projection for H_res
+    - apply_h_res becomes an identity (no matrix multiply)
+    - H_pre and H_post remain fully dynamic and learnable
+
+    Args:
+        config: TransformerConfig with hyper-connection fields
+        layer_number: Current layer index for initialization
+    """
+
+    def __init__(self, config: TransformerConfig, layer_number: int):
+        super().__init__()
+        self.config = config
+        self.layer_number = layer_number
+        self.n = config.num_residual_streams
+        self.hidden_size = config.hidden_size
+        self.single_stream_init = config.mhc_single_stream_init
+        self.compute_h_eps = _MHC_COMPUTE_H_EPS
+
+        # Projection weights for dynamic mappings
+        # Input: [..., n*C] -> Output: 2n values per token (H_pre + H_post only)
+        # - H_pre: n values
+        # - H_post: n values
+        # H_res is fixed identity: no learned projection needed
+        self.mapping_proj = nn.Linear(
+            self.n * self.hidden_size,
+            2 * self.n,
+            bias_attr=False,
+        )
+
+        init_alpha = config.mhc_init_gating_factor
+        # Learnable scaling factors for H_pre and H_post only
+        self.alpha_pre = self.create_parameter(
+            shape=[1],
+            dtype=self.config.params_dtype,
+            default_initializer=nn.initializer.Constant(init_alpha),
+        )
+        self.alpha_post = self.create_parameter(
+            shape=[1],
+            dtype=self.config.params_dtype,
+            default_initializer=nn.initializer.Constant(init_alpha),
+        )
+
+        # enable_hyper_connections 为true，就无条件给每个 HC 子模块生成三条 alpha_res/pre/post -> alpha_res/pre/post 语句。
+        # alpha_pre/post 存在所以通过，alpha_res 在ihc中没有，因此，在模型 sharded_state_dict() 中找不到输入，
+        # AOA shape 传播的 _get_var_ref 查不到输入（aoa_engine.py:643-649）→ 抛 "should be assigned before"。
+        # 这里初始化一个self.alhpa_res，实际不参与任何前向/反向计算，仅为让 AOA shape 能正确传播。
+        self.alpha_res = self.create_parameter(
+            shape=[1],
+            dtype=self.config.params_dtype,
+            default_initializer=nn.initializer.Constant(1.0),
+        )
+
+        # Static bias terms for H_pre and H_post only (2n values)
+        self.bias = self.create_parameter(
+            shape=[2 * self.n],
+            default_initializer=nn.initializer.Constant(0.0),
+        )
+
+        self.norm_eps = 1e-6
+
+        # Choose implementation: fused kernels vs native reference.
+        # Note: iHC does not use sinkhorn or fused_compute_h (h_res is identity),
+        # but reuses the same aggregate / h_post / proj_rms ops as mHC.
+        if config.use_fused_mhc:
+            from paddlefleet.fusions.fused_mhc_kernels import (
+                fused_h_aggregate,
+                fused_h_post_bda,
+                fused_proj_rms,
+            )
+
+            self._h_aggregate_op = fused_h_aggregate
+            self._h_post_bda_op = fused_h_post_bda
+            self._proj_rms_op = fused_proj_rms
+            self._widen_in_kernel = config.high_precision_mhc
+        else:
+            self._h_aggregate_op = native_h_aggregate
+            self._h_post_bda_op = native_h_post_bda
+            self._proj_rms_op = native_proj_rms
+            self._widen_in_kernel = False
+
+        logging.info("[IdentityHyperConnectionModule] __init__ completed successfully.")
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        """Initialize weights for stable training."""
+        if self.single_stream_init:
+            self._single_stream_init_weights()
+        else:
+            if paddle.distributed.get_world_size() <= 1:
+                nn.initializer.XavierUniform()(self.mapping_proj.weight)
+            else:
+                with get_cuda_rng_tracker().fork():
+                    nn.initializer.XavierUniform()(self.mapping_proj.weight)
+
+        if self.config.sequence_parallel:
+            self.mapping_proj.weight.is_distributed = False
+            self.alpha_pre.is_distributed = False
+            self.alpha_post.is_distributed = False
+            self.alpha_res.is_distributed = False
+            self.bias.is_distributed = False
+
+    def _single_stream_init_weights(self) -> None:
+        """Initialize iHC as a stable single-stream residual connection."""
+        self.mapping_proj.weight.set_value(
+            paddle.zeros_like(self.mapping_proj.weight)
+        )
+
+        n = self.n
+        bias_init = paddle.concat(
+            [
+                paddle.full([n], -3.0, dtype="float32"),
+                paddle.zeros([n], dtype="float32"),
+            ]
+        )
+        bias_init[self.layer_number % n] = 3.0
+        self.bias.set_value(bias_init.astype(self.bias.dtype))
+
+    def _projection_and_get_norm(self, x: Tensor) -> tuple[Tensor, Tensor]:
+        """
+        Project input hidden states to mapping space and apply RMS normalization.
+
+        Args:
+            x: [..., n*C] - n-stream hidden states
+        """
+        if _use_accuracy_compatible_kernel():
+            nC = x.shape[-1]
+            weight = self.mapping_proj.weight
+            r = x.norm(axis=-1, keepdim=True) / math.sqrt(nC)  # [..., 1]
+            r = (1.0 / (r + self.norm_eps)).astype(x.dtype)  # [..., 1]
+            x_2d = x.reshape([-1, nC])
+            weight_out_in = weight.t().contiguous()
+            proj_2d = paddle.matmul(x_2d, weight_out_in, transpose_y=True)
+            proj = proj_2d.reshape([*x.shape[:-1], weight.shape[-1]])
+        else:
+            ori_dtype = x.dtype
+            if self._widen_in_kernel:
+                proj, r = self._proj_rms_op(
+                    x, self.mapping_proj.weight, self.norm_eps, fuse_cast=True
+                )
+            else:
+                proj, r = self._proj_rms_op(
+                    x, self.mapping_proj.weight.astype(ori_dtype), self.norm_eps
+                )
+            if not self.config.high_precision_mhc:
+                r = r.astype(ori_dtype)
+
+        return proj, r
+
+    def _compute_h(
+        self, proj: Tensor, r: Tensor
+    ) -> tuple[Tensor, Tensor]:
+        """
+        Compute h_pre and h_post from projected hidden states.
+
+        iHC omits h_res entirely (H_res = I, no learned logits).
+
+        Args:
+            proj: [..., 2n] - projected hidden states (H_pre + H_post only)
+            r: [..., 1] - RMS scaling factors
+
+        Returns:
+            h_pre: [..., n] - aggregation weights
+            h_post: [..., n] - expansion weights
+        """
+        n = self.n
+        alpha_ = paddle.concat(
+            [
+                self.alpha_pre.expand([n]),
+                self.alpha_post.expand([n]),
+            ],
+            axis=-1,
+        )
+        h = r * proj * alpha_ + self.bias
+        if _use_accuracy_compatible_kernel():
+            h_pre = (h[..., :n].sigmoid() + self.compute_h_eps).astype(proj.dtype)
+            h_post = (h[..., n:].sigmoid() * 2).astype(proj.dtype)
+        else:
+            h_pre = h[..., :n].sigmoid() + self.compute_h_eps
+            h_post = h[..., n:].sigmoid() * 2
+        return h_pre, h_post
+
+    def compute_mappings(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """
+        Compute iHC mappings from input hidden states.
+
+        H_res is always the identity matrix (fixed, not learned).
+
+        Args:
+            x: [..., n*C] - n-stream hidden states
+
+        Returns:
+            h_pre: [..., n] - aggregation weights (sigmoid activated)
+            h_post: [..., n] - expansion weights (2*sigmoid activated)
+            h_res: [..., n, n] - identity matrix (fixed)
+        """
+        leading_shape = x.shape[:-1]
+        proj, r = self._projection_and_get_norm(x)
+        h_pre, h_post = self._compute_h(proj, r)
+
+        # H_res = I: broadcast identity matrix to [..., n, n]
+        eye = paddle.eye(self.n, dtype=x.dtype)
+        h_res = eye.reshape([1] * len(leading_shape) + [self.n, self.n]).expand(
+            [*leading_shape, self.n, self.n]
+        )
+
+        return h_pre, h_post, h_res
+
+    def aggregate(self, x: Tensor, h_pre: Tensor) -> Tensor:
+        """
+        Aggregate n-stream to 1-stream using H_pre weights.
+
+        Computes: sum_i(h_pre_i * x_stream_i)
+
+        Args:
+            x: [..., n*C] - n-stream hidden states
+            h_pre: [..., n] - aggregation weights
+
+        Returns:
+            aggregated: [..., C] - single stream hidden states
+        """
+        leading_shape = x.shape[:-1]
+        C = self.hidden_size
+
+        x_streams = x.reshape([*leading_shape, self.n, C])
+
+        if _use_accuracy_compatible_kernel():
+            aggregated = (x_streams * h_pre.unsqueeze(-1)).sum(axis=-2)
+            if aggregated.dtype != x.dtype:
+                aggregated = aggregated.astype(x.dtype)
+            return aggregated
+        else:
+            if self._widen_in_kernel:
+                aggregated = self._h_aggregate_op(
+                    x_streams, h_pre, fuse_cast=True
+                )
+            else:
+                aggregated = self._h_aggregate_op(x_streams, h_pre)
+            if aggregated.dtype != x.dtype:
+                aggregated = aggregated.astype(x.dtype)
+            return aggregated
+
+    def apply_h_res(self, h_res: Tensor, residual: Tensor) -> Tensor:
+        """
+        Apply H_res to residual.
+
+        iHC: H_res = I, so this is an identity operation.
+        Returns residual unchanged (no matrix multiply needed).
+
+        Args:
+            h_res: [..., n, n] - identity matrix (unused in iHC)
+            residual: [..., n*C] - n-stream hidden states
+
+        Returns:
+            residual: [..., n*C] - unchanged
+        """
+        return residual
+
+    def _apply_h_post(self, x: Tensor, h_post: Tensor) -> Tensor:
+        """
+        Core implementation of H_post application to a single tensor.
+
+        Computes: H_post^T @ x
+
+        Args:
+            x: Input tensor, can be either:
+               - [..., C] - standard hidden states
+               - [C] - bias tensor (will be broadcast)
+            h_post: [..., n] - expansion weights
+
+        Returns:
+            output: [..., n*C] - expanded tensor
+        """
+        n = self.n
+        leading_shape = h_post.shape[:-1]
+
+        if x.dim() == 1:
+            # x is bias with shape [C], broadcast to [..., 1, C]
+            C = x.shape[0]
+            x_expanded = x.reshape([1] * len(leading_shape) + [1, C])
+            x_expanded = x_expanded.expand([*leading_shape, 1, C])
+        else:
+            # x is [..., C]
+            C = x.shape[-1]
+            x_expanded = x.unsqueeze(-2)  # [..., 1, C]
+
+        # h_post^T @ x : [..., n, 1] * [..., 1, C] -> [..., n, C]
+        result = h_post.unsqueeze(-1) * x_expanded
+        return result.reshape([*leading_shape, n * C])
+
+    def apply_h_post(
+        self,
+        x_with_bias: tuple[Tensor, Tensor | None],
+        h_post: Tensor,
+    ) -> tuple[Tensor, Tensor | None]:
+        """
+        Apply H_post to x and optionally bias.
+
+        Args:
+            x_with_bias: Tuple of (x, bias) where:
+                - x: [..., C] - hidden states
+                - bias: [C] or None - optional bias tensor
+            h_post: [..., n] - expansion weights
+
+        Returns:
+            Tuple of (x_out, bias_out) where:
+                - x_out: [..., n*C] - expanded hidden states
+                - bias_out: [..., n*C] or None
+        """
+        x, bias = x_with_bias
+        x_out = self._apply_h_post(x, h_post)
+        bias_out = (
+            self._apply_h_post(bias, h_post) if bias is not None else None
+        )
+        return x_out, bias_out
+
+    def forward(self, hidden_states: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        """
+        Full iHC forward pass.
+
+        Args:
+            hidden_states: [..., n*C] - n-stream hidden states
+
+        Returns:
+            aggregated: [..., C] - aggregated input for layer computation
+            h_res: [..., n, n] - identity matrix
+            h_post: [..., n] - expansion weights
+        """
+        with paddle.amp.auto_cast(enable=False):
+            if (
+                not _use_accuracy_compatible_kernel()
+                and self.config.high_precision_mhc
+                and not self._widen_in_kernel
+            ):
+                hidden_states = hidden_states.astype("float32")
+            h_pre, h_post, h_res = self.compute_mappings(hidden_states)
+
+            aggregated = self.aggregate(hidden_states, h_pre)
+
+        return aggregated, h_res, h_post
+
+    # ==================== Block-level utilities ====================
+
+    @staticmethod
+    def input_expand(x: Tensor, n: int) -> Tensor:
+        """
+        Expand 1-stream to n-stream at TransformerBlock entry.
+
+        Args:
+            x: [..., C] - single stream hidden states
+            n: Number of residual streams
+
+        Returns:
+            expanded: [..., n*C] - n-stream hidden states
+        """
+        leading_shape = x.shape[:-1]
+        C = x.shape[-1]
+        expanded = x.unsqueeze(-2).expand([*leading_shape, n, C])
+        return expanded.reshape([*leading_shape, n * C])
+
+    @staticmethod
+    def output_contract(x: Tensor, n: int) -> Tensor:
+        """
+        Contract n-stream to 1-stream at TransformerBlock exit.
+
+        Args:
+            x: [..., n*C] - n-stream hidden states
+            n: Number of residual streams
+
+        Returns:
+            contracted: [..., C] - single stream hidden states
+        """
+        leading_shape = x.shape[:-1]
+        nC = x.shape[-1]
+        C = nC // n
+        x_streams = x.reshape([*leading_shape, n, C])
+        contracted = x_streams.mean(axis=-2)
+        return contracted
+
+    # ==================== Learned output contraction ====================
+
+    @staticmethod
+    def learned_output_contract(
+        hidden_states: Tensor,
+        head_fn: Tensor,
+        base: Tensor,
+        scale: Tensor,
+        n: int,
+        eps: float,
+    ) -> Tensor:
+        """Learned output contraction: n-stream → 1-stream via sigmoid-gated weighted sum."""
+        dtype = hidden_states.dtype
+        hidden_states = hidden_states.astype("float32")
+        head_fn = head_fn.astype("float32")
+        base = base.astype("float32")
+        scale = scale.astype("float32")
+
+        rsqrt = paddle.rsqrt(
+            hidden_states.square().mean(-1, keepdim=True) + eps
+        )
+        if _use_accuracy_compatible_kernel():
+            head_fn_out_in = head_fn.transpose([1, 0]).contiguous()
+            with paddle.amp.auto_cast(False):
+                proj = paddle.matmul(
+                    hidden_states, head_fn_out_in, transpose_y=True
+                )
+            mixes = proj * rsqrt
+        else:
+            mixes = F.linear(hidden_states, head_fn) * rsqrt
+        pre = F.sigmoid(mixes * scale + base) + eps
+        y = paddle.sum(
+            pre.unsqueeze(-1)
+            * hidden_states.reshape([*hidden_states.shape[:-1], n, -1]),
+            axis=-2,
+        )
+        return y.astype(dtype)
+
+    # ==================== Fused kernel placeholder ====================
+
+    def bda_span_pays_off(self, dropout_prob: float, training: bool) -> bool:
+        """Whether wrapping ``fused_h_res_h_post_bda`` in a recompute span saves."""
+        if dropout_prob > 0.0 and training:
+            return True
+        if not self.config.high_precision_mhc:
+            return False
+        return not _use_accuracy_compatible_kernel()
+
+    def fused_h_res_h_post_bda(
+        self,
+        h_res: Tensor,
+        original_residual: Tensor,
+        h_post: Tensor,
+        layer_output_with_bias: tuple[Tensor, Tensor | None],
+        dropout_prob: float,
+        training: bool,
+        fused: bool,
+    ) -> Tensor:
+        """
+        Fused kernel combining apply_h_res, apply_h_post and bias-dropout-add.
+
+        iHC: apply_h_res is identity (H_res = I), so mixed = original_residual.
+        Always uses the sequential path since the fast path's h_post_bda kernel
+        operates on h_res which is fixed identity and carries no compute benefit.
+
+        The computation flow is:
+            1. mixed = original_residual  (identity, no matrix multiply)
+            2. expanded = H_post^T @ layer_output (apply_h_post)
+            3. output = dropout(expanded + bias) + mixed (bias-dropout-add)
+
+        Args:
+            h_res: [..., n, n] - identity matrix (unused, kept for API compat)
+            original_residual: [..., n*C] - n-stream hidden states
+            h_post: [..., n] - expansion weights
+            layer_output_with_bias: Tuple of (x, bias)
+            dropout_prob: Dropout probability
+            training: Whether in training mode
+            fused: Unused, kept for API compat
+
+        Returns:
+            output: [..., n*C] - final output after all operations
+        """
+        with paddle.amp.auto_cast(enable=False):
+            x, bias = layer_output_with_bias
+
+            # mixed = I @ residual = residual (identity, free)
+            mixed = original_residual
+
+            if self.config.high_precision_mhc:
+                mixed = mixed.astype("float32")
+                x = x.astype("float32")
+                if bias is not None:
+                    bias = bias.astype("float32")
+
+            x_expanded = self._apply_h_post(x, h_post)
+            bias_expanded = (
+                self._apply_h_post(bias, h_post) if bias is not None else None
+            )
+
+            if bias_expanded is not None:
+                x_expanded = x_expanded + bias_expanded
+            out = paddle.nn.functional.dropout(
+                x_expanded, p=dropout_prob, training=training
+            )
+            output = out + mixed
+
+        return output
+
+
