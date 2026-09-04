@@ -102,6 +102,21 @@ class TestECCompatibleRopeApply(unittest.TestCase):
         self.assertEqual(k_out.dtype, k_pe.dtype)
 
 
+class TestMLAKposEmbSequenceParallelGather(unittest.TestCase):
+    def test_uac_absorbed_core_passes_k_abs_weight(self):
+        import inspect
+
+        from paddlefleet.transformer import multi_latent_attention as mla
+
+        source = inspect.getsource(mla.MLASelfAttention.forward)
+        self.assertIn("k_abs_weight", source)
+        self.assertIn("_dsa_absorbed_enabled()", source)
+        self.assertNotIn("core_kv_compressed", source)
+        helper = inspect.getsource(mla._dsa_absorbed_enabled)
+        self.assertIn("FLAGS_use_accuracy_compatible_kernel", helper)
+        self.assertIn("MODEL_REPRO_DSA_ABSORBED", helper)
+
+
 class TestDeferredWeightGradLinear(unittest.TestCase):
     """Tests for DeferredWeightGradLinear PyLayer."""
 

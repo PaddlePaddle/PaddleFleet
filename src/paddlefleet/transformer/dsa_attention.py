@@ -72,6 +72,16 @@ _ACCURACY_COMPATIBLE_KERNEL = (
 )
 
 
+def _absorb_q_nope_k_up(qn3, k_abs_weight):
+    """K-absorb q_nope @ k_up. Torch-aligned UAC path uses bmm, not einsum."""
+    uac = os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+    if uac:
+        return paddle.bmm(qn3, k_abs_weight)
+    return paddle.einsum(
+        "hsk,hkd->hsd", qn3.cast("float32"), k_abs_weight.cast("float32")
+    ).cast(qn3.dtype)
+
+
 def _accuracy_compat_linear(projection, x):
     """Torch-aligned F.linear for duplicated (TP1) DSA indexer projections.
 
@@ -1982,6 +1992,7 @@ class DSAttention(FleetLayer):
         k_pos_emb: paddle.Tensor = None,
         q_absorbed: paddle.Tensor = None,
         v_b_proj_weight: paddle.Tensor = None,
+        k_abs_weight: paddle.Tensor = None,
     ) -> Tensor:
         """Forward pass for Sparse Attention.
 
@@ -2158,26 +2169,75 @@ class DSAttention(FleetLayer):
 
         # Run sparse attention (batch-first layout)
         if (
-            _ACCURACY_COMPATIBLE_KERNEL
-            and q_absorbed is not None
-            and kv_compressed is not None
-            and k_pos_emb is not None
-            and v_b_proj_weight is not None
-        ):
-            kv_aligned = _align_sp_aux_to_query(kv_compressed, q_absorbed)
-            k_pos_aligned = _align_sp_aux_to_query(k_pos_emb, q_absorbed)
-            if k_pos_aligned.ndim == 3:
-                k_pos_aligned = k_pos_aligned.unsqueeze(-2)
-            key_absorbed = paddle.concat(
-                [kv_aligned.unsqueeze(-2), k_pos_aligned], axis=-1
+            q_absorbed is not None or k_abs_weight is not None
+        ) and v_b_proj_weight is not None:
+            # IEEE 1-5: torch-aligned absorbed core. Query is latent
+            # [b,s,h,512+rope]; key = cat(kv_compressed, k_pos_emb); scores
+            # go through STE unfused DSA; V de-absorption is bmm on wv_b.
+            if q_absorbed is None:
+                qk_hd = query.shape[-1]
+                rope_hd = (
+                    k_pos_emb.shape[-1]
+                    if k_pos_emb is not None
+                    else int(getattr(self.config, "qk_rope_head_dim", 64))
+                )
+                nope_hd = qk_hd - rope_hd
+                q_nope = query[..., :nope_hd]
+                q_pe = query[..., nope_hd:]
+                bs_abs = query.shape[0] * query.shape[1]
+                qn3 = q_nope.reshape(
+                    [bs_abs, query.shape[2], nope_hd]
+                ).transpose([1, 0, 2])
+                q_abs_nope = _absorb_q_nope_k_up(qn3, k_abs_weight)
+                q_abs_nope = q_abs_nope.transpose([1, 0, 2]).reshape(
+                    [
+                        query.shape[0],
+                        query.shape[1],
+                        query.shape[2],
+                        k_abs_weight.shape[-1],
+                    ]
+                )
+                q_absorbed = paddle.concat([q_abs_nope, q_pe], axis=-1)
+            _kv_c = _align_sp_aux_to_query(kv_compressed, query)
+            # Live UAC TP2 always takes this absorbed unfused path. Read the
+            # FLAG at these sites so import-time constants cannot miss it.
+            uac = (
+                os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0")
+                == "1"
             )
-            core_attn_out = _unfused_absorbed_dsa_attention(
-                q_absorbed,
-                key_absorbed,
-                kv_aligned.unsqueeze(-2),
-                v_b_proj_weight,
-                combined_mask,
-                self.softmax_scale,
+            if uac:
+                # x + x*0 is an add, not a view. clone/contiguous were PIR-folded.
+                _kv_c = _kv_c + (_kv_c * 0)
+            k_latent = _kv_c.unsqueeze(2)
+            k_rope = _align_sp_aux_to_query(k_pos_emb, query)
+            if k_rope.ndim == 3:
+                k_rope = k_rope.unsqueeze(2)
+            key_abs = paddle.concat([k_latent, k_rope], axis=-1)
+            # Dummy, not k_latent: live PIR CSE'd key[..., :v] to k_latent.
+            value = paddle.zeros(k_latent.shape, dtype=k_latent.dtype)
+            latent_flat = _unfused_dsa_attention(
+                q_absorbed, key_abs, value, combined_mask, self.softmax_scale
+            )
+            nh = q_absorbed.shape[2]
+            kv_rank = _kv_c.shape[-1]
+            latent_out = latent_flat.reshape([b, sq, nh, kv_rank])
+            if uac:
+                _bs = b * sq
+                _lat = latent_out.transpose([2, 0, 1, 3]).reshape(
+                    [nh, _bs, kv_rank]
+                )
+                _v = v_b_proj_weight.transpose([0, 2, 1])
+                core_attn_out = (
+                    paddle.bmm(_lat, _v)
+                    .reshape([nh, b, sq, -1])
+                    .transpose([1, 2, 0, 3])
+                )
+            else:
+                core_attn_out = paddle.einsum(
+                    "bshc,hdc->bshd", latent_out, v_b_proj_weight
+                )
+            core_attn_out = core_attn_out.reshape(
+                [b, sq, nh * core_attn_out.shape[-1]]
             )
         else:
             core_attn_out = _unfused_dsa_attention(

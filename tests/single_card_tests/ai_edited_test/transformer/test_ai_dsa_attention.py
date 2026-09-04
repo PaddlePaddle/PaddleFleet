@@ -429,6 +429,28 @@ class TestIndexer(unittest.TestCase):
         helper = inspect.getsource(dsa._accuracy_compat_linear)
         self.assertIn("F.linear(x, projection.weight, bias)", helper)
 
+    def test_uac_absorbed_core_rebuilds_q_from_k_abs_weight(self):
+        import inspect
+
+        from paddlefleet.transformer import dsa_attention as dsa
+
+        source = inspect.getsource(dsa.DSAttention.forward)
+        self.assertIn("k_abs_weight", source)
+        self.assertIn("_absorb_q_nope_k_up", source)
+        self.assertIn("_unfused_dsa_attention", source)
+        self.assertIn("_align_sp_aux_to_query", source)
+        kv_idx = source.index("_kv_c + (_kv_c * 0)")
+        bmm_idx = source.index("paddle.bmm(_lat, _v)")
+        self.assertLess(kv_idx, bmm_idx)
+        absorbed = source[
+            source.index("_kv_c = _align_sp_aux_to_query") : bmm_idx
+        ]
+        self.assertIn(
+            'os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0")',
+            absorbed,
+        )
+        self.assertNotIn("if _ACCURACY_COMPATIBLE_KERNEL:", absorbed)
+
     @patch("paddlefleet.transformer.dsa_attention.rotate_activation")
     def test_forward_before_topk_shape(self, mock_rotate):
         mock_rotate.side_effect = lambda x, use_fast_hadamard=False: x

@@ -66,6 +66,18 @@ _ACCURACY_COMPATIBLE_KERNEL: bool = (
 )
 
 
+def _dsa_absorbed_enabled() -> bool:
+    """Torch-aligned absorbed-MLA core (E-063 / IEEE 1-5).
+
+    Read FLAGS at call time: import-time evaluation can see the kernel
+    FLAG before run_paddle.sh exports it.
+    """
+    return (
+        os.environ.get("MODEL_REPRO_DSA_ABSORBED", "0") == "1"
+        or os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+    )
+
+
 class _AccuracyCompatibleLinearInputGrad(paddle.autograd.PyLayer):
     """Linear value path whose backward only returns materialized-transpose dgrad."""
 
@@ -954,14 +966,6 @@ class MultiLatentAttention(Attention):
             key = key.transpose([1, 0, 2, 3]).contiguous()
             value = value.transpose([1, 0, 2, 3]).contiguous()
 
-        # DSA's indexer keeps x/qr sequence-first, while absorbed MLA
-        # auxiliaries must follow the batch-first core attention tensors.
-        core_kv_compressed = kv_compressed
-        core_k_pos_emb = k_pos_emb
-        if self.config.sequence_parallel:
-            core_kv_compressed = kv_compressed.transpose([1, 0, 2]).contiguous()
-            core_k_pos_emb = k_pos_emb.transpose([1, 0, 2]).contiguous()
-
         # The indexer-loss row mask needs ``input_ids``: the packed sequence's
         # trailing padding is invisible to ``attn_mask_startend_row_indices``.
         # Only the non-absorbed-MQA core attention accepts it (and only that one
@@ -992,6 +996,7 @@ class MultiLatentAttention(Attention):
         if self.mqa_latent:
             core_attn_extra["in_recompute"] = in_recompute
 
+        k_abs_weight = None
         if self.mqa_latent:
             # Query is already absorbed; the core attention only needs the V-side
             # de-absorption weight.
@@ -1017,6 +1022,17 @@ class MultiLatentAttention(Attention):
                         -1,
                     ]
                 )[:, :, self.qk_nope_head_dim :]
+        elif _dsa_absorbed_enabled():
+            # IEEE 1-5: torch-aligned absorbed core. DSA builds q_absorbed
+            # from its own query (pre-rope nope + roped rope) with these
+            # K/V de-absorption weights. Mirrors AbsorbedMLASelfAttention.
+            kv_b_w = self.kv_b_proj.weight
+            w_h = kv_b_w.reshape(
+                [self.kv_lora_rank, self.num_attention_heads_per_partition, -1]
+            ).transpose([1, 2, 0])
+            k_abs_weight = w_h[:, : self.qk_nope_head_dim, :]
+            wv_b = w_h[:, -self.v_head_dim :, :]
+            q_absorbed = None
         elif hasattr(self.core_attention.config, "forward_meta"):  # decode mode
             # Compute absorbed query and V de-absorption weight for FD MLA decode kernel
             # q_absorbed: [b, s, heads, kv_lora_rank + qk_rope_head_dim]
@@ -1070,8 +1086,6 @@ class MultiLatentAttention(Attention):
                 # cache has to be seeded here for the later decode steps.
                 past_key_values.update(key, value, layer_idx)
         elif self.recompute_core_attention and self.training:
-            if _ACCURACY_COMPATIBLE_KERNEL:
-                q_absorbed, wv_b = self._compute_absorbed_q(query)
             core_attn_out = recompute(
                 self.core_attention,
                 query,
@@ -1095,15 +1109,14 @@ class MultiLatentAttention(Attention):
                 x=keep_indexer_grad_path(hidden_states, self.config),
                 qr=q_compressed,
                 # fastdeploy support
-                kv_compressed=core_kv_compressed,
-                k_pos_emb=core_k_pos_emb,
+                kv_compressed=kv_compressed,
+                k_pos_emb=k_pos_emb,
                 q_absorbed=q_absorbed,
                 v_b_proj_weight=wv_b,
+                k_abs_weight=k_abs_weight,
                 **core_attn_extra,
             )
         else:
-            if _ACCURACY_COMPATIBLE_KERNEL:
-                q_absorbed, wv_b = self._compute_absorbed_q(query)
             # Static batching attention kernel.
             core_attn_out = self.core_attention(
                 query,
@@ -1123,10 +1136,11 @@ class MultiLatentAttention(Attention):
                 x=hidden_states,
                 qr=q_compressed,
                 # fastdeploy support
-                kv_compressed=core_kv_compressed,
-                k_pos_emb=core_k_pos_emb,
+                kv_compressed=kv_compressed,
+                k_pos_emb=k_pos_emb,
                 q_absorbed=q_absorbed,
                 v_b_proj_weight=wv_b,
+                k_abs_weight=k_abs_weight,
                 **core_attn_extra,
             )
             # Ablation boundary: core attention output (static-batch branch).
