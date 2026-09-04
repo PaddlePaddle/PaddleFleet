@@ -33,6 +33,7 @@ from paddlefleet_ops.flash_mask_facade import (
     flash_attention,
     flashmask_attention,
     get_fa_version,
+    needs_value_padding,
 )
 
 from paddlefleet.context_parallel_utils import (
@@ -788,22 +789,13 @@ class DotProductAttention(FleetLayer):
                 q_head_dim, v_head_dim, attn_mask_startend_row_indices
             )
 
-            need_value_padding = (
-                not (
-                    fa_version == 4
-                    and (
-                        (q_head_dim == 192 and v_head_dim == 128)
-                        or (q_head_dim == 576 and v_head_dim == 512)
-                    )
-                )
-            ) and q_head_dim != v_head_dim
+            need_value_padding = needs_value_padding(
+                fa_version, q_head_dim, v_head_dim
+            )
 
             if need_value_padding:
-                # Pad value to match query head_dim
-                # value: [b, s, h, v_head_dim] -> [b, s, h, q_head_dim]
-                bsz, seq_len, num_heads, _ = value.shape
                 value_padding = paddle.zeros(
-                    [bsz, seq_len, num_heads, q_head_dim - v_head_dim],
+                    [*value.shape[:-1], q_head_dim - v_head_dim],
                     dtype=value.dtype,
                 )
                 value_padded = paddle.concat([value, value_padding], axis=-1)

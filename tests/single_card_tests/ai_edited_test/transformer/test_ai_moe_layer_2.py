@@ -14,6 +14,7 @@
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(
     0,
@@ -24,6 +25,7 @@ sys.path.insert(
     ),
 )
 
+import numpy as np
 import paddle
 
 from paddlefleet.transformer.moe.moe_layer import MoELayer
@@ -114,6 +116,125 @@ class TestMoELayerLightweightMethods(unittest.TestCase):
 
         self.assertIs(output, dispatched_input)
         self.assertEqual(model.experts[0].inputs, [])
+
+    def test_expert_forward_requires_router_probs_with_accuracy_kernel(self):
+        model = MinimalMoE()
+        model.moe_rank = 0
+        model.num_experts_per_device = 1
+        model.use_accuracy_compatible = True
+        model.token_dispatcher = type("Dispatcher", (), {})()
+        model.experts = [Expert(1)]
+        dispatched_input = paddle.ones([1, 2], dtype="float32")
+
+        with (
+            patch(
+                "paddlefleet.transformer.moe.moe_layer.use_accuracy_compatible_kernel",
+                return_value=True,
+            ),
+            self.assertRaisesRegex(
+                RuntimeError, "requires dispatched router probabilities"
+            ),
+        ):
+            MoELayer.expert_forward(model, dispatched_input, [1])
+
+    def test_expert_forward_tiny_m_padding_preserves_backward(self):
+        class TwiceExpert:
+            def __init__(self):
+                self.inputs = []
+
+            def __call__(self, x):
+                self.inputs.append(x)
+                return x * 2, None
+
+        model = MinimalMoE()
+        model.moe_rank = 0
+        model.num_experts_per_device = 2
+        model.use_accuracy_compatible = True
+        model.token_dispatcher = type("Dispatcher", (), {})()
+        model.token_dispatcher.global_input_probs = None
+        model.experts = [TwiceExpert(), TwiceExpert()]
+
+        dispatched_input = paddle.arange(8, dtype="float32").reshape([2, 4])
+        dispatched_input.stop_gradient = False
+        output = MoELayer.expert_forward(
+            model,
+            dispatched_input,
+            paddle.to_tensor([1, 1], dtype="int64"),
+        )
+
+        self.assertEqual([x.shape[0] for x in model.experts[0].inputs], [32])
+        self.assertEqual([x.shape[0] for x in model.experts[1].inputs], [32])
+        np.testing.assert_allclose(output.numpy(), dispatched_input.numpy() * 2)
+        output.sum().backward()
+        np.testing.assert_allclose(dispatched_input.grad.numpy(), 2.0)
+
+    def test_expert_forward_tiny_m_padding_preserves_router_scale(self):
+        class ScaledExpert:
+            def __init__(self):
+                self.scales = []
+
+            def __call__(self, x, per_token_scale):
+                self.scales.append(per_token_scale)
+                return x * per_token_scale.unsqueeze(-1), None
+
+        model = MinimalMoE()
+        model.moe_rank = 0
+        model.num_experts_per_device = 1
+        model.use_accuracy_compatible = True
+        model.token_dispatcher = type("Dispatcher", (), {})()
+        model.token_dispatcher.global_input_probs = paddle.to_tensor(
+            [0.25, 0.75], dtype="float32"
+        )
+        model.experts = [ScaledExpert()]
+        dispatched_input = paddle.ones([2, 3], dtype="float32")
+
+        with patch(
+            "paddlefleet.transformer.moe.moe_layer.use_accuracy_compatible_kernel",
+            return_value=True,
+        ):
+            output = MoELayer.expert_forward(model, dispatched_input, [2])
+
+        self.assertEqual(model.experts[0].scales[0].shape, [32])
+        np.testing.assert_allclose(
+            model.experts[0].scales[0][:2].numpy(), [0.25, 0.75]
+        )
+        np.testing.assert_allclose(model.experts[0].scales[0][2:].numpy(), 0.0)
+        np.testing.assert_allclose(
+            output.numpy(), [[0.25, 0.25, 0.25], [0.75, 0.75, 0.75]]
+        )
+
+    def test_accuracy_fusion_forward_populates_overlap_output(self):
+        model = MinimalMoE()
+        model.use_accuracy_compatible = True
+        hidden_states = paddle.ones([2, 3], dtype="float32")
+        shared_calls = []
+
+        def shared_expert(x):
+            shared_calls.append(x)
+            return x + 2.0, None
+
+        model.custom_forward = lambda *args, **kwargs: hidden_states + 1.0
+        overlap_handle = {
+            "fn": shared_expert,
+            "fn_args": (hidden_states,),
+        }
+
+        output = MoELayer.fusion_moe_forward(
+            model,
+            hidden_states,
+            probs=None,
+            routing_map=None,
+            combine_overlap_handle=overlap_handle,
+        )
+
+        self.assertEqual(len(shared_calls), 1)
+        self.assertEqual(
+            output.numpy().tolist(), (hidden_states + 1.0).numpy().tolist()
+        )
+        self.assertEqual(
+            overlap_handle["fn_out"][0].numpy().tolist(),
+            (hidden_states + 2.0).numpy().tolist(),
+        )
 
     def test_compute_gate_and_hybrid_fusion_predicate(self):
         model = MinimalMoE()

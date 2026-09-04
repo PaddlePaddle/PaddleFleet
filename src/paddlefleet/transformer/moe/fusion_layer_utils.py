@@ -19,6 +19,16 @@ import logging
 import paddle
 import paddlefleet_ops
 
+from paddlefleet.train_infer_consistent_ops.ffn_act import (
+    inspect_tensor_force_unit_probs,
+)
+from paddlefleet.train_infer_consistent_ops.inspect_util import (
+    get_current_layer,
+    inspect_tensor,
+)
+from paddlefleet.train_infer_consistent_ops.permute import (
+    inspect_tensor_set_permute_index,
+)
 from paddlefleet.transformer.moe.fp8_utils import (
     ExpertsGroupGemmContiguousNode,
     expert_weights_all_frozen,
@@ -1325,7 +1335,29 @@ class MlpNode:
                 else {"padding_alignment": padding_alignment}
             ),
         )
+        # Force unit routing weights while probing so this side's fused
+        # SwiGLU x probs x quant and the inference side's quant-then-weight
+        # order become comparable. Tied to the `moe_act_quant_output` probe, so a
+        # run narrowed to other tags leaves the MoE math alone. Done before the
+        # cache below, which the custom backward reads: an inspect run only
+        # compares the forward, but having backward differentiate the weights the
+        # forward actually used costs nothing here.
+        unzipped_probs = inspect_tensor_force_unit_probs(
+            unzipped_probs, "moe_act_quant_output"
+        )
         self.unzipped_probs = unzipped_probs
+
+        # Row permutation that maps each (dispatched token, expert) pair into the
+        # expert-contiguous buffer: `[num_tokens, num_local_experts]` -> row in that
+        # buffer (-1 where the token does not route to that expert). This is already
+        # the canonical keying the inference side is re-keyed into, so publish it for
+        # the expert-GEMM probes and dump it for offline checks.
+        inspect_tensor_set_permute_index(zipped_expertwise_rowmap)
+        zipped_expertwise_rowmap = inspect_tensor(
+            "moe_permute_index",
+            get_current_layer(),
+            zipped_expertwise_rowmap,
+        )
 
         # 2. 获取 shape 信息 + record_stream（标记 tensor 可被异步释放）
         if use_fp8_dispatch_a2a:

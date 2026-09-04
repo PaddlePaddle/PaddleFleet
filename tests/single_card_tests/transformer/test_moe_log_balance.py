@@ -217,6 +217,7 @@ class TestMoeBalanceLogging(unittest.TestCase):
             _run_hybrid_ep_fusion=lambda value, probs, **kwargs: value,
             combine=lambda value, **kwargs: value,
             use_latent_moe=False,
+            use_accuracy_compatible=False,
         )
 
         with (

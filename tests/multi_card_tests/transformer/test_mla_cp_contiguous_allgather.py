@@ -429,7 +429,9 @@ class TestMLAContiguousAllgatherCP(unittest.TestCase):
         from paddlefleet_ops import is_flash_mask_available
 
         if not is_flash_mask_available():
-            self.skipTest("FA4 cute backend unavailable (needs sm100)")
+            self.skipTest(
+                "FA4 cute backend unavailable (needs capability >= 9)"
+            )
         old = paddle.get_flags("FLAGS_flash_attn_version")[
             "FLAGS_flash_attn_version"
         ]

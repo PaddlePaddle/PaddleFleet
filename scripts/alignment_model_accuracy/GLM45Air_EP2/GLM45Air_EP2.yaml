@@ -1,0 +1,93 @@
+# PaddleFormers 单机 EP2 训练配置 - 用于和 ms-swift EP2 精度对齐
+# 基于 glm_sft_single.yaml; 仅修改并行相关字段
+# 单节点 2 卡: TP=1, PP=1, EP=2, DP=2 (dense 层在 2 卡间复制, 专家按 EP 切分)
+
+# 数据集类型
+train_dataset_type: erniekit
+eval_dataset_type: erniekit
+train_dataset_path: /home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP/alignment_paddle.jsonl
+eval_dataset_path: /home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP/alignment_paddle.jsonl
+train_dataset_prob: "1.0"
+eval_dataset_prob: "1.0"
+
+# 数据处理
+dataset_type: map
+packing: false
+truncate_packing: false
+truncation_strategy: right
+max_seq_len: 8192
+mix_strategy: concat
+random_shuffle: false
+dataloader_shuffle: false
+use_template: false
+
+_attn_implementation: eager
+
+# 模型路径
+model_name_or_path: /home/.cache/PaddleFormers/GLM-4.5-Air-tiny-2L
+
+# 训练配置
+stage: SFT
+fine_tuning: full
+seed: 42
+do_train: true
+do_eval: false
+per_device_eval_batch_size: 1
+per_device_train_batch_size: 1
+num_train_epochs: 1
+max_steps: 10
+eval_steps: 1000
+evaluation_strategy: steps
+save_steps: 200
+save_strategy: steps
+logging_steps: 1
+gradient_accumulation_steps: 1
+logging_dir: ./logs/paddle/default/vdl
+output_dir: ./logs/paddle/default/trainer
+disable_tqdm: true
+
+# 并行配置 - 单机 2 卡 EP2
+tensor_model_parallel_size: 1
+pipeline_model_parallel_size: 1
+sequence_parallel: false
+use_expert_parallel: true
+expert_model_parallel_size: 2
+
+# MoE配置
+moe_router_load_balancing_type: seq_aux_loss
+moe_shared_expert_overlap: false
+router_aux_loss_coef: 1.0e-4
+moe_expert_fusion: false
+moe_router_bias_update_rate: 0.0
+
+# 优化器配置
+weight_decay: 0.1
+adam_beta2: 0.95
+learning_rate: 5.0e-5
+warmup_steps: 0
+min_lr: 1.0e-5
+lr_scheduler_type: cosine
+
+# 性能优化
+recompute_granularity: full
+recompute_method: uniform
+recompute_num_layers: 1
+fp32_residual_connection: false
+
+# FP16/BF16
+bf16: true
+amp_master_grad: true
+fp16_opt_level: O2
+fa_version: 3
+
+save_checkpoint_format: flex_checkpoint
+load_checkpoint_format: flex_checkpoint
+# save_to_hf: true
+continue_training: true
+
+# 权重转换 - 从HF格式正确加载
+convert_from_hf: true
+
+dataloader_num_workers: 4
+
+use_accuracy_compatible: true

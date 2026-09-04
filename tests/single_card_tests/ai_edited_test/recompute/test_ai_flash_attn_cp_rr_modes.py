@@ -26,8 +26,20 @@ _REPO_ROOT = os.path.dirname(
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 
 import paddle
+from paddlefleet_ops import flash_mask_facade
 
 from paddlefleet.refined_recompute import flash_attn as fa
+
+
+def cpp_flashmask_backend():
+    """Route FA3 to Paddle's cpp kernel by flipping the hotfix switch off.
+
+    ``uses_cutedsl_backend`` reads the module global on every call and
+    ``PyLayer.backward`` reads it independently of the forward, so a forward and
+    its backward have to run inside the same context or they pick different
+    kernels.
+    """
+    return patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", False)
 
 
 class FakeCtx:
@@ -137,6 +149,12 @@ class TestFlashMaskAttnFunctor(unittest.TestCase):
 
         def fake_flashmask_attention(query, key, value, block_mask=None):
             return None
+
+        # ``backward`` re-reads the switch, so it has to stay off for both halves
+        # or the FA3 forward would be paired with a cutedsl backward.
+        switch = cpp_flashmask_backend()
+        switch.start()
+        self.addCleanup(switch.stop)
 
         with patch.object(fa, "get_fa_version", return_value=3):
             self.assertIs(
@@ -285,7 +303,10 @@ class TestUlyssesHelpers(unittest.TestCase):
         self.assertIs(mock_fwd.call_args.kwargs["learnable_sink"], sink)
 
         # fa2/fa3 have no sink support, so fail loudly instead of dropping it.
+        # FA3 only counts as "no sink support" while the cutedsl switch is off --
+        # on cutedsl FA3 serves the sink just like FA4.
         with (
+            cpp_flashmask_backend(),
             patch.object(fa, "get_fa_version", return_value=3),
             self.assertRaises(NotImplementedError),
         ):
@@ -311,7 +332,13 @@ class TestUlyssesHelpers(unittest.TestCase):
         )
         for version, target, return_value in cases:
             with self.subTest(version=version):
-                with patch.object(fa, "get_fa_version", return_value=version):
+                # FA3 reaches ``_C_ops.flashmask_attention_v2`` only with the
+                # cutedsl switch off; FA2 and FA4 do not read the switch at all,
+                # so keeping it off for the whole loop is safe.
+                with (
+                    cpp_flashmask_backend(),
+                    patch.object(fa, "get_fa_version", return_value=version),
+                ):
                     if version == 4:
                         patcher = patch.object(
                             fa, target, return_value=return_value, create=True
@@ -352,14 +379,6 @@ class TestUlyssesHelpers(unittest.TestCase):
                 q, q, q, startend, False, None, 0.5
             )
 
-        with (
-            patch.object(fa, "get_fa_version", return_value=0),
-            self.assertRaises(ValueError),
-        ):
-            fa.ulysses_local_flashmask_first_fwd(
-                q, q, q, startend, False, None, None
-            )
-
     def test_ulysses_local_v3_forward_signature_variants(self):
         q = paddle.randn([1, 4, 2, 4])
         out = paddle.randn([1, 4, 2, 4])
@@ -378,6 +397,7 @@ class TestUlyssesHelpers(unittest.TestCase):
         ):
             with self.subTest(signature=fake_attention.__name__):
                 with (
+                    cpp_flashmask_backend(),
                     patch.object(fa, "get_fa_version", return_value=3),
                     patch.object(fa, "flashmask_attention", fake_attention),
                     patch.object(fa, "_C_ops") as mock_c_ops,
@@ -767,6 +787,12 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
     def test_ulysses_functor_backward_fa3_signature_variants(self):
         local_grad = paddle.ones_like(self.out)
 
+        # ``hold["fa_version"] == 3`` only routes to ``_C_ops`` while the cutedsl
+        # switch is off, and the switch is read again inside ``backward``.
+        switch = cpp_flashmask_backend()
+        switch.start()
+        self.addCleanup(switch.stop)
+
         def flashmask_attention_with_group(query, key, value, group=None):
             return None
 
@@ -873,25 +899,6 @@ class TestRefinedRcomputeFlashMaskCpAttentionModes(unittest.TestCase):
                 self.assertEqual(len(grads), expected_len)
                 if requires_grad:
                     self.assertIs(grads[3], sink_grad)
-
-    def test_ulysses_functor_backward_rejects_invalid_fa_version(self):
-        ctx = FakeCtx()
-        hold = self._ulysses_hold(0)
-        fa.FlashMaskUlyssesCpFunctor.forward(
-            ctx, self.q, self.k, self.v, None, hold
-        )
-        with (
-            patch.object(fa, "_ulysses_fused_supported", return_value=False),
-            patch.object(
-                fa,
-                "_ulysses_single_all_to_all",
-                return_value=paddle.ones_like(self.out),
-            ),
-            self.assertRaises(ValueError),
-        ):
-            fa.FlashMaskUlyssesCpFunctor.backward(
-                ctx, paddle.ones_like(self.out)
-            )
 
     def test_second_forward_dispatches_each_mode(self):
         attn = fa.RefinedRcomputeFlashMaskCpAttention()

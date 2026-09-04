@@ -35,6 +35,7 @@ from paddlefleet.context_parallel_utils import (
 )
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
+    get_expert_model_parallel_group,
     get_tensor_model_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -230,6 +231,9 @@ class LanguageLoss(FleetLayer):
         self.pg_collection = pg_collection
 
         self.config = config
+        self.use_accuracy_compatible = getattr(
+            config, "use_accuracy_compatible", False
+        )
         self.ignored_index = -100
         self.enable_parallel_cross_entropy = (
             paddle.distributed.is_initialized()
@@ -456,10 +460,34 @@ class LanguageLoss(FleetLayer):
                     (1 - is_invalid_line_float).sum() + 1e-6
                 )
             else:
-                loss = paddle.sum(
-                    loss.cast(paddle.float32).reshape([-1]) * lossmask
-                )
-                loss = loss / lossmask.sum()
+                if self.use_accuracy_compatible:
+                    _flat = loss.cast(paddle.float32).reshape([-1]) * lossmask
+                    loss_sum = (
+                        _flat.cast(paddle.float64).sum().cast(paddle.float32)
+                    )
+                    _count = lossmask.sum()
+                    import paddle.distributed as _pdist
+
+                    _pg_collection = getattr(self, "pg_collection", None)
+                    _ep_group = getattr(_pg_collection, "ep", None)
+                    if _ep_group is None:
+                        _ep_group = get_expert_model_parallel_group(
+                            check_initialized=False
+                        )
+                    _ep_size = (
+                        _pdist.get_world_size(group=_ep_group)
+                        if _ep_group is not None
+                        else 1
+                    )
+                    _acc_sum = paddle.zeros([1], dtype=paddle.float32)
+                    for _ in range(_ep_size):
+                        _acc_sum = _acc_sum + loss_sum
+                    loss = _acc_sum[0] / (_count * _ep_size)
+                else:
+                    loss = paddle.sum(
+                        loss.cast(paddle.float32).reshape([-1]) * lossmask
+                    )
+                    loss = loss / lossmask.sum()
 
         if _use_accuracy_compatible_kernel():
             # 定位锚点 2：mask + 归一化后的标量 loss，与锚点 1 配合可切开

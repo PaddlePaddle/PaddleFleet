@@ -22,7 +22,10 @@ from paddle.autograd import PyLayer
 from paddle.distributed import fleet
 from paddle.nn.functional.flash_attention import flashmask_attention
 from paddlefleet_ops import is_flash_mask_available
-from paddlefleet_ops.flash_mask_facade import get_fa_version
+from paddlefleet_ops.flash_mask_facade import (
+    get_fa_version,
+    uses_cutedsl_backend,
+)
 
 from paddlefleet.context_parallel_utils import (
     UlyssesAlltoAll,
@@ -123,14 +126,7 @@ class FlashAttnFunctor(PyLayer):
                 dropout,
                 causal,
             )
-        elif fa_version == 3:
-            result_attention = hold_tensors["result_attention"]
-            softmax_lse = hold_tensors["softmax_lse"]
-            causal = hold_tensors["causal"]
-            ctx.save_for_backward(
-                q, k, v, result_attention, softmax_lse, causal
-            )
-        elif fa_version == 4:
+        elif not uses_cutedsl_backend(fa_version):
             result_attention = hold_tensors["result_attention"]
             softmax_lse = hold_tensors["softmax_lse"]
             causal = hold_tensors["causal"]
@@ -138,7 +134,12 @@ class FlashAttnFunctor(PyLayer):
                 q, k, v, result_attention, softmax_lse, causal
             )
         else:
-            raise ValueError(f"Invalid flash attention version: {fa_version}")
+            result_attention = hold_tensors["result_attention"]
+            softmax_lse = hold_tensors["softmax_lse"]
+            causal = hold_tensors["causal"]
+            ctx.save_for_backward(
+                q, k, v, result_attention, softmax_lse, causal
+            )
 
         # Return the actual output computed during the first forward pass.
         return result_attention
@@ -185,7 +186,7 @@ class FlashAttnFunctor(PyLayer):
                 causal,
             )
             seed_offset._clear_dataptr()
-        elif fa_version == 3:
+        elif not uses_cutedsl_backend(fa_version):
             q, k, v, result_attention, softmax_lse, causal = ctx.saved_tensor()
             q_grad, k_grad, v_grad = _C_ops.flash_attn_v3_grad(
                 q.detach(),
@@ -203,7 +204,7 @@ class FlashAttnFunctor(PyLayer):
                 0.0,  # softcap
                 0,  # sm_margin
             )
-        elif fa_version == 4:
+        else:
             flashmask_info = None
             q, k, v, result_attention, softmax_lse, causal = ctx.saved_tensor()
             q_grad, k_grad, v_grad, _ = _flash_attn_bwd(
@@ -222,8 +223,6 @@ class FlashAttnFunctor(PyLayer):
                     ]
                 ),
             )
-        else:
-            raise ValueError(f"Invalid flash attention version: {fa_version}")
 
         # Manually release memory of intermediate tensors to save GPU memory.
         result_attention._clear_dataptr()
@@ -336,7 +335,7 @@ class RefinedRcomputeFlashAttention:
                 "dropout": dropout,
                 "causal": causal,
             }
-        elif fa_version == 3:
+        elif not uses_cutedsl_backend(fa_version):
             (result_attention, softmax_lse) = _C_ops.flash_attn_v3(
                 query_states,
                 key_states,
@@ -364,7 +363,7 @@ class RefinedRcomputeFlashAttention:
                 "softmax_scale": softmax_scale,
             }
             result_softmax = None  # FA v3 does not return softmax.
-        elif fa_version == 4:
+        else:
             (result_attention, softmax_lse) = _flash_attn_fwd(
                 query_states,
                 key_states,
@@ -382,8 +381,6 @@ class RefinedRcomputeFlashAttention:
                 "softmax_scale": softmax_scale,
             }
             result_softmax = None
-        else:
-            raise ValueError(f"Invalid flash attention version: {fa_version}")
 
         # Put the dictionary of saved tensors into the queue.
         self._hold_tensors_queue.put(hold_tensors)
@@ -455,7 +452,7 @@ class FlashMaskAttnFunctor(PyLayer):
                 dropout,
                 causal,
             )
-        elif fa_version == 3:
+        elif not uses_cutedsl_backend(fa_version):
             result_attention = hold_tensors["result_attention"]
             softmax_lse = hold_tensors["softmax_lse"]
             causal = hold_tensors["causal"]
@@ -468,7 +465,7 @@ class FlashMaskAttnFunctor(PyLayer):
                 softmax_lse,
                 causal,
             )
-        elif fa_version == 4:
+        else:
             result_attention = hold_tensors["result_attention"]
             softmax_lse = hold_tensors["softmax_lse"]
             causal = hold_tensors["causal"]
@@ -482,8 +479,6 @@ class FlashMaskAttnFunctor(PyLayer):
                 causal,
                 learnable_sink,
             )
-        else:
-            raise ValueError(f"Invalid flash attention version: {fa_version}")
 
         return result_attention
 
@@ -521,7 +516,7 @@ class FlashMaskAttnFunctor(PyLayer):
                 causal,
             )
             seed_offset._clear_dataptr()
-        elif fa_version == 3:
+        elif not uses_cutedsl_backend(fa_version):
             (
                 q,
                 k,
@@ -580,7 +575,7 @@ class FlashMaskAttnFunctor(PyLayer):
                     softmax_scale,
                     causal,
                 )
-        elif fa_version == 4:
+        else:
             (
                 q,
                 k,
@@ -615,8 +610,6 @@ class FlashMaskAttnFunctor(PyLayer):
                     ]
                 ),
             )
-        else:
-            raise ValueError(f"Invalid flash attention version: {fa_version}")
 
         # Manually release memory.
         result_attention._clear_dataptr()
@@ -668,9 +661,9 @@ class RefinedRcomputeFlashMaskAttention:
                 value_states.shape[-1],
                 startend_row_indices,
             )
-            if fa_version != 4:
+            if not uses_cutedsl_backend(fa_version):
                 raise NotImplementedError(
-                    "learnable_sink only supported on fa_version==4 cute backend"
+                    "learnable_sink is only supported on the cute backend"
                 )
         if not framework._dygraph_tracer()._has_grad:
             # This is the initial, normal forward pass.
@@ -752,7 +745,7 @@ class RefinedRcomputeFlashMaskAttention:
                 "dropout": dropout,
                 "causal": causal,
             }
-        elif fa_version == 3:
+        elif not uses_cutedsl_backend(fa_version):
             sig_params = inspect.signature(flashmask_attention).parameters
             scale = (
                 query_states.shape[-1] ** (-0.5)
@@ -797,7 +790,7 @@ class RefinedRcomputeFlashMaskAttention:
                 "causal": causal,
                 "softmax_scale": softmax_scale,
             }
-        elif fa_version == 4:
+        else:
             (result_attention, softmax_lse) = _flash_attn_fwd(
                 query_states,
                 key_states,
@@ -816,8 +809,6 @@ class RefinedRcomputeFlashMaskAttention:
                 "learnable_sink": learnable_sink,
                 "softmax_scale": softmax_scale,
             }
-        else:
-            raise ValueError(f"Invalid flash attention version: {fa_version}")
 
         self._hold_tensors_queue.put(hold_tensors)
         return result_attention
@@ -1044,7 +1035,7 @@ class FlashMaskUlyssesCpFunctor(PyLayer):
                 causal,
             )
             seed_offset._clear_dataptr()
-        elif ctx.fa_version == 3:
+        elif not uses_cutedsl_backend(ctx.fa_version):
             sig_params = inspect.signature(flashmask_attention).parameters
             scale = (
                 q.shape[-1] ** (-0.5)
@@ -1091,7 +1082,7 @@ class FlashMaskUlyssesCpFunctor(PyLayer):
                     scale,
                     causal,
                 )
-        elif ctx.fa_version == 4:
+        else:
             if startend_row_indices is not None:
                 flashmask_info = FlashMaskInfoPaddle(
                     startend_row_indices=startend_row_indices,
@@ -1115,10 +1106,6 @@ class FlashMaskUlyssesCpFunctor(PyLayer):
                         "FLAGS_cudnn_deterministic"
                     ]
                 ),
-            )
-        else:
-            raise ValueError(
-                f"Invalid flash attention version: {ctx.fa_version}"
             )
 
         query_grad = _ulysses_single_all_to_all_rr(
@@ -1270,9 +1257,9 @@ def ulysses_local_flashmask_first_fwd(
     fa_version = get_fa_version(
         query_states.shape[-1], value_states.shape[-1], startend_row_indices
     )
-    if learnable_sink is not None and fa_version != 4:
+    if learnable_sink is not None and not uses_cutedsl_backend(fa_version):
         raise NotImplementedError(
-            "learnable_sink only supported on fa_version==4 cute backend"
+            "learnable_sink is only supported on the cute backend"
         )
     if fa_version == 2:
         if softmax_scale is not None:
@@ -1301,7 +1288,7 @@ def ulysses_local_flashmask_first_fwd(
             "dropout": 0.0,
             "causal": causal,
         }
-    elif fa_version == 3:
+    elif not uses_cutedsl_backend(fa_version):
         sig_params = inspect.signature(flashmask_attention).parameters
         scale = (
             query_states.shape[-1] ** (-0.5)
@@ -1346,7 +1333,7 @@ def ulysses_local_flashmask_first_fwd(
             "causal": causal,
             "softmax_scale": softmax_scale,
         }
-    elif fa_version == 4:
+    else:
         result_attention, softmax_lse = _flash_attn_fwd(
             query_states,
             key_states,
@@ -1364,8 +1351,7 @@ def ulysses_local_flashmask_first_fwd(
             "causal": causal,
             "softmax_scale": softmax_scale,
         }
-    else:
-        raise ValueError(f"Invalid flash attention version: {fa_version}")
+
     hold_tensors["fa_version"] = fa_version
     return result_attention, hold_tensors
 
@@ -1408,9 +1394,9 @@ class RefinedRcomputeFlashMaskCpAttention:
                 value_states.shape[-1],
                 startend_row_indices,
             )
-            if not fa_version == 4:
+            if not uses_cutedsl_backend(fa_version):
                 raise NotImplementedError(
-                    "learnable_sink only supported on fa_version==4 cute backend"
+                    "learnable_sink is only supported on the cute backend"
                 )
         if not framework._dygraph_tracer()._has_grad:
             # This is the initial, normal forward pass.

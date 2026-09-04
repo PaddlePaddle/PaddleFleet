@@ -709,10 +709,16 @@ def general_gemm(
     else:
         # Standard bf16/fp16 path
         if bias is not None:
-            output = paddle.nn.functional.linear(a, b, bias)
+            if use_accuracy_compatible:
+                weight_t = b.T.contiguous()
+                output = paddle.matmul(a, weight_t, transpose_y=True)
+                output = output + bias
+            else:
+                output = paddle.nn.functional.linear(a, b, bias)
         else:
             if use_accuracy_compatible:
-                output = paddle.nn.functional.linear(a, b)
+                weight_t = b.T.contiguous()
+                output = paddle.matmul(a, weight_t, transpose_y=True)
             else:
                 output = paddle.matmul(a, b)
         return output, None
@@ -948,7 +954,12 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                     ),
                 )
             else:
-                grad_input, _ = general_gemm(grad_output, weight.t())
+                if ctx.use_accuracy_compatible:
+                    grad_input, _ = general_gemm(
+                        grad_output, weight.t().contiguous()
+                    )
+                else:
+                    grad_input, _ = general_gemm(grad_output, weight.t())
         else:
             grad_input = None
 

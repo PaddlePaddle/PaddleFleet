@@ -16,6 +16,16 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import paddle
+from paddlefleet_ops import flash_mask_facade
+
+
+def _cpp_flashmask():
+    """FA3 reaches the cpp ``_C_ops.flashmask_attention_v2*`` kernels only while
+    the hotfix switch is off -- with cutedsl on it takes the cute path. Every
+    ``fa_version == 3`` case here is about those cpp branches.
+    """
+    return patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", False)
+
 
 # fmt: off
 # Parameters dicts used to control which branch the signature check enters.
@@ -55,6 +65,7 @@ class TestCpFlashmaskBackwardDispatch(unittest.TestCase):
         mock_v2_grad = MagicMock(return_value=(dummy, dummy, dummy))
 
         with (
+            _cpp_flashmask(),
             patch(
                 "paddlefleet.context_parallel_utils.inspect.signature"
             ) as mock_sig,
@@ -140,6 +151,7 @@ class TestFlashMaskAttnFunctorBackwardDispatch(unittest.TestCase):
         mock_v2_grad = MagicMock(return_value=(dummy, dummy, dummy))
 
         with (
+            _cpp_flashmask(),
             patch(
                 "paddlefleet.refined_recompute.flash_attn.inspect.signature"
             ) as mock_sig,
@@ -178,6 +190,7 @@ class TestRefinedRecomputeFirstFwdDispatch(unittest.TestCase):
     (fa_version==3). The "block_mask" and "else" branches are already covered
     by test_ai_flash_attn.py."""
 
+    @patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", False)
     @patch("paddlefleet.refined_recompute.flash_attn.framework._dygraph_tracer")
     @patch(
         "paddlefleet.refined_recompute.flash_attn._C_ops.flashmask_attention_v2",

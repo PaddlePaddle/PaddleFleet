@@ -22,8 +22,8 @@ WORKSPACE_DIR="${SCRIPT_DIR}"
 readonly PYTHON_VERSION="3.12"
 readonly TORCH_VERSION="2.12.0+cu130"
 readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
-readonly MCORE_BRIDGE_VERSION="1.4.3"
 readonly TE_VERSION="2.17.1"
+readonly TRANSFORMERS_VERSION="4.57.1"
 readonly PADDLE_INDEX_URL="https://www.paddlepaddle.org.cn/packages/stable/cu130/"
 readonly NIGHTLY_WHL_BASE="https://paddle-whl.bj.bcebos.com/nightly/cu130"
 # readonly PADDLE_VERSION="xx"
@@ -33,6 +33,7 @@ readonly PADDLEFLEET_OPS_WHEEL="${PADDLEFLEET_OPS_WHEEL_PATH:-${NIGHTLY_WHL_BASE
 readonly PADDLEFORMERS_WHEEL="${NIGHTLY_WHL_BASE}/paddleformers/paddleformers-0.0.0.dev-py3-none-any.whl"
 readonly MEGATRON_CORE_WHEEL="${MEGATRON_CORE_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/megatron_core-0.19.0+f2706b6f3-cp312-cp312-linux_x86_64.whl}"
 readonly MS_SWIFT_WHEEL="${MS_SWIFT_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/ms_swift-4.5.0.dev0-py3-none-any.whl}"
+readonly MCORE_BRIDGE_WHEEL="${MCORE_BRIDGE_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/mcore_bridge-1.7.0.dev0-py3-none-any.whl}"
 readonly NO_PROXY_LIST="localhost,127.0.0.1,0.0.0.0,bj.bcebos.com,su.bcebos.com,paddle-ci.gz.bcebos.com,baidu-int.com,.baidu.com,.bcebos.com"
 # readonly PROXY_URL="set your proxy"
 readonly UV_BIN_DIR="/home/.local/bin"
@@ -102,11 +103,13 @@ setup_torch_venv() {
 
     UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --python "${torch_py}" --index-strategy unsafe-best-match \
         --force-reinstall --no-deps \
-        "${MEGATRON_CORE_WHEEL}" "${MS_SWIFT_WHEEL}"
+        "${MEGATRON_CORE_WHEEL}" "${MS_SWIFT_WHEEL}" "${MCORE_BRIDGE_WHEEL}"
+    # uv pip install --python "${torch_py}" --index-strategy unsafe-best-match \
+    #     -e ./ms-swift -e ./Megatron-LM -e ./mcore-bridge
 
     uv pip install --python "${torch_py}" --index-strategy unsafe-best-match \
-        omegaconf tensor-spec-worker datasets transformers_stream_generator tensorboard json_repair matplotlib \
-        "mcore-bridge==${MCORE_BRIDGE_VERSION}" \
+        omegaconf tensor-spec-worker datasets transformers_stream_generator tensorboard json_repair matplotlib modelscope peft \
+        "transformers==${TRANSFORMERS_VERSION}" \
         "transformer-engine[core_cu13]==${TE_VERSION}"
 
     # transformer_engine_torch
@@ -124,6 +127,7 @@ setup_paddle_venv() {
 
     echo "[setup_venvs] paddle python: ${paddle_py}"
     local -a paddle_index=(
+        --no-config
         --index-url "${PADDLE_INDEX_URL}"
         --extra-index-url https://pypi.org/simple/
         --index-strategy unsafe-best-match
@@ -149,7 +153,8 @@ setup_paddle_venv() {
     #     cd ./PaddleFleet
     #     git submodule update --init --recursive
     #     VIRTUAL_ENV="${WORKSPACE_DIR}/venv/paddle" \
-    #         uv sync -p "${PYTHON_VERSION}" --inexact --active --no-build-isolation -v
+    #         uv sync --python "${paddle_py}" --inexact --active --no-build-isolation -v \
+    #             --index "paddlepaddle-gpu=${PADDLE_INDEX_URL}"
     # )
 
     # paddlefleet_ops

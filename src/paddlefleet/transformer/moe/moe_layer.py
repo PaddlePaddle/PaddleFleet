@@ -44,6 +44,10 @@ from paddlefleet.recompute_utils import (
     module_needs_recompute,
     module_needs_refined_recompute,
 )
+from paddlefleet.train_infer_consistent_ops.inspect_util import (
+    inspect_tensor,
+    inspect_tensor_set_current_layer,
+)
 from paddlefleet.transformer.activations import situ
 from paddlefleet.transformer.dw_overlap import (
     deferrable_linear_bare,
@@ -213,6 +217,8 @@ class MoELayer(nn.Layer):
             "ringmoe",
         )
         self.moe_allgather_gate_overlap = config.moe_allgather_gate_overlap
+        if self.use_accuracy_compatible:
+            self.moe_token_dispatcher_type = "alltoall"
         self.use_hybrid_ep_backend = False
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
@@ -276,6 +282,14 @@ class MoELayer(nn.Layer):
                     "paddlefleet_ops.sonicmoe"
                 ]
             )
+            if self.use_accuracy_compatible:
+                raise ValueError(
+                    "use_accuracy_compatible=True is incompatible with "
+                    "using_sonic_moe=True: the accuracy-compatible path runs "
+                    "experts one by one via self.experts, while SonicMoE only "
+                    "builds the fused grouped_gemm_experts. Please disable one "
+                    "of them in the configuration yaml."
+                )
             # SonicMoE's experts have their own two deferral points; the two
             # defer_expert_*_dw flags above only reach the fp8_utils path.
             install_sonic_moe_dw_deferral(config)
@@ -857,16 +871,49 @@ class MoELayer(nn.Layer):
                     "FLAGS_use_accuracy_compatible_kernel requires dispatched "
                     "router probabilities from the token dispatcher."
                 )
-            scale_chunks = paddle.split(
-                per_token_scale, num_or_sections=tokens_per_expert, axis=0
-            )
+            else:
+                scale_chunks = paddle.split(
+                    per_token_scale, num_or_sections=tokens_per_expert, axis=0
+                )
         for i, chunk in enumerate(chunks):
             if tokens_per_expert[i] == 0:
                 continue
             chunk = chunk.contiguous()
             current_expert_idx = i + self.moe_rank * self.num_experts_per_device
             expert = self.experts[current_expert_idx]
-            if scale_chunks is None:
+            if (
+                getattr(self, "use_accuracy_compatible", False)
+                and 0 < int(chunk.shape[0]) < 17
+            ):
+                num_rows = int(chunk.shape[0])
+                pad_rows = 32 - num_rows
+                chunk = paddle.concat(
+                    [
+                        chunk,
+                        paddle.zeros(
+                            [pad_rows, chunk.shape[1]], dtype=chunk.dtype
+                        ),
+                    ],
+                    axis=0,
+                )
+                scale = None
+                if scale_chunks is not None:
+                    scale = paddle.concat(
+                        [
+                            scale_chunks[i],
+                            paddle.zeros(
+                                [pad_rows], dtype=scale_chunks[i].dtype
+                            ),
+                        ],
+                        axis=0,
+                    )
+                expert_output = (
+                    expert(chunk)[0]
+                    if scale is None
+                    else expert(chunk, per_token_scale=scale)[0]
+                )
+                expert_output = expert_output[:num_rows]
+            elif scale_chunks is None:
                 expert_output = expert(chunk)[0]
             else:
                 expert_output = expert(chunk, per_token_scale=scale_chunks[i])[
@@ -1199,7 +1246,28 @@ class MoELayer(nn.Layer):
         topk_weights: paddle.Tensor | None = None,
         topk_indices: paddle.Tensor | None = None,
     ):
+        if self.use_accuracy_compatible:
+            if (
+                combine_overlap_handle is not None
+                and "fn_out" not in combine_overlap_handle
+            ):
+                combine_overlap_handle["fn_out"] = tuple(
+                    combine_overlap_handle["fn"](
+                        *combine_overlap_handle["fn_args"]
+                    )
+                )
+            return self.custom_forward(
+                hidden_states,
+                probs,
+                routing_map,
+                topk_weights=topk_weights,
+                topk_indices=topk_indices,
+            )
         hidden_states = self._project_to_latent(hidden_states)
+        layer_idx = getattr(self, "layer_number", None)
+        hidden_states = inspect_tensor(
+            "moe_latent_input", layer_idx, hidden_states
+        )
 
         should_log_balance = framework._dygraph_tracer()._has_grad
         with profile("dispatch"):
@@ -1209,6 +1277,27 @@ class MoELayer(nn.Layer):
 
         dispatched_indices, dispatched_probs, tokens_per_expert = (
             self.token_dispatcher.get_dispatched_routing()
+        )
+        tokens_per_expert = inspect_tensor(
+            "moe_dispatch_tokens_per_expert",
+            layer_idx,
+            tokens_per_expert,
+            pre_save_func=lambda counts: counts
+            if isinstance(counts, paddle.Tensor)
+            else paddle.to_tensor(counts, dtype="int32"),
+            post_load_func=lambda loaded: loaded
+            if isinstance(tokens_per_expert, paddle.Tensor)
+            else loaded.tolist(),
+        )
+        dispatched_probs = inspect_tensor(
+            "moe_dispatched_probs",
+            layer_idx,
+            dispatched_probs,
+        )
+        dispatched_indices = inspect_tensor(
+            "moe_dispatched_expert_ids",
+            layer_idx,
+            dispatched_indices,
         )
         if should_log_balance and global_moe_balance_training_logs_enabled():
             log_moe_balance(
@@ -1273,6 +1362,10 @@ class MoELayer(nn.Layer):
                     use_w4a8_fused_quant=self.use_w4a8_fused_quant,
                 )
 
+        hidden_states = inspect_tensor(
+            "moe_zipped_output", layer_idx, hidden_states
+        )
+
         with profile("combine"):
             hidden_states = self.combine(
                 hidden_states,
@@ -1280,10 +1373,19 @@ class MoELayer(nn.Layer):
                 fp8_combine_grad_handle=fp8_combine_grad_handle,
             )
 
+        hidden_states = inspect_tensor(
+            "moe_combine_output", layer_idx, hidden_states
+        )
+
         # Latent MoE: project back from latent space to hidden_size
         if self.use_latent_moe:
             if self.latent_norm is not None:
                 hidden_states = self.latent_norm(hidden_states)
+                hidden_states = inspect_tensor(
+                    "moe_latent_norm_output",
+                    layer_idx,
+                    hidden_states,
+                )
             hidden_states = deferrable_linear_bare(
                 self.config,
                 "moe_latent_proj",
@@ -1625,6 +1727,8 @@ class MoELayer(nn.Layer):
 
         layer_idx = getattr(self, "layer_number", None)
 
+        inspect_tensor_set_current_layer(layer_idx)
+
         _three_paths_enabled = (
             getattr(self, "use_accuracy_compatible", False)
             and hidden_states.stop_gradient is False
@@ -1641,6 +1745,7 @@ class MoELayer(nn.Layer):
 
         self._maybe_pre_allgather_overlap(hidden_states)
         gate_input = self._prepare_gate_input(_hs_router_path, residual)
+        gate_input = inspect_tensor("moe_gate_input", layer_idx, gate_input)
 
         (
             capacity,
@@ -1663,6 +1768,12 @@ class MoELayer(nn.Layer):
 
         _log_moe_md5(probs, "probs", layer_idx)
         _log_moe_md5(mask, "routing_mask", layer_idx)
+
+        probs = inspect_tensor("moe_probs", layer_idx, probs)
+        topk_indices = inspect_tensor("moe_topk_ids", layer_idx, topk_indices)
+        topk_weights = inspect_tensor(
+            "moe_topk_weights", layer_idx, topk_weights
+        )
         if framework._dygraph_tracer()._has_grad:
             log_moe_losses(layer_idx, aux_loss=aux_loss, z_loss=z_loss)
 
@@ -1738,6 +1849,7 @@ class MoELayer(nn.Layer):
                 )
 
         _log_moe_md5(output, "moe_routed_output", layer_idx)
+        output = inspect_tensor("moe_routed_output", layer_idx, output)
 
         if self.training and self.router_aux_loss_coef and aux_loss is not None:
             aux_loss = aux_loss * float(self.router_aux_loss_coef)
@@ -1750,11 +1862,15 @@ class MoELayer(nn.Layer):
         output = self._post_routed_output(output)
 
         if self.shared_experts is not None:
+            residuals = inspect_tensor("moe_shared_input", layer_idx, residuals)
             if combine_overlap_handle is not None:
                 shared_output = combine_overlap_handle["fn_out"][0]
             else:
                 shared_output = self.shared_experts(residuals)[0]
             shared_output = self._post_shared_output(shared_output)
+            shared_output = inspect_tensor(
+                "moe_shared_output", layer_idx, shared_output
+            )
             output = output + shared_output
 
         _log_moe_md5(output, "moe_final_output", layer_idx)
