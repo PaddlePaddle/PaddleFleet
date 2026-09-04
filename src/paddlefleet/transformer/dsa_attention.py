@@ -95,6 +95,34 @@ def _accuracy_compat_linear(projection, x):
     return output, output_bias
 
 
+class _SteQKMatmul(paddle.autograd.PyLayer):
+    """Opaque 4D QK STE matmul so live PIR cannot rewrite dK to bf16 GEMM."""
+
+    @staticmethod
+    def forward(ctx, q4: Tensor, k4: Tensor, scale: Tensor) -> Tensor:
+        q = q4.cast("float32") if q4.dtype != paddle.float32 else q4
+        k = k4.cast("float32") if k4.dtype != paddle.float32 else k4
+        ctx.save_for_backward(q, k, scale)
+        ctx.k_dtype = k4.dtype
+        ctx.k_heads = int(k.shape[1])
+        return paddle.matmul(q, k.transpose([0, 1, 3, 2])) * scale
+
+    @staticmethod
+    def backward(ctx, grad_scores: Tensor):
+        q, k, scale = ctx.saved_tensor()
+        g = (
+            grad_scores.cast("float32")
+            if grad_scores.dtype != paddle.float32
+            else grad_scores
+        )
+        gk = paddle.matmul(g.transpose([0, 1, 3, 2]), q) * scale
+        if ctx.k_heads == 1 and int(gk.shape[1]) != 1:
+            gk = gk.sum(axis=1, keepdim=True)
+        if gk.dtype != ctx.k_dtype:
+            gk = gk.cast(ctx.k_dtype)
+        return None, gk, None
+
+
 class _AccuracyCompatibleQKMatmul(paddle.autograd.PyLayer):
     """Batched QK matmul with an explicit broadcast-key gradient reduction."""
 
@@ -268,17 +296,46 @@ def _unfused_dsa_attention(
     """
     b, s, nhpp, qk_hd = query.shape
     v_hd = value.shape[-1]
+    uac_mqa = (
+        os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+        and key.dim() == 4
+        and key.shape[2] == 1
+        and nhpp > 1
+        and key.shape[-1] >= v_hd
+    )
+    key_mqa = key
 
     # Reshape for bmm: [b*nhpp, s, hd]
     q = query.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, qk_hd])
-    k = key.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, qk_hd])
-    v = value.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, v_hd])
+    if key.dim() == 4 and key.shape[2] == 1 and nhpp > 1:
+        # MQA key broadcast to the query head count (absorbed core path).
+        key_e = key.expand([b, s, nhpp, qk_hd])
+        if uac_mqa:
+            key_e = key_e.detach()
+        k = key_e.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, qk_hd])
+    else:
+        k = key.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, qk_hd])
+    if uac_mqa:
+        # V is the leading slice of absorbed key, matching torch key[..., :v].
+        value = paddle.slice(key, axes=[-1], starts=[0], ends=[v_hd]) * 1
+    if value.dim() == 4 and value.shape[2] == 1 and nhpp > 1:
+        value_e = value.expand([b, s, nhpp, v_hd])
+        v = value_e.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, v_hd])
+    else:
+        v = value.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, v_hd])
 
     # Q * K^T with scale: [b*nhpp, s, s]
     attn_scores = (
         paddle.bmm(q.cast("float32"), k.cast("float32").transpose([0, 2, 1]))
         * softmax_scale
     )
+    if uac_mqa:
+        q4 = query.transpose([0, 2, 1, 3]).cast("float32").detach()
+        k4 = key_mqa.transpose([0, 2, 1, 3]).cast("float32")
+        scale_t = paddle.full([], softmax_scale, dtype="float32")
+        scores_bwd = _SteQKMatmul.apply(q4, k4, scale_t)
+        scores_bwd = scores_bwd.reshape([b * nhpp, s, s])
+        attn_scores = attn_scores + (scores_bwd - scores_bwd.detach())
 
     # Apply combined mask (causal + sparse index mask)
     if combined_mask is not None:
@@ -289,7 +346,12 @@ def _unfused_dsa_attention(
         )
         attn_scores = attn_scores + mask.cast("float32")
 
-    attn_weights = F.softmax(attn_scores, axis=-1)
+    if os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1":
+        attn_weights = _AccuracyCompatibleSoftmax.apply(
+            attn_scores, paddle.isfinite(attn_scores)
+        )
+    else:
+        attn_weights = F.softmax(attn_scores, axis=-1)
 
     # Attention_weights * V: [b*nhpp, s, v_hd]
     output = paddle.bmm(attn_weights.cast(v.dtype), v)

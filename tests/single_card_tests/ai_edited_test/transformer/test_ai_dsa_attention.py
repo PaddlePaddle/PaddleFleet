@@ -451,6 +451,19 @@ class TestIndexer(unittest.TestCase):
         )
         self.assertNotIn("if _ACCURACY_COMPATIBLE_KERNEL:", absorbed)
 
+    def test_unfused_dsa_expands_mqa_key_to_query_heads(self):
+        import inspect
+
+        from paddlefleet.transformer import dsa_attention as dsa
+
+        source = inspect.getsource(dsa._unfused_dsa_attention)
+        self.assertIn("key.shape[2] == 1", source)
+        self.assertIn("key.expand([b, s, nhpp, qk_hd])", source)
+        self.assertIn("_SteQKMatmul.apply", source)
+        self.assertIn(
+            "paddle.slice(key, axes=[-1], starts=[0], ends=[v_hd])", source
+        )
+
     @patch("paddlefleet.transformer.dsa_attention.rotate_activation")
     def test_forward_before_topk_shape(self, mock_rotate):
         mock_rotate.side_effect = lambda x, use_fast_hadamard=False: x
