@@ -681,6 +681,7 @@ class DSAIndexer(paddle.nn.Layer):
                 ),
                 rotary_base=config.rope_theta,
                 cp_group=pg_collection.cp,
+                rotary_embed_cache=getattr(config, "rotary_embed_cache", False),
             )
         elif config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(

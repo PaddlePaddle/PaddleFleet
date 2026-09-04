@@ -619,6 +619,9 @@ class MultiLatentAttention(Attention):
                 use_accuracy_compatible=getattr(
                     self.config, "use_accuracy_compatible", False
                 ),
+                rotary_embed_cache=getattr(
+                    self.config, "rotary_embed_cache", False
+                ),
             )
         elif self.config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(

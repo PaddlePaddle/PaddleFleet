@@ -720,6 +720,7 @@ class DSv4HybridAttention(Attention):
                 self.qk_pos_emb_head_dim,
                 rotary_percent=getattr(config, "rotary_percent", 1.0),
                 rotary_base=rope_base,
+                rotary_embed_cache=getattr(config, "rotary_embed_cache", False),
             )
 
         self.core_attention = build_spec_layer(

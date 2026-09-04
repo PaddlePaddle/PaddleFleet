@@ -568,6 +568,38 @@ class TransformerConfig(ModelParallelConfig):
 
     high_precision_rope: bool = False
     swa_high_precision_norm: bool = False
+
+    rotary_embed_cache: bool = False
+    """If True, ``RotaryEmbedding.forward`` memoises its angle table per
+    ``(max_seq_len, offset)``.
+
+    The table is a pure function of that key plus instance constants, so a hit is
+    bit-identical to recomputing. Training rebuilds the identical table once per
+    attention module per microbatch (~95 us of host dispatch each for an 8192 x 64
+    table), which the cache collapses to a dict lookup. Calls that pass
+    ``position_ids`` are never cached -- the result then depends on a runtime
+    tensor. Off by default so the original code path is unchanged.
+
+    Scope, on purpose: the ``RotaryEmbedding`` instances that attention layers own
+    -- MLA (``multi_latent_attention.py``), DSv4 hybrid (``dsv4_hybrid_attention.py``)
+    and the DSA indexer (``dsa_attention.py``). Those are the ones that rebuild the
+    table, because every layer holds its own instance and calls it once per
+    microbatch; a 44-layer model does that a few hundred times per step.
+
+    Deliberately *not* wired into ``GPTEmbedding``: models that take that path build
+    one table per forward at the embedding stage and pass it down through
+    ``dict_args``, so there is no repeated rebuild to remove and caching would add
+    surface without a measurable win. ``YarnRotaryEmbedding`` and
+    ``MultimodalRotaryEmbedding`` override ``forward`` outright and are likewise out
+    of scope.
+
+    The memo is a single slot, not a dict. On the training path the key is fixed --
+    that is where the win comes from, and the slot is a permanent hit. Callers that
+    vary the key get no benefit: incremental decode reaches ``_build_rope_freqs``'s
+    ``sq + position_offset`` form, whose key grows with the KV cache, so every step
+    replaces the slot and misses. That is why one slot is enough -- what it holds is
+    bounded by construction, without an eviction policy."""
+
     ####################
     # fusion
     ####################
