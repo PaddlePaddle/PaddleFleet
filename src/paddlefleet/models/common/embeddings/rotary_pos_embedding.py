@@ -69,6 +69,7 @@ class RotaryEmbedding(nn.Layer):
         rope_scaling_factor: float = 8.0,
         cp_group: paddle.distributed.communication.group.Group | None = None,
         use_accuracy_compatible: bool = False,
+        rotary_embed_cache: bool = False,
     ) -> None:
         super().__init__()
 
@@ -103,6 +104,27 @@ class RotaryEmbedding(nn.Layer):
         )
 
         self._cast_to_low_precision = False
+
+        # ``forward`` is a pure function of ``(max_seq_len, offset)`` whenever
+        # ``position_ids`` is None: the only other inputs are the instance
+        # constants ``inv_freq``, ``seq_len_interpolation_factor`` and
+        # ``rotary_interleaved``. Training calls it once per attention module
+        # per microbatch with an unchanging key, so every call after the first
+        # rebuilds the identical table -- an arange, a cast, an outer product, a
+        # concat and a slice, each paying full dygraph dispatch cost for a kernel
+        # the GPU finishes in ~1-2 us. Enabling the cache turns the whole chain
+        # into a dict lookup; a hit is bit-identical to recomputing.
+        #
+        # Per-instance, because the table also depends on ``inv_freq``. A single
+        # slot rather than a dict: the training path keeps one key for the whole run,
+        # so the slot is a permanent hit there. A caller that varies the key --
+        # incremental decode, whose ``sq + position_offset`` grows with the KV cache
+        # -- just replaces the slot and keeps missing, so what is retained is bounded
+        # by construction and no eviction policy is needed. Stays None when the cache
+        # is off, and ``forward`` then runs unchanged.
+        self.rotary_embed_cache = rotary_embed_cache
+        self._emb_cache_key: tuple[int, int] | None = None
+        self._emb_cache_value: Tensor | None = None
 
     def _apply_scaling(
         self,
@@ -208,6 +230,16 @@ class RotaryEmbedding(nn.Layer):
         Returns:
             Tensor: Embeddings after applying RoPE.
         """
+        # Cache lookup (config: ``rotary_embed_cache``). Skipped when
+        # ``position_ids`` is given: the result then depends on a runtime tensor
+        # and is not a constant of (max_seq_len, offset). A hit is bit-identical
+        # to recomputing.
+        cache_key = None
+        if self.rotary_embed_cache and position_ids is None:
+            cache_key = (int(max_seq_len), int(offset))
+            if cache_key == self._emb_cache_key:
+                return self._emb_cache_value
+
         freqs = self.get_freqs_non_repeated(
             max_seq_len, offset, position_ids=position_ids
         )
@@ -221,6 +253,14 @@ class RotaryEmbedding(nn.Layer):
             ).reshape((freqs.shape[0], -1))
         # emb [1, seq_len, 1, dim]
         emb = emb[None, :, None, :]
+
+        if cache_key is not None:
+            # Sharing one object across calls is safe because no caller mutates
+            # the table in place (verified: no `+=`/`copy_`/`fill_`/`scale_` on
+            # the returned tensor anywhere in paddlefleet), and the recompute
+            # path in transformer_layer.py already clones its inputs.
+            self._emb_cache_key = cache_key
+            self._emb_cache_value = emb
         return emb
 
     def get_rotary_seq_len(
