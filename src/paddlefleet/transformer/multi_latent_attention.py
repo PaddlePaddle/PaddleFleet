@@ -105,8 +105,10 @@ def _accuracy_compatible_q_up_projection(projection, hidden_states):
     """Preserve native parameter gradients while controlling q-up input dgrad.
 
     ColumnParallelLinear under SP all-gathers first so F.linear sees the
-    fused-linear sequence, matching E-062 / q-down. The caller keeps the
-    local output shard (gather_output is false on q_b_proj).
+    fused-linear sequence, matching E-062 / q-down. Do not call
+    ``projection()`` after that gather: ColumnParallelLinear would gather
+    again. The caller keeps the local output shard (gather_output is false
+    on q_b_proj).
     """
     output_bias = projection.bias if projection.skip_bias_add else None
     if (
@@ -121,7 +123,9 @@ def _accuracy_compatible_q_up_projection(projection, hidden_states):
             hidden_states, group=projection.tp_group
         )
         hidden_states = hidden_states.contiguous()
-    parameter_path, _ = projection(hidden_states.detach())
+    parameter_path = paddle.nn.functional.linear(
+        hidden_states.detach(), projection.weight, None
+    )
     input_path = _AccuracyCompatibleLinearInputGrad.apply(
         hidden_states, projection.weight.detach()
     )

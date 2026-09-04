@@ -271,10 +271,6 @@ class TestAccuracyCompatibleQUpProjection(unittest.TestCase):
             sequence_parallel=True,
             tp_group=tp_group,
         )
-        projection.side_effect = lambda value: (
-            paddle.nn.functional.linear(value, weight),
-            None,
-        )
         with (
             patch(
                 "paddlefleet.transformer.multi_latent_attention.get_pg_size",
@@ -287,6 +283,7 @@ class TestAccuracyCompatibleQUpProjection(unittest.TestCase):
         ):
             output, _ = _accuracy_compatible_q_up_projection(projection, hidden)
         mock_gather.assert_called_once()
+        projection.assert_not_called()
         expected = paddle.nn.functional.linear(gathered, weight)
         self.assertTrue(paddle.equal_all(output, expected).item())
 
