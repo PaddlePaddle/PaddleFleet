@@ -186,31 +186,50 @@ def _accuracy_compatible_mla_rope_apply(
     rope_base,
     position_ids,
     sequence_parallel=False,
+    k_seq_offset=0,
 ):
-    """Apply Megatron MLA RoPE ordering for explicit MTP position IDs."""
+    """Apply Megatron MLA RoPE ordering for explicit MTP position IDs.
+
+    Query may already be full-seq (ColumnParallelLinear SP gather) while
+    k_pos_emb is still the local shard. Rotate each tensor against its own
+    sequence length so unabsorbed concat keeps matching k_no_pe. A sharded
+    k uses ``k_seq_offset`` so rank 1 rotates positions 30-59, not 0-29.
+    """
     head_dim = q_pe.shape[-1]
     seq_axis = 0 if sequence_parallel else 1
-    seq_len = q_pe.shape[seq_axis]
+    q_seq_len = int(q_pe.shape[seq_axis])
+    k_seq_len = int(k_pe.shape[seq_axis])
     if position_ids.ndim != 1:
         position_ids = position_ids.reshape([-1])
-    if position_ids.shape[0] < seq_len:
+    if position_ids.shape[0] < q_seq_len:
         raise ValueError(
             f"MLA RoPE position_ids length {position_ids.shape[0]} is shorter than "
-            f"the query sequence length {seq_len}."
+            f"the query sequence length {q_seq_len}."
         )
     # MTP retains one look-ahead token in the input batch, while the backbone
     # attention tensors contain only the first seq_len positions.
-    position_ids = position_ids[:seq_len]
+    q_position_ids = position_ids[:q_seq_len]
+    k_end = int(k_seq_offset) + k_seq_len
+    if position_ids.shape[0] < k_end:
+        raise ValueError(
+            f"MLA RoPE position_ids length {position_ids.shape[0]} is shorter than "
+            f"the key shard end {k_end}."
+        )
+    k_position_ids = position_ids[int(k_seq_offset) : k_end]
     inv_freq = paddle.pow(
         paddle.to_tensor(rope_base, dtype="float32"),
         -paddle.arange(0, head_dim, 2, dtype="float32") / float(head_dim),
     )
-    freqs = paddle.outer(position_ids.cast("float32"), inv_freq)
-    freqs = paddle.concat((freqs, freqs), axis=-1)
-    if sequence_parallel:
-        freqs = freqs[:, None, None, :]
-    else:
-        freqs = freqs[None, :, None, :]
+
+    def _freqs(ids):
+        freqs = paddle.outer(ids.cast("float32"), inv_freq)
+        freqs = paddle.concat((freqs, freqs), axis=-1)
+        if sequence_parallel:
+            return freqs[:, None, None, :]
+        return freqs[None, :, None, :]
+
+    q_freqs = _freqs(q_position_ids)
+    k_freqs = _freqs(k_position_ids)
 
     def rotate(tensor, seq_freqs):
         tensor = paddle.concat((tensor[..., 0::2], tensor[..., 1::2]), axis=-1)
@@ -220,24 +239,7 @@ def _accuracy_compatible_mla_rope_apply(
             tensor.dtype
         ) + rotated * paddle.sin(seq_freqs).cast(tensor.dtype)
 
-    k_seq = int(k_pe.shape[seq_axis])
-    if k_seq == seq_len:
-        k_freqs = freqs
-    elif seq_len % k_seq == 0:
-        world = seq_len // k_seq
-        rank = int(paddle.distributed.get_rank()) % world
-        start = rank * k_seq
-        k_freqs = (
-            freqs[start : start + k_seq]
-            if sequence_parallel
-            else freqs[:, start : start + k_seq]
-        )
-    else:
-        raise ValueError(
-            "MLA RoPE key sequence length "
-            f"{k_seq} is not a TP shard of query sequence length {seq_len}."
-        )
-    return rotate(q_pe, freqs), rotate(k_pe, k_freqs)
+    return rotate(q_pe, q_freqs), rotate(k_pe, k_freqs)
 
 
 def _is_incremental_decode(past_key_values, layer_idx, use_cache) -> bool:
@@ -2415,12 +2417,21 @@ class MLASelfAttention(MultiLatentAttention):
                     and position_ids is not None
                     and position_ids.ndim == 1
                 ):
+                    k_seq_offset = 0
+                    if self.config.sequence_parallel:
+                        k_seq_len = int(k_pos_emb.shape[0])
+                        q_seq_len = int(q_pos_emb.shape[0])
+                        if k_seq_len > 0 and q_seq_len % k_seq_len == 0:
+                            world = q_seq_len // k_seq_len
+                            rank = int(paddle.distributed.get_rank()) % world
+                            k_seq_offset = rank * k_seq_len
                     q_pos_emb, k_pos_emb = _accuracy_compatible_mla_rope_apply(
                         q_pos_emb,
                         k_pos_emb,
                         self.rope_theta,
                         position_ids,
                         sequence_parallel=self.config.sequence_parallel,
+                        k_seq_offset=k_seq_offset,
                     )
                 elif self.config.gpt_model_use_experimental_version:
                     # EC-compatible RoPE: complex rotation, no YaRN, no mscale

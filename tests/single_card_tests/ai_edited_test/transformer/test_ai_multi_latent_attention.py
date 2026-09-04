@@ -116,6 +116,44 @@ class TestMLAKposEmbSequenceParallelGather(unittest.TestCase):
         self.assertIn("FLAGS_use_accuracy_compatible_kernel", helper)
         self.assertIn("MODEL_REPRO_DSA_ABSORBED", helper)
 
+    def test_uac_mla_rope_helper_uses_k_seq_offset_for_sharded_key(self):
+        from paddlefleet.transformer.multi_latent_attention import (
+            _accuracy_compatible_mla_rope_apply,
+        )
+
+        q_pe = paddle.ones([4, 1, 1, 8], dtype="float32")
+        k_pe = paddle.ones([2, 1, 1, 8], dtype="float32")
+        position_ids = paddle.arange(4, dtype="int64")
+        _, k0 = _accuracy_compatible_mla_rope_apply(
+            q_pe,
+            k_pe,
+            10000.0,
+            position_ids,
+            sequence_parallel=True,
+            k_seq_offset=0,
+        )
+        _, k1 = _accuracy_compatible_mla_rope_apply(
+            q_pe,
+            k_pe,
+            10000.0,
+            position_ids,
+            sequence_parallel=True,
+            k_seq_offset=2,
+        )
+        self.assertFalse(bool(paddle.equal_all(k0, k1)))
+
+    def test_uac_mla_rope_call_site_passes_k_seq_offset(self):
+        import inspect
+
+        from paddlefleet.transformer import multi_latent_attention as mla
+
+        source = inspect.getsource(mla)
+        self.assertIn("k_seq_offset=k_seq_offset", source)
+        self.assertIn(
+            "k_seq_offset=0",
+            inspect.getsource(mla._accuracy_compatible_mla_rope_apply),
+        )
+
 
 class TestDeferredWeightGradLinear(unittest.TestCase):
     """Tests for DeferredWeightGradLinear PyLayer."""
