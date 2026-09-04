@@ -101,12 +101,50 @@ class TestAccuracyCompatibleMLARope(unittest.TestCase):
         paddle.testing.assert_close(q_out, expected_q)
         paddle.testing.assert_close(k_out, expected_k)
 
+    def test_sequence_parallel_applies_local_key_window(self):
+        import paddle
+
+        q_pe = paddle.randn([4, 1, 2, 4])
+        k_pe = paddle.randn([2, 1, 1, 4])
+        position_ids = paddle.arange(4, dtype="int64")
+        with patch(
+            "paddlefleet.transformer.multi_latent_attention.paddle.distributed.get_rank",
+            return_value=0,
+        ):
+            q_out, k_out = _accuracy_compatible_mla_rope_apply(
+                q_pe,
+                k_pe,
+                rope_base=100.0,
+                position_ids=position_ids,
+                sequence_parallel=True,
+            )
+        expected_q, _ = _accuracy_compatible_mla_rope_apply(
+            q_pe,
+            q_pe,
+            rope_base=100.0,
+            position_ids=position_ids,
+            sequence_parallel=True,
+        )
+        _, expected_k = _accuracy_compatible_mla_rope_apply(
+            k_pe.expand([2, 1, 2, 4]),
+            k_pe,
+            rope_base=100.0,
+            position_ids=position_ids[:2],
+            sequence_parallel=True,
+        )
+        self.assertEqual(tuple(q_out.shape), (4, 1, 2, 4))
+        self.assertEqual(tuple(k_out.shape), (2, 1, 1, 4))
+        paddle.testing.assert_close(q_out, expected_q)
+        paddle.testing.assert_close(k_out, expected_k)
+
     def test_rejects_short_position_ids(self):
         import paddle
 
         q_pe = paddle.randn([4, 1, 2, 4])
         k_pe = paddle.randn([4, 1, 1, 4])
-        with self.assertRaisesRegex(ValueError, "shorter than the query sequence"):
+        with self.assertRaisesRegex(
+            ValueError, "shorter than the query sequence"
+        ):
             _accuracy_compatible_mla_rope_apply(
                 q_pe,
                 k_pe,

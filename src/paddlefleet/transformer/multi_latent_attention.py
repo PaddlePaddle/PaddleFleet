@@ -139,15 +139,32 @@ def _accuracy_compatible_mla_rope_apply(
     else:
         freqs = freqs[None, :, None, :]
 
-    def rotate(tensor):
+    def rotate(tensor, seq_freqs):
         tensor = paddle.concat((tensor[..., 0::2], tensor[..., 1::2]), axis=-1)
         x1, x2 = paddle.chunk(tensor, 2, axis=-1)
         rotated = paddle.concat((-x2, x1), axis=-1)
-        return tensor * paddle.cos(freqs).cast(
+        return tensor * paddle.cos(seq_freqs).cast(
             tensor.dtype
-        ) + rotated * paddle.sin(freqs).cast(tensor.dtype)
+        ) + rotated * paddle.sin(seq_freqs).cast(tensor.dtype)
 
-    return rotate(q_pe), rotate(k_pe)
+    k_seq = int(k_pe.shape[seq_axis])
+    if k_seq == seq_len:
+        k_freqs = freqs
+    elif seq_len % k_seq == 0:
+        world = seq_len // k_seq
+        rank = int(paddle.distributed.get_rank()) % world
+        start = rank * k_seq
+        k_freqs = (
+            freqs[start : start + k_seq]
+            if sequence_parallel
+            else freqs[:, start : start + k_seq]
+        )
+    else:
+        raise ValueError(
+            "MLA RoPE key sequence length "
+            f"{k_seq} is not a TP shard of query sequence length {seq_len}."
+        )
+    return rotate(q_pe, freqs), rotate(k_pe, k_freqs)
 
 
 def _is_incremental_decode(past_key_values, layer_idx, use_cache) -> bool:
