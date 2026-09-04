@@ -59,15 +59,15 @@ def _make_spec(num_transformer_layers=2, num_mtp=1):
 
 
 def _make_config(**overrides):
-    cfg = dict(
-        model_type="gpt",
-        enable_mtp_magic_send=False,
-        mtp_shared_last_layer=False,
-        gpt_model_use_experimental_version=False,
-        num_nextn_predict_layers=1,
-        multimax_modules=None,
-        separate_mtp_headloss=False,
-    )
+    cfg = {
+        "model_type": "gpt",
+        "enable_mtp_magic_send": False,
+        "mtp_shared_last_layer": False,
+        "gpt_model_use_experimental_version": False,
+        "num_nextn_predict_layers": 1,
+        "multimax_modules": None,
+        "separate_mtp_headloss": False,
+    }
     cfg.update(overrides)
     return SimpleNamespace(**cfg)
 

@@ -116,9 +116,7 @@ class TestExtractLocalCpChunksDispatch(unittest.TestCase):
             got = extract_local_cp_chunks(
                 t, rank, cp_size, axis=1, mode="contiguous_allgather"
             )
-            expected = extract_local_contiguous_chunk(
-                t, rank, cp_size, axis=1
-            )
+            expected = extract_local_contiguous_chunk(t, rank, cp_size, axis=1)
             self.assertTrue(bool((got == expected).all()))
 
     def test_the_two_layouts_actually_differ(self) -> None:
@@ -162,9 +160,7 @@ class TestExtractLocalCpChunksDispatch(unittest.TestCase):
     def test_contiguous_a2a_raises(self) -> None:
         t = _arange_bl(1, 16)
         with self.assertRaisesRegex(ValueError, r"unsupported cp_balance_mode"):
-            extract_local_cp_chunks(
-                t, 0, 2, axis=1, mode="contiguous_a2a"
-            )
+            extract_local_cp_chunks(t, 0, 2, axis=1, mode="contiguous_a2a")
 
     def test_unknown_mode_raises(self) -> None:
         t = _arange_bl(1, 16)
