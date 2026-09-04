@@ -509,6 +509,14 @@ def _align_sp_aux_to_query(tensor: Tensor, query: Tensor) -> Tensor:
             ):
                 return gathered.transpose([1, 0, 2, 3])
             return gathered
+        # IEEE 1-5: k_pos_emb can still be full-seq on the batch-first
+        # axis while query is the local SP shard. Slice that rank's window
+        # instead of gathering (gather would expand query, not shrink rope).
+        if int(tensor.shape[0]) == batch and int(tensor.shape[1]) > seq:
+            if int(tensor.shape[1]) % seq == 0:
+                world = int(tensor.shape[1]) // seq
+                rank = int(paddle.distributed.get_rank()) % world
+                return tensor[:, rank * seq : (rank + 1) * seq]
         return tensor
     return tensor
 

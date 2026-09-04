@@ -193,6 +193,23 @@ class TestNormalizeDsaMask(unittest.TestCase):
         out = _align_sp_aux_to_query(tensor, query)
         self.assertTrue(paddle.equal_all(out, tensor))
 
+    def test_align_sp_aux_slices_full_seq_batch_first_window(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        full = paddle.arange(16, dtype="float32").reshape([1, 8, 1, 2])
+        with patch(
+            "paddlefleet.transformer.dsa_attention.paddle.distributed.get_rank",
+            return_value=0,
+        ):
+            out0 = _align_sp_aux_to_query(full, query)
+        with patch(
+            "paddlefleet.transformer.dsa_attention.paddle.distributed.get_rank",
+            return_value=1,
+        ):
+            out1 = _align_sp_aux_to_query(full, query)
+        self.assertEqual(tuple(out0.shape), (1, 4, 1, 2))
+        self.assertTrue(paddle.equal_all(out0, full[:, 0:4, :, :]))
+        self.assertTrue(paddle.equal_all(out1, full[:, 4:8, :, :]))
+
 
 class TestHadamardTransform(unittest.TestCase):
     """Test hadamard_transform function."""
