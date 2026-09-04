@@ -22,7 +22,11 @@ env:
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn,paddlepaddle.org.cn,.paddlepaddle.org.cn,www.paddlepaddle.org.cn"
   docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda129-py312-dev"
   build_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle_manylinux_devel:cuda12.9-cudnn9.9-trt10.5-gcc11"
-  formers_branch: "release/1.2"
+  # paddle nightly renamed Muon._muon_update -> _muon_update_group.
+  # Formers develop has the hasattr fallback; release/1.2 still
+  # unconditionally reads _muon_update and fails GLM-4.5 / Qwen3VL
+  # integration on this stack.
+  formers_branch: "develop"
 
 defaults:
   run:
