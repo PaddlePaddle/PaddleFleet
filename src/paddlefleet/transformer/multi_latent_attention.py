@@ -119,8 +119,28 @@ def _accuracy_compatible_projection(projection, hidden_states):
 
 
 def _accuracy_compatible_q_down_projection(projection, hidden_states):
-    """Apply q-down with the Torch-aligned strided-transpose GEMM formulation."""
-    return _accuracy_compatible_projection(projection, hidden_states)
+    """Apply q-down with the Torch-aligned strided-transpose GEMM formulation.
+
+    Replicated Linear never takes the gather branch: it does not set
+    sequence_parallel on itself. ColumnParallelLinear under SP all-gathers
+    first so F.linear sees the fused-linear sequence, matching E-062.
+    """
+    output_bias = projection.bias if projection.skip_bias_add else None
+    bias = None if projection.skip_bias_add else projection.bias
+    if (
+        getattr(projection, "sequence_parallel", False)
+        and get_pg_size(getattr(projection, "tp_group", None)) > 1
+    ):
+        from paddlefleet.tensor_parallel.mappings import (
+            gather_from_sequence_parallel_region,
+        )
+
+        hidden_states = gather_from_sequence_parallel_region(
+            hidden_states, group=projection.tp_group
+        )
+        hidden_states = hidden_states.contiguous()
+    output = paddle.nn.functional.linear(hidden_states, projection.weight, bias)
+    return output, output_bias
 
 
 def _accuracy_compatible_mla_rope_apply(
@@ -1916,10 +1936,7 @@ class MLASelfAttention(MultiLatentAttention):
         if self.q_lora_rank is not None:
             # if q_a_proj is ColumnParallelLinear:
             #     q_compressed: [b, s, q_lora_rank / TP]
-            if (
-                _ACCURACY_COMPATIBLE_KERNEL
-                and get_pg_size(self.pg_collection.tp) == 1
-            ):
+            if _ACCURACY_COMPATIBLE_KERNEL:
                 q_compressed, _ = _accuracy_compatible_q_down_projection(
                     self.q_a_proj, hidden_states
                 )

@@ -66,6 +66,54 @@ class TestLanguageLossInit(unittest.TestCase):
 
         loss = LanguageLoss(config=mock_config)
         self.assertTrue(loss.enable_parallel_cross_entropy)
+        mock_pce.assert_called_once()
+
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss.get_tensor_model_parallel_world_size",
+        return_value=4,
+    )
+    @patch("paddle.distributed.is_initialized", return_value=True)
+    @patch("paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy")
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss._use_accuracy_compatible_kernel",
+        return_value=True,
+    )
+    def test_init_with_parallel_uac_uses_vocab_parallel_ce(
+        self, mock_uac, mock_pce, mock_dist, mock_tp
+    ):
+        from paddlefleet.models.common.language_loss.language_loss import (
+            LanguageLoss,
+            _uac_vocab_parallel_ce,
+        )
+
+        mock_config = MagicMock()
+        mock_config.parallel_output = True
+        mock_config.loss_subbatch_sequence_length = 0
+
+        loss = LanguageLoss(config=mock_config)
+        self.assertTrue(loss.enable_parallel_cross_entropy)
+        self.assertIs(loss.loss_func, _uac_vocab_parallel_ce)
+        mock_pce.assert_not_called()
+
+    def test_uac_vocab_parallel_ce_transposes_batch_first_logits(self):
+        import paddle
+
+        from paddlefleet.models.common.language_loss.language_loss import (
+            _uac_vocab_parallel_ce,
+        )
+
+        logits = paddle.randn([2, 3, 4])
+        labels = paddle.randint(0, 4, [2, 3])
+        with patch(
+            "paddlefleet.tensor_parallel.cross_entropy.vocab_parallel_cross_entropy",
+            side_effect=lambda lg, lb: lg.sum(axis=-1),
+        ) as mock_ce:
+            out = _uac_vocab_parallel_ce(logits, labels)
+        mock_ce.assert_called_once()
+        lg, lb = mock_ce.call_args.args
+        self.assertEqual(list(lg.shape), [3, 2, 4])
+        self.assertEqual(list(lb.shape), [3, 2])
+        self.assertEqual(list(out.shape), [2, 3])
 
     @patch(
         "paddlefleet.models.common.language_loss.language_loss.get_tensor_model_parallel_world_size",

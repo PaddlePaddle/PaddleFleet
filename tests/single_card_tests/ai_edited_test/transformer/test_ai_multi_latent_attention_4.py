@@ -258,6 +258,28 @@ class TestAccuracyCompatibleQDownProjection(unittest.TestCase):
         self.assertTrue(paddle.equal_all(output, expected).item())
         self.assertIsNone(output_bias)
 
+    def test_replicated_linear_skips_sp_gather(self):
+        import paddle
+
+        hidden = paddle.randn([1, 3, 4])
+        weight = paddle.randn([4, 6])
+        projection = MagicMock(
+            weight=weight,
+            bias=None,
+            skip_bias_add=True,
+            sequence_parallel=False,
+            tp_group=None,
+        )
+        with patch(
+            "paddlefleet.tensor_parallel.mappings.gather_from_sequence_parallel_region"
+        ) as mock_gather:
+            output, _ = _accuracy_compatible_q_down_projection(
+                projection, hidden
+            )
+        mock_gather.assert_not_called()
+        expected = paddle.nn.functional.linear(hidden, weight)
+        self.assertTrue(paddle.equal_all(output, expected).item())
+
 
 class TestMLASelfAttentionBackwardDW(unittest.TestCase):
     """Tests for MLASelfAttention.backward_dw."""

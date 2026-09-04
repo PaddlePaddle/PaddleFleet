@@ -69,6 +69,24 @@ def _accuracy_compatible_cross_entropy(
     return vocab_parallel_cross_entropy(logits, labels)
 
 
+def _uac_vocab_parallel_ce(logits: Tensor, labels: Tensor) -> Tensor:
+    """IEEE E-608 needle: TP>1 UAC vocab-parallel CE, not fleet ParallelCrossEntropy.
+
+    Layout matches Megatron vocab-parallel CE: 3D logits [s, b, v] with
+    labels [s, b]. The live GLM-5.2 trainer feeds [b, s, v] / [b, s].
+    """
+    from paddlefleet.tensor_parallel.cross_entropy import (
+        vocab_parallel_cross_entropy,
+    )
+
+    if logits.ndim == 3 and labels.ndim == 2:
+        lg = logits.transpose([1, 0, 2])
+        lb = labels.transpose([1, 0])
+        loss = vocab_parallel_cross_entropy(lg, lb)
+        return loss.transpose([1, 0])
+    return vocab_parallel_cross_entropy(logits, labels)
+
+
 def _tensor_md5(tensor: Tensor, dtype: str = "float32") -> str:
     """Calculate MD5 hash of a tensor, **for debugging only**.
 
@@ -254,9 +272,18 @@ class LanguageLoss(FleetLayer):
         )
 
         if self.enable_parallel_cross_entropy:
-            self.loss_func = (
-                paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy()
-            )
+            if _use_accuracy_compatible_kernel():
+                # E-608: Megatron-aligned vocab-parallel CE. Default path
+                # stays fleet ParallelCrossEntropy.
+                self.loss_func = _uac_vocab_parallel_ce
+                print(
+                    "[UAC-CE] LanguageLoss.loss_func="
+                    "vocab_parallel_cross_entropy "
+                    f"live_tp={get_tensor_model_parallel_world_size()}",
+                    flush=True,
+                )
+            else:
+                self.loss_func = paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy()
         elif _use_accuracy_compatible_kernel():
             # Keep TP=1 loss backward identical to Megatron's unfused
             # vocab-parallel cross entropy. Paddle's native CrossEntropyLoss
