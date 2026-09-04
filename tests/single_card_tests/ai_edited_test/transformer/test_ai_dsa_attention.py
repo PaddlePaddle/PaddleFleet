@@ -36,6 +36,7 @@ from paddlefleet.transformer.dsa_attention import (
     Indexer,
     _AccuracyCompatibleQKMatmul,
     _AccuracyCompatibleSoftmax,
+    _align_dsa_indexer_mask,
     _normalize_dsa_mask,
     _unfused_absorbed_dsa_attention,
     _unfused_dsa_attention,
@@ -159,6 +160,16 @@ class TestNormalizeDsaMask(unittest.TestCase):
         mask = paddle.zeros([1, 1, 60, 60], dtype="float32")
         out = _normalize_dsa_mask(mask)
         self.assertEqual(tuple(out.shape), (1, 60, 60))
+
+    def test_align_keeps_matching_last_dim(self):
+        mask = paddle.zeros([1, 60, 60], dtype="float32")
+        out = _align_dsa_indexer_mask(mask, 60)
+        self.assertEqual(tuple(out.shape), (1, 60, 60))
+
+    def test_align_mismatch_without_tp_returns_none(self):
+        mask = paddle.zeros([1, 60, 30], dtype="float32")
+        out = _align_dsa_indexer_mask(mask, 60)
+        self.assertIsNone(out)
 
 
 class TestHadamardTransform(unittest.TestCase):

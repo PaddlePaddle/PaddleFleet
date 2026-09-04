@@ -21,15 +21,13 @@ import requests
 
 PR_checkTemplate = ["PaddleFleet"]
 
-BRANCH = os.environ["BRANCH"]
-if BRANCH.startswith("develop"):
-    REPO_TEMPLATE = {
-        "PaddleFleet": r"""### PR Category(.*[^\s].*)### PR Types(.*[^\s].*)### Description(.*[^\s].*)"""
-    }
-elif BRANCH.startswith("release"):
-    REPO_TEMPLATE = {
-        "PaddleFleet": r"""### PR Category(.*[^\s].*)### PR Types(.*[^\s].*)### Description(.*[^\s].*)"""
-    }
+# Fleet CI always exports BRANCH. The body schema is the same on develop,
+# release, and stacked GLM-5.2 bases; a missing map fail-closes the
+# Check PR Description job with NameError.
+os.environ["BRANCH"]
+REPO_TEMPLATE = {
+    "PaddleFleet": r"""### PR Category(.*[^\s].*)### PR Types(.*[^\s].*)### Description(.*[^\s].*)"""
+}
 
 
 def re_rule(body, CHECK_TEMPLATE):
