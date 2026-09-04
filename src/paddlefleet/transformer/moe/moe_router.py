@@ -364,19 +364,14 @@ class StandardMoERouter(nn.Layer):
                 f"but got {self.scoring_func!r}. "
             )
 
-        # Initialize gate weight with Normal distribution aligned with Megatron.
-        if self.use_accuracy_compatible:
-            self.weight = paddle.create_parameter(
-                shape=[self.num_experts, self.hidden_size],
-                dtype=config.params_dtype,
-                default_initializer=paddle.nn.initializer.Constant(0.0),
-            )
-        else:
-            self.weight = paddle.create_parameter(
-                shape=[self.num_experts, self.hidden_size],
-                dtype="float32",
-                default_initializer=paddle.nn.initializer.Constant(0.0),
-            )
+        # IEEE e468 stores the gate in float32 even under UAC. A bf16
+        # Parameter is skipped by the AOA loader (`dtype='float32'`) and
+        # keeps random init; Megatron also allocates the router as fp32.
+        self.weight = paddle.create_parameter(
+            shape=[self.num_experts, self.hidden_size],
+            dtype="float32",
+            default_initializer=paddle.nn.initializer.Constant(0.0),
+        )
         config.init_method(self.weight)
 
         if (
