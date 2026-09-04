@@ -1529,6 +1529,7 @@ jobs:
     env:
       GITHUB_REPO_NAME: ${{ github.repository }}
     steps:
+      - run: exit 1
       - name: Cleanup
         run: |
           rm -rf * .[^.]*
