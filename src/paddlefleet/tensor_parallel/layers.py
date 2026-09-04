@@ -2488,35 +2488,48 @@ class RowParallelLinear(paddle.nn.Layer):
                         self.config.cpu_offloading_activations
                     )
 
-        output_parallel = self._forward_impl(
-            input=input_parallel,
-            weight=self.weight,
-            bias=None,
-            gradient_accumulation_fusion=self.gradient_accumulation_fusion,
-            allreduce_dgrad=allreduce_dgrad,
-            sequence_parallel=False,
-            tp_group=None,
-            grad_output_buffer=None,
-            use_accuracy_compatible=getattr(
-                self.config, "use_accuracy_compatible", False
-            ),
-            fp8=self.fp8,
-            fp8_wgrad=self.fp8_wgrad,
-            inp_quant_func=self.inp_quant_func,
-            weight_quant_func=self.weight_quant_func,
-            use_pow2_scale=self.use_pow2_scale,
-            use_ue8m0=self.use_ue8m0,
-            save_original_input=self.save_original_input,
-        )
+        if getattr(self.config, "use_accuracy_compatible", False):
+            # leftover IEEE step-1 bind: local row-parallel GEMM as contiguous
+            # F.linear. Bias stays on the post-reduce add below.
+            output_parallel = F.linear(
+                input_parallel.contiguous(), self.weight, None
+            )
+        else:
+            output_parallel = self._forward_impl(
+                input=input_parallel,
+                weight=self.weight,
+                bias=None,
+                gradient_accumulation_fusion=self.gradient_accumulation_fusion,
+                allreduce_dgrad=allreduce_dgrad,
+                sequence_parallel=False,
+                tp_group=None,
+                grad_output_buffer=None,
+                use_accuracy_compatible=getattr(
+                    self.config, "use_accuracy_compatible", False
+                ),
+                fp8=self.fp8,
+                fp8_wgrad=self.fp8_wgrad,
+                inp_quant_func=self.inp_quant_func,
+                weight_quant_func=self.weight_quant_func,
+                use_pow2_scale=self.use_pow2_scale,
+                use_ue8m0=self.use_ue8m0,
+                save_original_input=self.save_original_input,
+            )
 
         # All-reduce across all the partitions.
         if self.explicit_expert_comm:
             assert self.skip_bias_add
             output_ = output_parallel
         elif self.sequence_parallel:
-            output_ = reduce_scatter_to_sequence_parallel_region(
-                output_parallel, group=self.tp_group
-            )
+            if getattr(self.config, "use_accuracy_compatible", False):
+                orig_dtype = output_parallel.dtype
+                output_ = reduce_scatter_to_sequence_parallel_region(
+                    output_parallel.cast("float32"), group=self.tp_group
+                ).cast(orig_dtype)
+            else:
+                output_ = reduce_scatter_to_sequence_parallel_region(
+                    output_parallel, group=self.tp_group
+                )
         else:
             output_ = reduce_from_tensor_model_parallel_region(
                 output_parallel, group=self.tp_group, is_expert=self.is_expert

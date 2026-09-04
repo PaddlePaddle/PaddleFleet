@@ -748,6 +748,36 @@ class TestRowParallelLinearBasic(unittest.TestCase):
         repr_str = repr(layer)
         self.assertIn("RowParallelLinear", repr_str)
 
+    def test_uac_sequence_parallel_reduce_scatter_casts_float32(self):
+        """UAC+SP row-parallel reduce-scatter must run in float32, then restore."""
+        import inspect
+
+        from paddlefleet.tensor_parallel.layers import RowParallelLinear
+
+        src = inspect.getsource(RowParallelLinear.forward)
+        self.assertIn(
+            'getattr(self.config, "use_accuracy_compatible", False)', src
+        )
+        self.assertIn("self.sequence_parallel", src)
+        self.assertIn('output_parallel.cast("float32")', src)
+        self.assertIn("reduce_scatter_to_sequence_parallel_region", src)
+        self.assertNotIn("os.environ", src)
+
+    def test_uac_row_parallel_local_gemm_uses_contiguous_linear(self):
+        """UAC row-parallel local GEMM must be contiguous F.linear, not env."""
+        import inspect
+
+        from paddlefleet.tensor_parallel.layers import RowParallelLinear
+
+        src = inspect.getsource(RowParallelLinear.forward)
+        self.assertIn(
+            'getattr(self.config, "use_accuracy_compatible", False)', src
+        )
+        self.assertIn("F.linear(", src)
+        self.assertIn("input_parallel.contiguous()", src)
+        self.assertIn("self.weight, None", src)
+        self.assertNotIn("os.environ", src)
+
 
 class TestVocabParallelEmbeddingBasic(unittest.TestCase):
     """Tests for VocabParallelEmbedding basics."""
