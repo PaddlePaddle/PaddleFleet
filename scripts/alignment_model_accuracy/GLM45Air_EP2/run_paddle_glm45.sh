@@ -44,7 +44,8 @@ unset LOCAL_WORLD_SIZE
 
 export CUDA_VISIBLE_DEVICES=0,1
 export MASTER_ADDR="127.0.0.1"
-export MASTER_PORT="${MASTER_PORT:-29503}"
+# shellcheck disable=SC1091
+source "${WORKSPACE_DIR}/_pick_master_port.sh"
 
 # EP2: 单机 2 卡
 export NNODES="1"
