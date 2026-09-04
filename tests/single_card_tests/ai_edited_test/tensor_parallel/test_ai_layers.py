@@ -918,6 +918,33 @@ class TestVocabParallelEmbeddingBasic(unittest.TestCase):
             weight.grad is None or float(weight.grad.abs().sum()) == 0.0
         )
 
+    def test_embed_fp32_gw_nz_tracks_nonzero_incoming_dy_elements(self):
+        """gw_nz is the count of nonzero wgrad elements, not unique ids.
+
+        Live stack-top hit=1 is ids=(1, 60) gw_nz=233445 vs E-654/e473 233444.
+        The pylayer body matches IEEE e9ac; zeroing one token's dy drops
+        hidden-size elements, so a +1 live count is incoming dy, not this op.
+        """
+        from paddlefleet.tensor_parallel.layers import _EmbedFp32MainGrad
+
+        paddle.seed(2026)
+        vocab, hidden, seq = 32, 8, 16
+        weight = paddle.randn([vocab, hidden], dtype=paddle.bfloat16)
+        weight.stop_gradient = False
+        ids = paddle.arange(seq, dtype="int64").reshape([1, seq])
+        looked = _EmbedFp32MainGrad.apply(weight, ids)
+        looked.backward(paddle.ones_like(looked))
+        nz_all = int((weight.main_grad != 0).astype("int64").sum().item())
+
+        weight2 = paddle.randn([vocab, hidden], dtype=paddle.bfloat16)
+        weight2.stop_gradient = False
+        looked2 = _EmbedFp32MainGrad.apply(weight2, ids)
+        dy2 = paddle.ones_like(looked2)
+        dy2[0, 0, :] = 0
+        looked2.backward(dy2)
+        nz_drop = int((weight2.main_grad != 0).astype("int64").sum().item())
+        self.assertEqual(nz_all - nz_drop, hidden)
+
 
 class TestLinearWithGradAccumulationAndAsyncCommunication(unittest.TestCase):
     """Tests for LinearWithGradAccumulationAndAsyncCommunication."""
