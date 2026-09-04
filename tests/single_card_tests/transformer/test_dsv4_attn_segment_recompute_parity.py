@@ -124,8 +124,37 @@ def _build(config):
         attn_mask_type=AttnMaskType.causal,
     )
     attn = build_spec_layer(spec, config=config, layer_number=_LAYER)
+    _fix_vha_param_dtype(attn, config)
     attn.train()
     return attn
+
+
+def _fix_vha_param_dtype(attn, config):
+    """Put the VHA parameters in ``params_dtype``, which the module does not.
+
+    ``vha_postmix_U`` / ``_V`` / ``vha_premix_weight`` are created without a
+    ``dtype``, so they land on paddle's fp32 default while every projection in
+    the same layer follows ``params_dtype`` -- and ``_apply_vha_postmix`` then
+    multiplies an fp32 matrix by a bf16 activation. That is a pre-existing DSv4
+    defect, unrelated to the recompute segments this file tests, and it makes
+    bf16 + VHA unable to run at all; the existing VHA coverage misses it by
+    staying in fp32 on a window-only layer. Cast here rather than fix it in
+    production so this file stays inside its own scope; drop this once the
+    parameters carry a dtype.
+    """
+    for name in ("vha_postmix_U", "vha_postmix_V", "vha_premix_weight"):
+        parameter = getattr(attn, name, None)
+        if parameter is None or parameter.dtype == config.params_dtype:
+            continue
+        casted = parameter.astype(config.params_dtype)
+        casted.stop_gradient = parameter.stop_gradient
+        attn.__dict__.pop(name, None)
+        attn._parameters.pop(name, None)
+        setattr(attn, name, attn.create_parameter(
+            shape=casted.shape,
+            dtype=config.params_dtype,
+            default_initializer=paddle.nn.initializer.Assign(casted),
+        ))
 
 
 def _collect(attn, hidden_np):
