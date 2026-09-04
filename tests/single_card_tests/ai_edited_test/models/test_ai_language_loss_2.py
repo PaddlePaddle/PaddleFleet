@@ -188,6 +188,54 @@ class TestLanguageLossForwardImpl(unittest.TestCase):
         result = loss_fn.forward_impl(logits, labels)
         self.assertIsNotNone(result)
 
+    @patch.dict(os.environ, {"FLAGS_use_accuracy_compatible_kernel": "1"})
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss.get_context_parallel_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss.get_tensor_model_parallel_world_size",
+        return_value=1,
+    )
+    @patch("paddle.distributed.is_initialized", return_value=False)
+    def test_uac_nonexperimental_uses_fp32_sum_and_defer_token(
+        self, mock_dist, mock_tp, mock_cp
+    ):
+        import inspect
+
+        import paddle
+
+        from paddlefleet.models.common.language_loss import language_loss as ll
+        from paddlefleet.models.common.language_loss.language_loss import (
+            DeferTokenNormalizationOp,
+            LanguageLoss,
+        )
+
+        mock_config = MagicMock()
+        mock_config.parallel_output = True
+        mock_config.loss_subbatch_sequence_length = 0
+        mock_config.gpt_model_use_experimental_version = False
+        mock_config.use_accuracy_compatible = True
+        mock_config.fused_linear_ce_loss_chunk = 0
+        mock_config.experimental_dataflow = False
+
+        src = inspect.getsource(LanguageLoss.forward_impl)
+        self.assertIn("_normalize_loss_by_tokens", src)
+        self.assertNotIn("cast(paddle.float64)", src)
+        self.assertIn("DeferTokenNormalizationOp", inspect.getsource(ll))
+
+        ll.clear_pending_gradient_divisor()
+        loss_fn = LanguageLoss(config=mock_config)
+        logits = paddle.randn([2, 4, 8])
+        labels = paddle.randint(0, 8, [2, 4])
+        out = loss_fn.forward_impl(logits, labels)
+        self.assertIsNotNone(out)
+        self.assertIsNotNone(ll.get_pending_gradient_divisor())
+        ll.clear_pending_gradient_divisor()
+        self.assertIs(
+            DeferTokenNormalizationOp.__bases__[0], paddle.autograd.PyLayer
+        )
+
 
 class TestLanguageLossForwardWithMTP(unittest.TestCase):
     """Test LanguageLoss.forward with Multi-Token Prediction."""
