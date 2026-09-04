@@ -799,6 +799,95 @@ class TestVocabParallelEmbeddingBasic(unittest.TestCase):
         output = layer(input_ids)
         self.assertEqual(output.shape, [4, 8, 32])
 
+    def test_two_fp32_accum_env_off_uses_weight_index(self):
+        """Env off: UAC lookup stays ``weight[ids]``."""
+        from paddlefleet.tensor_parallel.layers import (
+            VocabParallelEmbedding,
+            _EmbedFp32MainGrad,
+        )
+
+        config = self._make_config()
+        config.use_accuracy_compatible = True
+        init_method = paddle.nn.initializer.Constant(1.0)
+        layer = VocabParallelEmbedding(
+            16,
+            8,
+            init_method=init_method,
+            reduce_scatter_embeddings=False,
+            config=config,
+        )
+        input_ids = paddle.to_tensor([[1, 2, 3, 4]], dtype="int64")
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("env off must not call _EmbedFp32MainGrad")
+
+        with (
+            patch.dict(
+                os.environ, {"MODEL_REPRO_TWO_FP32_ACCUM": ""}, clear=False
+            ),
+            patch.object(_EmbedFp32MainGrad, "apply", side_effect=_boom),
+        ):
+            output = layer(input_ids)
+        np.testing.assert_array_equal(
+            output.numpy(), layer.weight[input_ids].numpy()
+        )
+
+    def test_two_fp32_accum_env_on_uses_embed_fp32_main_grad(self):
+        """Env on: UAC lookup routes through ``_EmbedFp32MainGrad``."""
+        from paddlefleet.tensor_parallel.layers import (
+            VocabParallelEmbedding,
+            _EmbedFp32MainGrad,
+        )
+
+        config = self._make_config()
+        config.use_accuracy_compatible = True
+        init_method = paddle.nn.initializer.Constant(1.0)
+        layer = VocabParallelEmbedding(
+            16,
+            8,
+            init_method=init_method,
+            reduce_scatter_embeddings=False,
+            config=config,
+        )
+        input_ids = paddle.to_tensor([[1, 2, 3, 4]], dtype="int64")
+        seen = {}
+
+        def _spy(weight, ids):
+            seen["weight"] = weight
+            seen["ids"] = ids
+            return weight[ids]
+
+        with (
+            patch.dict(
+                os.environ, {"MODEL_REPRO_TWO_FP32_ACCUM": "1"}, clear=False
+            ),
+            patch.object(_EmbedFp32MainGrad, "apply", side_effect=_spy),
+        ):
+            output = layer(input_ids)
+        self.assertIs(seen["weight"], layer.weight)
+        np.testing.assert_array_equal(seen["ids"].numpy(), input_ids.numpy())
+        np.testing.assert_array_equal(
+            output.numpy(), layer.weight[input_ids].numpy()
+        )
+
+    def test_embed_fp32_main_grad_deposits_fp32_and_suppresses_bf16_grad(self):
+        """TWO_FP32 backward writes fp32 main_grad and returns None wgrad."""
+        from paddlefleet.tensor_parallel.layers import _EmbedFp32MainGrad
+
+        paddle.seed(2026)
+        weight = paddle.randn([16, 8], dtype=paddle.bfloat16)
+        weight.stop_gradient = False
+        ids = paddle.to_tensor([[1, 2, 3, 4]], dtype="int64")
+        looked = _EmbedFp32MainGrad.apply(weight, ids)
+        looked.cast("float32").sum().backward()
+        self.assertIsNotNone(weight.main_grad)
+        self.assertEqual(weight.main_grad.dtype, paddle.float32)
+        self.assertEqual(tuple(weight.main_grad.shape), tuple(weight.shape))
+        self.assertGreater(float(weight.main_grad.abs().sum()), 0.0)
+        self.assertTrue(
+            weight.grad is None or float(weight.grad.abs().sum()) == 0.0
+        )
+
 
 class TestLinearWithGradAccumulationAndAsyncCommunication(unittest.TestCase):
     """Tests for LinearWithGradAccumulationAndAsyncCommunication."""

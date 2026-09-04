@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import os
 import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -118,6 +119,15 @@ class GPTEmbedding(FleetLayer):
         self.rotary_pos_emb = None
         self.swa_rotary_pos_emb = None
         self.mrope_section = mrope_section
+        # Claim main_grad so MixPrecision skips this Parameter. The
+        # PyLayer deposits IndexingBackward into this buffer (E-471).
+        if os.environ.get("MODEL_REPRO_TWO_FP32_ACCUM", "") == "1":
+            self.embedding.embed_tokens.weight.main_grad = None
+            print(
+                "[TWO-FP32-ACCUM] claimed embed_tokens.weight "
+                "(MixPrecision skipped)",
+                flush=True,
+            )
         self.position_embedding_type = position_embedding_type
         if sublayers_spec.rope_embedding is not None:
             self.rotary_pos_emb = build_spec_layer(
@@ -707,6 +717,58 @@ class GPTEmbedding(FleetLayer):
                                     .permute(1, 0, 2)
                                     .contiguous()
                                 )  # change to [S, B, H]
+                            # Second GradNode after ScatterOp plus fp32
+                            # main_grad scatter. MixPrecision cannot
+                            # add_(bf16) on the second hit.
+                            if os.environ.get(
+                                "MODEL_REPRO_TWO_FP32_ACCUM", ""
+                            ) == "1" and getattr(
+                                self.config, "use_accuracy_compatible", False
+                            ):
+                                seq_length_ids = (
+                                    input_ids.shape[1]
+                                    - self.config.num_nextn_predict_layers
+                                )
+                                mtp_ids = input_ids[
+                                    :,
+                                    (depth + 1) : (depth + 1 + seq_length_ids),
+                                ]
+                                looked = self.embedding(
+                                    input_ids=mtp_ids,
+                                    position_ids=None,
+                                )
+                                if (
+                                    get_context_parallel_world_size() > 1
+                                    and self.config.experimental_dataflow
+                                ):
+                                    looked = ContextParallelScatterOp.apply(
+                                        looked,
+                                        axis=1,
+                                        mode=self.config.cp_balance_mode,
+                                    )
+                                if self.sequence_parallel:
+                                    looked = looked.reshape(
+                                        [-1, looked.shape[-1]]
+                                    )
+                                    looked = ScatterOp.apply(looked)
+                                    looked = (
+                                        looked.reshape(
+                                            [batch_size, -1, hidden_size]
+                                        )
+                                        .permute(1, 0, 2)
+                                        .contiguous()
+                                    )
+                                inputs_embeds_mtp = (
+                                    inputs_embeds_mtp.detach()
+                                    + (looked - looked.detach())
+                                )
+                                print(
+                                    "[TWO-FP32-ACCUM] "
+                                    "second lookup armed depth="
+                                    f"{depth} looked={tuple(looked.shape)} "
+                                    f"carrier={tuple(inputs_embeds_mtp.shape)}",
+                                    flush=True,
+                                )
                             mtp_emb_res.append(inputs_embeds_mtp)
 
             if self.multimodal_embedding:

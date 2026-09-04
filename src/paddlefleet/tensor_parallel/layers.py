@@ -275,6 +275,66 @@ def _initialize_affine_weight_cpu(
     return None
 
 
+class _EmbedFp32MainGrad(paddle.autograd.Function):
+    """UAC embedding lookup whose wgrad lands in fp32 main_grad.
+
+    Forward is `weight[ids]` (bf16 activation unchanged). Backward deposits
+    via a nested IndexingBackward on an fp32 view of the accumulator.
+    Returns None for weight.grad so MixPrecision cannot add_(bf16).
+    """
+
+    _printed = 0
+
+    @staticmethod
+    def forward(ctx, weight, ids):
+        ctx.save_for_backward(ids)
+        ctx.weight_ref = weight
+        return weight[ids]
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        ids = ctx.saved_tensor()[0]
+        weight = ctx.weight_ref
+        # Function.backward disables grads. Re-enable so W[ids] is
+        # IndexingBackward on a clone, not MixPrecision bf16 merge.
+        prev = paddle.is_grad_enabled()
+        paddle.set_grad_enabled(True)
+        try:
+            w = weight.detach().clone()
+            w.stop_gradient = False
+            looked = w[ids]
+            (gw,) = paddle.autograd.grad(
+                looked, w, grad_output, allow_unused=True
+            )
+        finally:
+            paddle.set_grad_enabled(prev)
+        _EmbedFp32MainGrad._printed += 1
+        if gw is None:
+            print(
+                "[TWO-FP32-ACCUM] pylayer gw=None "
+                f"hit={_EmbedFp32MainGrad._printed} "
+                f"ids={tuple(ids.shape)}",
+                flush=True,
+            )
+            return None, None
+        fp = gw.cast(paddle.float32)
+        if hasattr(weight, "main_grad") and weight.main_grad is not None:
+            weight.main_grad.add_(fp)
+        else:
+            weight.main_grad = fp
+        if hasattr(weight, "grad_added_to_main_grad"):
+            weight.grad_added_to_main_grad = True
+        if _EmbedFp32MainGrad._printed <= 4:
+            print(
+                "[TWO-FP32-ACCUM] pylayer IndexingBackward "
+                f"hit={_EmbedFp32MainGrad._printed} "
+                f"ids={tuple(ids.shape)} gw_dtype={gw.dtype} "
+                f"gw_nz={(gw != 0).astype('int64').sum().item()}",
+                flush=True,
+            )
+        return None, None
+
+
 class VocabParallelEmbedding(paddle.nn.Layer):
     """Embedding parallelized in the vocabulary dimension.
 
@@ -389,7 +449,12 @@ class VocabParallelEmbedding(paddle.nn.Layer):
             masked_input = input_
         # Get the embeddings.
         if self.deterministic_mode or self.use_accuracy_compatible:
-            output_parallel = self.weight[masked_input]
+            if os.environ.get("MODEL_REPRO_TWO_FP32_ACCUM", "") == "1":
+                output_parallel = _EmbedFp32MainGrad.apply(
+                    self.weight, masked_input
+                )
+            else:
+                output_parallel = self.weight[masked_input]
         else:
             # F.embedding currently has a non-deterministic backward function
             output_parallel = F.embedding(masked_input, self.weight)
