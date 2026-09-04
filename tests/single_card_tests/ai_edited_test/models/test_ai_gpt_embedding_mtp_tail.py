@@ -23,13 +23,16 @@ Under ``use_accuracy_compatible`` the carrier tail is zeroed so both conventions
 agree. These tests pin that behaviour, its gate, and the fact that the main path is
 untouched.
 """
+
 import os
 import sys
 
 sys.path.insert(
     0,
     os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
     ),
 )
 
@@ -99,7 +102,9 @@ class TestGPTEmbeddingMTPCarrierTail(unittest.TestCase):
         emb.forward(dict_args={"input_ids": input_ids})
 
         embedded = seen["input_ids"].numpy().tolist()[0]
-        self.assertEqual(embedded[-1], 0, "the vacated MTP position must embed id 0")
+        self.assertEqual(
+            embedded[-1], 0, "the vacated MTP position must embed id 0"
+        )
         self.assertEqual(
             embedded[:-1],
             input_ids.numpy().tolist()[0][:-1],
@@ -117,7 +122,9 @@ class TestGPTEmbeddingMTPCarrierTail(unittest.TestCase):
         self.assertEqual(
             embedded[-3:], [0, 0, 0], "depth d must leave d trailing zero ids"
         )
-        self.assertNotEqual(embedded[-4], 0, "the zeroing must not reach further back")
+        self.assertNotEqual(
+            embedded[-4], 0, "the zeroing must not reach further back"
+        )
 
     def test_disabled_without_accuracy_compatible(self):
         emb, seen = _make_embedding(

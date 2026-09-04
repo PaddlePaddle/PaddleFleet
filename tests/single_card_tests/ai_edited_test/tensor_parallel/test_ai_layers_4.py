@@ -33,13 +33,16 @@ These tests pin the marking, its use_accuracy_compatible gate, and the remaining
 guards. They are pure attribute assertions on a single card: no TP group is
 created, so nothing here depends on a distributed launch.
 """
+
 import os
 import sys
 
 sys.path.insert(
     0,
     os.path.dirname(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
     ),
 )
 
@@ -263,9 +266,12 @@ class TestMLADownProjectionsAreReplicated(unittest.TestCase):
 
         spec = self._mla_spec(use_accuracy_compatible=False)
         backend = LocalSpecProvider()
-        self.assertIs(spec.sublayers_spec.q_a_proj, backend.column_parallel_linear())
         self.assertIs(
-            spec.sublayers_spec.kv_a_proj_with_mqa, backend.column_parallel_linear()
+            spec.sublayers_spec.q_a_proj, backend.column_parallel_linear()
+        )
+        self.assertIs(
+            spec.sublayers_spec.kv_a_proj_with_mqa,
+            backend.column_parallel_linear(),
         )
 
     def test_the_neighbouring_projections_stay_tensor_parallel(self):
@@ -273,8 +279,12 @@ class TestMLADownProjectionsAreReplicated(unittest.TestCase):
 
         spec = self._mla_spec(use_accuracy_compatible=True)
         backend = LocalSpecProvider()
-        self.assertIs(spec.sublayers_spec.q_b_proj, backend.column_parallel_linear())
-        self.assertIs(spec.sublayers_spec.kv_b_proj, backend.column_parallel_linear())
+        self.assertIs(
+            spec.sublayers_spec.q_b_proj, backend.column_parallel_linear()
+        )
+        self.assertIs(
+            spec.sublayers_spec.kv_b_proj, backend.column_parallel_linear()
+        )
         self.assertIs(spec.sublayers_spec.o_proj, backend.row_parallel_linear())
 
 

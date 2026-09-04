@@ -135,8 +135,12 @@ class TestMultiTokenPrediction(unittest.TestCase):
         )
 
         self.assertEqual(list(dict_args["attention_mask"].shape), [1, 1, 3, 3])
-        self.assertTrue(paddle.equal_all(dict_args["attention_mask"], dense_mask[:, 1:2]))
-        self.assertEqual(list(dict_args["mtp_hidden_inputs_mask"].shape), [1, 1, 3])
+        self.assertTrue(
+            paddle.equal_all(dict_args["attention_mask"], dense_mask[:, 1:2])
+        )
+        self.assertEqual(
+            list(dict_args["mtp_hidden_inputs_mask"].shape), [1, 1, 3]
+        )
         self.assertNotIn("mtp_attn_mask", dict_args)
         self.assertNotIn("mtp_hidden_inputs_mask_all", dict_args)
 

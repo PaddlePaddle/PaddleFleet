@@ -26,11 +26,11 @@ import paddle
 import paddle.distributed as dist
 import paddle.nn.functional as F
 from paddle.distributed.communication.reduce_scatter import _reduce_scatter_base
-from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
-    build_sharded_state_dict,
-)
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     mark_as_sequence_parallel_parameter,
+)
+from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
+    build_sharded_state_dict,
 )
 
 from ..parallel_state import (
