@@ -775,18 +775,16 @@ def general_gemm(
         )
 
     else:
-        # Standard bf16/fp16 path
+        # Standard bf16/fp16 path.
+        # UAC must use F.linear (IEEE e9ac / E-654). The previous
+        # matmul(a, b.T.contiguous(), transpose_y=True) path is a different
+        # kernel family once bias is fused, and the matching UAC dgrad TN
+        # disagrees with F.linear autograd at the live shared-down shape.
         if bias is not None:
-            if use_accuracy_compatible:
-                weight_t = b.T.contiguous()
-                output = paddle.matmul(a, weight_t, transpose_y=True)
-                output = output + bias
-            else:
-                output = paddle.nn.functional.linear(a, b, bias)
+            output = paddle.nn.functional.linear(a, b, bias)
         else:
             if use_accuracy_compatible:
-                weight_t = b.T.contiguous()
-                output = paddle.matmul(a, weight_t, transpose_y=True)
+                output = paddle.nn.functional.linear(a, b)
             else:
                 output = paddle.matmul(a, b)
         return output, None
@@ -1023,8 +1021,20 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 )
             else:
                 if ctx.use_accuracy_compatible:
-                    grad_input, _ = general_gemm(
-                        grad_output, weight.t().contiguous()
+                    # IEEE e9ac / E-240: weight is [in, out]; materialize
+                    # W^T and run an NN GEMM so cuBLAS matches torch.linear
+                    # dgrad. Routing this through UAC general_gemm used to
+                    # emit matmul(go, W, transpose_y=True), which disagrees
+                    # at the live shared-down shape.
+                    original_shape = grad_output.shape
+                    flat_grad_output = grad_output.reshape(
+                        [-1, original_shape[-1]]
+                    )
+                    flat_grad_input = paddle.matmul(
+                        flat_grad_output, weight.t().contiguous()
+                    )
+                    grad_input = flat_grad_input.reshape(
+                        [*list(original_shape[:-1]), weight.shape[0]]
                     )
                 else:
                     grad_input, _ = general_gemm(grad_output, weight.t())

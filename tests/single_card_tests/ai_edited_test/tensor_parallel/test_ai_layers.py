@@ -1130,6 +1130,35 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         self.assertEqual(input_tensor.grad.shape, [4, 8])
         self.assertEqual(weight.grad.shape, [8, 16])
 
+    def test_uac_dgrad_matches_e9ac_nn_materialized_t(self):
+        """IEEE e9ac: UAC dgrad is NN GEMM on materialized W^T.
+
+        Live shared-expert down-projection (M=30, K=2048, N=6144) is where
+        routing UAC dgrad through general_gemm's old TN path disagreed with
+        this formula. F.linear autograd itself follows the TN family here.
+        """
+        if not paddle.is_compiled_with_cuda():
+            self.skipTest("Requires CUDA")
+
+        paddle.seed(2026)
+        x = paddle.randn([30, 1, 2048], dtype="bfloat16")
+        w = paddle.randn([2048, 6144], dtype="bfloat16")
+        go = paddle.randn([30, 1, 6144], dtype="bfloat16")
+        x.stop_gradient = False
+        w.stop_gradient = False
+
+        out = self._run(True, x, w)
+        out.backward(go)
+
+        expected = paddle.matmul(
+            go.reshape([-1, go.shape[-1]]), w.t().contiguous()
+        ).reshape(list(x.shape))
+        tn = paddle.matmul(go, w.contiguous(), transpose_y=True)
+        self.assertTrue(
+            bool((x.grad.cast("int16") == expected.cast("int16")).all())
+        )
+        self.assertFalse(bool((x.grad.cast("int16") == tn.cast("int16")).all()))
+
 
 class TestGradAccumFusionAvailable(unittest.TestCase):
     """Tests for _grad_accum_fusion_available flag."""
