@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -30,10 +29,6 @@ from paddle import Tensor, nn
 from paddlefleet import parallel_state
 
 logger = logging.getLogger(__name__)
-
-_ACCURACY_COMPATIBLE_KERNEL = (
-    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
-)
 
 
 __all__ = [
@@ -84,11 +79,11 @@ class RotaryEmbedding(nn.Layer):
         self.rotary_interleaved = rotary_interleaved
 
         self.seq_len_interpolation_factor = seq_len_interpolation_factor
-        # Upstream develop turned this into an explicit constructor flag; this
-        # branch reached the same fp32-on-CPU path through the engine env flag.
-        # Keep both entry points so the formal entrypoint, which exports
-        # FLAGS_use_accuracy_compatible_kernel=1, still selects it.
-        if use_accuracy_compatible or _ACCURACY_COMPATIBLE_KERNEL:
+        # IEEE e468 only honors the constructor flag. Restacking develop
+        # OR'd FLAGS_use_accuracy_compatible_kernel=1 here, so DSA indexer
+        # RotaryEmbedding (no constructor flag) took the CPU inv_freq path
+        # while MLA still passed the flag explicitly.
+        if use_accuracy_compatible:
             _exp_cpu = (
                 paddle.arange(0, dim, 2, dtype=paddle.int64)
                 .cpu()

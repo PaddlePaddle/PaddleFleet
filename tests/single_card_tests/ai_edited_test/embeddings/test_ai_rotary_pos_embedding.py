@@ -54,27 +54,52 @@ class TestRotaryEmbeddingInit(unittest.TestCase):
     @patch(
         "paddlefleet.models.common.embeddings.rotary_pos_embedding.parallel_state"
     )
-    def test_accuracy_compatible_inv_freq_matches_torch_bytes(self, mock_ps):
+    def test_accuracy_compatible_inv_freq_uses_cpu_arange(self, mock_ps):
         from paddlefleet.models.common.embeddings import (
             rotary_pos_embedding as rope_module,
         )
 
         mock_ps.get_context_parallel_group.return_value = None
-        with (
-            patch.object(rope_module, "_ACCURACY_COMPATIBLE_KERNEL", True),
-            patch.object(
-                paddle.device,
-                "device_guard",
-                side_effect=AssertionError(
-                    "accuracy-compatible RoPE must not stage on CPU"
-                ),
-            ),
-        ):
+        rope = rope_module.RotaryEmbedding(
+            head_dim=64,
+            rotary_percent=1.0,
+            rotary_base=8_000_000,
+            use_accuracy_compatible=True,
+        )
+        raw = rope.inv_freq.cpu().contiguous().numpy().tobytes()
+        self.assertEqual(
+            hashlib.sha256(raw).hexdigest(),
+            "3e2d22ef0e3defc2ed17027c7fd7afa42c933825b48864c0b465db4f4daf9f21",
+        )
+
+    @patch(
+        "paddlefleet.models.common.embeddings.rotary_pos_embedding.parallel_state"
+    )
+    def test_default_inv_freq_matches_ieee_indexer_gpu_arange(self, mock_ps):
+        import inspect
+        import os
+
+        from paddlefleet.models.common.embeddings import (
+            rotary_pos_embedding as rope_module,
+        )
+
+        mock_ps.get_context_parallel_group.return_value = None
+        source = inspect.getsource(rope_module.RotaryEmbedding.__init__)
+        self.assertIn("if use_accuracy_compatible:", source)
+        self.assertNotIn("or _ACCURACY_COMPATIBLE_KERNEL", source)
+        prev = os.environ.get("FLAGS_use_accuracy_compatible_kernel")
+        os.environ["FLAGS_use_accuracy_compatible_kernel"] = "1"
+        try:
             rope = rope_module.RotaryEmbedding(
                 head_dim=64,
                 rotary_percent=1.0,
                 rotary_base=8_000_000,
             )
+        finally:
+            if prev is None:
+                os.environ.pop("FLAGS_use_accuracy_compatible_kernel", None)
+            else:
+                os.environ["FLAGS_use_accuracy_compatible_kernel"] = prev
         raw = rope.inv_freq.cpu().contiguous().numpy().tobytes()
         self.assertEqual(
             hashlib.sha256(raw).hexdigest(),
