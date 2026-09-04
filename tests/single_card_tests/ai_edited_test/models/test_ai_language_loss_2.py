@@ -236,6 +236,52 @@ class TestLanguageLossForwardImpl(unittest.TestCase):
             DeferTokenNormalizationOp.__bases__[0], paddle.autograd.PyLayer
         )
 
+    @patch.dict(os.environ, {"FLAGS_use_accuracy_compatible_kernel": "0"})
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss.get_context_parallel_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss.get_tensor_model_parallel_world_size",
+        return_value=1,
+    )
+    @patch("paddle.distributed.is_initialized", return_value=False)
+    def test_non_uac_token_normalize_divides_by_tensor_count(
+        self, mock_dist, mock_tp, mock_cp
+    ):
+        import inspect
+
+        import paddle
+
+        from paddlefleet.models.common.language_loss.language_loss import (
+            LanguageLoss,
+        )
+
+        src = inspect.getsource(LanguageLoss.forward_impl)
+        self.assertIn("loss / lossmask.sum()", src)
+
+        mock_config = MagicMock()
+        mock_config.parallel_output = True
+        mock_config.loss_subbatch_sequence_length = 0
+        mock_config.gpt_model_use_experimental_version = False
+        mock_config.use_accuracy_compatible = False
+        mock_config.fused_linear_ce_loss_chunk = 0
+        mock_config.experimental_dataflow = False
+
+        loss_fn = LanguageLoss(config=mock_config)
+        logits = paddle.randn([2, 4, 8])
+        labels = paddle.randint(0, 8, [2, 4])
+        out = loss_fn.forward_impl(logits, labels)
+        per_token = loss_fn.loss_func(logits.cast("float32"), labels)
+        lossmask = (
+            (labels != loss_fn.ignored_index).reshape([-1]).cast(paddle.float32)
+        )
+        expected = (
+            paddle.sum(per_token.cast(paddle.float32).reshape([-1]) * lossmask)
+            / lossmask.sum()
+        )
+        self.assertTrue(bool((out == expected).numpy().all()))
+
 
 class TestLanguageLossForwardWithMTP(unittest.TestCase):
     """Test LanguageLoss.forward with Multi-Token Prediction."""

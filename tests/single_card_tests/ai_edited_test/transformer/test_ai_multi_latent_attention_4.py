@@ -421,5 +421,20 @@ class TestMLASelfAttentionSublayersSpecDefaults(unittest.TestCase):
         self.assertIsNone(spec.kv_a_layernorm)
 
 
+class TestKvBProjSequenceParallelGate(unittest.TestCase):
+    def test_kv_b_proj_sp_disable_is_gated_on_uac(self):
+        import inspect
+
+        from paddlefleet.transformer.multi_latent_attention import (
+            MLASelfAttention,
+        )
+
+        src = inspect.getsource(MLASelfAttention.__init__)
+        self.assertIn("kv_b_proj.sequence_parallel = False", src)
+        self.assertIn(
+            'getattr(self.config, "use_accuracy_compatible", False)', src
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

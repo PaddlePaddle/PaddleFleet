@@ -576,11 +576,17 @@ class LanguageLoss(FleetLayer):
                 loss = paddle.sum(
                     loss.cast(paddle.float32).reshape([-1]) * lossmask
                 )
-                loss = _normalize_loss_by_tokens(
-                    loss,
-                    _valid_tokens,
-                    main_tokens=self._deferred_main_tokens,
-                )
+                if _use_accuracy_compatible_kernel():
+                    loss = _normalize_loss_by_tokens(
+                        loss,
+                        _valid_tokens,
+                        main_tokens=self._deferred_main_tokens,
+                    )
+                else:
+                    # Default path must keep structure's tensor divisor.
+                    # `loss / float(lossmask.sum())` is 1 ulp off
+                    # (A100 GLM-4.5 pretrain 11.92311 vs GT 11.923111).
+                    loss = loss / lossmask.sum()
 
         if _use_accuracy_compatible_kernel():
             # 定位锚点 2：mask + 归一化后的标量 loss，与锚点 1 配合可切开
