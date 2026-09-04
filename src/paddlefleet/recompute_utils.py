@@ -48,6 +48,7 @@ except ImportError:
         def pending(cls, _key):
             return 0
 
+
 logger = logging.getLogger(__name__)
 
 g_has_print_recovery_log = False
