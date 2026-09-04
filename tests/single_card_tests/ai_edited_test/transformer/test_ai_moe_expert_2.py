@@ -253,6 +253,13 @@ class TestGroupedMLPExpertForward(unittest.TestCase):
             tuple(expert.weight1.main_grad.shape), tuple(expert.weight1.shape)
         )
 
+    def test_ieee_tp2_does_not_mark_fused_experts_sequence_parallel(self):
+        """E-811 left fused expert replicas uncolored; SPGradSync would move step-2."""
+        src = inspect.getsource(GroupedMLPExpert.__init__)
+        self.assertNotIn("mark_as_sequence_parallel_parameter", src)
+        self.assertIn("self.weight1.main_grad = None", src)
+        self.assertIn("self.weight2.main_grad = None", src)
+
 
 class TestGroupedMLPExpertBackwardDW(unittest.TestCase):
     """Tests for GroupedMLPExpert backward_dw."""

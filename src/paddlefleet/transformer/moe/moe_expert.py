@@ -23,9 +23,6 @@ from dataclasses import dataclass
 import paddle
 import paddle.nn.functional as F
 import paddlefleet_ops
-from paddle.distributed.fleet.utils.sequence_parallel_utils import (
-    mark_as_sequence_parallel_parameter,
-)
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
     shard_weight,
@@ -360,22 +357,10 @@ class GroupedMLPExpert(FleetLayer):
         ):
             self.weight1.main_grad = None
             self.weight2.main_grad = None
-            # IEEE Megatron dirty expert-DP domain: ETP < TP (formal
-            # ETP=1/TP=2) keeps a full expert copy on every TP rank while
-            # each rank only sees s/TP tokens, so the local wgrad is a
-            # partial sum. MoELayer only colors fused experts when EP>1, so
-            # they never enter expert-DP. Mark them for SPGradSync so the
-            # TP group sums those shards (scale=1).
-            if (
-                getattr(self.config, "sequence_parallel", False)
-                and int(
-                    getattr(self.config, "tensor_model_parallel_size", 1) or 1
-                )
-                > 1
-                and not self.expert_parallel
-            ):
-                mark_as_sequence_parallel_parameter(self.weight1)
-                mark_as_sequence_parallel_parameter(self.weight2)
+            # Do not mark fused experts as sequence-parallel. E-811 IEEE
+            # 1-100 (PaddleFleet-e808) left these replicas uncolored; SPGradSync
+            # would all-reduce the already-local ETP=1/TP=2 shards and move
+            # step-2. MoELayer still colors fused experts when EP>1.
 
     def update_activation_recompute(self, layer_number):
         """Resolve the ``moe_act`` flag; re-called once the layer id is known.
