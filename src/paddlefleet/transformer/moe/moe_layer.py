@@ -2070,20 +2070,58 @@ class MoELayer(nn.Layer):
             )
             return final_hidden_states.cast(hidden_states.dtype)
         else:
+            # Accuracy-compatible expert path (E-163 / e468). Under
+            # use_accuracy_compatible: permute/unpermute use the MG-aligned
+            # gather/sum PyLayers; fold routing probs into post-GLU before
+            # fc2; batch each expert GEMM per SP shard so bf16 M matches
+            # mcore. Dump / LOCAL_SHARD env knobs stay on the Explore tree.
+            ac_expert_path = getattr(
+                self.config, "use_accuracy_compatible", False
+            )
             tokens_per_expert = routing_map.sum(axis=0)
             permuted_local_hidden_states, sorted_indices = permute(
-                hidden_states, routing_map, tokens_per_expert
+                hidden_states,
+                routing_map,
+                tokens_per_expert,
+                use_accuracy_compatible=ac_expert_path,
             )
-            grouped_expert_out = self.grouped_gemm_experts(
-                permuted_local_hidden_states, tokens_per_expert
-            )[0]
-            final_hidden_states = unpermute(
-                grouped_expert_out,
-                sorted_indices,
-                restore_shape=hidden_states.shape,
-                probs=probs,
-                routing_map=routing_map,
-            )
+            if ac_expert_path:
+                shard_len = max(
+                    hidden_states.shape[0]
+                    // max(self.tensor_model_parallel_size, 1),
+                    1,
+                )
+                row_owner = sorted_indices // shard_len
+                permuted_probs = None
+                if probs is not None:
+                    permuted_probs = probs.T.contiguous().masked_select(
+                        routing_map.T.contiguous().cast("bool")
+                    )
+                grouped_expert_out = self.grouped_gemm_experts(
+                    permuted_local_hidden_states,
+                    tokens_per_expert,
+                    permuted_probs=permuted_probs,
+                    row_owner=row_owner,
+                )[0]
+                final_hidden_states = unpermute(
+                    grouped_expert_out,
+                    sorted_indices,
+                    restore_shape=hidden_states.shape,
+                    probs=None,
+                    routing_map=routing_map,
+                    use_accuracy_compatible=True,
+                )
+            else:
+                grouped_expert_out = self.grouped_gemm_experts(
+                    permuted_local_hidden_states, tokens_per_expert
+                )[0]
+                final_hidden_states = unpermute(
+                    grouped_expert_out,
+                    sorted_indices,
+                    restore_shape=hidden_states.shape,
+                    probs=probs,
+                    routing_map=routing_map,
+                )
             return final_hidden_states.cast(hidden_states.dtype)
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
