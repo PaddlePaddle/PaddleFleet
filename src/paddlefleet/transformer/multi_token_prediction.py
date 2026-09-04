@@ -38,6 +38,7 @@ from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.recompute_utils import need_full_recompute
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_sequence_parallel_region,
@@ -708,6 +709,11 @@ class MultiTokenPredictionLayer(FleetLayer):
         self.tensor_parallel = config.tensor_model_parallel_size
         self.sublayers_spec = sublayers_spec
         self.layer_number = layer_number
+        self.full_recompute = False
+        if self.config.recompute_granularity == "full":
+            self.full_recompute = need_full_recompute(
+                self.layer_number, self.config
+            )
         self.cp_group = pg_collection.cp
 
         self_attention_spec = (
@@ -1173,94 +1179,49 @@ class MultiTokenPredictionLayer(FleetLayer):
 
         return hidden_states
 
-    def _checkpointed_forward(self, forward_func, *args, **kwargs):
-        def checkpoint_handler():
-            """Determines whether to use the `tensor_parallel.checkpoint`"""
-            hidden_states = kwargs.get("hidden_states", None)
-            decoder_input = kwargs.get("decoder_input", None)
-            attention_mask = kwargs.get("attention_mask", None)
-            attn_mask_startend_row_indices = kwargs.get(
-                "attn_mask_startend_row_indices", None
-            )
-            context = kwargs.get("context", None)
-            context_mask = kwargs.get("context_mask", None)
-            rotary_pos_emb = kwargs.get("rotary_pos_emb", None)
-            rotary_pos_cos = kwargs.get("rotary_pos_cos", None)
-            rotary_pos_sin = kwargs.get("rotary_pos_sin", None)
-            swa_rotary_pos_emb = kwargs.get("swa_rotary_pos_emb", None)
-            swa_rotary_pos_cos = kwargs.get("swa_rotary_pos_cos", None)
-            swa_rotary_pos_sin = kwargs.get("swa_rotary_pos_sin", None)
-            attention_bias = kwargs.get("attention_bias", None)
-            packed_seq_params = kwargs.get("packed_seq_params", None)
-            mtp_hidden_inputs_mask = kwargs.get("mtp_hidden_inputs_mask", None)
-            input_ids = kwargs.get("input_ids", None)
-            position_ids = None
-            if self.config.gpt_model_use_experimental_version:
-                position_ids = kwargs.get("position_ids", None)
-            return recompute(
-                forward_func,
-                hidden_states=hidden_states
-                if hidden_states is not None
-                else None,
-                decoder_input=decoder_input
-                if decoder_input is not None
-                else None,
-                attention_mask=attention_mask
-                if attention_mask is not None
-                else None,
-                attn_mask_startend_row_indices=attn_mask_startend_row_indices
-                if attn_mask_startend_row_indices is not None
-                else None,
-                context=context if context is not None else None,
-                context_mask=context_mask if context_mask is not None else None,
-                rotary_pos_emb=rotary_pos_emb
-                if rotary_pos_emb is not None
-                else None,
-                rotary_pos_cos=rotary_pos_cos
-                if rotary_pos_cos is not None
-                else None,
-                rotary_pos_sin=rotary_pos_sin
-                if rotary_pos_sin is not None
-                else None,
-                swa_rotary_pos_emb=swa_rotary_pos_emb
-                if swa_rotary_pos_emb is not None
-                else None,
-                swa_rotary_pos_cos=swa_rotary_pos_cos
-                if swa_rotary_pos_cos is not None
-                else None,
-                swa_rotary_pos_sin=swa_rotary_pos_sin
-                if swa_rotary_pos_sin is not None
-                else None,
-                attention_bias=attention_bias
-                if attention_bias is not None
-                else None,
-                packed_seq_params=packed_seq_params
-                if packed_seq_params is not None
-                else None,
-                mtp_hidden_inputs_mask=mtp_hidden_inputs_mask
-                if mtp_hidden_inputs_mask is not None
-                else None,
-                input_ids=input_ids if input_ids is not None else None,
-                position_ids=position_ids if position_ids is not None else None,
-            )
-
-        if self.config.recompute_method == "uniform":
-            # Uniformly divide the total number of Transformer layers and checkpoint
-            # the input activation of each divided chunk.
-            # A method to further reduce memory usage reducing checkpoints.
-            assert self.config.recompute_num_layers == 1, (
-                "recompute_num_layers must be 1 for MTP recompute"
-            )
-            outputs = checkpoint_handler()
-        elif self.config.recompute_method in ("block", "first_n"):
-            # "block" and "first_n" are decoder-layer concepts (based on
-            # decoder layer_number vs recompute_num_layers).  They don't
-            # apply to MTP layers, so skip recompute and run forward directly.
-            outputs = forward_func(*args, **kwargs)
-        else:
-            raise ValueError("Invalid activation recompute method.")
-
-        return outputs
+    def _checkpointed_forward(self, forward_func, **kwargs):
+        """Run forward_func under activation recompute."""
+        hidden_states = kwargs.get("hidden_states", None)
+        decoder_input = kwargs.get("decoder_input", None)
+        attention_mask = kwargs.get("attention_mask", None)
+        attn_mask_startend_row_indices = kwargs.get(
+            "attn_mask_startend_row_indices", None
+        )
+        context = kwargs.get("context", None)
+        context_mask = kwargs.get("context_mask", None)
+        rotary_pos_emb = kwargs.get("rotary_pos_emb", None)
+        rotary_pos_cos = kwargs.get("rotary_pos_cos", None)
+        rotary_pos_sin = kwargs.get("rotary_pos_sin", None)
+        swa_rotary_pos_emb = kwargs.get("swa_rotary_pos_emb", None)
+        swa_rotary_pos_cos = kwargs.get("swa_rotary_pos_cos", None)
+        swa_rotary_pos_sin = kwargs.get("swa_rotary_pos_sin", None)
+        attention_bias = kwargs.get("attention_bias", None)
+        packed_seq_params = kwargs.get("packed_seq_params", None)
+        mtp_hidden_inputs_mask = kwargs.get("mtp_hidden_inputs_mask", None)
+        input_ids = kwargs.get("input_ids", None)
+        position_ids = None
+        if self.config.gpt_model_use_experimental_version:
+            position_ids = kwargs.get("position_ids", None)
+        return recompute(
+            forward_func,
+            hidden_states=hidden_states,
+            decoder_input=decoder_input,
+            attention_mask=attention_mask,
+            attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+            context=context,
+            context_mask=context_mask,
+            rotary_pos_emb=rotary_pos_emb,
+            rotary_pos_cos=rotary_pos_cos,
+            rotary_pos_sin=rotary_pos_sin,
+            swa_rotary_pos_emb=swa_rotary_pos_emb,
+            swa_rotary_pos_cos=swa_rotary_pos_cos,
+            swa_rotary_pos_sin=swa_rotary_pos_sin,
+            attention_bias=attention_bias,
+            packed_seq_params=packed_seq_params,
+            mtp_hidden_inputs_mask=mtp_hidden_inputs_mask,
+            input_ids=input_ids,
+            position_ids=position_ids,
+        )
 
     def forward(self, dict_args: dict):
         # Dispatch by config.use_erndata. Under erndata the data pipeline
@@ -1481,8 +1442,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             for k in _none_keys:
                 dict_args.pop(k)
 
-            # Projection + transformer
-            if self.config.recompute_granularity == "full" and self.training:
+            if self.full_recompute and self.training:
                 output = self._checkpointed_forward(
                     self._proj_and_transformer_layer,
                     **dict_args,
@@ -1695,9 +1655,15 @@ class MultiTokenPredictionLayer(FleetLayer):
                 else:
                     dict_args.pop("input_ids", None)
 
-                hidden_states = self._proj_and_transformer_layer(
-                    **dict_args,
-                )
+                if self.full_recompute and self.training:
+                    hidden_states = self._checkpointed_forward(
+                        self._proj_and_transformer_layer,
+                        **dict_args,
+                    )
+                else:
+                    hidden_states = self._proj_and_transformer_layer(
+                        **dict_args,
+                    )
 
                 if mhc_chunks is not None:
                     # mHC: hidden_states is multi-stream, store for next depth
@@ -1756,9 +1722,15 @@ class MultiTokenPredictionLayer(FleetLayer):
             else:
                 dict_args.pop("input_ids", None)
 
-            hidden_states = self._proj_and_transformer_layer(
-                **dict_args,
-            )
+            if self.full_recompute and self.training:
+                hidden_states = self._checkpointed_forward(
+                    self._proj_and_transformer_layer,
+                    **dict_args,
+                )
+            else:
+                hidden_states = self._proj_and_transformer_layer(
+                    **dict_args,
+                )
 
             if mhc_chunks is not None:
                 # mHC: hidden_states is multi-stream, store for next depth
@@ -1976,8 +1948,15 @@ class MultiTokenPredictionLayer(FleetLayer):
                 )
             )
 
-        # Run transformer layer.
-        hidden_states = self._proj_and_transformer_layer(**dict_args)
+        if self.full_recompute and self.training:
+            hidden_states = self._checkpointed_forward(
+                self._proj_and_transformer_layer,
+                **dict_args,
+            )
+        else:
+            hidden_states = self._proj_and_transformer_layer(
+                **dict_args,
+            )
 
         # mHC: the shared block emits multi-stream output. Same contract as the
         # legacy magic-send / separate_mtp_input branch above: publish it as
