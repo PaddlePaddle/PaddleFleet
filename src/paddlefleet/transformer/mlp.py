@@ -42,6 +42,7 @@ from paddlefleet.fusions.fused_bias_swiglu import (
     bias_swiglu_impl,
     weighted_bias_swiglu_impl,
 )
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.train_infer_consistent_ops.inspect_util import (
     get_current_layer,
     inspect_tensor,
@@ -49,7 +50,6 @@ from paddlefleet.train_infer_consistent_ops.inspect_util import (
 from paddlefleet.transformer.activations import situ, situ_glu
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.transformer.moe.moe_utils import ieee_kernel_enabled
 from paddlefleet.utils import (
     get_tensor_model_parallel_group_if_none,
     nvtx_range_pop,

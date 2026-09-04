@@ -32,6 +32,7 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
 )
 
 from paddlefleet import utils
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import module_needs_recompute
 from paddlefleet.tensor_parallel.random import (
@@ -41,7 +42,6 @@ from paddlefleet.tensor_parallel.random import (
 from paddlefleet.transformer.activations import situ, situ_glu
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
-from paddlefleet.transformer.moe.moe_utils import ieee_kernel_enabled
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 if paddlefleet_ops.is_sonic_moe_available():

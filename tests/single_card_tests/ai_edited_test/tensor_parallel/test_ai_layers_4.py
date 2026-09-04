@@ -47,6 +47,7 @@ sys.path.insert(
 )
 
 import unittest
+from unittest.mock import patch
 
 import paddle
 
@@ -253,13 +254,30 @@ class TestMLADownProjectionsAreReplicated(unittest.TestCase):
         backend = LocalSpecProvider()
         self.assertIsNot(backend.linear(), backend.column_parallel_linear())
 
-    def test_spec_uses_replicated_linear_under_accuracy_compatible(self):
+    def test_spec_uses_replicated_linear_under_ieee_and_accuracy_compatible(
+        self,
+    ):
         from paddlefleet.models.backends import LocalSpecProvider
 
-        spec = self._mla_spec(use_accuracy_compatible=True)
+        with patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"}):
+            spec = self._mla_spec(use_accuracy_compatible=True)
         backend = LocalSpecProvider()
         self.assertIs(spec.sublayers_spec.q_a_proj, backend.linear())
         self.assertIs(spec.sublayers_spec.kv_a_proj_with_mqa, backend.linear())
+
+    def test_spec_stays_column_parallel_under_flag_uac_without_ieee(self):
+        from paddlefleet.models.backends import LocalSpecProvider
+
+        with patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "0"}):
+            spec = self._mla_spec(use_accuracy_compatible=True)
+        backend = LocalSpecProvider()
+        self.assertIs(
+            spec.sublayers_spec.q_a_proj, backend.column_parallel_linear()
+        )
+        self.assertIs(
+            spec.sublayers_spec.kv_a_proj_with_mqa,
+            backend.column_parallel_linear(),
+        )
 
     def test_spec_stays_column_parallel_by_default(self):
         from paddlefleet.models.backends import LocalSpecProvider

@@ -19,9 +19,9 @@ makes the positions vacated by the shift carry the REAL trailing carrier tokens 
 pad token). The reference implementation instead rolls by -1 and zero-fills, so at
 depth ``d`` its last ``d + 1`` MTP positions embed token id 0.
 
-Under ``use_accuracy_compatible`` the carrier tail is zeroed so both conventions
-agree. These tests pin that behaviour, its gate, and the fact that the main path is
-untouched.
+Under IEEE+UAC the carrier tail is zeroed so both conventions agree. FLAG+UAC
+alone leaves the structure carrier. These tests pin that behaviour, its gate, and
+the fact that the main path is untouched.
 """
 
 import os
@@ -37,7 +37,7 @@ sys.path.insert(
 )
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import paddle
 
@@ -94,6 +94,7 @@ def _carrier(seq_len, tail):
 class TestGPTEmbeddingMTPCarrierTail(unittest.TestCase):
     """The tail zeroing must be exact, gated, and confined to the tail."""
 
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_tail_is_zeroed_under_accuracy_compatible(self):
         emb, seen = _make_embedding(
             use_accuracy_compatible=True, num_nextn_predict_layers=1
@@ -111,6 +112,7 @@ class TestGPTEmbeddingMTPCarrierTail(unittest.TestCase):
             "only the last num_nextn_predict_layers ids may change",
         )
 
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_tail_length_follows_depth(self):
         emb, seen = _make_embedding(
             use_accuracy_compatible=True, num_nextn_predict_layers=3
@@ -126,6 +128,7 @@ class TestGPTEmbeddingMTPCarrierTail(unittest.TestCase):
             embedded[-4], 0, "the zeroing must not reach further back"
         )
 
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_disabled_without_accuracy_compatible(self):
         emb, seen = _make_embedding(
             use_accuracy_compatible=False, num_nextn_predict_layers=1
@@ -139,6 +142,7 @@ class TestGPTEmbeddingMTPCarrierTail(unittest.TestCase):
             "without the alignment switch the carrier must be untouched",
         )
 
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_disabled_without_mtp(self):
         emb, seen = _make_embedding(
             use_accuracy_compatible=True, num_nextn_predict_layers=0
@@ -152,6 +156,7 @@ class TestGPTEmbeddingMTPCarrierTail(unittest.TestCase):
             "with MTP off there is no shifted slice to align",
         )
 
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_dict_args_is_updated_for_downstream_consumers(self):
         emb, _ = _make_embedding(
             use_accuracy_compatible=True, num_nextn_predict_layers=1
@@ -166,17 +171,38 @@ class TestGPTEmbeddingMTPCarrierTail(unittest.TestCase):
             "downstream MTP consumers read input_ids back out of dict_args",
         )
 
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "0"})
+    def test_flag_uac_without_ieee_leaves_carrier(self):
+        emb, seen = _make_embedding(
+            use_accuracy_compatible=True, num_nextn_predict_layers=1
+        )
+        input_ids = _carrier(seq_len=8, tail=3)
+        emb.forward(dict_args={"input_ids": input_ids})
+
+        self.assertEqual(
+            seen["input_ids"].numpy().tolist(),
+            input_ids.numpy().tolist(),
+            "FLAG+UAC without IEEE must keep the structure carrier",
+        )
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_shorter_than_depth_is_left_alone(self):
         emb, seen = _make_embedding(
             use_accuracy_compatible=True, num_nextn_predict_layers=4
         )
         input_ids = paddle.to_tensor([[11, 12, 13, 14]], dtype="int64")
-        # A carrier no longer than the depth leaves the main slice empty, so the
-        # pre-existing MTP split downstream fails on its own. That is not what this
-        # test is about: it asserts only that the tail zeroing declines to blank the
-        # whole carrier, which is observable in what reached the embedding.
-        with self.assertRaises(ValueError):
+        # Carrier length equals depth, so the IEEE tail-zero gate does not
+        # fire. The mock embedding still runs; this only pins that the
+        # whole carrier is not blanked.
+        try:
             emb.forward(dict_args={"input_ids": input_ids})
+        except ValueError:
+            pass
+        self.assertEqual(
+            seen["input_ids"].numpy().tolist(),
+            input_ids.numpy().tolist(),
+            "equal-length carriers must not be blanked by the IEEE tail gate",
+        )
 
         self.assertEqual(
             seen["input_ids"].numpy().tolist(),

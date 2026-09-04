@@ -188,7 +188,13 @@ class TestLanguageLossForwardImpl(unittest.TestCase):
         result = loss_fn.forward_impl(logits, labels)
         self.assertIsNotNone(result)
 
-    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    @patch.dict(
+        os.environ,
+        {
+            "MODEL_REPRO_IEEE_KERNEL": "1",
+            "FLAGS_use_accuracy_compatible_kernel": "1",
+        },
+    )
     @patch(
         "paddlefleet.models.common.language_loss.language_loss.get_context_parallel_world_size",
         return_value=1,
@@ -221,7 +227,9 @@ class TestLanguageLossForwardImpl(unittest.TestCase):
 
         src = inspect.getsource(LanguageLoss.forward_impl)
         self.assertIn("_normalize_loss_by_tokens", src)
-        self.assertNotIn("cast(paddle.float64)", src)
+        self.assertIn("cast(paddle.float64)", src)
+        self.assertIn("if ieee_kernel_enabled():", src)
+        self.assertIn("elif self.use_accuracy_compatible:", src)
         self.assertIn("DeferTokenNormalizationOp", inspect.getsource(ll))
 
         ll.clear_pending_gradient_divisor()
@@ -281,6 +289,44 @@ class TestLanguageLossForwardImpl(unittest.TestCase):
             / lossmask.sum()
         )
         self.assertTrue(bool((out == expected).numpy().all()))
+
+    @patch.dict(
+        os.environ,
+        {
+            "MODEL_REPRO_IEEE_KERNEL": "0",
+            "FLAGS_use_accuracy_compatible_kernel": "1",
+        },
+    )
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss.get_context_parallel_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss.get_tensor_model_parallel_world_size",
+        return_value=1,
+    )
+    @patch("paddle.distributed.is_initialized", return_value=False)
+    def test_flag_uac_without_ieee_keeps_structure_fp64_ep_normalize(
+        self, mock_dist, mock_tp, mock_cp
+    ):
+        import inspect
+
+        from paddlefleet.models.common.language_loss.language_loss import (
+            LanguageLoss,
+        )
+
+        src = inspect.getsource(LanguageLoss.forward_impl)
+        ieee_idx = src.index("# leftover / IEEE E-654")
+        uac_idx = src.index("# Structure FLAG+UAC")
+        default_idx = src.index(
+            "# Default path must keep structure's tensor divisor."
+        )
+        self.assertLess(ieee_idx, uac_idx)
+        self.assertLess(uac_idx, default_idx)
+        self.assertIn("cast(paddle.float64)", src[uac_idx:default_idx])
+        self.assertIn("_normalize_loss_by_tokens", src[ieee_idx:uac_idx])
+        self.assertNotIn("cast(paddle.float64)", src[ieee_idx:uac_idx])
+        self.assertIn("loss / lossmask.sum()", src[default_idx:])
 
 
 class TestLanguageLossForwardWithMTP(unittest.TestCase):

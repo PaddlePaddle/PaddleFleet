@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 from paddlefleet import utils
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.recompute_utils import (
     module_needs_recompute,
     module_needs_refined_recompute,
@@ -68,7 +69,6 @@ from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import (
     AddAuxiliaryLoss,
-    ieee_kernel_enabled,
     use_accuracy_compatible_kernel,
 )
 from .token_dispatcher import (

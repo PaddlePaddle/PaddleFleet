@@ -32,6 +32,7 @@ from paddlefleet.context_parallel_utils import (
     ContextParallelScatterOp,
     mark_context_parallel_parameter_disable_scale_grad,
 )
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.models.gpt.utils import fill_feature
 from paddlefleet.parallel_state import (
     get_context_parallel_rank,
@@ -315,11 +316,13 @@ class GPTEmbedding(FleetLayer):
                     "multi_latent_attention is not supported when gpt_model_use_experimental_version=True and sequence_parallel=True"
                 )
         input_ids = dict_args["input_ids"]
-        # Under use_accuracy_compatible, zero the MTP carrier tail so offset
-        # slices match Megatron roll-and-zero-fill (E-217). Main path slices
-        # input_ids[:, :-num_nextn] and is unchanged.
+        # Under IEEE+UAC, zero the MTP carrier tail so offset slices match
+        # Megatron roll-and-zero-fill (E-217). FLAG+UAC alone stays on the
+        # structure carrier. Main path slices input_ids[:, :-num_nextn]
+        # and is unchanged.
         if (
-            getattr(self.config, "use_accuracy_compatible", False)
+            ieee_kernel_enabled()
+            and getattr(self.config, "use_accuracy_compatible", False)
             and input_ids is not None
             and self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0

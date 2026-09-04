@@ -35,6 +35,7 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
 
 from paddlefleet import tensor_parallel
 from paddlefleet.context_parallel_utils import ContextParallelScatterOp
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
 )
@@ -47,7 +48,6 @@ from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.transformer.moe.moe_utils import ieee_kernel_enabled
 
 if TYPE_CHECKING:
     from paddlefleet.models.backends import BackendSpecProvider

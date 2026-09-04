@@ -34,6 +34,7 @@ from paddle import Tensor
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
 from paddlefleet import parallel_state
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
@@ -51,7 +52,6 @@ from paddlefleet.transformer.cp_utils import all_gather_cp
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.transformer.moe.moe_utils import ieee_kernel_enabled
 
 try:
     from paddlefleet_ops.fast_hadamard_transform import (

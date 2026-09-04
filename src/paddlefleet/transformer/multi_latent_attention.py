@@ -29,6 +29,7 @@ from paddlefleet.context_parallel_utils import (
     preprocess_index,
     preprocess_index_dual_chunks,
 )
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.models.common.embeddings import (
     apply_rotary_pos_emb,
 )
@@ -62,7 +63,6 @@ from paddlefleet.train_infer_consistent_ops.slice_util import (
 from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
-from paddlefleet.transformer.moe.moe_utils import ieee_kernel_enabled
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_rank, get_pg_size
 
@@ -1711,14 +1711,15 @@ class MLASelfAttention(MultiLatentAttention):
             )
             self.config.init_method(self.v_b_proj)
         elif (
-            getattr(self.config, "use_accuracy_compatible", False)
+            ieee_kernel_enabled()
+            and getattr(self.config, "use_accuracy_compatible", False)
             and self.config.sequence_parallel
             and self.kv_b_proj is not None
         ):
             # KV up-projection consumes the already local compressed-KV sequence.
             # Its SP linear path would all-gather that input once more, doubling the
             # sequence length before it is concatenated with the positional branch.
-            # Gate on UAC so default GLM-4.5 / Qwen keep structure's SP linear.
+            # IEEE+UAC only; FLAG+UAC keeps structure's SP linear.
             self.kv_b_proj.sequence_parallel = False
             self.kv_b_proj.allreduce_dgrad = (
                 self.kv_b_proj.world_size > 1

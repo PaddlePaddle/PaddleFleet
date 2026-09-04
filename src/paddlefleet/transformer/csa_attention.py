@@ -36,6 +36,7 @@ from paddle import Tensor, framework, nn
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
 from paddlefleet.context_parallel_utils import ContextParallelGatherOp
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
@@ -49,7 +50,6 @@ from paddlefleet.transformer.dsa_attention import (
     rotate_activation,
 )
 from paddlefleet.transformer.dw_overlap import deferrable_linear
-from paddlefleet.transformer.moe.moe_utils import ieee_kernel_enabled
 
 _ACCURACY_COMPATIBLE_KERNEL: bool = ieee_kernel_enabled()
 

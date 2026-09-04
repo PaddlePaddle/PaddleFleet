@@ -30,9 +30,9 @@ import paddle
 import paddle.nn.functional as F
 from paddle import Tensor, nn
 
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.transformer.moe.moe_utils import ieee_kernel_enabled
 
 if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig

@@ -33,15 +33,14 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
 
+# from ..dist_checkpointing.mapping import ShardedStateDict
+# from ..transformer.utils import make_sharded_tensors_for_checkpoint
+from ..ieee_kernel import ieee_kernel_enabled
 from ..parallel_state import (
     get_global_memory_buffer,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-
-# from ..dist_checkpointing.mapping import ShardedStateDict
-# from ..transformer.utils import make_sharded_tensors_for_checkpoint
-from ..transformer.moe.moe_utils import ieee_kernel_enabled
 from ..utils import (
     divide,
     get_pg_rank,
