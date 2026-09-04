@@ -1205,12 +1205,11 @@ class MultiTokenPredictionLayer(FleetLayer):
                 "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
                 "is_mtp": True,
                 "input_ids": input_ids,
-                "position_ids": _mtp_shift_position_ids(
-                    position_ids,
-                    hidden_states,
-                    self.layer_number,
-                    self.sequence_parallel,
-                ),
+                # IEEE e468: pass the unshifted carrier. MLA already
+                # wrap-rolls the arange RoPE table under UAC. Rolling
+                # position_ids here sets start_pos=1 in
+                # qkv_up_proj_and_rope_apply and slices off that wrap.
+                "position_ids": position_ids,
             }
             rst_dict = self.transformer_layer(input_dict)
 

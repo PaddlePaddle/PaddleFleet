@@ -376,6 +376,21 @@ class TestMultiTokenPrediction(unittest.TestCase):
                 position_ids,
             )
 
+    def test_proj_and_transformer_layer_passes_unshifted_position_ids(self):
+        """IEEE e468 keeps the unshifted MTP carrier on the live path."""
+        from pathlib import Path
+
+        src_path = (
+            Path(__file__).resolve().parents[4]
+            / "src/paddlefleet/transformer/multi_token_prediction.py"
+        )
+        src = src_path.read_text()
+        start = src.find("def _proj_and_transformer_layer")
+        self.assertNotEqual(start, -1)
+        body = src[start : src.find("\n    def ", start + 1)]
+        self.assertIn('"position_ids": position_ids', body)
+        self.assertNotIn("_mtp_shift_position_ids(", body)
+
     def test_weight_only_mtp_layer_forward(self):
         """Test WeightOnlyMTPLayer.forward returns dict_args."""
         from paddlefleet.transformer.multi_token_prediction import (
