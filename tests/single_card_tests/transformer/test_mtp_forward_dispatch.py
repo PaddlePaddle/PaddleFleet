@@ -59,6 +59,8 @@ def _make_layer(
     cfg.sequence_parallel = sequence_parallel
     layer.config = cfg
     layer.layer_number = layer_number
+    layer.training = True
+    layer.full_recompute = False
 
     recorded = {}
 

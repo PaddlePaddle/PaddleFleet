@@ -355,7 +355,8 @@ class TransformerLayer(nn.Layer):
         self.recompute_input_layernorm = False
         self.recompute_post_attention_layernorm = False
         self.recompute_mlp = False
-        if self.config.recompute_granularity == "full":
+        # MTP handle full recompute itself
+        if self.config.recompute_granularity == "full" and not is_mtp_layer:
             self.full_recompute = need_full_recompute(
                 self.layer_number, self.config
             )

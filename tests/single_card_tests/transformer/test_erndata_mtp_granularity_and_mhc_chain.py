@@ -171,6 +171,7 @@ def _make_mhc_layer(K: int, layer_number: int, n: int, h: int):
     layer.config = cfg
     layer.layer_number = layer_number
     layer.mhc_enabled = True
+    layer.full_recompute = True
 
     recorded = {}
 

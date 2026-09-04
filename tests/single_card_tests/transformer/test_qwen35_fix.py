@@ -162,6 +162,7 @@ class TestMTPLayerForward(unittest.TestCase):
         mock.config = config
         mock.layer_number = 0
         mock.training = False
+        mock.full_recompute = False
         mock._proj_and_transformer_layer = lambda **kw: kw.get(
             "hidden_states", kw.get("decoder_input")
         )
