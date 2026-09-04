@@ -843,14 +843,14 @@ def _compute_dsa_indexer_loss(
 
     # Handle fully-masked rows (all -inf) to prevent NaN in softmax
     if causal_mask_override is not None:
-        if causal_mask.ndim == 2:
-            row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [sq]
+        row_valid = (causal_mask > float("-inf")).any(axis=-1)
+        if row_valid.ndim == 1:
             attn_row_mask = row_valid.reshape([1, 1, sq, 1])
             idx_row_mask = row_valid.reshape([1, sq, 1])
         else:
-            row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [b, sq]
-            attn_row_mask = row_valid.reshape([b, 1, sq, 1])
-            idx_row_mask = row_valid.reshape([b, sq, 1])
+            mask_b = int(row_valid.shape[0])
+            attn_row_mask = row_valid.reshape([mask_b, 1, sq, 1])
+            idx_row_mask = row_valid.reshape([mask_b, sq, 1])
 
         attention_scores = paddle.where(
             attn_row_mask, attention_scores, paddle.zeros_like(attention_scores)
@@ -979,14 +979,14 @@ def _bwd_fused_indexer_loss(
 
     # Handle fully-masked rows (all -inf) to prevent NaN in softmax
     if causal_mask_override is not None:
-        if causal_mask.ndim == 2:
-            row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [sq]
+        row_valid = (causal_mask > float("-inf")).any(axis=-1)
+        if row_valid.ndim == 1:
             attn_row_mask = row_valid.reshape([1, 1, sq, 1])
             idx_row_mask = row_valid.reshape([1, sq, 1])
         else:
-            row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [b, sq]
-            attn_row_mask = row_valid.reshape([b, 1, sq, 1])
-            idx_row_mask = row_valid.reshape([b, sq, 1])
+            mask_b = int(row_valid.shape[0])
+            attn_row_mask = row_valid.reshape([mask_b, 1, sq, 1])
+            idx_row_mask = row_valid.reshape([mask_b, sq, 1])
 
         attention_scores = paddle.where(
             attn_row_mask, attention_scores, paddle.zeros_like(attention_scores)
