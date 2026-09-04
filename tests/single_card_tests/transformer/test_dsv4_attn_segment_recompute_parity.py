@@ -150,11 +150,15 @@ def _fix_vha_param_dtype(attn, config):
         casted.stop_gradient = parameter.stop_gradient
         attn.__dict__.pop(name, None)
         attn._parameters.pop(name, None)
-        setattr(attn, name, attn.create_parameter(
-            shape=casted.shape,
-            dtype=config.params_dtype,
-            default_initializer=paddle.nn.initializer.Assign(casted),
-        ))
+        setattr(
+            attn,
+            name,
+            attn.create_parameter(
+                shape=casted.shape,
+                dtype=config.params_dtype,
+                default_initializer=paddle.nn.initializer.Assign(casted),
+            ),
+        )
 
 
 def _collect(attn, hidden_np):
