@@ -6,6 +6,7 @@
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import paddle
@@ -28,9 +29,19 @@ from paddlefleet.pipeline_parallel.indexcache_adapter import (
     register_indexcache_pipeline_adapter,
 )
 
-_EMPTY_PATTERN_REGISTRATION = register_indexcache_pipeline_adapter(None)
-_FIRST_REGISTRATION = register_indexcache_pipeline_adapter("FS")
-_SECOND_REGISTRATION = register_indexcache_pipeline_adapter("FS")
+_EMPTY_CONFIG = SimpleNamespace(
+    index_topk_pattern=None,
+    indexcache_train_debug=False,
+)
+_ADAPTER_CONFIG = SimpleNamespace(
+    index_topk_pattern="FS",
+    indexcache_train_debug=False,
+)
+_EMPTY_PATTERN_REGISTRATION = register_indexcache_pipeline_adapter(
+    _EMPTY_CONFIG
+)
+_FIRST_REGISTRATION = register_indexcache_pipeline_adapter(_ADAPTER_CONFIG)
+_SECOND_REGISTRATION = register_indexcache_pipeline_adapter(_ADAPTER_CONFIG)
 
 
 def _make_distill_state(offset):
@@ -81,7 +92,9 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
             with self.subTest(name=name):
                 output = StringIO()
                 with (
-                    patch.dict("os.environ", {"INDEXCACHE_TRAIN_DEBUG": "1"}),
+                    patch.object(
+                        _ADAPTER_CONFIG, "indexcache_train_debug", True
+                    ),
                     redirect_stdout(output),
                 ):
                     _debug_state5_gradient(
@@ -93,7 +106,7 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
                 self.assertIn(f"grad_nonzero={nonzero}", marker)
 
     def test_pipeline_metadata_recovers_state5_producer_layer(self):
-        with patch.dict("os.environ", {"INDEXCACHE_TRAIN_DEBUG": "1"}):
+        with patch.object(_ADAPTER_CONFIG, "indexcache_train_debug", True):
             pipeline_inputs = _dict_to_tuple_helper(
                 {
                     "hidden_states": paddle.to_tensor(
@@ -106,7 +119,7 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
             self.assertEqual(_indexcache_producer_layer(pipeline_inputs), 7)
 
     def test_pipeline_metadata_avoids_item_after_dataptr_clear(self):
-        with patch.dict("os.environ", {"INDEXCACHE_TRAIN_DEBUG": "1"}):
+        with patch.object(_ADAPTER_CONFIG, "indexcache_train_debug", True):
             pipeline_inputs = _dict_to_tuple_helper(
                 {
                     "hidden_states": paddle.to_tensor(
@@ -141,7 +154,7 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
             self.assertIn("producer_layer=7", output.getvalue())
 
     def test_missing_metadata_skips_released_producer_tensor(self):
-        with patch.dict("os.environ", {"INDEXCACHE_TRAIN_DEBUG": "1"}):
+        with patch.object(_ADAPTER_CONFIG, "indexcache_train_debug", True):
             state = _make_distill_state(7)
             state[6]._clear_dataptr()
             pipeline_inputs = _dict_to_tuple_helper({"indexcache_state": state})
@@ -154,7 +167,7 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
             def apply(value):
                 return value.clone()
 
-        with patch.dict("os.environ", {"INDEXCACHE_TRAIN_DEBUG": "1"}):
+        with patch.object(_ADAPTER_CONFIG, "indexcache_train_debug", True):
             pipeline_inputs = _dict_to_tuple_helper(
                 {"indexcache_state": _make_distill_state(7)}
             )
@@ -170,7 +183,7 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
             self.assertEqual(_indexcache_producer_layer((cloned,)), 7)
 
     def test_fresh_state_dict_captures_metadata_before_detach(self):
-        with patch.dict("os.environ", {"INDEXCACHE_TRAIN_DEBUG": "1"}):
+        with patch.object(_ADAPTER_CONFIG, "indexcache_train_debug", True):
             inputs = {"indexcache_state": _make_distill_state(7)}
             detached = _detach_and_requires_grad(inputs)
             detached_state = detached["indexcache_state"]
@@ -186,7 +199,7 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
             def apply(_value):
                 raise AssertionError("allocating FakeClone must not run")
 
-        with patch.dict("os.environ", {"INDEXCACHE_TRAIN_DEBUG": "1"}):
+        with patch.object(_ADAPTER_CONFIG, "indexcache_train_debug", True):
             cloned = _clone_and_clear_dataptr(
                 {"indexcache_state": _make_distill_state(7)},
                 ForbiddenAllocatingClone,
@@ -205,7 +218,7 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
         )
         output = StringIO()
         with (
-            patch.dict("os.environ", {"INDEXCACHE_TRAIN_DEBUG": "1"}),
+            patch.object(_ADAPTER_CONFIG, "indexcache_train_debug", True),
             redirect_stdout(output),
         ):
             outputs = node.forward({"indexcache_state": _make_distill_state(7)})

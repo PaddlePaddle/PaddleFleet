@@ -4,6 +4,8 @@
 # you may not use this file except in compliance with the License.
 
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from types import SimpleNamespace
 
 import paddle
@@ -11,6 +13,8 @@ import paddle
 from paddlefleet.transformer.transformer_layer import (
     HyperConnectionTransformerLayer,
     TransformerLayer,
+    _emit_indexcache_stall_trace,
+    _indexcache_stall_trace_enabled,
 )
 
 _STATE_NOT_UPDATED = object()
@@ -119,6 +123,28 @@ def _make_forward_impl_layer(attention_result):
 
 
 class TestIndexCacheTransformerLayerStateTransitions(unittest.TestCase):
+    def test_stall_trace_is_driven_by_normalized_config(self):
+        disabled = SimpleNamespace(
+            indexcache_stall_trace=False,
+            indexcache_stall_trace_layers=(2,),
+        )
+        enabled = SimpleNamespace(
+            indexcache_stall_trace=True,
+            indexcache_stall_trace_layers=(2, 4),
+        )
+
+        self.assertFalse(_indexcache_stall_trace_enabled(disabled, 2))
+        self.assertTrue(_indexcache_stall_trace_enabled(enabled, 2))
+        self.assertFalse(_indexcache_stall_trace_enabled(enabled, 3))
+
+        output = StringIO()
+        with redirect_stdout(output):
+            _emit_indexcache_stall_trace(enabled, 2, "attention", "enter")
+            _emit_indexcache_stall_trace(enabled, 3, "attention", "enter")
+        marker = output.getvalue()
+        self.assertIn("layer=2 phase=attention edge=enter", marker)
+        self.assertNotIn("layer=3", marker)
+
     def test_forward_attention_preserves_no_update_replace_and_clear(self):
         hidden_states = paddle.ones([1, 1, 4], dtype="float32")
         old_state = _topk_state(1)

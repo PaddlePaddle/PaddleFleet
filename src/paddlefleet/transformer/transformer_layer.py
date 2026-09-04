@@ -82,26 +82,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _indexcache_stall_trace_enabled(layer_number):
+def _indexcache_stall_trace_enabled(config, layer_number):
     """Return whether count-only stall tracing is enabled for this layer."""
-    if os.environ.get("INDEXCACHE_STALL_TRACE", "0") != "1":
+    if not getattr(config, "indexcache_stall_trace", False):
         return False
-    try:
-        layers = {
-            int(value.strip())
-            for value in os.environ.get(
-                "INDEXCACHE_STALL_TRACE_LAYERS", "2"
-            ).split(",")
-            if value.strip()
-        }
-    except ValueError:
-        return False
+    layers = getattr(config, "indexcache_stall_trace_layers", ())
     return layer_number in layers
 
 
-def _emit_indexcache_stall_trace(layer_number, phase, edge):
+def _emit_indexcache_stall_trace(config, layer_number, phase, edge):
     """Emit a symmetric marker without tensor values or CUDA synchronization."""
-    if _indexcache_stall_trace_enabled(layer_number):
+    if _indexcache_stall_trace_enabled(config, layer_number):
         print(
             "[INDEXCACHE_STALL_TRACE] "
             f"layer={layer_number} phase={phase} edge={edge}",
@@ -374,7 +365,7 @@ class TransformerLayer(nn.Layer):
                 register_indexcache_pipeline_adapter,
             )
 
-            register_indexcache_pipeline_adapter(config.index_topk_pattern)
+            register_indexcache_pipeline_adapter(config)
         TransformerLayer._gpt_model_use_experimental_version = (
             config.gpt_model_use_experimental_version
         )
@@ -1111,7 +1102,10 @@ class TransformerLayer(nn.Layer):
                         )
                     )
                     _emit_indexcache_stall_trace(
-                        self.layer_number, "recompute_body", "enter"
+                        self.config,
+                        self.layer_number,
+                        "recompute_body",
+                        "enter",
                     )
                     body_outputs = self._forward_impl(
                         hidden_states=hidden_states,
@@ -1135,12 +1129,18 @@ class TransformerLayer(nn.Layer):
                         **docmask_meta_kwargs,
                     )
                     _emit_indexcache_stall_trace(
-                        self.layer_number, "recompute_body", "exit"
+                        self.config,
+                        self.layer_number,
+                        "recompute_body",
+                        "exit",
                     )
                     return _flatten_indexcache_recompute_outputs(body_outputs)
 
                 _emit_indexcache_stall_trace(
-                    self.layer_number, "full_recompute", "enter"
+                    self.config,
+                    self.layer_number,
+                    "full_recompute",
+                    "enter",
                 )
                 outputs = recompute(
                     _forward_impl_for_recompute,
@@ -1188,7 +1188,10 @@ class TransformerLayer(nn.Layer):
                     **offload_kwargs,
                 )
                 _emit_indexcache_stall_trace(
-                    self.layer_number, "full_recompute", "exit"
+                    self.config,
+                    self.layer_number,
+                    "full_recompute",
+                    "exit",
                 )
         else:
             outputs = self._forward_impl(**dict_args, **docmask_meta_kwargs)
@@ -1276,9 +1279,9 @@ class TransformerLayer(nn.Layer):
         else:
             dict_args.pop("indexcache_state", None)
         rst = {**dict_args, **rst}
-        if os.environ.get("INDEXCACHE_TRAIN_DEBUG", "0") == "1" and getattr(
-            self.config, "index_topk_pattern", None
-        ):
+        if getattr(
+            self.config, "indexcache_train_debug", False
+        ) and getattr(self.config, "index_topk_pattern", None):
             state = rst.get("indexcache_state", None)
             if isinstance(state, (tuple, list)):
                 state_len = len(state)
@@ -1560,7 +1563,9 @@ class TransformerLayer(nn.Layer):
                 context (Tensor): Updated context tensor if cross-attention is used,
                 otherwise None.
         """
-        _emit_indexcache_stall_trace(self.layer_number, "attention", "enter")
+        _emit_indexcache_stall_trace(
+            self.config, self.layer_number, "attention", "enter"
+        )
 
         # Residual connection.
         residual = hidden_states
@@ -1573,7 +1578,7 @@ class TransformerLayer(nn.Layer):
         else:
             input_layernorm_output = self.input_layernorm(hidden_states)
         _emit_indexcache_stall_trace(
-            self.layer_number, "input_layernorm", "exit"
+            self.config, self.layer_number, "input_layernorm", "exit"
         )
 
         self._log_md5(
@@ -1652,7 +1657,7 @@ class TransformerLayer(nn.Layer):
                 **extra_kwargs,
             )
         _emit_indexcache_stall_trace(
-            self.layer_number, "self_attention", "exit"
+            self.config, self.layer_number, "self_attention", "exit"
         )
 
         indexcache_state_updated = False
@@ -1713,7 +1718,9 @@ class TransformerLayer(nn.Layer):
         if is_first_fwd:
             hidden_states.stop_gradient = False
 
-        _emit_indexcache_stall_trace(self.layer_number, "attention", "exit")
+        _emit_indexcache_stall_trace(
+            self.config, self.layer_number, "attention", "exit"
+        )
         if indexcache_state_updated or indexcache_state is not None:
             return hidden_states, context, indexcache_state
         return hidden_states, context
@@ -1736,7 +1743,9 @@ class TransformerLayer(nn.Layer):
         Returns:
             output (Tensor): Transformed hidden states of shape [s, b, h].
         """
-        _emit_indexcache_stall_trace(self.layer_number, "mlp", "enter")
+        _emit_indexcache_stall_trace(
+            self.config, self.layer_number, "mlp", "enter"
+        )
 
         # Residual connection.
         residual = hidden_states
@@ -1751,7 +1760,10 @@ class TransformerLayer(nn.Layer):
                 hidden_states
             )
         _emit_indexcache_stall_trace(
-            self.layer_number, "post_attention_layernorm", "exit"
+            self.config,
+            self.layer_number,
+            "post_attention_layernorm",
+            "exit",
         )
 
         self._log_md5(
@@ -1760,7 +1772,9 @@ class TransformerLayer(nn.Layer):
             self.layer_number,
         )
 
-        _emit_indexcache_stall_trace(self.layer_number, "mlp_core", "enter")
+        _emit_indexcache_stall_trace(
+            self.config, self.layer_number, "mlp_core", "enter"
+        )
         if self.recompute_mlp:
             _mlp_input_ids = (
                 input_ids if isinstance(self.mlp, MoELayer) else None
@@ -1806,7 +1820,9 @@ class TransformerLayer(nn.Layer):
                 )
             else:
                 mlp_output_with_bias = self.mlp(post_attention_layernorm_output)
-        _emit_indexcache_stall_trace(self.layer_number, "mlp_core", "exit")
+        _emit_indexcache_stall_trace(
+            self.config, self.layer_number, "mlp_core", "exit"
+        )
 
         # Log MLP raw output before BDA
         if (
@@ -1841,7 +1857,9 @@ class TransformerLayer(nn.Layer):
         if is_first_fwd:
             hidden_states.stop_gradient = False
 
-        _emit_indexcache_stall_trace(self.layer_number, "mlp", "exit")
+        _emit_indexcache_stall_trace(
+            self.config, self.layer_number, "mlp", "exit"
+        )
         return hidden_states
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
