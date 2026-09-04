@@ -243,6 +243,7 @@ class KimiDeltaAttention(FleetLayer):
         gate_lower_bound: float | None = -5.0,
         dt_init_range: tuple[float, float] = (0.001, 0.1),
         dt_init_floor: float = 1e-4,
+        is_mtp_layer: bool = False,
     ):
         """
         Args:
@@ -275,6 +276,9 @@ class KimiDeltaAttention(FleetLayer):
                 identical to fla's KDA layer.
             dt_init_floor: Lower clamp on that dt draw before the inverse
                 softplus.
+            is_mtp_layer: Whether this is an MTP layer. ``layer_number`` restarts
+                from 0 inside the MTP block, so it takes the recompute selector
+                out of the backbone's id space.
         """
         super().__init__(config=config)
         # Keep the parent-owned FP32 gate parameters (A_log and dt_bias) in
@@ -283,6 +287,7 @@ class KimiDeltaAttention(FleetLayer):
 
         # Attributes from arguments
         self.layer_number = layer_number
+        self.is_mtp_layer = is_mtp_layer
         self.bias = bias
         self.conv_bias = conv_bias
         self.conv_init = conv_init
@@ -343,7 +348,10 @@ class KimiDeltaAttention(FleetLayer):
         self.recompute_rms_norm_gated = (
             self.config.recompute_granularity == "selective"
             and module_needs_recompute(
-                "rms_norm_gated", self.layer_number, self.config
+                "rms_norm_gated",
+                self.layer_number,
+                self.config,
+                is_mtp_layer=self.is_mtp_layer,
             )
         )
 

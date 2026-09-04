@@ -328,6 +328,7 @@ def get_attention_spec(
                 "gate_lora_rank": config.linear_gate_lora_rank,
                 "use_full_rank_gate": config.linear_use_full_rank_gate,
                 "gate_lower_bound": config.linear_gate_lower_bound,
+                "is_mtp_layer": is_mtp_layer,
             },
         )
     elif attention_layer_type == "multi_latent_attention":

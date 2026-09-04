@@ -759,7 +759,10 @@ class TestKdaParameterInitialization(unittest.TestCase):
         self.assertLess(
             params.index("dt_init_range"), params.index("dt_init_floor")
         )
-        self.assertEqual(params[-1], "dt_init_floor")
+        self.assertLess(
+            params.index("dt_init_floor"), params.index("is_mtp_layer")
+        )
+        self.assertEqual(params[-1], "is_mtp_layer")
 
 
 @unittest.skipUnless(HAVE_FLA, "paddlefleet_ops fla kernels are not available")
@@ -1376,6 +1379,45 @@ class TestGatedNormRecompute(unittest.TestCase):
                 config_overrides={
                     "recompute_granularity": "selective",
                     "recompute_modules": {"rms_norm_gated": [0, 5]},
+                },
+            )
+
+    def test_mtp_layers_are_addressed_after_the_backbone(self):
+        """An MTP layer must not answer to a backbone layer id.
+
+        ``layer_number`` restarts from 0 inside the MTP block, so without the
+        flag the two collide: an MTP instance would read the selector as if it
+        were backbone layer 0. Ids are in the ``logical_layer_index`` space, so
+        MTP layer ``i`` is ``num_hidden_layers + i``.
+        """
+
+        def flag(layer_number, ids, is_mtp_layer):
+            return _build_kda(
+                layer_number=layer_number,
+                is_mtp_layer=is_mtp_layer,
+                config_overrides={
+                    "num_nextn_predict_layers": 1,
+                    "recompute_granularity": "selective",
+                    "recompute_modules": {"rms_norm_gated": ids},
+                },
+            ).recompute_rms_norm_gated
+
+        # num_hidden_layers=2, so id 2 is MTP layer 0.
+        self.assertTrue(flag(0, [2], is_mtp_layer=True))
+        self.assertFalse(flag(0, [2], is_mtp_layer=False))
+
+        # And a backbone id must not pull the MTP layer in with it.
+        self.assertTrue(flag(0, [0], is_mtp_layer=False))
+        self.assertFalse(flag(0, [0], is_mtp_layer=True))
+
+    def test_mtp_id_is_in_range_only_with_mtp_layers_configured(self):
+        """The MTP ids exist only when the model builds MTP layers."""
+        with self.assertRaises(ValueError):
+            _build_kda(
+                layer_number=0,
+                config_overrides={
+                    "recompute_granularity": "selective",
+                    "recompute_modules": {"rms_norm_gated": [2]},
                 },
             )
 
