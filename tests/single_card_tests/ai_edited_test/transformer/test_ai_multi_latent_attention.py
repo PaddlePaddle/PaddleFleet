@@ -142,17 +142,18 @@ class TestMLAKposEmbSequenceParallelGather(unittest.TestCase):
         )
         self.assertFalse(bool(paddle.equal_all(k0, k1)))
 
-    def test_uac_mla_rope_call_site_passes_k_seq_offset(self):
+    def test_uac_mla_rope_live_path_uses_apply_rotary_pos_emb(self):
         import inspect
 
         from paddlefleet.transformer import multi_latent_attention as mla
 
-        source = inspect.getsource(mla)
-        self.assertIn("k_seq_offset=k_seq_offset", source)
-        self.assertIn(
-            "k_seq_offset=0",
-            inspect.getsource(mla._accuracy_compatible_mla_rope_apply),
+        source = inspect.getsource(mla.MLASelfAttention)
+        self.assertNotIn(
+            "q_pos_emb, k_pos_emb = _accuracy_compatible_mla_rope_apply(",
+            source,
         )
+        self.assertIn("q_pos_emb = apply_rotary_pos_emb(", source)
+        self.assertIn("k_pos_emb = apply_rotary_pos_emb(", source)
 
 
 class TestDeferredWeightGradLinear(unittest.TestCase):

@@ -2412,28 +2412,10 @@ class MLASelfAttention(MultiLatentAttention):
                     if mqa_rope_adjacent
                     else {}
                 )
-                if (
-                    _ACCURACY_COMPATIBLE_KERNEL
-                    and position_ids is not None
-                    and position_ids.ndim == 1
-                ):
-                    k_seq_offset = 0
-                    if self.config.sequence_parallel:
-                        k_seq_len = int(k_pos_emb.shape[0])
-                        q_seq_len = int(q_pos_emb.shape[0])
-                        if k_seq_len > 0 and q_seq_len % k_seq_len == 0:
-                            world = q_seq_len // k_seq_len
-                            rank = int(paddle.distributed.get_rank()) % world
-                            k_seq_offset = rank * k_seq_len
-                    q_pos_emb, k_pos_emb = _accuracy_compatible_mla_rope_apply(
-                        q_pos_emb,
-                        k_pos_emb,
-                        self.rope_theta,
-                        position_ids,
-                        sequence_parallel=self.config.sequence_parallel,
-                        k_seq_offset=k_seq_offset,
-                    )
-                elif self.config.gpt_model_use_experimental_version:
+                # leftover IEEE: UAC FLAG does not intercept RoPE. The helper
+                # rebuilds vanilla freqs from rope_theta and never consumes
+                # rotary_pos_emb (YaRN cache).
+                if self.config.gpt_model_use_experimental_version:
                     # EC-compatible RoPE: complex rotation, no YaRN, no mscale
                     from paddlefleet.transformer.transformer_layer import (
                         TransformerLayer,
