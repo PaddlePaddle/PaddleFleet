@@ -38,8 +38,6 @@ import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet
 
-paddle.set_flags({"FLAGS_flash_attn_version": 4})
-
 from paddlefleet.context_parallel_utils import (
     flashmask_attention_cp,
     scatter_balance,
@@ -56,18 +54,27 @@ CP_SIZE = None
 CP_RANK = None
 CP_GROUP = None
 
+_FA_VERSION_KEY = "FLAGS_flash_attn_version"
+_SAVED_FA_VERSION = None
+
 
 def setUpModule():
-    # FA4 attention-sink lives only in the cute backend, built solely for
-    # compute capability >= 10 (sm100/Blackwell). Skip before fleet.init so
-    # non-sm100 ranks exit cleanly without initializing distributed.
+    # FA4 attention-sink lives only in the cute backend, which paddlefleet_ops
+    # builds for compute capability >= 9 (Hopper and Blackwell). Skip before
+    # fleet.init so ranks without it exit cleanly rather than initializing
+    # distributed first.
     from paddlefleet_ops import is_flash_mask_available
 
     if not is_flash_mask_available():
         raise unittest.SkipTest(
-            "FA4 attention-sink CP requires the cute backend "
-            "(sm100, capability >= 10)"
+            "FA4 attention-sink CP requires the cute backend (capability >= 9)"
         )
+    # Pin FA4 here, not at import time: the flag is process-global, so pinning it
+    # while this module is merely being collected would leak into every other
+    # test file in the same process.
+    global _SAVED_FA_VERSION
+    _SAVED_FA_VERSION = paddle.get_flags([_FA_VERSION_KEY])[_FA_VERSION_KEY]
+    paddle.set_flags({_FA_VERSION_KEY: 4})
     global CP_SIZE, CP_RANK, CP_GROUP
     strategy = fleet.DistributedStrategy()
     world = dist.get_world_size()
@@ -95,6 +102,12 @@ def setUpModule():
     CP_GROUP = fleet.get_hybrid_communicate_group().get_context_parallel_group()
     CP_RANK = CP_GROUP.rank
     CP_SIZE = CP_GROUP.nranks
+
+
+def tearDownModule():
+    """Hand the process-global flag back to whatever it was."""
+    if _SAVED_FA_VERSION is not None:
+        paddle.set_flags({_FA_VERSION_KEY: _SAVED_FA_VERSION})
 
 
 def _cosine_sim(actual, expected):

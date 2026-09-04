@@ -211,6 +211,16 @@ class TestLatentMoEInit(unittest.TestCase):
         self.assertFalse(hasattr(layer, "fc1_latent_proj"))
         self.assertFalse(hasattr(layer, "fc2_latent_proj"))
 
+    def test_accuracy_compatible_forces_alltoall_dispatcher(self):
+        config = _make_moe_config(
+            moe_token_dispatcher_type="deepep",
+            use_accuracy_compatible=True,
+        )
+
+        layer = self._run_init(config)
+
+        self.assertEqual(layer.moe_token_dispatcher_type, "alltoall")
+
     def test_latent_moe_disabled_when_size_is_none(self):
         """moe_latent_size=None disables latent MoE."""
         config = _make_moe_config(moe_latent_size=None)
@@ -866,6 +876,7 @@ class TestFusionMoeForwardLatent(unittest.TestCase):
         expert_out_size = latent_size if use_latent_moe else hidden_size
         stub = MagicMock()
         stub.use_latent_moe = use_latent_moe
+        stub.use_accuracy_compatible = False
         stub._latent_hidden = None
         if use_latent_moe:
             stub.fc1_latent_proj = nn.Linear(hidden_size, latent_size)

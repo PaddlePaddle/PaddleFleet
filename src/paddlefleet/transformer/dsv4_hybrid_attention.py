@@ -485,9 +485,9 @@ def _unpack_dsv4_logical_batch(
     return output.reshape([batch_size, seqlen, -1])
 
 
+from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.utils import (
     get_doc_lens,
-    inspect_tensor,
 )
 
 

@@ -564,7 +564,7 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
     )
     @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
-    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
+    @patch("paddlefleet_ops.flash_mask_facade.FLASHMASK_FA3_USE_CUTEDSL", False)
     @patch(
         "paddlefleet.context_parallel_utils.paddle.get_flags",
         return_value={"FLAGS_cudnn_deterministic": False},
@@ -634,7 +634,7 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
     )
     @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
-    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
+    @patch("paddlefleet_ops.flash_mask_facade.FLASHMASK_FA3_USE_CUTEDSL", False)
     @patch(
         "paddlefleet.context_parallel_utils.paddle.get_flags",
         return_value={"FLAGS_cudnn_deterministic": False},
@@ -705,7 +705,7 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
     )
     @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
-    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
+    @patch("paddlefleet_ops.flash_mask_facade.FLASHMASK_FA3_USE_CUTEDSL", False)
     @patch(
         "paddlefleet.context_parallel_utils.paddle.get_flags",
         return_value={"FLAGS_cudnn_deterministic": False},
@@ -776,7 +776,7 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
     )
     @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
-    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
+    @patch("paddlefleet_ops.flash_mask_facade.FLASHMASK_FA3_USE_CUTEDSL", False)
     @patch(
         "paddlefleet.context_parallel_utils.paddle.get_flags",
         return_value={"FLAGS_cudnn_deterministic": False},
@@ -851,7 +851,7 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
     )
     @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
-    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
+    @patch("paddlefleet_ops.flash_mask_facade.FLASHMASK_FA3_USE_CUTEDSL", False)
     @patch(
         "paddlefleet.context_parallel_utils.paddle.get_flags",
         return_value={"FLAGS_cudnn_deterministic": False},
@@ -922,7 +922,7 @@ class TestCpFlashmaskSoftmaxScaleNotImplemented(unittest.TestCase):
     )
     @patch("paddlefleet.context_parallel_utils.flashmask_attention")
     @patch("paddlefleet.context_parallel_utils.paddle.distributed.all_gather")
-    @patch("paddlefleet.context_parallel_utils._flash_mask_available", False)
+    @patch("paddlefleet_ops.flash_mask_facade.FLASHMASK_FA3_USE_CUTEDSL", False)
     @patch(
         "paddlefleet.context_parallel_utils.paddle.get_flags",
         return_value={"FLAGS_cudnn_deterministic": False},

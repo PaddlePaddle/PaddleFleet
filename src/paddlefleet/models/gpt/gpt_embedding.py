@@ -40,6 +40,7 @@ from paddlefleet.parallel_state import (
 from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
+from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.kimi_delta_attention import build_cu_seqlens
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -334,6 +335,7 @@ class GPTEmbedding(FleetLayer):
                 axis=-1,
             )
             dict_args["input_ids"] = input_ids
+        input_ids = inspect_tensor("embedding_input", -1, input_ids)
         labels = dict_args.get("labels", None)
         if labels is not None:
             labels = labels.cuda()
@@ -414,6 +416,9 @@ class GPTEmbedding(FleetLayer):
                 position_ids=None
                 if self.multimodal_embedding
                 else position_ids,
+            )
+            decoder_input = inspect_tensor(
+                "embedding_output", -1, decoder_input
             )
             # Padding-Token is 0，avoiding Grad updating (ernie_core fill_feature func）
             if (

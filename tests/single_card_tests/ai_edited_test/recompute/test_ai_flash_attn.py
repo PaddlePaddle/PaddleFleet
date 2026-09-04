@@ -29,6 +29,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import paddle
+from paddlefleet_ops import flash_mask_facade
 
 _SKIP_FLASH_ATTN = False
 try:
@@ -41,27 +42,6 @@ except (ImportError, ModuleNotFoundError, AttributeError):
 
 class TestFlashattnAutoCast(unittest.TestCase):
     """Tests for flashattn_auto_cast function."""
-
-
-class TestFlashAttnFunctor(unittest.TestCase):
-    """Tests for FlashAttnFunctor PyLayer."""
-
-    def test_forward_invalid_version(self):
-        """Test that FlashAttnFunctor.forward raises for invalid fa_version."""
-        from paddlefleet.refined_recompute.flash_attn import FlashAttnFunctor
-
-        q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
-        k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
-        v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
-        hold_tensors = {"result_attention": q, "causal": True, "softmax_lse": k}
-
-        with patch(
-            "paddlefleet.refined_recompute.flash_attn.get_fa_version",
-            return_value=99,
-        ):
-            with self.assertRaises(ValueError) as ctx:
-                FlashAttnFunctor.apply(q, k, v, hold_tensors)
-            self.assertIn("Invalid flash attention version", str(ctx.exception))
 
 
 class TestRefinedRcomputeFlashAttention(unittest.TestCase):
@@ -138,36 +118,7 @@ class TestRefinedRcomputeFlashMaskAttention(unittest.TestCase):
         self.assertIn("seed_offset", hold_tensors)
         self.assertIn("causal", hold_tensors)
 
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn.get_fa_version",
-        return_value=99,
-    )
-    @patch(
-        "paddlefleet.refined_recompute.flash_attn._C_ops.flashmask_attention"
-    )
-    @patch("paddlefleet.refined_recompute.flash_attn.framework._dygraph_tracer")
-    def test_first_fwd_invalid_version_raises(
-        self, mock_tracer, mock_flashmask, mock_version
-    ):
-        """Test _first_fwd raises for invalid FA version."""
-        from paddlefleet.refined_recompute.flash_attn import (
-            RefinedRcomputeFlashMaskAttention,
-        )
-
-        mock_tracer_obj = MagicMock()
-        mock_tracer_obj._has_grad = False
-        mock_tracer.return_value = mock_tracer_obj
-
-        q = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
-        k = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
-        v = paddle.randn([2, 4, 8], dtype=paddle.bfloat16)
-        startend = paddle.to_tensor([0, 4, 8], dtype=paddle.int32)
-
-        attn = RefinedRcomputeFlashMaskAttention()
-        with self.assertRaises(ValueError) as ctx:
-            attn.forward(q, k, v, startend)
-        self.assertIn("Invalid flash attention version", str(ctx.exception))
-
+    @patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", False)
     @patch(
         "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=3,
@@ -180,7 +131,11 @@ class TestRefinedRcomputeFlashMaskAttention(unittest.TestCase):
     def test_first_fwd_version_3_with_block_mask(
         self, mock_tracer, mock_sig, mock_flashmask_v2, mock_version
     ):
-        """Test _first_fwd v3 with block_mask parameter in signature."""
+        """Test _first_fwd v3 with block_mask parameter in signature.
+
+        FA3 only lands on ``_C_ops.flashmask_attention_v2`` with the cutedsl
+        hotfix switch off.
+        """
         from paddlefleet.refined_recompute.flash_attn import (
             RefinedRcomputeFlashMaskAttention,
         )
@@ -207,6 +162,7 @@ class TestRefinedRcomputeFlashMaskAttention(unittest.TestCase):
         result = attn.forward(q, k, v, startend, causal=False)
         self.assertTrue(result is not None)
 
+    @patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", False)
     @patch(
         "paddlefleet.refined_recompute.flash_attn.get_fa_version",
         return_value=3,

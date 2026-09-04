@@ -27,6 +27,8 @@ sys.path.insert(
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import paddle
@@ -165,6 +167,36 @@ class TestLanguageLoss(unittest.TestCase):
         self.assertIsNotNone(loss_fn)
         self.assertFalse(loss_fn.enable_parallel_cross_entropy)
         self.assertFalse(loss_fn.use_subbatch)
+
+    def test_accuracy_loss_prefers_explicit_ep_group(self):
+        class FixedLoss(paddle.nn.Layer):
+            def forward(self, logits, labels):
+                return paddle.to_tensor([1.0, 2.0, 3.0, 4.0], dtype="float32")
+
+        config = self._make_config(use_accuracy_compatible=True)
+        loss_fn = LanguageLoss(config)
+        explicit_ep = object()
+        loss_fn.pg_collection = SimpleNamespace(ep=explicit_ep)
+        loss_fn.loss_func = FixedLoss()
+
+        with (
+            patch(
+                "paddlefleet.models.common.language_loss.language_loss.get_expert_model_parallel_group",
+                side_effect=AssertionError(
+                    "global EP group should not be used"
+                ),
+            ),
+            patch(
+                "paddle.distributed.get_world_size", return_value=4
+            ) as get_world_size,
+        ):
+            loss = loss_fn.forward_impl(
+                paddle.zeros([1, 4, 2], dtype="float32"),
+                paddle.zeros([1, 4], dtype="int64"),
+            )
+
+        get_world_size.assert_called_once_with(group=explicit_ep)
+        self.assertAlmostEqual(float(loss), 2.5)
 
     def test_language_loss_forward_impl_simple(self):
         """Test forward_impl with simple logits and labels."""

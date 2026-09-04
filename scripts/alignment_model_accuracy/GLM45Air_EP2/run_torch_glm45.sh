@@ -24,8 +24,7 @@ WORKSPACE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 source "${WORKSPACE_DIR}/venv/torch/bin/activate"
 cd "${WORKSPACE_DIR}"
 
-export MINIMAX_MEGATRON_LM_PATH="${MINIMAX_MEGATRON_LM_PATH:-${WORKSPACE_DIR}/Megatron-LM}"
-export MEGATRON_LM_PATH="${MINIMAX_MEGATRON_LM_PATH}"
+export MEGATRON_LM_PATH="${WORKSPACE_DIR}/Megatron-LM"
 
 # EP2: 单机 2 卡
 export CUDA_VISIBLE_DEVICES=0,1
@@ -33,37 +32,41 @@ export NPROC_PER_NODE=2
 export NNODES="${NNODES:-1}"
 export NODE_RANK="${NODE_RANK:-0}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
-export MASTER_PORT="${MASTER_PORT:-29500}"
+export MASTER_PORT="${MASTER_PORT:-29502}"
 
 export CUBLAS_WORKSPACE_CONFIG=":4096:8"
 # 本机 NVLS multicast 内存注册失败（CUDA error 401），NCCL init 会直接崩：
 #   "Failed to bind NVLink SHARP (NVLS) Multicast memory ... Disable NVLS (NCCL_NVLS_ENABLE=0)"
 export NCCL_NVLS_ENABLE=0
 export TORCHDYNAMO_DISABLE=1
-export TORCH_USE_CUDA_DSA=1
 export PYTORCH_ALLOC_CONF='expandable_segments:True'
 
-# ---- 精度对齐：逐层输出 md5 ----
-export ENABLE_SAVE_HOOK=1
-export ENABLE_BACKWARD_HOOK=0
-export SAVE_TENSOR_GRAD=1
-export SAVE_TENSOR_SAVE_NPY=0
-export SAVE_TENSOR_NAMES=output,grad,nzs,input
+# ---- 精度对齐 Flag ----
+export FLAGS_use_accuracy_compatible_kernel=1
+export USE_ACCURACY_COMPATIBLE=1
+export GLM_ALIGN_BIT_EXACT=1
+export GLM_ALIGN_LOG=0
+
+# ---- 精度对齐：逐层输出 md5（默认关闭）----
+export ENABLE_SAVE_HOOK="${ENABLE_SAVE_HOOK:-0}"
+export ENABLE_BACKWARD_HOOK="${ENABLE_BACKWARD_HOOK:-0}"
+export SAVE_TENSOR_GRAD="${SAVE_TENSOR_GRAD:-0}"
+export SAVE_TENSOR_SAVE_NPY="${SAVE_TENSOR_SAVE_NPY:-0}"
+export MINIMAX_WORKSPACE="${WORKSPACE_DIR}"
 export MG_TENSOR_DEBUG_DIR="${WORKSPACE_DIR}/logs/mg"
 
 RUN_TS="$(date +%Y%m%d-%H%M%S)"
 TORCH_LOG_DIR="${WORKSPACE_DIR}/logs/torch/${RUN_TS}"
-rm -rf "${MG_TENSOR_DEBUG_DIR}"
 mkdir -p "${TORCH_LOG_DIR}" "${MG_TENSOR_DEBUG_DIR}"
 
 # ------- 训练参数 -----
 ARGS=(
     ### model
-    --model /home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP
+    --model /home/.cache/PaddleFormers/GLM-4.5-Air-tiny-2L
 
     ### data
     --dataset /home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP/alignment_torch.jsonl
-    --max_length 128
+    --max_length 8192
     --packing False
     --padding_free False
     --truncation_strategy right
@@ -76,12 +79,12 @@ ARGS=(
     --dataloader_persistent_workers False
 
     ### finetuning
-    --seed 23
+    --seed 42
     --finetune True
     --train_iters 10
     --logging_steps 1
     --eval_iters 0
-    --output_dir ./logs/torch/default/trainer
+    --output_dir "${TORCH_LOG_DIR}/trainer"
 
     ### parallel
     --tensor_model_parallel_size 1
@@ -111,26 +114,22 @@ ARGS=(
     --bias_dropout_fusion False
     --bias_activation_fusion True
     --gradient_accumulation_fusion False
-    --cross_entropy_loss_fusion True
-    --cross_entropy_fusion_impl native
-    --attention_backend local
+    --cross_entropy_loss_fusion False
+    --attention_backend unfused
     --micro_batch_size 1
     --global_batch_size 2
     --calculate_per_token_loss False
 
     ### optimizer
     --optimizer adam
-    --lr 1e-5
-    --min_lr 1e-6
+    --lr 5e-5
+    --min_lr 1e-5
     --lr_warmup_iters 0
     --lr_decay_style cosine
     --adam_beta1 0.9
     --adam_beta2 0.95
     --weight_decay 0.1
-    --clip_grad 0.0
-    --optimizer_cpu_offload False
-    --optimizer_offload_fraction 0.0
-    --use_precision_aware_optimizer False
+    --clip_grad 1.0
     --use_distributed_optimizer False
     --accumulate_allreduce_grads_in_fp32 True
 
