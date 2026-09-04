@@ -154,9 +154,13 @@ class TestMoETopkFusionWrappers(unittest.TestCase):
         self.assertIsNone(none_value)
 
     def test_routing_map_wrapper_launches_kernel_with_masks(self):
-        old_kernel = moe_topk_fusion._routing_map_fwd_kernel
+        # The wrapper launches `_routing_map_fwd_bitmap_kernel`; the module
+        # still defines `_routing_map_fwd_kernel`, but only as the reference
+        # implementation `test_routing_map_bitmap.py` compares against, so
+        # patching that name would record nothing.
+        old_kernel = moe_topk_fusion._routing_map_fwd_bitmap_kernel
         recorder = KernelRecorder()
-        moe_topk_fusion._routing_map_fwd_kernel = recorder
+        moe_topk_fusion._routing_map_fwd_bitmap_kernel = recorder
         gate_probs = paddle.ones([3, 5], dtype="float32")
         topk_indices = paddle.to_tensor([[1, 2], [3, 4], [0, 1]], dtype="int64")
         input_ids = paddle.to_tensor([1, 0, 2], dtype="int64")
@@ -166,7 +170,7 @@ class TestMoETopkFusionWrappers(unittest.TestCase):
                 gate_probs, topk_indices, input_ids, pure_text
             )
         finally:
-            moe_topk_fusion._routing_map_fwd_kernel = old_kernel
+            moe_topk_fusion._routing_map_fwd_bitmap_kernel = old_kernel
 
         self.assertEqual(recorder.grid, (1, 1))
         self.assertIs(recorder.kwargs["topk_indices_ptr"], topk_indices)
@@ -180,15 +184,15 @@ class TestMoETopkFusionWrappers(unittest.TestCase):
         self.assertEqual(dispatch_mask.shape, [5])
 
     def test_routing_map_wrapper_uses_placeholders_without_masks(self):
-        old_kernel = moe_topk_fusion._routing_map_fwd_kernel
+        old_kernel = moe_topk_fusion._routing_map_fwd_bitmap_kernel
         recorder = KernelRecorder()
-        moe_topk_fusion._routing_map_fwd_kernel = recorder
+        moe_topk_fusion._routing_map_fwd_bitmap_kernel = recorder
         gate_probs = paddle.ones([2, 4], dtype="float32")
         topk_indices = paddle.ones([2, 3], dtype="int64")
         try:
             routing_map_fusion_forward(gate_probs, topk_indices)
         finally:
-            moe_topk_fusion._routing_map_fwd_kernel = old_kernel
+            moe_topk_fusion._routing_map_fwd_bitmap_kernel = old_kernel
 
         self.assertIs(recorder.kwargs["input_ids_ptr"], topk_indices)
         self.assertIs(recorder.kwargs["is_pure_text_line_ptr"], topk_indices)

@@ -267,6 +267,16 @@ def situ_glu_scale_forward_triton(
         return out
     block_n = min(1024, triton.next_power_of_2(n_cols))
     grid = (rows, triton.cdiv(n_cols, block_n))
+    # 8 elements per thread, i.e. 32 B in flight per thread. The old rule
+    # (`8 if block_n >= 512 else 4`) left only 4 elements per thread at
+    # block_n=1024, which is the shape this kernel actually runs at. Measured at
+    # M=82432 / N=2048 / bf16, the fastest point at every block_n is the
+    # "8 elements/thread" diagonal: 512:w2 328.0, 1024:w4 327.4, 2048:w8 331.6
+    # us, versus 338.4 us for the old rule's 1024:w8.
+    # This is bit-exact, not a numeric tradeoff: the forward kernel has no
+    # cross-element reduction, so each output element's arithmetic is
+    # independent of which block or thread computes it (verified over all
+    # 168 820 736 elements at M=82432, zero differing bits).
     _situ_glu_scale_fwd_kernel[grid](
         x,
         probs,
@@ -276,7 +286,7 @@ def situ_glu_scale_forward_triton(
         linear_beta=1.0 if linear_beta is None else float(linear_beta),
         has_linear_tanh=linear_beta is not None,
         block_n=block_n,
-        num_warps=8 if block_n >= 512 else 4,
+        num_warps=max(1, min(32, block_n // 256)),
     )
     return out
 
