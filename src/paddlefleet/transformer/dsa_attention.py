@@ -77,32 +77,29 @@ class _AccuracyCompatibleQKMatmul(paddle.autograd.PyLayer):
 
     @staticmethod
     def forward(ctx, query: Tensor, key: Tensor) -> Tensor:
-        batch_size, num_heads, sequence_length, head_dim = query.shape
-        expanded_key = key.expand(
-            [batch_size, num_heads, head_dim, sequence_length]
-        )
+        # query: [b, h, sq, d], key: [b, 1|h, d, sk]. Under sequence
+        # parallel sq may already be gathered while sk is still s/TP;
+        # expand only the head axis, never rewrite sk from sq.
+        batch_size, num_heads, query_seq, head_dim = query.shape
+        key_seq = int(key.shape[-1])
+        expanded_key = key.expand([batch_size, num_heads, head_dim, key_seq])
         scores = paddle.bmm(
-            query.reshape([batch_size * num_heads, sequence_length, head_dim]),
-            expanded_key.reshape(
-                [batch_size * num_heads, head_dim, sequence_length]
-            ),
-        ).reshape([batch_size, num_heads, sequence_length, sequence_length])
+            query.reshape([batch_size * num_heads, query_seq, head_dim]),
+            expanded_key.reshape([batch_size * num_heads, head_dim, key_seq]),
+        ).reshape([batch_size, num_heads, query_seq, key_seq])
         ctx.save_for_backward(query, key)
         return scores
 
     @staticmethod
     def backward(ctx, grad_output: Tensor) -> tuple[Tensor, Tensor]:
         query, key = ctx.saved_tensor()
-        batch_size, num_heads, sequence_length, head_dim = query.shape
-        expanded_key = key.expand(
-            [batch_size, num_heads, head_dim, sequence_length]
-        )
+        batch_size, num_heads, query_seq, head_dim = query.shape
+        key_seq = int(key.shape[-1])
+        expanded_key = key.expand([batch_size, num_heads, head_dim, key_seq])
         grad_query = paddle.bmm(
-            grad_output.reshape(
-                [batch_size * num_heads, sequence_length, sequence_length]
-            ),
+            grad_output.reshape([batch_size * num_heads, query_seq, key_seq]),
             expanded_key.transpose([0, 1, 3, 2]).reshape(
-                [batch_size * num_heads, sequence_length, head_dim]
+                [batch_size * num_heads, key_seq, head_dim]
             ),
         ).reshape(query.shape)
         grad_key_per_head = paddle.matmul(
@@ -371,6 +368,64 @@ def _align_dsa_indexer_mask(
         )
         return gathered.transpose([1, 2, 0]).contiguous()
     return None
+
+
+def _align_sp_aux_to_query(tensor: Tensor, query: Tensor) -> Tensor:
+    """Lift a seq-sharded MLA auxiliary to the query layout [b, s, ...].
+
+    Query entering DSAttention is batch-first and already gathered under
+    sequence parallel. ``kv_compressed`` / ``k_pos_emb`` stay at s/TP, so
+    concatenating them into absorbed key fail-closes in QK expand
+    (sk=30 vs sq=60).
+    """
+    if tensor is None or query.ndim != 4:
+        return tensor
+    batch, seq = int(query.shape[0]), int(query.shape[1])
+    if tensor.ndim == 3:
+        if int(tensor.shape[0]) == batch and int(tensor.shape[1]) == seq:
+            return tensor
+        if int(tensor.shape[0]) == seq and int(tensor.shape[1]) == batch:
+            return tensor.transpose([1, 0, 2])
+        if int(tensor.shape[0]) == batch and int(tensor.shape[1]) < seq:
+            return (
+                gather_from_sequence_parallel_region(
+                    tensor.transpose([1, 0, 2]).contiguous()
+                )
+                .transpose([1, 0, 2])
+                .contiguous()
+            )
+        if int(tensor.shape[0]) < seq and int(tensor.shape[1]) == batch:
+            gathered = gather_from_sequence_parallel_region(tensor.contiguous())
+            if (
+                int(gathered.shape[0]) == seq
+                and int(gathered.shape[1]) == batch
+            ):
+                return gathered.transpose([1, 0, 2])
+            return gathered
+        return tensor
+    if tensor.ndim == 4:
+        if int(tensor.shape[0]) == batch and int(tensor.shape[1]) == seq:
+            return tensor
+        if int(tensor.shape[0]) == seq and int(tensor.shape[1]) == batch:
+            return tensor.transpose([1, 0, 2, 3])
+        if int(tensor.shape[0]) == batch and int(tensor.shape[1]) < seq:
+            return (
+                gather_from_sequence_parallel_region(
+                    tensor.transpose([1, 0, 2, 3]).contiguous()
+                )
+                .transpose([1, 0, 2, 3])
+                .contiguous()
+            )
+        if int(tensor.shape[0]) < seq and int(tensor.shape[1]) == batch:
+            gathered = gather_from_sequence_parallel_region(tensor.contiguous())
+            if (
+                int(gathered.shape[0]) == seq
+                and int(gathered.shape[1]) == batch
+            ):
+                return gathered.transpose([1, 0, 2, 3])
+            return gathered
+        return tensor
+    return tensor
 
 
 # ---------------------------------------------------------------------------
@@ -2085,13 +2140,17 @@ class DSAttention(FleetLayer):
             and k_pos_emb is not None
             and v_b_proj_weight is not None
         ):
+            kv_aligned = _align_sp_aux_to_query(kv_compressed, q_absorbed)
+            k_pos_aligned = _align_sp_aux_to_query(k_pos_emb, q_absorbed)
+            if k_pos_aligned.ndim == 3:
+                k_pos_aligned = k_pos_aligned.unsqueeze(-2)
             key_absorbed = paddle.concat(
-                [kv_compressed.unsqueeze(-2), k_pos_emb], axis=-1
+                [kv_aligned.unsqueeze(-2), k_pos_aligned], axis=-1
             )
             core_attn_out = _unfused_absorbed_dsa_attention(
                 q_absorbed,
                 key_absorbed,
-                kv_compressed.unsqueeze(-2),
+                kv_aligned.unsqueeze(-2),
                 v_b_proj_weight,
                 combined_mask,
                 self.softmax_scale,

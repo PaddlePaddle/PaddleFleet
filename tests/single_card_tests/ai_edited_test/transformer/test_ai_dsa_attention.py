@@ -37,6 +37,7 @@ from paddlefleet.transformer.dsa_attention import (
     _AccuracyCompatibleQKMatmul,
     _AccuracyCompatibleSoftmax,
     _align_dsa_indexer_mask,
+    _align_sp_aux_to_query,
     _normalize_dsa_mask,
     _unfused_absorbed_dsa_attention,
     _unfused_dsa_attention,
@@ -81,6 +82,14 @@ class TestAccuracyCompatibleQKMatmul(unittest.TestCase):
 
         self.assertTrue(paddle.equal_all(query.grad, expected_query))
         self.assertTrue(paddle.equal_all(key.grad, expected_key))
+
+    def test_forward_keeps_key_seq_when_query_seq_differs(self):
+        query = paddle.randn([1, 2, 4, 8], dtype="float32")
+        key = paddle.randn([1, 1, 8, 2], dtype="float32")
+        scores = _AccuracyCompatibleQKMatmul.apply(query, key)
+        self.assertEqual(tuple(scores.shape), (1, 2, 4, 2))
+        expected = paddle.matmul(query, key.expand([1, 2, 8, 2]))
+        self.assertTrue(paddle.equal_all(scores, expected))
 
 
 class TestAccuracyCompatibleSoftmax(unittest.TestCase):
@@ -170,6 +179,19 @@ class TestNormalizeDsaMask(unittest.TestCase):
         mask = paddle.zeros([1, 60, 30], dtype="float32")
         out = _align_dsa_indexer_mask(mask, 60)
         self.assertIsNone(out)
+
+    def test_align_sp_aux_transposes_seq_first_to_query_layout(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        tensor = paddle.arange(8, dtype="float32").reshape([4, 1, 2])
+        out = _align_sp_aux_to_query(tensor, query)
+        self.assertEqual(tuple(out.shape), (1, 4, 2))
+        self.assertTrue(paddle.equal_all(out, tensor.transpose([1, 0, 2])))
+
+    def test_align_sp_aux_keeps_matching_batch_first(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        tensor = paddle.arange(8, dtype="float32").reshape([1, 4, 2])
+        out = _align_sp_aux_to_query(tensor, query)
+        self.assertTrue(paddle.equal_all(out, tensor))
 
 
 class TestHadamardTransform(unittest.TestCase):
