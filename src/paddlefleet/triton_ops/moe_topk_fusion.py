@@ -541,6 +541,140 @@ def _routing_map_fwd_kernel(
 
 
 # -----------------------------------------------------------
+# Bitmap routing-map kernel
+# -----------------------------------------------------------
+@triton.jit
+def _bitwise_or(a, b):
+    # Reduction operator for the bit packing below. `tl.sum` would only equal
+    # OR while every expert id in a row is distinct; the kernel this replaces
+    # reduces with `max`, which is correct even for a repeated id, so use OR
+    # and do not inherit an assumption the original did not make.
+    return a | b
+
+
+# Why this replaced `_routing_map_fwd_kernel` above: that one materializes a
+# [BLOCK_M, BLOCK_K, BLOCK_N] = [64, 16, 128] fp32 intermediate (`matches`).
+# That is 4 KB per thread, i.e. ~1024 registers where the hardware has 255, so
+# ptxas spills it to local memory -- and local memory is DRAM. Measured with
+# ncu on B30Z at tokens 8192 / experts 512 / topk 10:
+#   local-memory traffic 899 MB load + 908 MB store per launch,
+#   DRAM 1.49 GB per launch against 18.1 MB of semantically necessary bytes
+#   (82x), 387 us per launch.
+# The comment on that broadcast calls it a "core optimization"; the broadcast
+# *is* the bug.
+#
+# This kernel keeps the same semantics and removes the 3D intermediate:
+#   * a tile is [BLOCK_M rows] x [32 experts]; the 32 experts of one row fit in
+#     one int32 word, so "which of my 32 experts did this row pick" is computed
+#     once per row as bits = OR_k (1 << (idx_k - base));
+#   * each output element then costs one shift + one and + one int-to-float,
+#     instead of moe_k compare/select pairs.
+# Measured on the same shape: no spills at all (local traffic exactly 0),
+# 3.47M warp-instructions vs 6.75M, 7.2 us per launch back-to-back (ncu, L2
+# flushed: 9.95 us) -- 53x faster than the 387 us above.
+# Reproduced here from Python without ncu: 139.7 us -> 19.2 us per launch
+# (7.3x). That is a *lower bound only*: at 19 us the bitmap kernel is floored by
+# per-launch CPU overhead, so this measurement cannot see its real GPU time. The
+# 53x figure is the ncu one; do not quote the two as if they disagreed about the
+# kernel.
+# `_routing_map_fwd_kernel` is kept as the reference implementation;
+# tests/single_card_tests/custom_ops/test_routing_map_bitmap.py asserts the two
+# agree bit-for-bit, which is the only reason bit-exactness can be claimed here
+# (unlike a launch-geometry change, this is a different algorithm).
+@enable_compat_on_triton_kernel
+@triton.jit
+def _routing_map_fwd_bitmap_kernel(
+    topk_indices_ptr,
+    input_ids_ptr,
+    is_pure_text_line_ptr,
+    routing_map_ptr,
+    topk_indices_out_ptr,
+    dispatch_mask_ptr,
+    stride_topk_s,
+    stride_topk_k,
+    stride_routing_s,
+    stride_routing_e,
+    n_experts,
+    seq_len,
+    moe_k,
+    pad_token_id,
+    has_input_ids: tl.constexpr,
+    has_pure_text_mask: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    tl.static_assert(
+        BLOCK_N == 32, "bitmap kernel packs one int32 word per row"
+    )
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    mask_m = offs_m < seq_len
+    base = pid_n * BLOCK_N
+    lane = tl.arange(0, BLOCK_N)
+    offs_n = base + lane
+    mask_n = offs_n < n_experts
+
+    is_valid = tl.full((BLOCK_M,), 1, dtype=tl.int1)
+    if has_input_ids:
+        in_ids = tl.load(
+            input_ids_ptr + offs_m, mask=mask_m, other=pad_token_id
+        )
+        is_valid = is_valid & (in_ids != pad_token_id)
+    if has_pure_text_mask:
+        p_mask = tl.load(is_pure_text_line_ptr + offs_m, mask=mask_m, other=0)
+        is_valid = is_valid & (p_mask > 0)
+
+    offs_k = tl.arange(0, BLOCK_K)
+    load_mask = mask_m[:, None] & (offs_k < moe_k)[None, :]
+    off2 = offs_m[:, None] * stride_topk_s + offs_k[None, :] * stride_topk_k
+    indices = tl.load(topk_indices_ptr + off2, mask=load_mask, other=-1)
+
+    # Only the first block along the expert dim writes the masked indices.
+    if pid_n == 0:
+        tl.store(
+            topk_indices_out_ptr + off2,
+            tl.where(is_valid[:, None], indices, -1),
+            mask=load_mask,
+        )
+
+    # Pack the experts of this tile into one int32 word per row.
+    # Comparing in int32 rather than int64 halves the integer work; expert ids
+    # are < n_experts and the sentinel is -1, so they fit.
+    rel = indices.to(tl.int32) - base
+    hit = load_mask & (rel >= 0) & (rel < BLOCK_N)
+    # tl.where evaluates both arms, so clamp the shift amount first.
+    bits = tl.reduce(
+        tl.where(hit, (1 << tl.where(hit, rel, 0)), 0), 1, _bitwise_or
+    )
+
+    # Expand the word back to one fp32 per expert. A row that hit relative
+    # index 31 has the top bit set, so bitcast to uint32 first and let the
+    # shift be a logical one; `& 1` would keep only bit 0 either way, but an
+    # unsigned word leaves nothing to reason about. Relative index 31 is
+    # covered by test_routing_map_bitmap.py, which checks those rows against
+    # both the kernel this replaces and an independent one-hot scatter.
+    words = bits.to(tl.uint32, bitcast=True)
+    lanes = lane.to(tl.uint32, bitcast=True)
+    routing_block = ((words[:, None] >> lanes[None, :]) & 1).to(tl.float32)
+    routing_block = tl.where(is_valid[:, None], routing_block, 0.0)
+
+    tl.store(
+        routing_map_ptr
+        + offs_m[:, None] * stride_routing_s
+        + offs_n[None, :] * stride_routing_e,
+        routing_block,
+        mask=mask_m[:, None] & mask_n[None, :],
+    )
+
+    dispatch_block = tl.sum(routing_block, axis=0)
+    dispatch_block = tl.where(mask_n, dispatch_block, 0.0).to(tl.int64)
+    tl.atomic_add(dispatch_mask_ptr + offs_n, dispatch_block, mask=mask_n)
+
+
+# -----------------------------------------------------------
 # Python wrapper
 # -----------------------------------------------------------
 
@@ -577,19 +711,23 @@ def routing_map_fusion_forward(
     dispatch_mask = paddle.zeros((n_experts,), dtype=paddle.int64)
 
     # Tuned block sizes.
-    # BLOCK_M: number of rows processed per block. 32 or 64 is recommended;
-    # larger values improve memory bandwidth but increase register pressure.
-    # BLOCK_N: number of experts processed per block. 64 or 128 is recommended.
+    # BLOCK_M: number of rows processed per block.
+    # BLOCK_N: fixed at 32 by the int32 bit packing in the kernel.
     # BLOCK_K: number of moe_k entries processed per block. Must be a power
     # of 2; use next_power_of_2 to round up.
+    # (BLOCK_M, num_warps) = (64, 2) was picked from a 49-point sweep: 7.16 us
+    # against 7.05 us for the fastest point (BLOCK_M=128), but with half the
+    # register pressure, which matters because the [BLOCK_M, BLOCK_K] index tile
+    # grows with moe_k. The whole sweep stayed within 7.0-14.6 us, i.e. there is
+    # no spill cliff to fall off.
     BLOCK_M = 64
-    BLOCK_N = 128
+    BLOCK_N = 32
     BLOCK_K = triton.next_power_of_2(moe_k)
 
     grid = (triton.cdiv(seq_len, BLOCK_M), triton.cdiv(n_experts, BLOCK_N))
 
     # Prepare pointer args: Paddle tensors can be passed directly to Triton.
-    _routing_map_fwd_kernel[grid](
+    _routing_map_fwd_bitmap_kernel[grid](
         topk_indices_ptr=topk_indices,
         input_ids_ptr=input_ids
         if input_ids is not None
@@ -613,6 +751,7 @@ def routing_map_fusion_forward(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
+        num_warps=2,
     )
 
     return routing_map, topk_indices_out, dispatch_mask

@@ -59,6 +59,80 @@ def _dsa_head_tile(num_heads: int) -> int:
     )
 
 
+# Query-head counts the DSA **score-target** kernel can tile. Unlike the
+# attention tile above it is not a fixed 64/128, and unlike it the answer depends
+# on the device, because the two arch paths are separate kernels
+# (``score_recompute/api.py`` dispatches on ``get_device_capability``).
+#
+# On SM100+ the kernel takes the query-head count as its MMA ``M``
+# (``_dispatch_sparse_attn_tile_params``: ``m = qhead_per_kv_head``) and
+# addresses TMEM through ``tcgen05.copy.Repetition(m // 4)``, an enum of powers
+# of two only (``cutlass/cute/nvgpu/tcgen05/copy.py``). So 24 / 40 / 48 / 80
+# raise ``N is not a valid Repetition`` from inside the CuTe trace -- i.e. from
+# wherever the recompute segment is replayed, not from the call site.
+#
+# 16 is the SM100+ floor rather than 4 because ``h == 8`` does not fail, it
+# silently returns an all-zero target, which the KL then renormalises into a
+# uniform distribution with no error anywhere.
+#
+# SM90 has neither constraint: it caps ``tile_m`` at 64 and loops over
+# ``qhead_per_kvhead // tile_m`` head tiles
+# (``_interface_sm90._compute_tile_m``), so it serves any width up to 64 in a
+# single tile and any multiple of 64 above that. Padding there would only buy
+# wasted MMA rows, so the width is computed per device.
+#
+# Its one floor is a single head: ``_compute_tile_m`` opens with
+# ``assert qhead_per_kvhead > 1, "SM90 kernel requires MQA/GQA"``, and the sparse
+# validator re-derives the ratio behind ``assert num_head > num_head_kv``
+# (``_interface_sm90.py:71,129``). With the single latent KV head this path uses,
+# ``h == 1`` trips both, and 2 is the narrowest pad that clears them.
+_SCORE_TARGET_QHEAD_MIN = 16
+_SM90_SCORE_TARGET_HEAD_TILE = 64
+_SM90_SCORE_TARGET_QHEAD_MIN = 2
+
+
+def score_target_qheads(num_heads: int) -> int:
+    """Narrowest score-target tile width this device covers ``num_heads`` at."""
+    num_heads = int(num_heads)
+    major, _ = paddle.device.cuda.get_device_capability()
+    if major < 10:
+        tile = _SM90_SCORE_TARGET_HEAD_TILE
+        if num_heads <= tile:
+            return max(_SM90_SCORE_TARGET_QHEAD_MIN, num_heads)
+        return -(-num_heads // tile) * tile
+    return max(_SCORE_TARGET_QHEAD_MIN, 1 << (num_heads - 1).bit_length())
+
+
+def pad_score_target_heads(query: Tensor, lse: Tensor):
+    """Widen ``query``/``lse`` to a head count the score-target kernel tiles.
+
+    ``query`` is ``[b, s, h, d]`` and ``lse`` the matching ``[b, s, h]`` per-head
+    log-sum-exp over the scored column set. Pad heads get a **zero** query row
+    and an **infinite** LSE, so ``exp(0 * scale - inf) == 0`` keeps them out of
+    the head sum exactly rather than approximately. Nothing is sliced back off:
+    the kernel's output is already head-reduced (``[b, s, width]``), so the pad
+    heads leave no trace in the returned shape.
+
+    The same rule is applied to the *dense* score pair by
+    ``cudnn_ops.indexer.dense_indexer_kl_cudnn._pad_attn_kl_heads``; the two
+    kernels share the tile-dispatch constraint but not the call path.
+    """
+    h = int(query.shape[2])
+    h_padded = score_target_qheads(h)
+    lse = lse.cast("float32")
+    if h_padded == h:
+        return query, lse
+    pad = h_padded - h
+    b, s, dk = int(query.shape[0]), int(query.shape[1]), int(query.shape[3])
+    query = paddle.concat(
+        [query, paddle.zeros([b, s, pad, dk], dtype=query.dtype)], axis=2
+    )
+    lse = paddle.concat(
+        [lse, paddle.full([b, s, pad], float("inf"), dtype="float32")], axis=2
+    )
+    return query, lse
+
+
 @functools.lru_cache(maxsize=16)
 def _real_rows(
     num_tokens: int, num_heads: int, head_tile: int, keep: int, total: int

@@ -339,6 +339,19 @@ class TransformerConfig(ModelParallelConfig):
     SiTU-GLU as separate ops; the fused kernel also falls back to those ops
     when Triton is unavailable."""
 
+    situ_glu_plain_fusion: bool = False
+    """Opt into the fused Triton SiTU-GLU kernel on the call sites that have no
+    router scaling: the dense MLP (``StandardMLPSharedExpert`` and the
+    ``first_k_dense_replace`` layer) and the non-FP8 GroupedMLP experts. This is
+    a different kernel from the one ``situ_glu_fusion`` selects -- that one also
+    fuses the per-token router scale and only serves FusionMoe -- so the two
+    flags are independent. Off by default, which runs SiTU-GLU as 13 separate
+    fp32 ops; the fused kernel also falls back to those ops when Triton is
+    unavailable or the input is not a contiguous GPU tensor. The forward is
+    bit-exact against the op chain; the backward is not (0.07% of gradient
+    elements differ, all near zero, in the direction of being more accurate --
+    see ``triton_ops/situ_glu_plain.py``)."""
+
     use_bias: bool = False
     """Include a bias term in all linear layers (QKV projections and Output projections, after core attention, and two in
     MLP layer)."""
