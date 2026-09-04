@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 
 import unittest
-from contextlib import redirect_stdout
+from contextlib import ExitStack, redirect_stdout
 from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -12,8 +12,10 @@ from unittest.mock import patch
 import paddle
 
 from paddlefleet.transformer.csa_attention import (
+    CompressOrSkip,
     CompressedSparseAttention,
     IndexCacheServedDistillLossAutoScaler,
+    TilelangIndexerLossState,
     TileLangCSAIndexerDistillBridge,
     TileLangCSAIndexerLossAutoScaler,
     _indexcache_offload_saved_delta,
@@ -161,6 +163,7 @@ class TestIndexCacheConfig(unittest.TestCase):
 
     def test_debug_config_rejects_invalid_values(self):
         cases = (
+            ({"indexcache_multi_layer_distill": 1}, TypeError),
             ({"indexcache_train_debug": 1}, TypeError),
             ({"indexcache_stall_trace": "true"}, TypeError),
             ({"indexcache_stall_trace_layers": "2"}, TypeError),
@@ -177,6 +180,20 @@ class TestIndexCacheConfig(unittest.TestCase):
         for overrides, error in cases:
             with self.subTest(overrides=overrides), self.assertRaises(error):
                 _config_for_pattern("F", **overrides)
+
+    def test_indexcache_fields_reject_non_dsv4_variants(self):
+        for overrides in (
+            {"index_topk_pattern": "F"},
+            {"indexcache_multi_layer_distill": True},
+        ):
+            with (
+                self.subTest(overrides=overrides),
+                self.assertRaisesRegex(
+                    ValueError,
+                    "experimental_attention_variant='dsv4_hybrid'",
+                ),
+            ):
+                TransformerConfig(num_hidden_layers=1, **overrides)
 
     def test_common_patterns_are_normalized_and_accepted(self):
         for pattern in ("F", "FSF", "FSSF"):
@@ -253,6 +270,18 @@ class TestIndexCacheConfig(unittest.TestCase):
                 recompute_num_layers=1,
             )
 
+    def test_recompute_rejects_block_attention_residuals(self):
+        with self.assertRaisesRegex(
+            NotImplementedError, "block_attention_residuals"
+        ):
+            _config_for_pattern(
+                "FS",
+                recompute_granularity="full",
+                recompute_method="uniform",
+                recompute_num_layers=1,
+                block_attention_residuals=True,
+            )
+
     def test_invalid_pattern_contracts_fail_fast(self):
         cases = (
             ({"pattern": "FX"}, ValueError),
@@ -289,6 +318,261 @@ class TestIndexCacheConfig(unittest.TestCase):
 
 
 class TestIndexCacheCoreState(unittest.TestCase):
+    def _assert_replay_only_changes_attention(self, action, cp_enabled):
+        pattern = "FS"
+        config = _layer_config(
+            pattern,
+            indexcache_multi_layer_distill=True,
+            context_parallel_size=2 if cp_enabled else 1,
+        )
+        layer = _make_layer(config, 1 if action == "F" else 2)
+        object.__setattr__(layer, "is_mqa_layer", False)
+        object.__setattr__(layer, "is_hca_layer", False)
+        object.__setattr__(layer, "compressor", object())
+        object.__setattr__(layer, "window_size", 2)
+        object.__setattr__(layer, "indexer_backend", "tilelang")
+        object.__setattr__(layer, "sparse_attn_backend", "unfused")
+        object.__setattr__(
+            layer, "attn_sink", paddle.zeros([1], dtype="float32")
+        )
+        object.__setattr__(layer, "softmax_scale", 1.0)
+        object.__setattr__(layer, "tp_group", None)
+
+        if cp_enabled:
+            object.__setattr__(layer, "cp_enabled", True)
+            object.__setattr__(layer, "cp_size", 2)
+            object.__setattr__(layer, "cp_rank", 0)
+            object.__setattr__(layer, "cp_group", None)
+
+        batch, seq = 1, 8
+        query = paddle.zeros([batch, seq, 1, 2], dtype="float32")
+        key = paddle.zeros([batch, seq, 1, 2], dtype="float32")
+        x = paddle.zeros([batch, seq, 4], dtype="float32")
+        qr = paddle.zeros([batch, seq, 2], dtype="float32")
+        window = paddle.full([batch, seq, 1], -1, dtype="int32")
+        original = paddle.full([batch, seq, 2], 8, dtype="int32")
+        replay = paddle.full([batch, seq, 2], 9, dtype="int32")
+        topk_probs = paddle.full(
+            [batch, seq, 2], 0.5, dtype="float32"
+        )
+        loss_state = TilelangIndexerLossState(
+            paddle.ones([1], dtype="float32"),
+            paddle.ones([1], dtype="float32"),
+            paddle.ones([1, 2, 1], dtype="float32"),
+            paddle.zeros([batch, seq, 2], dtype="int32"),
+            topk_probs,
+            None,
+            0.1,
+            "tilelang",
+            None,
+            None,
+        )
+        packed_state = (paddle.ones([1], dtype="float32"),)
+        attention_output = paddle.ones(
+            [batch, seq, 1, 2], dtype="float32"
+        )
+
+        class _Compressor:
+            def __call__(self, *_args, **_kwargs):
+                return paddle.zeros([batch, 4, 2], dtype="float32")
+
+        if cp_enabled:
+            object.__setattr__(layer, "compressor", _Compressor())
+
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch.object(
+                    CompressedSparseAttention,
+                    "_indexcache_next_c4_action",
+                    return_value=(0 if action == "F" else 1, action, pattern),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    CompressedSparseAttention,
+                    "_indexcache_has_future_served_layer",
+                    return_value=action == "F",
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    CompressedSparseAttention,
+                    "_indexcache_multi_layer_distill_enabled",
+                    return_value=True,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    CompressedSparseAttention,
+                    "_indexcache_served_count",
+                    return_value=1,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    CompressedSparseAttention,
+                    "_indexcache_scaled_loss_coeff",
+                    return_value=0.1,
+                )
+            )
+            cache_topk = stack.enter_context(
+                patch.object(
+                    CompressedSparseAttention,
+                    "_indexcache_cache_topk",
+                    return_value=packed_state,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    CompressedSparseAttention,
+                    "_indexcache_reuse_topk",
+                    return_value=original,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    CompressedSparseAttention,
+                    "_indexcache_served_distill_state",
+                    return_value=None,
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    CompressedSparseAttention,
+                    "_indexcache_clear_cached_state",
+                )
+            )
+            replay_hook = stack.enter_context(
+                patch.object(
+                    CompressedSparseAttention,
+                    "_postprocess_indexer_replay",
+                    return_value=replay,
+                )
+            )
+            sparse_attn = stack.enter_context(
+                patch.object(
+                    CompressedSparseAttention,
+                    "compressed_sparse_attn",
+                    return_value=attention_output,
+                )
+            )
+            fused_target = stack.enter_context(
+                patch.object(
+                    CompressedSparseAttention,
+                    "_compute_fused_indexer_target",
+                    return_value=paddle.full_like(topk_probs, 0.5),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    CompressedSparseAttention,
+                    "_indexcache_attach_indexer_loss",
+                    side_effect=lambda output, *_args, **_kwargs: output,
+                )
+            )
+
+            if cp_enabled:
+                stack.enter_context(
+                    patch(
+                        "paddlefleet.transformer.csa_attention."
+                        "get_window_topk_idxs_cp",
+                        return_value=window,
+                    )
+                )
+                stack.enter_context(
+                    patch(
+                        "paddlefleet.transformer.csa_attention.all_gather_cp",
+                        return_value=paddle.zeros(
+                            [batch, seq * 2, 2], dtype="float32"
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        CompressedSparseAttention,
+                        "_compute_indexer_compressed_topk_idxs_cp",
+                        return_value=(
+                            original,
+                            None,
+                            loss_state if action == "F" else None,
+                            0.1,
+                            action == "F",
+                            1,
+                        ),
+                    )
+                )
+                result = CompressedSparseAttention._forward_cp(
+                    layer,
+                    query,
+                    key,
+                    x,
+                    qr,
+                    indexcache_state=(
+                        packed_state if action == "S" else None
+                    ),
+                )
+            else:
+                stack.enter_context(
+                    patch(
+                        "paddlefleet.transformer.csa_attention."
+                        "get_window_topk_idxs",
+                        return_value=window,
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        CompressOrSkip,
+                        "apply",
+                        return_value=paddle.zeros(
+                            [batch, seq + 2, 2], dtype="float32"
+                        ),
+                    )
+                )
+                stack.enter_context(
+                    patch.object(
+                        CompressedSparseAttention,
+                        "_compute_indexer_compressed_topk_idxs",
+                        return_value=(
+                            original,
+                            None,
+                            loss_state if action == "F" else None,
+                        ),
+                    )
+                )
+                result = CompressedSparseAttention.forward(
+                    layer,
+                    query,
+                    key,
+                    key,
+                    x=x,
+                    qr=qr,
+                    indexcache_state=(
+                        packed_state if action == "S" else None
+                    ),
+                )
+
+        replay_hook.assert_called_once()
+        self.assertIs(replay_hook.call_args.args[0], original)
+        compressed_attention_topk = sparse_attn.call_args.args[3][..., -2:]
+        self.assertTrue(
+            paddle.equal_all(compressed_attention_topk, replay).item()
+        )
+        if action == "F":
+            self.assertIs(cache_topk.call_args.args[0], original)
+            self.assertIs(fused_target.call_args.args[2], original)
+            self.assertIs(result[1], packed_state)
+        else:
+            cache_topk.assert_not_called()
+            fused_target.assert_not_called()
+
+    def test_replay_preserves_native_f_s_state_and_loss_indices(self):
+        for cp_enabled in (False, True):
+            for action in ("F", "S"):
+                with self.subTest(cp_enabled=cp_enabled, action=action):
+                    self._assert_replay_only_changes_attention(
+                        action, cp_enabled
+                    )
+
     def test_train_debug_is_driven_by_config(self):
         config = _layer_config("F", indexcache_train_debug=True)
         layer = _make_layer(config, 1)
@@ -527,7 +811,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
         self.assertEqual(state_kind(state), INDEXCACHE_STATE_KIND_DISTILL)
         self.assertEqual(INDEXCACHE_DISTILL_GRAD_INDICES, (5,))
         self.assertEqual(
-            [state[idx].numel() for idx in (1, 2, 3, 4)], [0, 0, 0, 0]
+            [state[idx].numel() for idx in (1, 2, 3, 4)], [1, 1, 1, 1]
         )
         self.assertEqual(state[0].dtype, paddle.int32)
         self.assertEqual(list(state[0].shape), [1, 2, 2])
@@ -587,7 +871,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
                 _unpack_indexcache_pipeline_topk(state[0], 2), raw_topk
             ).item()
         )
-        self.assertEqual(state[4].numel(), 0)
+        self.assertEqual(state[4].numel(), 1)
         served = _make_layer(config, 1)
         reused = served._indexcache_reuse_topk(1, 4, 1, pattern, state)
         self.assertEqual(reused.dtype, paddle.int32)

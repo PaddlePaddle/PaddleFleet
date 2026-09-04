@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import paddle
+from paddle.distributed.fleet.meta_parallel import pipeline_parallel
 from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
     ScheduleNode,
 )
@@ -47,9 +48,9 @@ _SECOND_REGISTRATION = register_indexcache_pipeline_adapter(_ADAPTER_CONFIG)
 def _make_distill_state(offset):
     return (
         paddle.to_tensor([offset], dtype="int64"),
-        paddle.empty([0]),
-        paddle.empty([0]),
-        paddle.empty([0]),
+        paddle.zeros([1]),
+        paddle.zeros([1]),
+        paddle.zeros([1]),
         paddle.to_tensor([offset], dtype="int64"),
         paddle.to_tensor([0.5 + offset], stop_gradient=False),
         paddle.to_tensor([offset], dtype="int64"),
@@ -62,6 +63,14 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
         self.assertFalse(_EMPTY_PATTERN_REGISTRATION)
         self.assertTrue(_FIRST_REGISTRATION)
         self.assertFalse(_SECOND_REGISTRATION)
+        self.assertIs(
+            pipeline_parallel.dict_to_tuple_helper,
+            _dict_to_tuple_helper,
+        )
+        self.assertIs(
+            pipeline_parallel.tuple_to_dict_helper,
+            _tuple_to_dict_helper,
+        )
 
     def test_clear_dataptr_clone_uses_zero_allocation_alias_gradient(self):
         class ForbiddenAllocatingClone:

@@ -3123,17 +3123,20 @@ class CompressedSparseAttention(FleetLayer):
                 # tensor while the cast's backward keeps the producer bridge
                 # gradient-connected. Served layers restore FP32 immediately.
                 pipeline_topk_probs = distill_topk_probs.cast("bfloat16")
-            empty_q = self._indexcache_forward_state_tensor(
-                paddle.empty([0], dtype=q_indexer_bf.dtype)
+            # Paddle's real PP transport rejects zero-element tensors. These
+            # four slots are protocol placeholders only, so use one zero of
+            # the original dtype: still constant-size, but sendable by NCCL.
+            placeholder_q = self._indexcache_forward_state_tensor(
+                paddle.zeros([1], dtype=q_indexer_bf.dtype)
             )
-            empty_weights = self._indexcache_forward_state_tensor(
-                paddle.empty([0], dtype=weights_indexer_bf.dtype)
+            placeholder_weights = self._indexcache_forward_state_tensor(
+                paddle.zeros([1], dtype=weights_indexer_bf.dtype)
             )
-            empty_k = self._indexcache_forward_state_tensor(
-                paddle.empty([0], dtype=k_indexer_bf.dtype)
+            placeholder_k = self._indexcache_forward_state_tensor(
+                paddle.zeros([1], dtype=k_indexer_bf.dtype)
             )
-            empty_topk_indices = self._indexcache_forward_state_tensor(
-                paddle.empty([0], dtype=topk_indices_compressed.dtype)
+            placeholder_topk_indices = self._indexcache_forward_state_tensor(
+                paddle.zeros([1], dtype=topk_indices_compressed.dtype)
             )
             compressed_kv_shape = list(k_indexer_bf.shape)
             compressed_kv_length = (
@@ -3163,10 +3166,10 @@ class CompressedSparseAttention(FleetLayer):
             )
             state.extend(
                 [
-                    empty_q,
-                    empty_weights,
-                    empty_k,
-                    empty_topk_indices,
+                    placeholder_q,
+                    placeholder_weights,
+                    placeholder_k,
+                    placeholder_topk_indices,
                     pipeline_topk_probs,
                     self._indexcache_forward_state_tensor(
                         paddle.full([1], self.layer_number, dtype="int64")
@@ -4402,6 +4405,7 @@ class CompressedSparseAttention(FleetLayer):
         lse_indexer = None
         indexcache_served_loss_state = None
         indexcache_producer_loss_fused = False
+        indexcache_loss_topk_idxs = None
 
         if (
             self.compress_ratio > 1
@@ -4515,11 +4519,11 @@ class CompressedSparseAttention(FleetLayer):
                     offset,
                     docmask_meta=docmask_meta,
                 )
-            if (
-                self.indexer is not None
-                and indexcache_action is not None
-                and indexcache_action[1] == "S"
-            ):
+            if self.indexer is not None:
+                # IndexCache state and all producer/served losses keep the
+                # learned/reused top-k table. Replay is an attention-only
+                # postprocess and must never redefine those tensors.
+                indexcache_loss_topk_idxs = compress_topk_idxs
                 compress_topk_idxs = self._postprocess_indexer_replay(
                     compress_topk_idxs,
                     n_compressed,
@@ -4571,7 +4575,7 @@ class CompressedSparseAttention(FleetLayer):
             target = self._compute_fused_indexer_target(
                 query,
                 kv_full,
-                compress_topk_idxs,
+                indexcache_loss_topk_idxs,
                 tilelang_indexer_loss_state.topk_probs,
                 lse_indexer,
                 loss_mask,
@@ -4878,6 +4882,7 @@ class CompressedSparseAttention(FleetLayer):
         lse_indexer = None
         indexcache_served_loss_state = None
         indexcache_producer_loss_fused = False
+        indexcache_loss_topk_idxs = None
 
         if (
             self.compress_ratio > 1
@@ -5000,6 +5005,9 @@ class CompressedSparseAttention(FleetLayer):
                     )
 
             if self.indexer is not None:
+                # Preserve the native F/S table for the cached state and loss.
+                # Replay may replace only the table consumed by attention.
+                indexcache_loss_topk_idxs = compress_topk_idxs
                 compress_topk_idxs = self._postprocess_indexer_replay(
                     compress_topk_idxs,
                     n_compressed_global,
@@ -5047,7 +5055,7 @@ class CompressedSparseAttention(FleetLayer):
             target = self._compute_fused_indexer_target(
                 query,
                 kv_full,
-                compress_topk_idxs,
+                indexcache_loss_topk_idxs,
                 tilelang_indexer_loss_state.topk_probs,
                 lse_indexer,
                 loss_mask,
