@@ -216,8 +216,8 @@ def _normalize_dsa_mask(mask: Tensor | None) -> Tensor | None:
     if mask.ndim == 4:
         assert mask.shape[1] == 1, "DSA mask must have singleton head dimension"
         mask = mask.squeeze(1)
-    if mask.ndim == 3 and mask.shape[0] == 1:
-        mask = mask.squeeze(0)
+    # Keep a leading batch axis so sequence-parallel local masks [1, sq, sk_local]
+    # are not flattened into [sq, sk_local] and then added onto gathered scores.
     return mask
 
 

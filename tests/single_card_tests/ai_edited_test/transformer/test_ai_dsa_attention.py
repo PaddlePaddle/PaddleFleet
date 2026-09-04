@@ -34,6 +34,7 @@ from paddlefleet.transformer.dsa_attention import (
     DSAIndexerSublayersSpec,
     FusedDSAIndexerLoss,
     Indexer,
+    _normalize_dsa_mask,
     _unfused_dsa_attention,
     hadamard_transform,
     rotate_activation,
@@ -53,6 +54,18 @@ def _make_config(**overrides):
     }
     defaults.update(overrides)
     return TransformerConfig(**defaults)
+
+
+class TestNormalizeDsaMask(unittest.TestCase):
+    def test_keeps_batch_axis_on_singleton_3d_mask(self):
+        mask = paddle.zeros([1, 60, 30], dtype="float32")
+        out = _normalize_dsa_mask(mask)
+        self.assertEqual(tuple(out.shape), (1, 60, 30))
+
+    def test_squeezes_singleton_head_from_4d_mask(self):
+        mask = paddle.zeros([1, 1, 60, 60], dtype="float32")
+        out = _normalize_dsa_mask(mask)
+        self.assertEqual(tuple(out.shape), (1, 60, 60))
 
 
 class TestHadamardTransform(unittest.TestCase):
