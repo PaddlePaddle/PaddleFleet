@@ -1832,6 +1832,49 @@ class TransformerConfig(ModelParallelConfig):
     overlap backward with sharding gradient reduce for non-pipeline parallelism
     """
 
+    index_topk_pattern: str | None = None
+    """Optional IndexCache training pattern over ratio=4 CSA indexer layers.
+
+    Each character corresponds to one ratio=4 layer in execution order:
+      - "F": run the learned indexer and cache its top-k indices
+      - "S": skip the local indexer and reuse the previous cached top-k indices
+    """
+
+    indexcache_multi_layer_distill: bool = False
+    """Train retained IndexCache indexers with targets from all served layers.
+
+    CP training is supported only for no-MTP TileLang CSA.
+    """
+
+    indexcache_train_debug: bool = False
+    """Emit detailed IndexCache state and gradient diagnostics.
+
+    The default is False because enabling this temporary troubleshooting
+    interface introduces device-to-host synchronization, numerical scans, and
+    synchronous logging. It should only be enabled while diagnosing
+    IndexCache state or gradient transport, and can be removed after the
+    PP/CP IndexCache path has stable multi-card CI coverage.
+    """
+
+    indexcache_stall_trace: bool = False
+    """Emit count-only Transformer layer boundary markers for IndexCache.
+
+    The default is False to avoid synchronous logging in the training hot
+    path. This is a temporary troubleshooting interface for locating PP or
+    recompute stalls and can be removed once those paths have stable
+    multi-card CI coverage. ``indexcache_stall_trace_layers`` selects the
+    one-based physical Transformer layers to trace.
+    """
+
+    indexcache_stall_trace_layers: tuple[int, ...] | list[int] = (2,)
+    """One-based physical Transformer layers included in the stall trace.
+
+    The default traces layer 2 when ``indexcache_stall_trace`` is enabled,
+    preserving the original diagnostic scope. JSON/YAML lists and tuples are
+    accepted and normalized in ``__post_init__`` to a sorted tuple of unique
+    positive integers.
+    """
+
     use_fast_hadamard: bool = False
     """Use Tridao's fast Hadamard transform for DSv4 rotate activation function."""
 
@@ -1917,6 +1960,11 @@ class TransformerConfig(ModelParallelConfig):
         "csa_sparse_attn_backend": "csa_sparse_attn_backend",
         "csa_share_docmask_meta": "csa_share_docmask_meta",
         "mqa_share_docmask_meta": "mqa_share_docmask_meta",
+        "index_topk_pattern": "index_topk_pattern",
+        "indexcache_multi_layer_distill": "indexcache_multi_layer_distill",
+        "indexcache_train_debug": "indexcache_train_debug",
+        "indexcache_stall_trace": "indexcache_stall_trace",
+        "indexcache_stall_trace_layers": "indexcache_stall_trace_layers",
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
@@ -2046,6 +2094,144 @@ class TransformerConfig(ModelParallelConfig):
         # "disabled" and collapses to 0.0, so this config object never exposes
         # None and consumers can key on ``> 0`` instead of ``is not None``.
         self.dsa_indexer_loss_coeff = float(self.dsa_indexer_loss_coeff or 0.0)
+
+        for field_name in (
+            "indexcache_multi_layer_distill",
+            "indexcache_train_debug",
+            "indexcache_stall_trace",
+        ):
+            field_value = getattr(self, field_name)
+            if not isinstance(field_value, bool):
+                raise TypeError(
+                    f"{field_name} must be a bool, got "
+                    f"{type(field_value).__name__}: {field_value!r}."
+                )
+
+        trace_layers = getattr(self, "indexcache_stall_trace_layers")
+        if not isinstance(trace_layers, (list, tuple)):
+            raise TypeError(
+                "indexcache_stall_trace_layers must be a list or tuple of "
+                f"positive integers, got {type(trace_layers).__name__}: "
+                f"{trace_layers!r}."
+            )
+        invalid_trace_layers = [
+            value
+            for value in trace_layers
+            if not isinstance(value, int)
+            or isinstance(value, bool)
+            or value <= 0
+        ]
+        if invalid_trace_layers:
+            raise ValueError(
+                "indexcache_stall_trace_layers must contain only positive "
+                f"integers, got invalid values: {invalid_trace_layers!r}."
+            )
+        self.indexcache_stall_trace_layers = tuple(sorted(set(trace_layers)))
+        if (
+            self.indexcache_stall_trace
+            and not self.indexcache_stall_trace_layers
+        ):
+            raise ValueError(
+                "indexcache_stall_trace=True requires at least one positive "
+                "entry in indexcache_stall_trace_layers."
+            )
+
+        if self.index_topk_pattern is not None:
+            pattern = str(self.index_topk_pattern).strip().upper()
+            if not pattern:
+                self.index_topk_pattern = None
+            else:
+                invalid_chars = sorted(set(pattern) - {"F", "S"})
+                if invalid_chars:
+                    raise ValueError(
+                        "index_topk_pattern may only contain 'F' and 'S', "
+                        f"got invalid chars: {invalid_chars}."
+                    )
+                if pattern[0] != "F":
+                    raise ValueError(
+                        "index_topk_pattern must start with 'F' so there "
+                        "is a producer before any reused top-k indices."
+                    )
+                self.index_topk_pattern = pattern
+
+        indexcache_requested = bool(
+            self.index_topk_pattern or self.indexcache_multi_layer_distill
+        )
+        if (
+            indexcache_requested
+            and self.experimental_attention_variant != "dsv4_hybrid"
+        ):
+            raise ValueError(
+                "index_topk_pattern / indexcache_multi_layer_distill are only "
+                "supported with experimental_attention_variant='dsv4_hybrid', "
+                f"got {self.experimental_attention_variant!r}."
+            )
+
+        if self.indexcache_multi_layer_distill:
+            if not self.index_topk_pattern:
+                raise ValueError(
+                    "indexcache_multi_layer_distill=True requires a "
+                    "non-empty index_topk_pattern."
+                )
+            active_mtp = (
+                self.num_nextn_predict_layers is not None
+                and self.num_nextn_predict_layers > 0
+                and not self.mtp_load_weight_only
+            )
+            if self.context_parallel_size > 1 and active_mtp:
+                raise NotImplementedError(
+                    "indexcache_multi_layer_distill currently supports "
+                    "CP training only when the MTP forward is disabled. "
+                    "Weight-only MTP is supported."
+                )
+            if self.csa_indexer_backend != "tilelang":
+                raise NotImplementedError(
+                    "indexcache_multi_layer_distill currently supports "
+                    "only csa_indexer_backend='tilelang'."
+                )
+
+        if self.index_topk_pattern:
+            if self.csa_compress_ratios is None:
+                raise ValueError(
+                    "index_topk_pattern requires csa_compress_ratios to be set."
+                )
+            if self.csa_dense_mode:
+                raise ValueError(
+                    "index_topk_pattern requires csa_dense_mode=False."
+                )
+            c4_layer_count = sum(
+                1 for ratio in self.csa_compress_ratios if int(ratio) == 4
+            )
+            if len(self.index_topk_pattern) != c4_layer_count:
+                raise ValueError(
+                    "index_topk_pattern length must equal the number "
+                    f"of ratio=4 CSA layers ({c4_layer_count}), got "
+                    f"{len(self.index_topk_pattern)}."
+                )
+
+            if self.recompute_granularity:
+                if not (
+                    self.recompute_granularity == "full"
+                    and self.recompute_method == "uniform"
+                    and self.recompute_num_layers == 1
+                ):
+                    raise NotImplementedError(
+                        "IndexCache recompute currently supports only "
+                        "recompute_granularity='full', "
+                        "recompute_method='uniform', and "
+                        "recompute_num_layers=1."
+                    )
+                if self.block_attention_residuals:
+                    raise NotImplementedError(
+                        "IndexCache full recompute is incompatible with "
+                        "block_attention_residuals=True: the split attention / "
+                        "MLP recompute path does not propagate indexcache_state."
+                    )
+                if self.csa_indexer_backend != "tilelang":
+                    raise NotImplementedError(
+                        "IndexCache recompute currently supports only "
+                        "csa_indexer_backend='tilelang'."
+                    )
 
         if self.p2p_overlap_dw_calc is not None:
             if isinstance(self.p2p_overlap_dw_calc, str):
