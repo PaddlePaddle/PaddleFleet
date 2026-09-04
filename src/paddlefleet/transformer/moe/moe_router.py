@@ -364,12 +364,30 @@ class StandardMoERouter(nn.Layer):
                 f"but got {self.scoring_func!r}. "
             )
 
-        # IEEE e468 stores the gate in float32 even under UAC. A bf16
-        # Parameter is skipped by the AOA loader (`dtype='float32'`) and
-        # keeps random init; Megatron also allocates the router as fp32.
+        # IEEE e468 stores the gate in float32 so AOA `dtype='float32'`
+        # can load GLM-5.2. That is opt-in via MODEL_REPRO_FP32_UAC_GATE=1
+        # (formal/stack-top runners export it). Default matches structure:
+        # params_dtype under UAC, float32 otherwise. Always-fp32 under UAC
+        # rejected GLM-4.5 Air bf16 checkpoints (AOA src bfloat16 vs
+        # target float32) on Fleet #1961 accuracy alignment, which also
+        # sets FLAGS_use_accuracy_compatible_kernel=1.
+        if os.environ.get("MODEL_REPRO_FP32_UAC_GATE", "0") == "1":
+            _gate_dtype = "float32"
+        elif self.use_accuracy_compatible:
+            _gate_dtype = config.params_dtype
+        else:
+            _gate_dtype = "float32"
+        if not getattr(StandardMoERouter, "_fp32_uac_gate_logged", False):
+            StandardMoERouter._fp32_uac_gate_logged = True
+            print(
+                f"[FP32-UAC-GATE] dtype={_gate_dtype} "
+                f"env={os.environ.get('MODEL_REPRO_FP32_UAC_GATE', '')!r} "
+                f"uac={self.use_accuracy_compatible}",
+                flush=True,
+            )
         self.weight = paddle.create_parameter(
             shape=[self.num_experts, self.hidden_size],
-            dtype="float32",
+            dtype=_gate_dtype,
             default_initializer=paddle.nn.initializer.Constant(0.0),
         )
         config.init_method(self.weight)
