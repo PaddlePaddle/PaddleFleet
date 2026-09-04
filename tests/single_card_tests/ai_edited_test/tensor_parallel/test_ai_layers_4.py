@@ -100,6 +100,7 @@ def _is_marked(parameter):
 class TestLinearMarksReplicatedGradForTPReduction(unittest.TestCase):
     """The mark is applied exactly when the partial-sum situation exists."""
 
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_marked_when_accuracy_compatible_and_sequence_parallel(self):
         layer = _build(
             sequence_parallel=True,
@@ -112,6 +113,7 @@ class TestLinearMarksReplicatedGradForTPReduction(unittest.TestCase):
             "must be all-reduced over the TP group",
         )
 
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_bias_is_marked_too(self):
         layer = _build(
             bias=True,
@@ -120,6 +122,16 @@ class TestLinearMarksReplicatedGradForTPReduction(unittest.TestCase):
             use_accuracy_compatible=True,
         )
         self.assertTrue(_is_marked(layer.bias))
+
+    def test_not_marked_under_flag_uac_without_ieee(self):
+        layer = _build(
+            bias=True,
+            sequence_parallel=True,
+            tensor_model_parallel_size=2,
+            use_accuracy_compatible=True,
+        )
+        self.assertFalse(_is_marked(layer.weight))
+        self.assertFalse(_is_marked(layer.bias))
 
     def test_not_marked_without_accuracy_compatible(self):
         layer = _build(

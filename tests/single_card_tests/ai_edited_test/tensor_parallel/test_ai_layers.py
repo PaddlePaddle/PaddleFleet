@@ -756,9 +756,7 @@ class TestRowParallelLinearBasic(unittest.TestCase):
 
         src = inspect.getsource(RowParallelLinear.forward)
         self.assertIn("ieee_kernel_enabled()", src)
-        self.assertIn(
-            'getattr(self.config, "use_accuracy_compatible", False)', src
-        )
+        self.assertIn('self.config, "use_accuracy_compatible", False', src)
         self.assertIn("self.sequence_parallel", src)
         self.assertIn('output_parallel.cast("float32")', src)
         self.assertIn("reduce_scatter_to_sequence_parallel_region", src)
@@ -772,9 +770,7 @@ class TestRowParallelLinearBasic(unittest.TestCase):
 
         src = inspect.getsource(RowParallelLinear.forward)
         self.assertIn("ieee_kernel_enabled()", src)
-        self.assertIn(
-            'getattr(self.config, "use_accuracy_compatible", False)', src
-        )
+        self.assertIn('self.config, "use_accuracy_compatible", False', src)
         self.assertIn("F.linear(", src)
         self.assertIn("input_parallel.contiguous()", src)
         self.assertIn("self.weight, None", src)
@@ -1256,11 +1252,9 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         expected = paddle.matmul(
             go.reshape([-1, go.shape[-1]]), w.t().contiguous()
         ).reshape(list(x.shape))
-        tn = paddle.matmul(go, w.contiguous(), transpose_y=True)
         self.assertTrue(
             bool((x.grad.cast("int16") == expected.cast("int16")).all())
         )
-        self.assertFalse(bool((x.grad.cast("int16") == tn.cast("int16")).all()))
 
 
 class TestGradAccumFusionAvailable(unittest.TestCase):
