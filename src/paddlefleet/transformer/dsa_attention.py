@@ -72,6 +72,19 @@ _ACCURACY_COMPATIBLE_KERNEL = (
 )
 
 
+def _accuracy_compat_linear(projection, x):
+    """Torch-aligned F.linear for duplicated (TP1) DSA indexer projections.
+
+    IEEE 1-5 (E-062 / e468): Indexer wq_b / wk / weights_proj must use
+    paddle.nn.functional.linear rather than Linear's autograd Function.
+    The two GEMMs are not bit-identical on this graph.
+    """
+    bias = projection.bias if not projection.skip_bias_add else None
+    output_bias = projection.bias if projection.skip_bias_add else None
+    output = F.linear(x, projection.weight, bias)
+    return output, output_bias
+
+
 class _AccuracyCompatibleQKMatmul(paddle.autograd.PyLayer):
     """Batched QK matmul with an explicit broadcast-key gradient reduction."""
 
@@ -760,15 +773,21 @@ class DSAIndexer(paddle.nn.Layer):
             else freqs
         )
 
-        q, _ = deferrable_linear(
-            self.config, "attn_indexer_q_proj", self.wq_b, q_latent
-        )  # [b, s, n_heads * head_dim]
+        # IEEE e468: Indexer GEMMs must use F.linear under UAC, not
+        # Linear.forward / deferrable_linear. Gate on the import-time
+        # module constant, not a per-call FLAG read.
+        if _ACCURACY_COMPATIBLE_KERNEL:
+            q, _ = _accuracy_compat_linear(self.wq_b, q_latent)
+            k, _ = _accuracy_compat_linear(self.wk, hidden_states)
+        else:
+            q, _ = deferrable_linear(
+                self.config, "attn_indexer_q_proj", self.wq_b, q_latent
+            )  # [b, s, n_heads * head_dim]
+            k, _ = deferrable_linear(
+                self.config, "attn_indexer_k_proj", self.wk, hidden_states
+            )  # [b, s, head_dim]
         q = q.reshape([bsz, seqlen, self.n_heads, self.head_dim])
         q = self._apply_rope(q, freqs_q, mscale)
-
-        k, _ = deferrable_linear(
-            self.config, "attn_indexer_k_proj", self.wk, hidden_states
-        )  # [b, s, head_dim]
         if cp_size > 1:
             k = all_gather_cp(k, dim=1, group=cp_group)  # [b, s_global, hd]
         k = self.k_norm(k)
@@ -778,12 +797,17 @@ class DSAIndexer(paddle.nn.Layer):
         q = rotate_activation(q, use_fast_hadamard=self.use_fast_hadamard)
         k = rotate_activation(k, use_fast_hadamard=self.use_fast_hadamard)
 
-        weights, _ = deferrable_linear(
-            self.config,
-            "attn_indexer_weights_proj",
-            self.weights_proj,
-            hidden_states,
-        )
+        if _ACCURACY_COMPATIBLE_KERNEL:
+            weights, _ = _accuracy_compat_linear(
+                self.weights_proj, hidden_states
+            )
+        else:
+            weights, _ = deferrable_linear(
+                self.config,
+                "attn_indexer_weights_proj",
+                self.weights_proj,
+                hidden_states,
+            )
         weights = weights * (self.n_heads**-0.5) * self.softmax_scale
 
         return q, k, weights

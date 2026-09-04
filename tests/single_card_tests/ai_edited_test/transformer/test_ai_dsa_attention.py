@@ -415,6 +415,20 @@ class TestIndexer(unittest.TestCase):
         self.assertEqual(result.shape, [2, 4, 16])
         mock_rope.assert_called()
 
+    def test_indexer_uac_uses_f_linear_not_module_forward(self):
+        import inspect
+
+        from paddlefleet.transformer import dsa_attention as dsa
+
+        source = inspect.getsource(dsa.Indexer.forward_before_topk)
+        self.assertIn("_accuracy_compat_linear", source)
+        self.assertIn("self.wq_b, q_latent", source)
+        self.assertIn("self.wk, hidden_states", source)
+        self.assertIn("self.weights_proj, hidden_states", source)
+        self.assertIn("if _ACCURACY_COMPATIBLE_KERNEL:", source)
+        helper = inspect.getsource(dsa._accuracy_compat_linear)
+        self.assertIn("F.linear(x, projection.weight, bias)", helper)
+
     @patch("paddlefleet.transformer.dsa_attention.rotate_activation")
     def test_forward_before_topk_shape(self, mock_rotate):
         mock_rotate.side_effect = lambda x, use_fast_hadamard=False: x
