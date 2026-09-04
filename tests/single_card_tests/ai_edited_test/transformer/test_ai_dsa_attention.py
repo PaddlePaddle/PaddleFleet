@@ -78,6 +78,57 @@ class TestNormalizeDsaMask(unittest.TestCase):
         out = _align_dsa_indexer_mask(mask, 60)
         self.assertIsNone(out)
 
+    def test_align_none_mask_returns_none(self):
+        self.assertIsNone(_align_dsa_indexer_mask(None, 60))
+
+    def test_align_gathers_2d_and_3d_sp_shards(self):
+        class _Group:
+            nranks = 2
+
+        with patch(
+            "paddlefleet.transformer.dsa_attention.gather_from_sequence_parallel_region",
+            side_effect=lambda tensor, group=None: paddle.concat(
+                [tensor, tensor], axis=0
+            ),
+        ) as gather:
+            mask2 = paddle.zeros([60, 30], dtype="float32")
+            out2 = _align_dsa_indexer_mask(
+                mask2, 60, sequence_parallel=True, tp_group=_Group()
+            )
+            self.assertEqual(tuple(out2.shape), (60, 60))
+            mask3 = paddle.zeros([1, 60, 30], dtype="float32")
+            out3 = _align_dsa_indexer_mask(
+                mask3, 60, sequence_parallel=True, tp_group=_Group()
+            )
+            self.assertEqual(tuple(out3.shape), (1, 60, 60))
+            self.assertEqual(gather.call_count, 2)
+
+    def test_align_4d_sp_shard_squeezes_then_gathers(self):
+        class _Group:
+            nranks = 2
+
+        with patch(
+            "paddlefleet.transformer.dsa_attention.gather_from_sequence_parallel_region",
+            side_effect=lambda tensor, group=None: paddle.concat(
+                [tensor, tensor], axis=0
+            ),
+        ):
+            mask = paddle.zeros([1, 1, 60, 30], dtype="float32")
+            out = _align_dsa_indexer_mask(
+                mask, 60, sequence_parallel=True, tp_group=_Group()
+            )
+            self.assertEqual(tuple(out.shape), (1, 60, 60))
+
+    def test_align_unsupported_rank_after_normalize_returns_none(self):
+        class _Group:
+            nranks = 2
+
+        mask = paddle.zeros([60], dtype="float32")
+        out = _align_dsa_indexer_mask(
+            mask, 120, sequence_parallel=True, tp_group=_Group()
+        )
+        self.assertIsNone(out)
+
 
 class TestHadamardTransform(unittest.TestCase):
     """Test hadamard_transform function."""
