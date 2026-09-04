@@ -41,6 +41,7 @@ from ..parallel_state import (
 
 # from ..dist_checkpointing.mapping import ShardedStateDict
 # from ..transformer.utils import make_sharded_tensors_for_checkpoint
+from ..transformer.moe.moe_utils import ieee_kernel_enabled
 from ..utils import (
     divide,
     get_pg_rank,
@@ -776,15 +777,26 @@ def general_gemm(
 
     else:
         # Standard bf16/fp16 path.
-        # UAC must use F.linear (IEEE e9ac / E-654). The previous
-        # matmul(a, b.T.contiguous(), transpose_y=True) path is a different
-        # kernel family once bias is fused, and the matching UAC dgrad TN
-        # disagrees with F.linear autograd at the live shared-down shape.
-        if bias is not None:
-            output = paddle.nn.functional.linear(a, b, bias)
+        # GLM-5.2 IEEE (MODEL_REPRO_IEEE_KERNEL=1) uses F.linear (e9ac /
+        # E-654). FLAG+UAC without that env must keep structure's
+        # matmul(a, b.T.contiguous(), transpose_y=True) path so Minimax /
+        # GLM-4.5 Air CI still matches Megatron.
+        if ieee_kernel_enabled() and use_accuracy_compatible:
+            if bias is not None:
+                output = paddle.nn.functional.linear(a, b, bias)
+            else:
+                output = paddle.nn.functional.linear(a, b)
+        elif bias is not None:
+            if use_accuracy_compatible:
+                weight_t = b.T.contiguous()
+                output = paddle.matmul(a, weight_t, transpose_y=True)
+                output = output + bias
+            else:
+                output = paddle.nn.functional.linear(a, b, bias)
         else:
             if use_accuracy_compatible:
-                output = paddle.nn.functional.linear(a, b)
+                weight_t = b.T.contiguous()
+                output = paddle.matmul(a, weight_t, transpose_y=True)
             else:
                 output = paddle.matmul(a, b)
         return output, None
@@ -1562,7 +1574,10 @@ class Linear(paddle.nn.Layer):
         """
         if self.is_expert:
             return
-        if not getattr(self.config, "use_accuracy_compatible", False):
+        if not (
+            ieee_kernel_enabled()
+            and getattr(self.config, "use_accuracy_compatible", False)
+        ):
             return
         if not getattr(self.config, "sequence_parallel", False):
             return
@@ -2488,9 +2503,12 @@ class RowParallelLinear(paddle.nn.Layer):
                         self.config.cpu_offloading_activations
                     )
 
-        if getattr(self.config, "use_accuracy_compatible", False):
+        if ieee_kernel_enabled() and getattr(
+            self.config, "use_accuracy_compatible", False
+        ):
             # leftover IEEE step-1 bind: local row-parallel GEMM as contiguous
-            # F.linear. Bias stays on the post-reduce add below.
+            # F.linear. Bias stays on the post-reduce add below. FLAG+UAC
+            # without MODEL_REPRO_IEEE_KERNEL stays on structure Linear.
             output_parallel = F.linear(
                 input_parallel.contiguous(), self.weight, None
             )
@@ -2521,7 +2539,9 @@ class RowParallelLinear(paddle.nn.Layer):
             assert self.skip_bias_add
             output_ = output_parallel
         elif self.sequence_parallel:
-            if getattr(self.config, "use_accuracy_compatible", False):
+            if ieee_kernel_enabled() and getattr(
+                self.config, "use_accuracy_compatible", False
+            ):
                 orig_dtype = output_parallel.dtype
                 output_ = reduce_scatter_to_sequence_parallel_region(
                     output_parallel.cast("float32"), group=self.tp_group

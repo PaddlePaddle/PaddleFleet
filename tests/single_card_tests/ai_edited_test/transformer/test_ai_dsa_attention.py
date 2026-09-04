@@ -513,10 +513,7 @@ class TestIndexer(unittest.TestCase):
         absorbed = source[
             source.index("_kv_c = _align_sp_aux_to_query") : bmm_idx
         ]
-        self.assertIn(
-            'os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0")',
-            absorbed,
-        )
+        self.assertIn("ieee_kernel_enabled()", absorbed)
         self.assertNotIn("if _ACCURACY_COMPATIBLE_KERNEL:", absorbed)
 
     def test_unfused_dsa_expands_mqa_key_to_query_heads(self):

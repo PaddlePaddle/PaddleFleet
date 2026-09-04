@@ -75,7 +75,7 @@ class TestLanguageLossInit(unittest.TestCase):
     @patch("paddle.distributed.is_initialized", return_value=True)
     @patch("paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy")
     @patch(
-        "paddlefleet.models.common.language_loss.language_loss._use_accuracy_compatible_kernel",
+        "paddlefleet.models.common.language_loss.language_loss.ieee_kernel_enabled",
         return_value=True,
     )
     def test_init_with_parallel_uac_uses_vocab_parallel_ce(
@@ -188,7 +188,7 @@ class TestLanguageLossForwardImpl(unittest.TestCase):
         result = loss_fn.forward_impl(logits, labels)
         self.assertIsNotNone(result)
 
-    @patch.dict(os.environ, {"FLAGS_use_accuracy_compatible_kernel": "1"})
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     @patch(
         "paddlefleet.models.common.language_loss.language_loss.get_context_parallel_world_size",
         return_value=1,

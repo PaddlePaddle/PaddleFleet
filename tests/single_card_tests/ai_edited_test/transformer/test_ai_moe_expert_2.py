@@ -25,6 +25,7 @@ sys.path.insert(
 )
 
 import unittest
+from unittest.mock import patch
 
 import paddle
 import paddle.nn.functional as F
@@ -168,6 +169,7 @@ class TestGroupedMLPExpertForward(unittest.TestCase):
         """Python binds the last def forward; the live method must be E-163."""
         src = inspect.getsource(GroupedMLPExpert.forward)
         self.assertEqual(src.count("def forward"), 1)
+        self.assertIn("ieee_kernel_enabled()", src)
         self.assertIn("use_accuracy_compatible", src)
         self.assertIn("transpose_y=True", src)
         self.assertIn("permuted_probs", src)
@@ -198,9 +200,11 @@ class TestGroupedMLPExpertForward(unittest.TestCase):
         self.assertIn("permuted_probs=", layer_src)
         self.assertIn("row_owner=", layer_src)
         self.assertIn("probs=None", layer_src)
+        self.assertIn("ieee_kernel_enabled()", layer_src)
         self.assertIn("use_accuracy_compatible=True", layer_src)
 
     @unittest.skipIf(not paddle.is_compiled_with_cuda(), "Requires CUDA")
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_uac_forward_folds_probs_and_splits_row_owner(self):
         config = _make_config(use_accuracy_compatible=True)
         expert = GroupedMLPExpert(
@@ -222,6 +226,7 @@ class TestGroupedMLPExpertForward(unittest.TestCase):
         self.assertIsNone(bias)
 
     @unittest.skipIf(not paddle.is_compiled_with_cuda(), "Requires CUDA")
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_uac_capture_backward_on_token_slices_writes_fp32_main_grad(self):
         """Slice views of permuted tokens must not segfault SliceGrad (E-480)."""
         config = _make_config(use_accuracy_compatible=True)

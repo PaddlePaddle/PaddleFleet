@@ -25,7 +25,6 @@ This module provides:
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -52,6 +51,7 @@ from paddlefleet.transformer.cp_utils import all_gather_cp
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.transformer.moe.moe_utils import ieee_kernel_enabled
 
 try:
     from paddlefleet_ops.fast_hadamard_transform import (
@@ -67,14 +67,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_ACCURACY_COMPATIBLE_KERNEL = (
-    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
-)
+_ACCURACY_COMPATIBLE_KERNEL = ieee_kernel_enabled()
 
 
 def _absorb_q_nope_k_up(qn3, k_abs_weight):
     """K-absorb q_nope @ k_up. Torch-aligned UAC path uses bmm, not einsum."""
-    uac = os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+    uac = ieee_kernel_enabled()
     if uac:
         return paddle.bmm(qn3, k_abs_weight)
     return paddle.einsum(
@@ -297,7 +295,7 @@ def _unfused_dsa_attention(
     b, s, nhpp, qk_hd = query.shape
     v_hd = value.shape[-1]
     uac_mqa = (
-        os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+        ieee_kernel_enabled()
         and key.dim() == 4
         and key.shape[2] == 1
         and nhpp > 1
@@ -346,7 +344,7 @@ def _unfused_dsa_attention(
         )
         attn_scores = attn_scores + mask.cast("float32")
 
-    if os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1":
+    if ieee_kernel_enabled():
         attn_weights = _AccuracyCompatibleSoftmax.apply(
             attn_scores, paddle.isfinite(attn_scores)
         )
@@ -2270,12 +2268,11 @@ class DSAttention(FleetLayer):
                 )
                 q_absorbed = paddle.concat([q_abs_nope, q_pe], axis=-1)
             _kv_c = _align_sp_aux_to_query(kv_compressed, query)
-            # Live UAC TP2 always takes this absorbed unfused path. Read the
-            # FLAG at these sites so import-time constants cannot miss it.
-            uac = (
-                os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0")
-                == "1"
-            )
+            # Live GLM-5.2 IEEE TP2 always takes this absorbed unfused path.
+            # Read MODEL_REPRO_IEEE_KERNEL at these sites so import-time
+            # constants cannot miss it. FLAG+UAC alone is the Minimax /
+            # GLM-4.5 Air CI graph and must stay on the structure path.
+            uac = ieee_kernel_enabled()
             if uac:
                 # x + x*0 is an add, not a view. clone/contiguous were PIR-folded.
                 _kv_c = _kv_c + (_kv_c * 0)

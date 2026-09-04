@@ -41,6 +41,7 @@ from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import module_needs_recompute
 from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.transformer.moe.moe_utils import ieee_kernel_enabled
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
@@ -331,9 +332,10 @@ class LanguageLoss(FleetLayer):
         )
 
         if self.enable_parallel_cross_entropy:
-            if _use_accuracy_compatible_kernel():
+            if ieee_kernel_enabled():
                 # E-608: Megatron-aligned vocab-parallel CE. Default path
-                # stays fleet ParallelCrossEntropy.
+                # stays fleet ParallelCrossEntropy. FLAG+UAC alone is the
+                # Minimax / GLM-4.5 Air CI graph.
                 self.loss_func = _uac_vocab_parallel_ce
                 print(
                     "[UAC-CE] LanguageLoss.loss_func="
@@ -343,10 +345,10 @@ class LanguageLoss(FleetLayer):
                 )
             else:
                 self.loss_func = paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy()
-        elif _use_accuracy_compatible_kernel():
-            # Keep TP=1 loss backward identical to Megatron's unfused
-            # vocab-parallel cross entropy. Paddle's native CrossEntropyLoss
-            # produces the same scalar but differs in raw logits gradients.
+        elif ieee_kernel_enabled():
+            # Keep TP=1 GLM-5.2 IEEE loss backward identical to Megatron's
+            # unfused vocab-parallel cross entropy. FLAG+UAC alone stays
+            # native CrossEntropyLoss for Minimax / GLM-4.5 Air CI.
             self.loss_func = functools.partial(
                 _accuracy_compatible_cross_entropy,
                 ignored_index=self.ignored_index,
@@ -576,7 +578,7 @@ class LanguageLoss(FleetLayer):
                 loss = paddle.sum(
                     loss.cast(paddle.float32).reshape([-1]) * lossmask
                 )
-                if _use_accuracy_compatible_kernel():
+                if ieee_kernel_enabled():
                     loss = _normalize_loss_by_tokens(
                         loss,
                         _valid_tokens,

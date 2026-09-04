@@ -113,7 +113,7 @@ class TestMLAKposEmbSequenceParallelGather(unittest.TestCase):
         self.assertIn("_dsa_absorbed_enabled()", source)
         self.assertNotIn("core_kv_compressed", source)
         helper = inspect.getsource(mla._dsa_absorbed_enabled)
-        self.assertIn("FLAGS_use_accuracy_compatible_kernel", helper)
+        self.assertIn("ieee_kernel_enabled()", helper)
         self.assertIn("MODEL_REPRO_DSA_ABSORBED", helper)
 
     def test_uac_mla_rope_helper_uses_k_seq_offset_for_sharded_key(self):

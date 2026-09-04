@@ -755,6 +755,7 @@ class TestRowParallelLinearBasic(unittest.TestCase):
         from paddlefleet.tensor_parallel.layers import RowParallelLinear
 
         src = inspect.getsource(RowParallelLinear.forward)
+        self.assertIn("ieee_kernel_enabled()", src)
         self.assertIn(
             'getattr(self.config, "use_accuracy_compatible", False)', src
         )
@@ -770,6 +771,7 @@ class TestRowParallelLinearBasic(unittest.TestCase):
         from paddlefleet.tensor_parallel.layers import RowParallelLinear
 
         src = inspect.getsource(RowParallelLinear.forward)
+        self.assertIn("ieee_kernel_enabled()", src)
         self.assertIn(
             'getattr(self.config, "use_accuracy_compatible", False)', src
         )
@@ -1085,12 +1087,16 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         )
 
     def test_accuracy_compatible_matches_reference_linear(self):
-        """The compatible branch must match the reference linear result."""
+        """IEEE kernel UAC must match the reference linear result."""
         paddle.seed(0)
         input_tensor = paddle.randn([3, 8], dtype=paddle.float32)
         weight = paddle.randn([8, 5], dtype=paddle.float32)
 
-        out_compat = self._run(True, input_tensor, weight)
+        with patch(
+            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
+            return_value=True,
+        ):
+            out_compat = self._run(True, input_tensor, weight)
         ref = paddle.nn.functional.linear(input_tensor, weight)
         np.testing.assert_allclose(
             out_compat.numpy(), ref.numpy(), rtol=1e-6, atol=1e-6
@@ -1104,12 +1110,16 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         weight = paddle.randn([8, 5], dtype=paddle.float32)
         bias = paddle.randn([5], dtype=paddle.float32)
 
-        output, quant_cache = general_gemm(
-            input_tensor,
-            weight,
-            bias=bias,
-            use_accuracy_compatible=True,
-        )
+        with patch(
+            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
+            return_value=True,
+        ):
+            output, quant_cache = general_gemm(
+                input_tensor,
+                weight,
+                bias=bias,
+                use_accuracy_compatible=True,
+            )
         reference = paddle.nn.functional.linear(input_tensor, weight, bias)
 
         self.assertIsNone(quant_cache)
@@ -1155,20 +1165,48 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         input_tensor = paddle.randn([4, 8], dtype=paddle.float32)
         weight = paddle.randn([8, 16], dtype=paddle.float32)
 
-        out = linear_with_grad_accumulation_and_async_allreduce(
-            input_tensor,
-            weight,
-            None,
-            gradient_accumulation_fusion=False,
-            allreduce_dgrad=False,
-            sequence_parallel=False,
-            tp_group=None,
-            use_accuracy_compatible=True,
-        )
+        with patch(
+            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
+            return_value=True,
+        ):
+            out = linear_with_grad_accumulation_and_async_allreduce(
+                input_tensor,
+                weight,
+                None,
+                gradient_accumulation_fusion=False,
+                allreduce_dgrad=False,
+                sequence_parallel=False,
+                tp_group=None,
+                use_accuracy_compatible=True,
+            )
         ref = paddle.nn.functional.linear(input_tensor, weight)
         self.assertEqual(out.shape, [4, 16])
         np.testing.assert_allclose(
             out.numpy(), ref.numpy(), rtol=1e-6, atol=1e-6
+        )
+
+    def test_flag_uac_without_ieee_kernel_keeps_structure_matmul(self):
+        """FLAG+UAC without MODEL_REPRO_IEEE_KERNEL stays on structure GEMM."""
+        from paddlefleet.tensor_parallel.layers import general_gemm
+
+        paddle.seed(3)
+        input_tensor = paddle.randn([3, 8], dtype=paddle.float32)
+        weight = paddle.randn([8, 5], dtype=paddle.float32)
+        with patch(
+            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
+            return_value=False,
+        ):
+            output, quant_cache = general_gemm(
+                input_tensor,
+                weight,
+                bias=None,
+                use_accuracy_compatible=True,
+            )
+        weight_t = weight.T.contiguous()
+        reference = paddle.matmul(input_tensor, weight_t, transpose_y=True)
+        self.assertIsNone(quant_cache)
+        np.testing.assert_allclose(
+            output.numpy(), reference.numpy(), rtol=1e-6, atol=1e-6
         )
 
     def test_compatible_backward_grads(self):
@@ -1179,8 +1217,12 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         weight = paddle.randn([8, 16], dtype=paddle.float32)
         weight.stop_gradient = False
 
-        out = self._run(True, input_tensor, weight)
-        out.sum().backward()
+        with patch(
+            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
+            return_value=True,
+        ):
+            out = self._run(True, input_tensor, weight)
+            out.sum().backward()
 
         self.assertIsNotNone(input_tensor.grad)
         self.assertIsNotNone(weight.grad)
@@ -1204,8 +1246,12 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         x.stop_gradient = False
         w.stop_gradient = False
 
-        out = self._run(True, x, w)
-        out.backward(go)
+        with patch(
+            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
+            return_value=True,
+        ):
+            out = self._run(True, x, w)
+            out.backward(go)
 
         expected = paddle.matmul(
             go.reshape([-1, go.shape[-1]]), w.t().contiguous()

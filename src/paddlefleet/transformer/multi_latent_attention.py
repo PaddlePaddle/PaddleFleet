@@ -62,25 +62,25 @@ from paddlefleet.train_infer_consistent_ops.slice_util import (
 from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.moe.moe_utils import ieee_kernel_enabled
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_rank, get_pg_size
 
 logger = logging.getLogger(__name__)
 
-_ACCURACY_COMPATIBLE_KERNEL: bool = (
-    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
-)
+_ACCURACY_COMPATIBLE_KERNEL: bool = ieee_kernel_enabled()
 
 
 def _dsa_absorbed_enabled() -> bool:
     """Torch-aligned absorbed-MLA core (E-063 / IEEE 1-5).
 
-    Read FLAGS at call time: import-time evaluation can see the kernel
-    FLAG before run_paddle.sh exports it.
+    Read MODEL_REPRO_IEEE_KERNEL at call time: import-time evaluation can
+    see the env before run_paddle.sh exports it. FLAG+UAC alone is not
+    enough; Minimax / GLM-4.5 Air CI also export FLAG=1.
     """
     return (
         os.environ.get("MODEL_REPRO_DSA_ABSORBED", "0") == "1"
-        or os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+        or ieee_kernel_enabled()
     )
 
 
@@ -2249,9 +2249,10 @@ class MLASelfAttention(MultiLatentAttention):
                     pre_save_func=lambda t: last_dim_segment(
                         t, 0, self.qk_nope_head_dim
                     ),
-                    post_load_func=lambda seg,
-                    full=query: scatter_last_dim_segment(
-                        full, seg, 0, self.qk_nope_head_dim
+                    post_load_func=lambda seg, full=query: (
+                        scatter_last_dim_segment(
+                            full, seg, 0, self.qk_nope_head_dim
+                        )
                     ),
                 )
                 query = inspect_tensor(
@@ -2261,9 +2262,10 @@ class MLASelfAttention(MultiLatentAttention):
                     pre_save_func=lambda t: last_dim_segment(
                         t, self.qk_nope_head_dim
                     ),
-                    post_load_func=lambda seg,
-                    full=query: scatter_last_dim_segment(
-                        full, seg, self.qk_nope_head_dim
+                    post_load_func=lambda seg, full=query: (
+                        scatter_last_dim_segment(
+                            full, seg, self.qk_nope_head_dim
+                        )
                     ),
                 )
 
@@ -2293,9 +2295,10 @@ class MLASelfAttention(MultiLatentAttention):
                     pre_save_func=lambda t: last_dim_segment(
                         t, self.qk_nope_head_dim
                     ),
-                    post_load_func=lambda seg,
-                    full=key: scatter_last_dim_segment(
-                        full, seg, self.qk_nope_head_dim
+                    post_load_func=lambda seg, full=key: (
+                        scatter_last_dim_segment(
+                            full, seg, self.qk_nope_head_dim
+                        )
                     ),
                 )
 

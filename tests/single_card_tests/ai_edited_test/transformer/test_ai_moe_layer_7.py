@@ -401,9 +401,7 @@ class TestAccuracyCompatibleExpertInputGather(unittest.TestCase):
 class TestMoELayerSingleCardAccuracy(unittest.TestCase):
     """Test accuracy-compatible routing-weight placement."""
 
-    @patch(
-        "paddlefleet.transformer.moe.moe_layer.use_accuracy_compatible_kernel"
-    )
+    @patch("paddlefleet.transformer.moe.moe_layer.ieee_kernel_enabled")
     def test_accuracy_gate_applies_weight_inside_expert(self, accuracy_gate):
         accuracy_gate.return_value = True
         layer = MoELayer.__new__(MoELayer)
@@ -430,9 +428,7 @@ class TestMoELayerSingleCardAccuracy(unittest.TestCase):
             1,
         )
 
-    @patch(
-        "paddlefleet.transformer.moe.moe_layer.use_accuracy_compatible_kernel"
-    )
+    @patch("paddlefleet.transformer.moe.moe_layer.ieee_kernel_enabled")
     def test_default_path_applies_weight_after_expert(self, accuracy_gate):
         accuracy_gate.return_value = False
         layer = MoELayer.__new__(MoELayer)

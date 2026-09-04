@@ -60,6 +60,17 @@ def use_accuracy_compatible_kernel() -> bool:
     return _USE_ACCURACY_COMPATIBLE_KERNEL
 
 
+def ieee_kernel_enabled() -> bool:
+    """Opt-in GLM-5.2 IEEE numeric paths on top of FLAG+UAC.
+
+    Fleet CI Minimax / GLM-4.5 Air export FLAGS_use_accuracy_compatible_kernel=1
+    and YAML use_accuracy_compatible=true. GLM-5.2 IEEE helpers that used those
+    two switches leaked into that graph and moved step-1 vs Megatron. Formal
+    and stack-top runners export MODEL_REPRO_IEEE_KERNEL=1; CI does not.
+    """
+    return os.environ.get("MODEL_REPRO_IEEE_KERNEL", "0") == "1"
+
+
 class AutoSBHistoryTracker:
     """只统计 warmup 阶段连续 MoE auto-subbatch forward 起点的显存下降。"""
 

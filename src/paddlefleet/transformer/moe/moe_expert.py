@@ -41,6 +41,7 @@ from paddlefleet.tensor_parallel.random import (
 from paddlefleet.transformer.activations import situ, situ_glu
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
+from paddlefleet.transformer.moe.moe_utils import ieee_kernel_enabled
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 if paddlefleet_ops.is_sonic_moe_available():
@@ -354,7 +355,9 @@ class GroupedMLPExpert(FleetLayer):
         self.weight2.is_distributed = self.expert_parallel
         # Claim main_grad so MixPrecision skips these Parameters. The
         # identity output capture writes fp32 X.T@dY into this buffer.
-        if getattr(self.config, "use_accuracy_compatible", False):
+        if ieee_kernel_enabled() and getattr(
+            self.config, "use_accuracy_compatible", False
+        ):
             self.weight1.main_grad = None
             self.weight2.main_grad = None
             # IEEE Megatron dirty expert-DP domain: ETP < TP (formal
@@ -489,7 +492,8 @@ class GroupedMLPExpert(FleetLayer):
             weight1, weight2 = self.weight1, self.weight2
 
         gemm_tn = (
-            getattr(self.config, "use_accuracy_compatible", False)
+            ieee_kernel_enabled()
+            and getattr(self.config, "use_accuracy_compatible", False)
             and expert_weights is None
         )
         if permuted_local_hidden_states.numel() != 0:

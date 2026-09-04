@@ -66,7 +66,11 @@ from .fusion_layer_utils import (
 from .moe_expert import GroupedMLPExpert, SonicMoEExpert, StandardMLPExpert
 from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
-from .moe_utils import AddAuxiliaryLoss, use_accuracy_compatible_kernel
+from .moe_utils import (
+    AddAuxiliaryLoss,
+    ieee_kernel_enabled,
+    use_accuracy_compatible_kernel,
+)
 from .token_dispatcher import (
     AllGatherTokenDispatcher,
     AllToAllTokenDispatcher,
@@ -1333,12 +1337,16 @@ class MoELayer(nn.Layer):
             "moe_dispatch_tokens_per_expert",
             layer_idx,
             tokens_per_expert,
-            pre_save_func=lambda counts: counts
-            if isinstance(counts, paddle.Tensor)
-            else paddle.to_tensor(counts, dtype="int32"),
-            post_load_func=lambda loaded: loaded
-            if isinstance(tokens_per_expert, paddle.Tensor)
-            else loaded.tolist(),
+            pre_save_func=lambda counts: (
+                counts
+                if isinstance(counts, paddle.Tensor)
+                else paddle.to_tensor(counts, dtype="int32")
+            ),
+            post_load_func=lambda loaded: (
+                loaded
+                if isinstance(tokens_per_expert, paddle.Tensor)
+                else loaded.tolist()
+            ),
         )
         dispatched_probs = inspect_tensor(
             "moe_dispatched_probs",
@@ -1776,7 +1784,7 @@ class MoELayer(nn.Layer):
         orig_shape = hidden_states.shape
         residuals = hidden_states
         if (
-            use_accuracy_compatible_kernel()
+            ieee_kernel_enabled()
             and self.shared_experts is not None
             and self.expert_model_parallel_size <= 1
         ):
@@ -1976,7 +1984,7 @@ class MoELayer(nn.Layer):
         tokens_per_expert = expert_mask.reshape([expert_mask.shape[0], -1]).sum(
             axis=-1
         )
-        accuracy_compatible = use_accuracy_compatible_kernel()
+        accuracy_compatible = ieee_kernel_enabled()
         gathered_state_chunks = None
         token_counts = [int(count) for count in tokens_per_expert.tolist()]
         if accuracy_compatible:
@@ -2075,7 +2083,7 @@ class MoELayer(nn.Layer):
             # gather/sum PyLayers; fold routing probs into post-GLU before
             # fc2; batch each expert GEMM per SP shard so bf16 M matches
             # mcore. Dump / LOCAL_SHARD env knobs stay on the Explore tree.
-            ac_expert_path = getattr(
+            ac_expert_path = ieee_kernel_enabled() and getattr(
                 self.config, "use_accuracy_compatible", False
             )
             tokens_per_expert = routing_map.sum(axis=0)

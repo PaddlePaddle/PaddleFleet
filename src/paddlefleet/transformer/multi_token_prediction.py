@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import os
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -48,6 +47,7 @@ from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.transformer.moe.moe_utils import ieee_kernel_enabled
 
 if TYPE_CHECKING:
     from paddlefleet.models.backends import BackendSpecProvider
@@ -61,9 +61,7 @@ SUPPORTED_ATTN_MASK = [
     AttnMaskType.padding_causal,
 ]
 
-_ACCURACY_COMPATIBLE_KERNEL = (
-    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
-)
+_ACCURACY_COMPATIBLE_KERNEL = ieee_kernel_enabled()
 
 
 def _mtp_eh_projection(projection, hidden_states, tensor_parallel_size):

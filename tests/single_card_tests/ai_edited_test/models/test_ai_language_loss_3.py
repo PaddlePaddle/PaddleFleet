@@ -37,6 +37,25 @@ from paddlefleet.models.common.language_loss.language_loss import (
 )
 
 
+class TestIeeeKernelEnabled(unittest.TestCase):
+    def test_ieee_kernel_is_opt_in_not_flag(self):
+        from paddlefleet.transformer.moe.moe_utils import ieee_kernel_enabled
+
+        with patch.dict(
+            os.environ,
+            {
+                "FLAGS_use_accuracy_compatible_kernel": "1",
+                "MODEL_REPRO_IEEE_KERNEL": "0",
+            },
+            clear=False,
+        ):
+            self.assertFalse(ieee_kernel_enabled())
+        with patch.dict(
+            os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"}, clear=False
+        ):
+            self.assertTrue(ieee_kernel_enabled())
+
+
 class TestAccuracyCompatibleCrossEntropy(unittest.TestCase):
     def test_ignored_label_preserves_megatron_signed_zero_gradient(self):
         logits = paddle.zeros([1, 1, 3], dtype="float32")
