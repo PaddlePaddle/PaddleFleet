@@ -26,7 +26,7 @@ are exercised on a single GPU (CP=1, TP=1):
 
 The CP>1 sublines (515/518/522/530/603/771) are covered single-card by
 monkeypatching ``get_context_parallel_world_size`` -> 2, faking the CP rank,
-and replacing ``extract_local_zigzag_chunks`` / the CP comm ops with
+and replacing ``extract_local_cp_chunks`` / the CP comm ops with
 identities (see TestLanguageLossMegatronCP).
 """
 
@@ -66,7 +66,7 @@ def _make_loss(K, *, distill, use_erndata=True):
     cfg.add_mtp_loss = True
     cfg.mtp_loss_scaling_factor = 1.0
     cfg.experimental_dataflow = False
-    cfg.cp_balance_mode = "zigzag"
+    cfg.cp_balance_mode = "dualchunk_allgather"
     cfg.recompute_modules = None
     loss.config = cfg
     loss.ignored_index = -100
@@ -175,7 +175,7 @@ def _fake_cp(cp_size=2):
 
     - module-level ``get_context_parallel_world_size`` -> cp_size;
     - source-module ``get_context_parallel_rank`` (local import) -> 0;
-    - ``extract_local_zigzag_chunks`` (local import) -> identity;
+    - ``extract_local_cp_chunks`` (local import) -> identity;
     - CP scatter/gather PyLayers -> identity;
     - ``dist.all_reduce`` -> no-op and ``fleet`` -> MagicMock (the
       distillation branch all-reduces the per-depth loss).
@@ -194,7 +194,7 @@ def _fake_cp(cp_size=2):
             mock.patch.object(ps, "get_context_parallel_rank", lambda: 0)
         )
         stack.enter_context(
-            mock.patch.object(mtp, "extract_local_zigzag_chunks", identity)
+            mock.patch.object(mtp, "extract_local_cp_chunks", identity)
         )
         stack.enter_context(
             mock.patch.object(ll.ContextParallelScatterOp, "apply", identity)
@@ -212,7 +212,7 @@ def _fake_cp(cp_size=2):
 class TestLanguageLossMegatronCP(unittest.TestCase):
     """Covers the CP>1 sublines (515,518,522,530,603,771) via monkeypatch.
 
-    ``extract_local_zigzag_chunks`` is mocked to identity, so all tensors
+    ``extract_local_cp_chunks`` is mocked to identity, so all tensors
     keep their full length and shapes stay self-consistent.
     """
 
