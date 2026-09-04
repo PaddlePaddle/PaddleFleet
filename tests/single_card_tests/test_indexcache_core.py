@@ -56,6 +56,7 @@ def _layer_config(pattern, **overrides):
     config = SimpleNamespace(
         index_topk_pattern=pattern,
         indexcache_multi_layer_distill=False,
+        indexcache_train_debug=False,
         recompute_granularity=None,
         pipeline_model_parallel_size=1,
         context_parallel_size=1,
@@ -129,6 +130,54 @@ class TestIndexCacheGradientNumerics(unittest.TestCase):
 
 
 class TestIndexCacheConfig(unittest.TestCase):
+    def test_debug_config_defaults_and_normalizes_trace_layers(self):
+        default = _config_for_pattern("F")
+        self.assertFalse(default.indexcache_train_debug)
+        self.assertFalse(default.indexcache_stall_trace)
+        self.assertEqual(default.indexcache_stall_trace_layers, (2,))
+
+        configured = _config_for_pattern(
+            "F",
+            indexcache_train_debug=True,
+            indexcache_stall_trace=True,
+            indexcache_stall_trace_layers=[2, 1, 2],
+        )
+        self.assertTrue(configured.indexcache_train_debug)
+        self.assertTrue(configured.indexcache_stall_trace)
+        self.assertEqual(configured.indexcache_stall_trace_layers, (1, 2))
+
+    def test_debug_config_defaults_survive_from_config(self):
+        config = TransformerConfig.from_config(
+            SimpleNamespace(
+                num_hidden_layers=2,
+                experimental_attention_variant="dsv4_hybrid",
+                csa_compress_ratios=[4, 128],
+                index_topk_pattern="F",
+            )
+        )
+        self.assertFalse(config.indexcache_train_debug)
+        self.assertFalse(config.indexcache_stall_trace)
+        self.assertEqual(config.indexcache_stall_trace_layers, (2,))
+
+    def test_debug_config_rejects_invalid_values(self):
+        cases = (
+            ({"indexcache_train_debug": 1}, TypeError),
+            ({"indexcache_stall_trace": "true"}, TypeError),
+            ({"indexcache_stall_trace_layers": "2"}, TypeError),
+            ({"indexcache_stall_trace_layers": [0]}, ValueError),
+            ({"indexcache_stall_trace_layers": [True]}, ValueError),
+            (
+                {
+                    "indexcache_stall_trace": True,
+                    "indexcache_stall_trace_layers": [],
+                },
+                ValueError,
+            ),
+        )
+        for overrides, error in cases:
+            with self.subTest(overrides=overrides), self.assertRaises(error):
+                _config_for_pattern("F", **overrides)
+
     def test_common_patterns_are_normalized_and_accepted(self):
         for pattern in ("F", "FSF", "FSSF"):
             config = _config_for_pattern(pattern.lower())
@@ -240,6 +289,20 @@ class TestIndexCacheConfig(unittest.TestCase):
 
 
 class TestIndexCacheCoreState(unittest.TestCase):
+    def test_train_debug_is_driven_by_config(self):
+        config = _layer_config("F", indexcache_train_debug=True)
+        layer = _make_layer(config, 1)
+        output = StringIO()
+        with redirect_stdout(output):
+            layer._indexcache_debug("action=test")
+        self.assertIn("action=test", output.getvalue())
+
+        config.indexcache_train_debug = False
+        output = StringIO()
+        with redirect_stdout(output):
+            layer._indexcache_debug("action=disabled")
+        self.assertEqual(output.getvalue(), "")
+
     def test_cp_indexer_helper_preserves_legacy_and_extended_contracts(self):
         config = _layer_config(
             "F",
@@ -753,10 +816,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
         previous_scale = DSAIndexerLossAutoScaler._main_loss_backward_scale
         DSAIndexerLossAutoScaler._main_loss_backward_scale = None
         marker_output = StringIO()
-        with (
-            patch.dict("os.environ", {"INDEXCACHE_TRAIN_DEBUG": "1"}),
-            redirect_stdout(marker_output),
-        ):
+        with redirect_stdout(marker_output):
             try:
                 bridged_probs = TileLangCSAIndexerDistillBridge.apply(
                     q,
@@ -768,6 +828,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
                     0.0,
                     None,
                     2,
+                    True,
                 )
                 output_leaf = paddle.ones([1], dtype="float32")
                 output_leaf.stop_gradient = False
@@ -781,6 +842,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
                     None,
                     3,
                     2,
+                    True,
                 )
                 output.sum().backward()
             finally:

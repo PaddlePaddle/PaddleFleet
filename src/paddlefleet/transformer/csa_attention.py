@@ -1519,6 +1519,7 @@ class TileLangCSAIndexerDistillBridge(paddle.autograd.PyLayer):
         producer_loss_coeff: float = 0.0,
         producer_num_rows_override: float | None = None,
         producer_layer: int = -1,
+        debug_enabled: bool = False,
     ) -> Tensor:
         ctx.input_stop_gradients = (
             bool(index_q.stop_gradient),
@@ -1533,7 +1534,8 @@ class TileLangCSAIndexerDistillBridge(paddle.autograd.PyLayer):
         ]
         ctx.has_producer_score_delta = producer_score_delta is not None
         ctx.producer_layer = int(producer_layer)
-        if os.environ.get("INDEXCACHE_TRAIN_DEBUG", "0") == "1":
+        ctx.debug_enabled = bool(debug_enabled)
+        if ctx.debug_enabled:
             print(
                 "[INDEXCACHE_DISTILL_GRAD] "
                 "boundary=producer_bridge_apply "
@@ -1578,7 +1580,7 @@ class TileLangCSAIndexerDistillBridge(paddle.autograd.PyLayer):
                     grad_index_scores.cast("float32") + producer_grad
                 )
 
-        debug_enabled = os.environ.get("INDEXCACHE_TRAIN_DEBUG", "0") == "1"
+        debug_enabled = getattr(ctx, "debug_enabled", False)
         if debug_enabled:
             score_summary = summarize_indexcache_gradients(
                 [("score", grad_index_scores)]
@@ -1662,10 +1664,12 @@ class IndexCacheServedDistillLossAutoScaler(paddle.autograd.PyLayer):
         loss_mask: Tensor | None = None,
         served_layer: int = -1,
         producer_layer: int = -1,
+        debug_enabled: bool = False,
     ) -> Tensor:
         ctx.topk_probs_stop_gradient = bool(topk_probs.stop_gradient)
         ctx.served_layer = int(served_layer)
         ctx.producer_layer = int(producer_layer)
+        ctx.debug_enabled = bool(debug_enabled)
         score_delta = topk_probs.detach() - target.detach()
         ctx.has_loss_mask = loss_mask is not None
         if loss_mask is not None:
@@ -1704,7 +1708,7 @@ class IndexCacheServedDistillLossAutoScaler(paddle.autograd.PyLayer):
         if ctx.topk_probs_stop_gradient:
             grad_index_scores = None
 
-        if os.environ.get("INDEXCACHE_TRAIN_DEBUG", "0") == "1":
+        if getattr(ctx, "debug_enabled", False):
             score_summary = summarize_indexcache_gradients(
                 [("score", grad_index_scores)]
             )["score"]
@@ -2797,6 +2801,9 @@ class CompressedSparseAttention(FleetLayer):
             raise ValueError("index_topk_pattern must start with 'F'.")
         return pattern
 
+    def _indexcache_train_debug_enabled(self) -> bool:
+        return bool(getattr(self.config, "indexcache_train_debug", False))
+
     def _indexcache_recompute_enabled(self) -> bool:
         return bool(getattr(self.config, "recompute_granularity", None))
 
@@ -2862,7 +2869,7 @@ class CompressedSparseAttention(FleetLayer):
         return state_kind
 
     def _indexcache_debug(self, msg: str) -> None:
-        if os.environ.get("INDEXCACHE_TRAIN_DEBUG", "0") == "1":
+        if self._indexcache_train_debug_enabled():
             cp_msg = (
                 f" cp_rank={self.cp_rank} cp_size={self.cp_size}"
                 if self.cp_enabled
@@ -2883,7 +2890,7 @@ class CompressedSparseAttention(FleetLayer):
             )
 
     def _indexcache_distill_debug(self, msg: str) -> None:
-        if os.environ.get("INDEXCACHE_TRAIN_DEBUG", "0") == "1":
+        if self._indexcache_train_debug_enabled():
             cp_msg = (
                 f" cp_rank={self.cp_rank} cp_size={self.cp_size}"
                 if self.cp_enabled
@@ -3071,7 +3078,7 @@ class CompressedSparseAttention(FleetLayer):
                     # gradients to one bridge/backward kernel. Saving one
                     # FP16 delta preserves the producer loss without retaining
                     # a second full TileLang backward context.
-                    if os.environ.get("INDEXCACHE_TRAIN_DEBUG", "0") == "1":
+                    if self._indexcache_train_debug_enabled():
                         print(
                             "[INDEXCACHE_DISTILL_GRAD] "
                             "boundary=producer_bridge_forward "
@@ -3089,6 +3096,7 @@ class CompressedSparseAttention(FleetLayer):
                         producer_loss_coeff,
                         producer_num_rows,
                         self.layer_number,
+                        self._indexcache_train_debug_enabled(),
                     )
                 else:
                     distill_topk_probs = TileLangCSAIndexerDistillBridge.apply(
@@ -3101,6 +3109,7 @@ class CompressedSparseAttention(FleetLayer):
                         0.0,
                         None,
                         self.layer_number,
+                        self._indexcache_train_debug_enabled(),
                     )
             else:
                 distill_topk_probs = topk_probs.detach()
@@ -3463,6 +3472,7 @@ class CompressedSparseAttention(FleetLayer):
             loss_mask,
             self.layer_number,
             int(producer_layer if producer_layer is not None else -1),
+            self._indexcache_train_debug_enabled(),
         )
 
     def _postprocess_indexer_replay(

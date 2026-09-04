@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import functools
-import os
 
 import paddle
 
@@ -25,10 +24,13 @@ _PIPELINE_KEY_ATTR = "_paddlefleet_pipeline_key"
 _PIPELINE_SHAPE_ATTR = "_paddlefleet_pipeline_shape"
 _PIPELINE_DTYPE_ATTR = "_paddlefleet_pipeline_dtype"
 _INDEXCACHE_PRODUCER_LAYER_ATTR = "_paddlefleet_indexcache_producer_layer"
+_INDEXCACHE_CONFIG = None
 
 
 def _debug_enabled() -> bool:
-    return os.environ.get("INDEXCACHE_TRAIN_DEBUG", "0") == "1"
+    return bool(
+        getattr(_INDEXCACHE_CONFIG, "indexcache_train_debug", False)
+    )
 
 
 def _is_indexcache_key(key) -> bool:
@@ -491,21 +493,25 @@ def _schedule_node_backward(self, output_grad=None, scaler=None):
     return grad
 
 
-def register_indexcache_pipeline_adapter(
-    index_topk_pattern: str | list[str] | None,
-) -> bool:
+def register_indexcache_pipeline_adapter(config) -> bool:
     """Register Paddle Pipeline compatibility only for IndexCache runs.
 
     The adapter is process-global because Paddle exposes the relevant Pipeline
     hooks as module functions and class methods. Registration is nevertheless
-    explicit, conditional, and idempotent: an empty pattern is a no-op and a
-    second registration does not wrap methods again.
+    explicit, conditional, and idempotent: a config with an empty
+    ``index_topk_pattern`` is a no-op and a second registration does not wrap
+    methods again. Pipeline diagnostics read ``indexcache_train_debug`` from
+    this normalized TransformerConfig instead of process environment state.
 
     Returns:
         ``True`` only when this call installs the adapter.
     """
+    index_topk_pattern = getattr(config, "index_topk_pattern", None)
     if not index_topk_pattern:
         return False
+
+    global _INDEXCACHE_CONFIG
+    _INDEXCACHE_CONFIG = config
 
     import paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils as fbo
     import paddle.distributed.fleet.meta_parallel.pp_utils.utils as pp_utils

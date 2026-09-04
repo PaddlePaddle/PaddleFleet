@@ -1846,6 +1846,35 @@ class TransformerConfig(ModelParallelConfig):
     CP training is supported only for no-MTP TileLang CSA.
     """
 
+    indexcache_train_debug: bool = False
+    """Emit detailed IndexCache state and gradient diagnostics.
+
+    The default is False because enabling this temporary troubleshooting
+    interface introduces device-to-host synchronization, numerical scans, and
+    synchronous logging. It should only be enabled while diagnosing
+    IndexCache state or gradient transport, and can be removed after the
+    PP/CP IndexCache path has stable multi-card CI coverage.
+    """
+
+    indexcache_stall_trace: bool = False
+    """Emit count-only Transformer layer boundary markers for IndexCache.
+
+    The default is False to avoid synchronous logging in the training hot
+    path. This is a temporary troubleshooting interface for locating PP or
+    recompute stalls and can be removed once those paths have stable
+    multi-card CI coverage. ``indexcache_stall_trace_layers`` selects the
+    one-based physical Transformer layers to trace.
+    """
+
+    indexcache_stall_trace_layers: tuple[int, ...] | list[int] = (2,)
+    """One-based physical Transformer layers included in the stall trace.
+
+    The default traces layer 2 when ``indexcache_stall_trace`` is enabled,
+    preserving the original diagnostic scope. JSON/YAML lists and tuples are
+    accepted and normalized in ``__post_init__`` to a sorted tuple of unique
+    positive integers.
+    """
+
     use_fast_hadamard: bool = False
     """Use Tridao's fast Hadamard transform for DSv4 rotate activation function."""
 
@@ -1933,6 +1962,9 @@ class TransformerConfig(ModelParallelConfig):
         "mqa_share_docmask_meta": "mqa_share_docmask_meta",
         "index_topk_pattern": "index_topk_pattern",
         "indexcache_multi_layer_distill": "indexcache_multi_layer_distill",
+        "indexcache_train_debug": "indexcache_train_debug",
+        "indexcache_stall_trace": "indexcache_stall_trace",
+        "indexcache_stall_trace_layers": "indexcache_stall_trace_layers",
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
         "qk_pos_emb_head_dim": "qk_pos_emb_head_dim",
@@ -2062,6 +2094,46 @@ class TransformerConfig(ModelParallelConfig):
         # "disabled" and collapses to 0.0, so this config object never exposes
         # None and consumers can key on ``> 0`` instead of ``is not None``.
         self.dsa_indexer_loss_coeff = float(self.dsa_indexer_loss_coeff or 0.0)
+
+        for field_name in (
+            "indexcache_train_debug",
+            "indexcache_stall_trace",
+        ):
+            field_value = getattr(self, field_name)
+            if not isinstance(field_value, bool):
+                raise TypeError(
+                    f"{field_name} must be a bool, got "
+                    f"{type(field_value).__name__}: {field_value!r}."
+                )
+
+        trace_layers = getattr(self, "indexcache_stall_trace_layers")
+        if not isinstance(trace_layers, (list, tuple)):
+            raise TypeError(
+                "indexcache_stall_trace_layers must be a list or tuple of "
+                f"positive integers, got {type(trace_layers).__name__}: "
+                f"{trace_layers!r}."
+            )
+        invalid_trace_layers = [
+            value
+            for value in trace_layers
+            if not isinstance(value, int)
+            or isinstance(value, bool)
+            or value <= 0
+        ]
+        if invalid_trace_layers:
+            raise ValueError(
+                "indexcache_stall_trace_layers must contain only positive "
+                f"integers, got invalid values: {invalid_trace_layers!r}."
+            )
+        self.indexcache_stall_trace_layers = tuple(sorted(set(trace_layers)))
+        if (
+            self.indexcache_stall_trace
+            and not self.indexcache_stall_trace_layers
+        ):
+            raise ValueError(
+                "indexcache_stall_trace=True requires at least one positive "
+                "entry in indexcache_stall_trace_layers."
+            )
 
         if self.p2p_overlap_dw_calc is not None:
             if isinstance(self.p2p_overlap_dw_calc, str):
