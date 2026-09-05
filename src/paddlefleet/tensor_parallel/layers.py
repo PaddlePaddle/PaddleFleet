@@ -26,18 +26,21 @@ import paddle
 import paddle.distributed as dist
 import paddle.nn.functional as F
 from paddle.distributed.communication.reduce_scatter import _reduce_scatter_base
+from paddle.distributed.fleet.utils.sequence_parallel_utils import (
+    mark_as_sequence_parallel_parameter,
+)
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
 
+# from ..dist_checkpointing.mapping import ShardedStateDict
+# from ..transformer.utils import make_sharded_tensors_for_checkpoint
+from ..ieee_kernel import ieee_kernel_enabled
 from ..parallel_state import (
     get_global_memory_buffer,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-
-# from ..dist_checkpointing.mapping import ShardedStateDict
-# from ..transformer.utils import make_sharded_tensors_for_checkpoint
 from ..utils import (
     divide,
     get_pg_rank,
@@ -272,6 +275,66 @@ def _initialize_affine_weight_cpu(
     return None
 
 
+class _EmbedFp32MainGrad(paddle.autograd.Function):
+    """UAC embedding lookup whose wgrad lands in fp32 main_grad.
+
+    Forward is `weight[ids]` (bf16 activation unchanged). Backward deposits
+    via a nested IndexingBackward on an fp32 view of the accumulator.
+    Returns None for weight.grad so MixPrecision cannot add_(bf16).
+    """
+
+    _printed = 0
+
+    @staticmethod
+    def forward(ctx, weight, ids):
+        ctx.save_for_backward(ids)
+        ctx.weight_ref = weight
+        return weight[ids]
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        ids = ctx.saved_tensor()[0]
+        weight = ctx.weight_ref
+        # Function.backward disables grads. Re-enable so W[ids] is
+        # IndexingBackward on a clone, not MixPrecision bf16 merge.
+        prev = paddle.is_grad_enabled()
+        paddle.set_grad_enabled(True)
+        try:
+            w = weight.detach().clone()
+            w.stop_gradient = False
+            looked = w[ids]
+            (gw,) = paddle.autograd.grad(
+                looked, w, grad_output, allow_unused=True
+            )
+        finally:
+            paddle.set_grad_enabled(prev)
+        _EmbedFp32MainGrad._printed += 1
+        if gw is None:
+            print(
+                "[TWO-FP32-ACCUM] pylayer gw=None "
+                f"hit={_EmbedFp32MainGrad._printed} "
+                f"ids={tuple(ids.shape)}",
+                flush=True,
+            )
+            return None, None
+        fp = gw.cast(paddle.float32)
+        if hasattr(weight, "main_grad") and weight.main_grad is not None:
+            weight.main_grad.add_(fp)
+        else:
+            weight.main_grad = fp
+        if hasattr(weight, "grad_added_to_main_grad"):
+            weight.grad_added_to_main_grad = True
+        if _EmbedFp32MainGrad._printed <= 4:
+            print(
+                "[TWO-FP32-ACCUM] pylayer IndexingBackward "
+                f"hit={_EmbedFp32MainGrad._printed} "
+                f"ids={tuple(ids.shape)} gw_dtype={gw.dtype} "
+                f"gw_nz={(gw != 0).astype('int64').sum().item()}",
+                flush=True,
+            )
+        return None, None
+
+
 class VocabParallelEmbedding(paddle.nn.Layer):
     """Embedding parallelized in the vocabulary dimension.
 
@@ -386,7 +449,12 @@ class VocabParallelEmbedding(paddle.nn.Layer):
             masked_input = input_
         # Get the embeddings.
         if self.deterministic_mode or self.use_accuracy_compatible:
-            output_parallel = self.weight[masked_input]
+            if os.environ.get("MODEL_REPRO_TWO_FP32_ACCUM", "") == "1":
+                output_parallel = _EmbedFp32MainGrad.apply(
+                    self.weight, masked_input
+                )
+            else:
+                output_parallel = self.weight[masked_input]
         else:
             # F.embedding currently has a non-deterministic backward function
             output_parallel = F.embedding(masked_input, self.weight)
@@ -707,8 +775,17 @@ def general_gemm(
         )
 
     else:
-        # Standard bf16/fp16 path
-        if bias is not None:
+        # Standard bf16/fp16 path.
+        # GLM-5.2 IEEE (MODEL_REPRO_IEEE_KERNEL=1) uses F.linear (e9ac /
+        # E-654). FLAG+UAC without that env must keep structure's
+        # matmul(a, b.T.contiguous(), transpose_y=True) path so Minimax /
+        # GLM-4.5 Air CI still matches Megatron.
+        if ieee_kernel_enabled() and use_accuracy_compatible:
+            if bias is not None:
+                output = paddle.nn.functional.linear(a, b, bias)
+            else:
+                output = paddle.nn.functional.linear(a, b)
+        elif bias is not None:
             if use_accuracy_compatible:
                 weight_t = b.T.contiguous()
                 output = paddle.matmul(a, weight_t, transpose_y=True)
@@ -955,8 +1032,20 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 )
             else:
                 if ctx.use_accuracy_compatible:
-                    grad_input, _ = general_gemm(
-                        grad_output, weight.t().contiguous()
+                    # IEEE e9ac / E-240: weight is [in, out]; materialize
+                    # W^T and run an NN GEMM so cuBLAS matches torch.linear
+                    # dgrad. Routing this through UAC general_gemm used to
+                    # emit matmul(go, W, transpose_y=True), which disagrees
+                    # at the live shared-down shape.
+                    original_shape = grad_output.shape
+                    flat_grad_output = grad_output.reshape(
+                        [-1, original_shape[-1]]
+                    )
+                    flat_grad_input = paddle.matmul(
+                        flat_grad_output, weight.t().contiguous()
+                    )
+                    grad_input = flat_grad_input.reshape(
+                        [*list(original_shape[:-1]), weight.shape[0]]
                     )
                 else:
                     grad_input, _ = general_gemm(grad_output, weight.t())
@@ -1415,6 +1504,7 @@ class Linear(paddle.nn.Layer):
             self.weight.allreduce = True
             self.weight.is_distributed = False
             self.weight.is_expert_param = self.is_expert
+            self._mark_replicated_grad_needs_tp_reduction(self.weight)
         else:
             self.weight = None
 
@@ -1430,6 +1520,7 @@ class Linear(paddle.nn.Layer):
                     self.bias.zero_()
             self.bias.allreduce = True
             self.bias.is_distributed = False
+            self._mark_replicated_grad_needs_tp_reduction(self.bias)
         else:
             self.bias = None
 
@@ -1470,6 +1561,28 @@ class Linear(paddle.nn.Layer):
             # Color the bf16 weight so ``clear_param_storage("linear_fp8")``
             # can free it after pre-quant.
             _maybe_color_linear_fp8_weight(self)
+
+    def _mark_replicated_grad_needs_tp_reduction(self, parameter) -> None:
+        """Mark a replicated parameter so its gradient is reduced over the TP group.
+
+        Under sequence parallelism each rank sees s/TP of the sequence, so the
+        local wgrad is a partial sum. Linear.forward never gathers, so nothing
+        else adds that term. SPGradSyncCallback all-reduces marked parameters
+        over the model-parallel group (E-205). Gated on use_accuracy_compatible
+        so the default Linear path is unchanged.
+        """
+        if self.is_expert:
+            return
+        if not (
+            ieee_kernel_enabled()
+            and getattr(self.config, "use_accuracy_compatible", False)
+        ):
+            return
+        if not getattr(self.config, "sequence_parallel", False):
+            return
+        if getattr(self.config, "tensor_model_parallel_size", 1) <= 1:
+            return
+        mark_as_sequence_parallel_parameter(parameter)
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
         """Pre-quantize this Linear's weight and cache on ``self.weight``.
@@ -2389,6 +2502,10 @@ class RowParallelLinear(paddle.nn.Layer):
                         self.config.cpu_offloading_activations
                     )
 
+        # IEEE uses the same Function path as FLAG+UAC (e808): general_gemm
+        # already selects F.linear when MODEL_REPRO_IEEE_KERNEL=1. A raw
+        # F.linear shortcut skipped the custom dgrad and, with the fp32
+        # reduce-scatter below, was unused leftover vs E-811 IEEE 1-100.
         output_parallel = self._forward_impl(
             input=input_parallel,
             weight=self.weight,

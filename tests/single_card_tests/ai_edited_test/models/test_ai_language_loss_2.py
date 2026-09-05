@@ -66,6 +66,54 @@ class TestLanguageLossInit(unittest.TestCase):
 
         loss = LanguageLoss(config=mock_config)
         self.assertTrue(loss.enable_parallel_cross_entropy)
+        mock_pce.assert_called_once()
+
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss.get_tensor_model_parallel_world_size",
+        return_value=4,
+    )
+    @patch("paddle.distributed.is_initialized", return_value=True)
+    @patch("paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy")
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss.ieee_kernel_enabled",
+        return_value=True,
+    )
+    def test_init_with_parallel_uac_uses_vocab_parallel_ce(
+        self, mock_uac, mock_pce, mock_dist, mock_tp
+    ):
+        from paddlefleet.models.common.language_loss.language_loss import (
+            LanguageLoss,
+            _uac_vocab_parallel_ce,
+        )
+
+        mock_config = MagicMock()
+        mock_config.parallel_output = True
+        mock_config.loss_subbatch_sequence_length = 0
+
+        loss = LanguageLoss(config=mock_config)
+        self.assertTrue(loss.enable_parallel_cross_entropy)
+        self.assertIs(loss.loss_func, _uac_vocab_parallel_ce)
+        mock_pce.assert_not_called()
+
+    def test_uac_vocab_parallel_ce_transposes_batch_first_logits(self):
+        import paddle
+
+        from paddlefleet.models.common.language_loss.language_loss import (
+            _uac_vocab_parallel_ce,
+        )
+
+        logits = paddle.randn([2, 3, 4])
+        labels = paddle.randint(0, 4, [2, 3])
+        with patch(
+            "paddlefleet.tensor_parallel.cross_entropy.vocab_parallel_cross_entropy",
+            side_effect=lambda lg, lb: lg.sum(axis=-1),
+        ) as mock_ce:
+            out = _uac_vocab_parallel_ce(logits, labels)
+        mock_ce.assert_called_once()
+        lg, lb = mock_ce.call_args.args
+        self.assertEqual(list(lg.shape), [3, 2, 4])
+        self.assertEqual(list(lb.shape), [3, 2])
+        self.assertEqual(list(out.shape), [2, 3])
 
     @patch(
         "paddlefleet.models.common.language_loss.language_loss.get_tensor_model_parallel_world_size",
@@ -139,6 +187,146 @@ class TestLanguageLossForwardImpl(unittest.TestCase):
         labels = paddle.full([2, 10], -100, dtype="int64")
         result = loss_fn.forward_impl(logits, labels)
         self.assertIsNotNone(result)
+
+    @patch.dict(
+        os.environ,
+        {
+            "MODEL_REPRO_IEEE_KERNEL": "1",
+            "FLAGS_use_accuracy_compatible_kernel": "1",
+        },
+    )
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss.get_context_parallel_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss.get_tensor_model_parallel_world_size",
+        return_value=1,
+    )
+    @patch("paddle.distributed.is_initialized", return_value=False)
+    def test_uac_nonexperimental_uses_fp32_sum_and_defer_token(
+        self, mock_dist, mock_tp, mock_cp
+    ):
+        import inspect
+
+        import paddle
+
+        from paddlefleet.models.common.language_loss import language_loss as ll
+        from paddlefleet.models.common.language_loss.language_loss import (
+            DeferTokenNormalizationOp,
+            LanguageLoss,
+        )
+
+        mock_config = MagicMock()
+        mock_config.parallel_output = True
+        mock_config.loss_subbatch_sequence_length = 0
+        mock_config.gpt_model_use_experimental_version = False
+        mock_config.use_accuracy_compatible = True
+        mock_config.fused_linear_ce_loss_chunk = 0
+        mock_config.experimental_dataflow = False
+
+        src = inspect.getsource(LanguageLoss.forward_impl)
+        self.assertIn("_normalize_loss_by_tokens", src)
+        self.assertIn("cast(paddle.float64)", src)
+        self.assertIn("if ieee_kernel_enabled():", src)
+        self.assertIn("elif self.use_accuracy_compatible:", src)
+        self.assertIn("DeferTokenNormalizationOp", inspect.getsource(ll))
+
+        ll.clear_pending_gradient_divisor()
+        loss_fn = LanguageLoss(config=mock_config)
+        logits = paddle.randn([2, 4, 8])
+        labels = paddle.randint(0, 8, [2, 4])
+        out = loss_fn.forward_impl(logits, labels)
+        self.assertIsNotNone(out)
+        self.assertIsNotNone(ll.get_pending_gradient_divisor())
+        ll.clear_pending_gradient_divisor()
+        self.assertIs(
+            DeferTokenNormalizationOp.__bases__[0], paddle.autograd.PyLayer
+        )
+
+    @patch.dict(os.environ, {"FLAGS_use_accuracy_compatible_kernel": "0"})
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss.get_context_parallel_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss.get_tensor_model_parallel_world_size",
+        return_value=1,
+    )
+    @patch("paddle.distributed.is_initialized", return_value=False)
+    def test_non_uac_token_normalize_divides_by_tensor_count(
+        self, mock_dist, mock_tp, mock_cp
+    ):
+        import inspect
+
+        import paddle
+
+        from paddlefleet.models.common.language_loss.language_loss import (
+            LanguageLoss,
+        )
+
+        src = inspect.getsource(LanguageLoss.forward_impl)
+        self.assertIn("loss / lossmask.sum()", src)
+
+        mock_config = MagicMock()
+        mock_config.parallel_output = True
+        mock_config.loss_subbatch_sequence_length = 0
+        mock_config.gpt_model_use_experimental_version = False
+        mock_config.use_accuracy_compatible = False
+        mock_config.fused_linear_ce_loss_chunk = 0
+        mock_config.experimental_dataflow = False
+
+        loss_fn = LanguageLoss(config=mock_config)
+        logits = paddle.randn([2, 4, 8])
+        labels = paddle.randint(0, 8, [2, 4])
+        out = loss_fn.forward_impl(logits, labels)
+        per_token = loss_fn.loss_func(logits.cast("float32"), labels)
+        lossmask = (
+            (labels != loss_fn.ignored_index).reshape([-1]).cast(paddle.float32)
+        )
+        expected = (
+            paddle.sum(per_token.cast(paddle.float32).reshape([-1]) * lossmask)
+            / lossmask.sum()
+        )
+        self.assertTrue(bool((out == expected).numpy().all()))
+
+    @patch.dict(
+        os.environ,
+        {
+            "MODEL_REPRO_IEEE_KERNEL": "0",
+            "FLAGS_use_accuracy_compatible_kernel": "1",
+        },
+    )
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss.get_context_parallel_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.models.common.language_loss.language_loss.get_tensor_model_parallel_world_size",
+        return_value=1,
+    )
+    @patch("paddle.distributed.is_initialized", return_value=False)
+    def test_flag_uac_without_ieee_keeps_structure_fp64_ep_normalize(
+        self, mock_dist, mock_tp, mock_cp
+    ):
+        import inspect
+
+        from paddlefleet.models.common.language_loss.language_loss import (
+            LanguageLoss,
+        )
+
+        src = inspect.getsource(LanguageLoss.forward_impl)
+        ieee_idx = src.index("# leftover / IEEE E-654")
+        uac_idx = src.index("# Structure FLAG+UAC")
+        default_idx = src.index(
+            "# Default path must keep structure's tensor divisor."
+        )
+        self.assertLess(ieee_idx, uac_idx)
+        self.assertLess(uac_idx, default_idx)
+        self.assertIn("cast(paddle.float64)", src[uac_idx:default_idx])
+        self.assertIn("_normalize_loss_by_tokens", src[ieee_idx:uac_idx])
+        self.assertNotIn("cast(paddle.float64)", src[ieee_idx:uac_idx])
+        self.assertIn("loss / lossmask.sum()", src[default_idx:])
 
 
 class TestLanguageLossForwardWithMTP(unittest.TestCase):

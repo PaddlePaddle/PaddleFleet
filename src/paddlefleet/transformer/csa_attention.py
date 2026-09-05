@@ -26,7 +26,6 @@ Components:
 from __future__ import annotations
 
 import contextlib
-import os
 import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
@@ -36,17 +35,13 @@ import paddle.nn.functional as F
 from paddle import Tensor, framework, nn
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
+from paddlefleet.context_parallel_utils import ContextParallelGatherOp
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
-from paddlefleet.transformer import FleetLayer
-from paddlefleet.transformer.dw_overlap import deferrable_linear
-
-_ACCURACY_COMPATIBLE_KERNEL: bool = (
-    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
-)
-from paddlefleet.context_parallel_utils import ContextParallelGatherOp
 from paddlefleet.parallel_state import get_context_parallel_world_size
+from paddlefleet.transformer import FleetLayer
 from paddlefleet.transformer.dsa_attention import (
     DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
@@ -54,6 +49,9 @@ from paddlefleet.transformer.dsa_attention import (
     fused_qk_topk_naive,
     rotate_activation,
 )
+from paddlefleet.transformer.dw_overlap import deferrable_linear
+
+_ACCURACY_COMPATIBLE_KERNEL: bool = ieee_kernel_enabled()
 
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection

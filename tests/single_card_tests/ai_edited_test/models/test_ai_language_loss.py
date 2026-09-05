@@ -168,6 +168,7 @@ class TestLanguageLoss(unittest.TestCase):
         self.assertFalse(loss_fn.enable_parallel_cross_entropy)
         self.assertFalse(loss_fn.use_subbatch)
 
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "0"})
     def test_accuracy_loss_prefers_explicit_ep_group(self):
         class FixedLoss(paddle.nn.Layer):
             def forward(self, logits, labels):

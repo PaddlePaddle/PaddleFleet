@@ -33,6 +33,8 @@ from paddlefleet.transformer.moe.moe_layer import (
     GradDtypeUnguard,
     MoELayer,
     MoESublayers,
+    _AccuracyCompatibleExpertInputGather,
+    _AccuracyCompatibleMoEInputBranches,
 )
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
@@ -320,6 +322,130 @@ class TestMoELayerFp8QuantWeight(unittest.TestCase):
         layer.fp8 = False
         # Should return early without errors
         layer.fp8_quant_weight()
+
+
+class TestAccuracyCompatibleMoEInputBranches(unittest.TestCase):
+    def test_backward_uses_routed_router_shared_order(self):
+        hidden = paddle.zeros([1, 4], dtype="bfloat16")
+        hidden.stop_gradient = False
+        routed, router, shared = _AccuracyCompatibleMoEInputBranches.apply(
+            hidden
+        )
+        routed_grad = paddle.to_tensor([[1.0, 1.0, 1.0, 1.0]], dtype="bfloat16")
+        router_grad = paddle.to_tensor(
+            [[0.00390625, 0.0078125, 0.015625, 0.03125]], dtype="bfloat16"
+        )
+        shared_grad = paddle.to_tensor(
+            [[-1.0, -1.0, -1.0, -1.0]], dtype="bfloat16"
+        )
+
+        paddle.autograd.backward(
+            [routed, router, shared],
+            [routed_grad, router_grad, shared_grad],
+        )
+
+        expected = (routed_grad + router_grad) + shared_grad
+        alternative = (router_grad + shared_grad) + routed_grad
+        self.assertEqual(
+            hidden.grad.numpy().tobytes(), expected.numpy().tobytes()
+        )
+        self.assertNotEqual(
+            expected.numpy().tobytes(), alternative.numpy().tobytes()
+        )
+
+
+class TestAccuracyCompatibleExpertInputGather(unittest.TestCase):
+    def test_backward_accumulates_experts_in_forward_order(self):
+        hidden = paddle.to_tensor(
+            [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+            dtype="bfloat16",
+        )
+        hidden.stop_gradient = False
+        parameter = paddle.ones([4], dtype="bfloat16")
+        parameter.stop_gradient = False
+        indices = paddle.to_tensor([0, 1, 0, 1], dtype="int64")
+        tokens_per_expert = paddle.to_tensor([2, 2], dtype="int64")
+        gathered = _AccuracyCompatibleExpertInputGather.apply(
+            hidden, indices, tokens_per_expert
+        )
+        expert_grads = paddle.to_tensor(
+            [
+                [1.0, 16.0, 256.0, 4096.0],
+                [2.0, 32.0, 512.0, 8192.0],
+                [0.25, 4.0, 64.0, 1024.0],
+                [0.5, 8.0, 128.0, 2048.0],
+            ],
+            dtype="bfloat16",
+        )
+        (gathered * parameter).backward(expert_grads)
+
+        expected = paddle.to_tensor(
+            [
+                [1.25, 20.0, 320.0, 5120.0],
+                [2.5, 40.0, 640.0, 10240.0],
+            ],
+            dtype="bfloat16",
+        )
+        self.assertEqual(
+            hidden.grad.numpy().tobytes(), expected.numpy().tobytes()
+        )
+        expected_parameter_grad = paddle.sum(
+            gathered.detach() * expert_grads, axis=0
+        )
+        self.assertEqual(
+            parameter.grad.numpy().tobytes(),
+            expected_parameter_grad.numpy().tobytes(),
+        )
+
+
+class TestMoELayerSingleCardAccuracy(unittest.TestCase):
+    """Test accuracy-compatible routing-weight placement."""
+
+    @patch("paddlefleet.transformer.moe.moe_layer.ieee_kernel_enabled")
+    def test_accuracy_gate_applies_weight_inside_expert(self, accuracy_gate):
+        accuracy_gate.return_value = True
+        layer = MoELayer.__new__(MoELayer)
+        layer.num_experts = 1
+        expert = MagicMock(return_value=(paddle.ones([1, 2]), None))
+        layer.experts = [expert]
+        hidden_states = paddle.ones([1, 2])
+        selected_experts = paddle.zeros([1, 1], dtype="int64")
+        topk_weights = paddle.to_tensor([[0.25]], dtype="float32")
+
+        output = layer._forward_single_card_moe(
+            hidden_states, selected_experts, topk_weights
+        )
+
+        paddle.testing.assert_close(output, paddle.ones([1, 2]))
+        expert.assert_called_once()
+        paddle.testing.assert_close(
+            expert.call_args.kwargs["per_token_scale"], paddle.to_tensor([0.25])
+        )
+        self.assertEqual(
+            expert.call_args.kwargs[
+                "accuracy_compatible_router_reduction_rows"
+            ],
+            1,
+        )
+
+    @patch("paddlefleet.transformer.moe.moe_layer.ieee_kernel_enabled")
+    def test_default_path_applies_weight_after_expert(self, accuracy_gate):
+        accuracy_gate.return_value = False
+        layer = MoELayer.__new__(MoELayer)
+        layer.num_experts = 1
+        expert = MagicMock(return_value=(paddle.ones([1, 2]), None))
+        layer.experts = [expert]
+        hidden_states = paddle.ones([1, 2])
+        selected_experts = paddle.zeros([1, 1], dtype="int64")
+        topk_weights = paddle.to_tensor([[0.25]], dtype="float32")
+
+        output = layer._forward_single_card_moe(
+            hidden_states, selected_experts, topk_weights
+        )
+
+        paddle.testing.assert_close(output, paddle.full([1, 2], 0.25))
+        self.assertEqual(expert.call_count, 1)
+        paddle.testing.assert_close(expert.call_args.args[0], hidden_states)
 
 
 class TestMoELayerForwardLogging(unittest.TestCase):

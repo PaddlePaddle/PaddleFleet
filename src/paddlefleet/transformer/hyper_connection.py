@@ -24,13 +24,13 @@ Reference: mHC paper - Manifold-Constrained Hyper-Connections for transformers.
 from __future__ import annotations
 
 import math
-import os
 from typing import TYPE_CHECKING
 
 import paddle
 import paddle.nn.functional as F
 from paddle import Tensor, nn
 
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -38,9 +38,7 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
-_ACCURACY_COMPATIBLE_KERNEL: bool = (
-    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
-)
+_ACCURACY_COMPATIBLE_KERNEL: bool = ieee_kernel_enabled()
 
 _MHC_COMPUTE_H_EPS = 1e-6
 

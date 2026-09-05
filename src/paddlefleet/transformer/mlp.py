@@ -42,6 +42,7 @@ from paddlefleet.fusions.fused_bias_swiglu import (
     bias_swiglu_impl,
     weighted_bias_swiglu_impl,
 )
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.train_infer_consistent_ops.inspect_util import (
     get_current_layer,
     inspect_tensor,
@@ -49,16 +50,93 @@ from paddlefleet.train_infer_consistent_ops.inspect_util import (
 from paddlefleet.transformer.activations import situ, situ_glu
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.layer import FleetLayer
-
-if TYPE_CHECKING:
-    from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import (
     get_tensor_model_parallel_group_if_none,
     nvtx_range_pop,
     nvtx_range_push,
 )
 
+if TYPE_CHECKING:
+    from paddlefleet.transformer.transformer_config import TransformerConfig
+
 logger = logging.getLogger(__name__)
+
+_ACCURACY_COMPATIBLE_KERNEL = ieee_kernel_enabled()
+
+
+def _accuracy_compatible_swiglu(hidden_states):
+    gate, linear = paddle.chunk(hidden_states, 2, axis=-1)
+    return F.silu(gate) * linear
+
+
+class _AccuracyCompatibleRouterScaleGradFunction(paddle.autograd.PyLayer):
+    """Apply router scale while matching Megatron's grouped reduction shape."""
+
+    @staticmethod
+    def forward(ctx, activation, scale, reduction_rows):
+        ctx.activation_dtype = activation.dtype
+        ctx.reduction_rows = int(reduction_rows)
+        ctx.save_for_backward(activation, scale)
+        return (activation * scale.unsqueeze(-1)).cast(activation.dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        activation, scale = ctx.saved_tensor()
+        row_count = activation.shape[0]
+        products = activation.cast("float32") * grad_output.cast("float32")
+        if ctx.reduction_rows > row_count:
+            products = paddle.concat(
+                [
+                    products,
+                    paddle.zeros(
+                        [ctx.reduction_rows - row_count, products.shape[-1]],
+                        dtype=products.dtype,
+                    ),
+                ],
+                axis=0,
+            )
+        grad_scale = products.sum(axis=-1)[:row_count]
+        return None, grad_scale.cast(scale.dtype)
+
+
+def _accuracy_compatible_router_scale(activation, scale, reduction_rows):
+    native_activation_path = (activation * scale.detach().unsqueeze(-1)).cast(
+        activation.dtype
+    )
+    scale_path = _AccuracyCompatibleRouterScaleGradFunction.apply(
+        activation.detach(), scale, reduction_rows
+    )
+    return native_activation_path + (scale_path - scale_path.detach())
+
+
+class _AccuracyCompatibleLinearInputGradFunction(paddle.autograd.PyLayer):
+    """Linear forward with a materialized-transpose input gradient."""
+
+    @staticmethod
+    def forward(ctx, hidden_states, weight):
+        ctx.save_for_backward(weight)
+        return F.linear(hidden_states, weight)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (weight,) = ctx.saved_tensor()
+        grad_input = paddle.matmul(
+            grad_output, weight.transpose([1, 0]).contiguous()
+        )
+        return grad_input, None
+
+
+def _accuracy_compatible_projection(projection, hidden_states):
+    output_bias = projection.bias if projection.skip_bias_add else None
+    bias = None if projection.skip_bias_add else projection.bias
+    output = _AccuracyCompatibleLinearInputGradFunction.apply(
+        hidden_states, projection.weight.detach()
+    )
+    if bias is not None:
+        output = output + bias.detach()
+    parameter_path = F.linear(hidden_states.detach(), projection.weight, bias)
+    output = output + (parameter_path - parameter_path.detach())
+    return output, output_bias
 
 
 # pylint: disable=missing-class-docstring
@@ -219,16 +297,31 @@ class MLP(FleetLayer):
             return {}
         return {"up_gate_proj.weight": (ortho_gate_up, {})}
 
-    def forward(self, hidden_states, per_token_scale=None):
+    def forward(
+        self,
+        hidden_states,
+        per_token_scale=None,
+        accuracy_compatible_router_reduction_rows=None,
+    ):
         """Perform the forward pass through the MLP block."""
         # [s, b, 4 * h/p]
         nvtx_range_push(suffix="up_gate_proj")
-        intermediate_parallel, bias_parallel = deferrable_linear(
-            self.config,
-            self._dw_up_gate_point,
-            self.up_gate_proj,
-            hidden_states,
-        )
+        if (
+            _ACCURACY_COMPATIBLE_KERNEL
+            and self.config.tensor_model_parallel_size == 1
+        ):
+            intermediate_parallel, bias_parallel = (
+                _accuracy_compatible_projection(
+                    self.up_gate_proj, hidden_states
+                )
+            )
+        else:
+            intermediate_parallel, bias_parallel = deferrable_linear(
+                self.config,
+                self._dw_up_gate_point,
+                self.up_gate_proj,
+                hidden_states,
+            )
         nvtx_range_pop(suffix="up_gate_proj")
 
         intermediate_parallel = inspect_tensor(
@@ -244,6 +337,27 @@ class MLP(FleetLayer):
             self.config, "gpt_model_use_experimental_version", False
         )
         if (
+            _ACCURACY_COMPATIBLE_KERNEL
+            and bias_parallel is None
+            and self.hidden_act == F.silu
+            and self.config.gated_linear_unit
+        ):
+            intermediate_parallel = _accuracy_compatible_swiglu(
+                intermediate_parallel
+            )
+            if per_token_scale is not None:
+                original_dtype = intermediate_parallel.dtype
+                if accuracy_compatible_router_reduction_rows is not None:
+                    intermediate_parallel = _accuracy_compatible_router_scale(
+                        intermediate_parallel,
+                        per_token_scale,
+                        accuracy_compatible_router_reduction_rows,
+                    )
+                else:
+                    intermediate_parallel = (
+                        intermediate_parallel * per_token_scale.unsqueeze(-1)
+                    ).to(original_dtype)
+        elif (
             self.config.use_bias
             and self.config.gpt_model_use_experimental_version
             and self.config.tensor_model_parallel_size == 1
@@ -258,7 +372,11 @@ class MLP(FleetLayer):
             )
             return output, None
 
-        if self.hidden_act == situ and self.config.gated_linear_unit:
+        # Upstream adds this as a fresh ``if`` because the branch above it ends
+        # in ``return``. Here it must stay ``elif``: this branch's chain starts
+        # at the accuracy-compatible swiglu branch, and a new ``if`` would let
+        # that branch fall through and apply an activation twice.
+        elif self.hidden_act == situ and self.config.gated_linear_unit:
             if bias_parallel is not None:
                 intermediate_parallel = intermediate_parallel + bias_parallel
             intermediate_parallel = situ_glu(
@@ -383,12 +501,20 @@ class MLP(FleetLayer):
 
         # [s, b, h]
         nvtx_range_push(suffix="down_proj")
-        output, output_bias = deferrable_linear(
-            self.config,
-            self._dw_down_point,
-            self.down_proj,
-            intermediate_parallel,
-        )
+        if (
+            _ACCURACY_COMPATIBLE_KERNEL
+            and self.config.tensor_model_parallel_size == 1
+        ):
+            output, output_bias = _accuracy_compatible_projection(
+                self.down_proj, intermediate_parallel
+            )
+        else:
+            output, output_bias = deferrable_linear(
+                self.config,
+                self._dw_down_point,
+                self.down_proj,
+                intermediate_parallel,
+            )
         nvtx_range_pop(suffix="down_proj")
         output = inspect_tensor(
             f"{self.inspect_name}_ffn2_output", get_current_layer(), output

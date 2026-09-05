@@ -29,6 +29,7 @@ from paddlefleet.context_parallel_utils import (
     preprocess_index,
     preprocess_index_dual_chunks,
 )
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.models.common.embeddings import (
     apply_rotary_pos_emb,
 )
@@ -49,8 +50,9 @@ from paddlefleet.recompute_utils import (
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.tensor_parallel.mappings import (
-    gather_from_sequence_parallel_region,
     gather_from_tensor_model_parallel_region,
+    reduce_from_tensor_model_parallel_region,
+    reduce_scatter_to_sequence_parallel_region,
     scatter_to_sequence_parallel_region,
 )
 from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
@@ -65,6 +67,179 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_rank, get_pg_size
 
 logger = logging.getLogger(__name__)
+
+_ACCURACY_COMPATIBLE_KERNEL: bool = ieee_kernel_enabled()
+
+
+def _dsa_absorbed_enabled() -> bool:
+    """Torch-aligned absorbed-MLA core (E-063 / IEEE 1-5).
+
+    Read MODEL_REPRO_IEEE_KERNEL at call time: import-time evaluation can
+    see the env before run_paddle.sh exports it. FLAG+UAC alone is not
+    enough; Minimax / GLM-4.5 Air CI also export FLAG=1.
+    """
+    return (
+        os.environ.get("MODEL_REPRO_DSA_ABSORBED", "0") == "1"
+        or ieee_kernel_enabled()
+    )
+
+
+class _AccuracyCompatibleLinearInputGrad(paddle.autograd.PyLayer):
+    """Linear value path whose backward only returns materialized-transpose dgrad."""
+
+    @staticmethod
+    def forward(ctx, hidden_states, weight):
+        ctx.save_for_backward(weight)
+        return paddle.nn.functional.linear(hidden_states, weight)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        (weight,) = ctx.saved_tensor()
+        grad_input = paddle.matmul(
+            grad_output, weight.transpose([1, 0]).contiguous()
+        )
+        return grad_input, None
+
+
+def _accuracy_compatible_q_up_projection(projection, hidden_states):
+    """Preserve native parameter gradients while controlling q-up input dgrad.
+
+    ColumnParallelLinear under SP all-gathers first so F.linear sees the
+    fused-linear sequence, matching E-062 / q-down. Do not call
+    ``projection()`` after that gather: ColumnParallelLinear would gather
+    again. The caller keeps the local output shard (gather_output is false
+    on q_b_proj).
+    """
+    output_bias = projection.bias if projection.skip_bias_add else None
+    if (
+        getattr(projection, "sequence_parallel", False)
+        and get_pg_size(getattr(projection, "tp_group", None)) > 1
+    ):
+        from paddlefleet.tensor_parallel.mappings import (
+            gather_from_sequence_parallel_region,
+        )
+
+        hidden_states = gather_from_sequence_parallel_region(
+            hidden_states, group=projection.tp_group
+        )
+        hidden_states = hidden_states.contiguous()
+    parameter_path = paddle.nn.functional.linear(
+        hidden_states.detach(), projection.weight, None
+    )
+    input_path = _AccuracyCompatibleLinearInputGrad.apply(
+        hidden_states, projection.weight.detach()
+    )
+    output = parameter_path + (input_path - input_path.detach())
+    return output, output_bias
+
+
+def _accuracy_compatible_projection(projection, hidden_states):
+    """Apply a projection with Torch-aligned strided-transpose GEMM formulation.
+
+    RowParallelLinear o_proj: local F.linear, then TP reduce or SP
+    reduce-scatter so the residual layout matches the fused layer.
+    """
+    output_bias = projection.bias if projection.skip_bias_add else None
+    bias = None if projection.skip_bias_add else projection.bias
+    output = paddle.nn.functional.linear(hidden_states, projection.weight, bias)
+    tp_group = getattr(projection, "tp_group", None)
+    if get_pg_size(tp_group) > 1:
+        if getattr(projection, "sequence_parallel", False):
+            output = reduce_scatter_to_sequence_parallel_region(
+                output, group=tp_group
+            )
+        else:
+            output = reduce_from_tensor_model_parallel_region(
+                output, group=tp_group
+            )
+    return output, output_bias
+
+
+def _accuracy_compatible_q_down_projection(projection, hidden_states):
+    """Apply q-down with the Torch-aligned strided-transpose GEMM formulation.
+
+    Replicated Linear never takes the gather branch: it does not set
+    sequence_parallel on itself. ColumnParallelLinear under SP all-gathers
+    first so F.linear sees the fused-linear sequence, matching E-062.
+    """
+    output_bias = projection.bias if projection.skip_bias_add else None
+    bias = None if projection.skip_bias_add else projection.bias
+    if (
+        getattr(projection, "sequence_parallel", False)
+        and get_pg_size(getattr(projection, "tp_group", None)) > 1
+    ):
+        from paddlefleet.tensor_parallel.mappings import (
+            gather_from_sequence_parallel_region,
+        )
+
+        hidden_states = gather_from_sequence_parallel_region(
+            hidden_states, group=projection.tp_group
+        )
+        hidden_states = hidden_states.contiguous()
+    output = paddle.nn.functional.linear(hidden_states, projection.weight, bias)
+    return output, output_bias
+
+
+def _accuracy_compatible_mla_rope_apply(
+    q_pe,
+    k_pe,
+    rope_base,
+    position_ids,
+    sequence_parallel=False,
+    k_seq_offset=0,
+):
+    """Apply Megatron MLA RoPE ordering for explicit MTP position IDs.
+
+    Query may already be full-seq (ColumnParallelLinear SP gather) while
+    k_pos_emb is still the local shard. Rotate each tensor against its own
+    sequence length so unabsorbed concat keeps matching k_no_pe. A sharded
+    k uses ``k_seq_offset`` so rank 1 rotates positions 30-59, not 0-29.
+    """
+    head_dim = q_pe.shape[-1]
+    seq_axis = 0 if sequence_parallel else 1
+    q_seq_len = int(q_pe.shape[seq_axis])
+    k_seq_len = int(k_pe.shape[seq_axis])
+    if position_ids.ndim != 1:
+        position_ids = position_ids.reshape([-1])
+    if position_ids.shape[0] < q_seq_len:
+        raise ValueError(
+            f"MLA RoPE position_ids length {position_ids.shape[0]} is shorter than "
+            f"the query sequence length {q_seq_len}."
+        )
+    # MTP retains one look-ahead token in the input batch, while the backbone
+    # attention tensors contain only the first seq_len positions.
+    q_position_ids = position_ids[:q_seq_len]
+    k_end = int(k_seq_offset) + k_seq_len
+    if position_ids.shape[0] < k_end:
+        raise ValueError(
+            f"MLA RoPE position_ids length {position_ids.shape[0]} is shorter than "
+            f"the key shard end {k_end}."
+        )
+    k_position_ids = position_ids[int(k_seq_offset) : k_end]
+    inv_freq = paddle.pow(
+        paddle.to_tensor(rope_base, dtype="float32"),
+        -paddle.arange(0, head_dim, 2, dtype="float32") / float(head_dim),
+    )
+
+    def _freqs(ids):
+        freqs = paddle.outer(ids.cast("float32"), inv_freq)
+        freqs = paddle.concat((freqs, freqs), axis=-1)
+        if sequence_parallel:
+            return freqs[:, None, None, :]
+        return freqs[None, :, None, :]
+
+    q_freqs = _freqs(q_position_ids)
+    k_freqs = _freqs(k_position_ids)
+
+    def rotate(tensor, seq_freqs):
+        tensor = paddle.concat((tensor[..., 0::2], tensor[..., 1::2]), axis=-1)
+        x1, x2 = paddle.chunk(tensor, 2, axis=-1)
+        rotated = paddle.concat((-x2, x1), axis=-1)
+        return tensor * paddle.cos(seq_freqs).cast(
+            tensor.dtype
+        ) + rotated * paddle.sin(seq_freqs).cast(tensor.dtype)
+
+    return rotate(q_pe, q_freqs), rotate(k_pe, k_freqs)
 
 
 def _is_incremental_decode(past_key_values, layer_idx, use_cache) -> bool:
@@ -896,6 +1071,7 @@ class MultiLatentAttention(Attention):
         if self.mqa_latent:
             core_attn_extra["in_recompute"] = in_recompute
 
+        k_abs_weight = None
         if self.mqa_latent:
             # Query is already absorbed; the core attention only needs the V-side
             # de-absorption weight.
@@ -921,6 +1097,17 @@ class MultiLatentAttention(Attention):
                         -1,
                     ]
                 )[:, :, self.qk_nope_head_dim :]
+        elif _dsa_absorbed_enabled():
+            # IEEE 1-5: torch-aligned absorbed core. DSA builds q_absorbed
+            # from its own query (pre-rope nope + roped rope) with these
+            # K/V de-absorption weights. Mirrors AbsorbedMLASelfAttention.
+            kv_b_w = self.kv_b_proj.weight
+            w_h = kv_b_w.reshape(
+                [self.kv_lora_rank, self.num_attention_heads_per_partition, -1]
+            ).transpose([1, 2, 0])
+            k_abs_weight = w_h[:, : self.qk_nope_head_dim, :]
+            wv_b = w_h[:, -self.v_head_dim :, :]
+            q_absorbed = None
         elif hasattr(self.core_attention.config, "forward_meta"):  # decode mode
             # Compute absorbed query and V de-absorption weight for FD MLA decode kernel
             # q_absorbed: [b, s, heads, kv_lora_rank + qk_rope_head_dim]
@@ -1001,6 +1188,7 @@ class MultiLatentAttention(Attention):
                 k_pos_emb=k_pos_emb,
                 q_absorbed=q_absorbed,
                 v_b_proj_weight=wv_b,
+                k_abs_weight=k_abs_weight,
                 **core_attn_extra,
             )
         else:
@@ -1027,6 +1215,7 @@ class MultiLatentAttention(Attention):
                 k_pos_emb=k_pos_emb,
                 q_absorbed=q_absorbed,
                 v_b_proj_weight=wv_b,
+                k_abs_weight=k_abs_weight,
                 **core_attn_extra,
             )
             # Ablation boundary: core attention output (static-batch branch).
@@ -1143,9 +1332,14 @@ class MultiLatentAttention(Attention):
             "mla_gate_output", layer_num, core_attn_out
         )
 
-        output, bias = deferrable_linear(
-            self.config, "attn_out_proj", self.o_proj, core_attn_out
-        )
+        if _ACCURACY_COMPATIBLE_KERNEL:
+            output, bias = _accuracy_compatible_projection(
+                self.o_proj, core_attn_out
+            )
+        else:
+            output, bias = deferrable_linear(
+                self.config, "attn_out_proj", self.o_proj, core_attn_out
+            )
 
         if self.gated_attention and self.recompute_gated_attn:
             gate_recompute.discard_output_and_register_recompute(output)
@@ -1525,6 +1719,21 @@ class MLASelfAttention(MultiLatentAttention):
                 default_initializer=paddle.nn.initializer.Constant(0.0),
             )
             self.config.init_method(self.v_b_proj)
+        elif (
+            ieee_kernel_enabled()
+            and getattr(self.config, "use_accuracy_compatible", False)
+            and self.config.sequence_parallel
+            and self.kv_b_proj is not None
+        ):
+            # KV up-projection consumes the already local compressed-KV sequence.
+            # Its SP linear path would all-gather that input once more, doubling the
+            # sequence length before it is concatenated with the positional branch.
+            # IEEE+UAC only; FLAG+UAC keeps structure's SP linear.
+            self.kv_b_proj.sequence_parallel = False
+            self.kv_b_proj.allreduce_dgrad = (
+                self.kv_b_proj.world_size > 1
+                and not self.kv_b_proj.disable_grad_reduce
+            )
 
         if q_lora_rank is not None:
             self.q_a_layernorm = build_spec_layer(
@@ -1781,9 +1990,14 @@ class MLASelfAttention(MultiLatentAttention):
         if self.q_lora_rank is not None:
             # if q_a_proj is ColumnParallelLinear:
             #     q_compressed: [b, s, q_lora_rank / TP]
-            q_compressed, _ = deferrable_linear(
-                self.config, "attn_q_proj", self.q_a_proj, hidden_states
-            )
+            if _ACCURACY_COMPATIBLE_KERNEL:
+                q_compressed, _ = _accuracy_compatible_q_down_projection(
+                    self.q_a_proj, hidden_states
+                )
+            else:
+                q_compressed, _ = deferrable_linear(
+                    self.config, "attn_q_proj", self.q_a_proj, hidden_states
+                )
 
             # When output is sharded (ColumnParallelLinear):
             # Gather output to restore output dim q_lora_rank;
@@ -1820,26 +2034,14 @@ class MLASelfAttention(MultiLatentAttention):
                 [self.kv_lora_rank, self.qk_rope_head_dim],
                 axis=-1,
             )
-            if self.config.sequence_parallel:
-                # kv_compressed:[b, s / TP, kv_lora_rank]
-                kv_compressed = scatter_to_sequence_parallel_region(
-                    kv_compressed
-                )
         else:
-            # kv_compressed:[b, s / TP, kv_lora_rank], k_pos_emb: [b, s / TP, qk_rope_head_dim]
+            # This projection already returns sequence-sharded tensors when SP is
+            # active; keep the compressed KV and RoPE branches on the same axis.
             kv_compressed, k_pos_emb = paddle.split(
                 kv_combined,
                 [self.kv_lora_rank, self.qk_rope_head_dim],
                 axis=-1,
             )
-            if (
-                get_pg_size(self.pg_collection.tp) > 1
-                and self.config.sequence_parallel
-            ):
-                # k_pos_emb: [b, s, qk_rope_head_dim]
-                k_pos_emb = gather_from_sequence_parallel_region(
-                    k_pos_emb, group=self.pg_collection.tp
-                )
 
         # Ablation boundary: kv_a_proj_with_mqa output (compressed part, after
         # TP-gather / split / SP-scatter). Input is hidden_states, already
@@ -1905,9 +2107,14 @@ class MLASelfAttention(MultiLatentAttention):
             if self.q_lora_rank is not None:
                 # q_compressed: [num_tokens, q_lora_rank]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
-                q, _ = deferrable_linear(
-                    self.config, "attn_q_proj", self.q_b_proj, q_compressed
-                )
+                if _ACCURACY_COMPATIBLE_KERNEL:
+                    q, _ = _accuracy_compatible_q_up_projection(
+                        self.q_b_proj, q_compressed
+                    )
+                else:
+                    q, _ = deferrable_linear(
+                        self.config, "attn_q_proj", self.q_b_proj, q_compressed
+                    )
             else:
                 # q_compressed: [num_tokens, hidden_size]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
@@ -2052,9 +2259,10 @@ class MLASelfAttention(MultiLatentAttention):
                     pre_save_func=lambda t: last_dim_segment(
                         t, 0, self.qk_nope_head_dim
                     ),
-                    post_load_func=lambda seg,
-                    full=query: scatter_last_dim_segment(
-                        full, seg, 0, self.qk_nope_head_dim
+                    post_load_func=lambda seg, full=query: (
+                        scatter_last_dim_segment(
+                            full, seg, 0, self.qk_nope_head_dim
+                        )
                     ),
                 )
                 query = inspect_tensor(
@@ -2064,9 +2272,10 @@ class MLASelfAttention(MultiLatentAttention):
                     pre_save_func=lambda t: last_dim_segment(
                         t, self.qk_nope_head_dim
                     ),
-                    post_load_func=lambda seg,
-                    full=query: scatter_last_dim_segment(
-                        full, seg, self.qk_nope_head_dim
+                    post_load_func=lambda seg, full=query: (
+                        scatter_last_dim_segment(
+                            full, seg, self.qk_nope_head_dim
+                        )
                     ),
                 )
 
@@ -2096,9 +2305,10 @@ class MLASelfAttention(MultiLatentAttention):
                     pre_save_func=lambda t: last_dim_segment(
                         t, self.qk_nope_head_dim
                     ),
-                    post_load_func=lambda seg,
-                    full=key: scatter_last_dim_segment(
-                        full, seg, self.qk_nope_head_dim
+                    post_load_func=lambda seg, full=key: (
+                        scatter_last_dim_segment(
+                            full, seg, self.qk_nope_head_dim
+                        )
                     ),
                 )
 
@@ -2220,6 +2430,9 @@ class MLASelfAttention(MultiLatentAttention):
                     if mqa_rope_adjacent
                     else {}
                 )
+                # leftover IEEE: UAC FLAG does not intercept RoPE. The helper
+                # rebuilds vanilla freqs from rope_theta and never consumes
+                # rotary_pos_emb (YaRN cache).
                 if self.config.gpt_model_use_experimental_version:
                     # EC-compatible RoPE: complex rotation, no YaRN, no mscale
                     from paddlefleet.transformer.transformer_layer import (

@@ -3,7 +3,7 @@ name: Require PR Description
 on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
-    branches: [develop, release/*]
+    branches: [develop, glm52-structure, release/*]
 
 jobs:
   check-pr-description:

@@ -68,6 +68,20 @@ def _make_config(**overrides):
     return TransformerConfig(**defaults)
 
 
+class TestDotProductAttentionAbsorbedKwargs(unittest.TestCase):
+    def test_forward_signature_accepts_k_abs_weight(self):
+        import inspect
+
+        from paddlefleet.transformer.dot_product_attention import (
+            DotProductAttention,
+        )
+
+        params = inspect.signature(DotProductAttention.forward).parameters
+        self.assertIn("k_abs_weight", params)
+        self.assertIn("q_absorbed", params)
+        self.assertIn("v_b_proj_weight", params)
+
+
 class TestDotProductAttentionConstructor(unittest.TestCase):
     """Tests for DotProductAttention constructor."""
 

@@ -34,8 +34,12 @@ from paddlefleet.transformer.dsa_attention import (
     DSAIndexerSublayersSpec,
     FusedDSAIndexerLoss,
     Indexer,
+    _AccuracyCompatibleQKMatmul,
+    _AccuracyCompatibleSoftmax,
     _align_dsa_indexer_mask,
+    _align_sp_aux_to_query,
     _normalize_dsa_mask,
+    _unfused_absorbed_dsa_attention,
     _unfused_dsa_attention,
     hadamard_transform,
     rotate_activation,
@@ -55,6 +59,104 @@ def _make_config(**overrides):
     }
     defaults.update(overrides)
     return TransformerConfig(**defaults)
+
+
+class TestAccuracyCompatibleQKMatmul(unittest.TestCase):
+    def test_backward_reduces_broadcast_key_gradient_with_sum(self):
+        query = paddle.randn([1, 2, 3, 4], dtype="float32")
+        key = paddle.randn([1, 1, 4, 3], dtype="float32")
+        query.stop_gradient = False
+        key.stop_gradient = False
+        grad_output = paddle.randn([1, 2, 3, 3], dtype="float32")
+
+        output = _AccuracyCompatibleQKMatmul.apply(query, key)
+        output.backward(grad_output)
+        expected_query = paddle.matmul(
+            grad_output, key.expand([1, 2, 4, 3]).transpose([0, 1, 3, 2])
+        )
+        expected_key = paddle.sum(
+            paddle.matmul(query.detach().transpose([0, 1, 3, 2]), grad_output),
+            axis=1,
+            keepdim=True,
+        )
+
+        self.assertTrue(paddle.equal_all(query.grad, expected_query))
+        self.assertTrue(paddle.equal_all(key.grad, expected_key))
+
+    def test_forward_keeps_key_seq_when_query_seq_differs(self):
+        query = paddle.randn([1, 2, 4, 8], dtype="float32")
+        key = paddle.randn([1, 1, 8, 2], dtype="float32")
+        scores = _AccuracyCompatibleQKMatmul.apply(query, key)
+        self.assertEqual(tuple(scores.shape), (1, 2, 4, 2))
+        expected = paddle.matmul(query, key.expand([1, 2, 8, 2]))
+        self.assertTrue(paddle.equal_all(scores, expected))
+
+
+class TestAccuracyCompatibleSoftmax(unittest.TestCase):
+    def test_backward_uses_explicit_reduction_and_positive_masked_zeros(self):
+        logits = paddle.to_tensor(
+            [[[[1.0, -float("inf"), -2.0], [0.5, 0.25, -float("inf")]]]],
+            dtype="float32",
+            stop_gradient=False,
+        )
+        grad_output = paddle.to_tensor(
+            [[[[0.75, -1.0, 0.125], [-0.25, 0.5, 2.0]]]],
+            dtype="float32",
+        )
+        valid_mask = paddle.isfinite(logits)
+        probabilities = _AccuracyCompatibleSoftmax.apply(logits, valid_mask)
+        probabilities.backward(grad_output)
+        expected = probabilities.detach() * (
+            grad_output
+            - paddle.sum(
+                grad_output * probabilities.detach(), axis=-1, keepdim=True
+            )
+        )
+        expected = paddle.where(
+            valid_mask, expected, paddle.zeros_like(expected)
+        )
+
+        self.assertTrue(paddle.equal_all(logits.grad, expected))
+        masked_bits = logits.grad[~valid_mask].numpy().view("uint32")
+        self.assertTrue((masked_bits == 0).all())
+
+
+class TestAbsorbedDSAAttention(unittest.TestCase):
+    def test_absorbed_attention_accuracy_path_uses_bmm_layout(self):
+        query = paddle.randn([1, 3, 2, 8], dtype="bfloat16")
+        key = paddle.randn([1, 3, 1, 8], dtype="bfloat16")
+        value = paddle.randn([1, 3, 1, 4], dtype="bfloat16")
+        weight = paddle.randn([2, 4, 8], dtype="bfloat16")
+        mask = paddle.zeros([1, 1, 3, 3], dtype="float32")
+
+        with patch(
+            "paddlefleet.transformer.dsa_attention._ACCURACY_COMPATIBLE_KERNEL",
+            True,
+        ):
+            output = _unfused_absorbed_dsa_attention(
+                query, key, value, weight, mask, 1.0
+            )
+
+        expected_scores = paddle.bmm(
+            query.transpose([0, 2, 1, 3]).cast("float32").reshape([2, 3, 8]),
+            key.transpose([0, 2, 3, 1])
+            .expand([1, 2, 8, 3])
+            .cast("float32")
+            .reshape([2, 8, 3]),
+        ).reshape([1, 2, 3, 3])
+        expected_probabilities = paddle.nn.functional.softmax(
+            expected_scores + mask, axis=-1
+        )
+        expected_context = paddle.matmul(
+            expected_probabilities.cast(value.dtype),
+            value.transpose([0, 2, 1, 3]),
+        )
+        expected = paddle.einsum(
+            "bhsr,hrd->bshd", expected_context, weight
+        ).reshape([1, 3, 16])
+        self.assertTrue(
+            paddle.equal_all(output.cast("float32"), expected.cast("float32"))
+        )
 
 
 class TestNormalizeDsaMask(unittest.TestCase):
@@ -77,6 +179,36 @@ class TestNormalizeDsaMask(unittest.TestCase):
         mask = paddle.zeros([1, 60, 30], dtype="float32")
         out = _align_dsa_indexer_mask(mask, 60)
         self.assertIsNone(out)
+
+    def test_align_sp_aux_transposes_seq_first_to_query_layout(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        tensor = paddle.arange(8, dtype="float32").reshape([4, 1, 2])
+        out = _align_sp_aux_to_query(tensor, query)
+        self.assertEqual(tuple(out.shape), (1, 4, 2))
+        self.assertTrue(paddle.equal_all(out, tensor.transpose([1, 0, 2])))
+
+    def test_align_sp_aux_keeps_matching_batch_first(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        tensor = paddle.arange(8, dtype="float32").reshape([1, 4, 2])
+        out = _align_sp_aux_to_query(tensor, query)
+        self.assertTrue(paddle.equal_all(out, tensor))
+
+    def test_align_sp_aux_slices_full_seq_batch_first_window(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        full = paddle.arange(16, dtype="float32").reshape([1, 8, 1, 2])
+        with patch(
+            "paddlefleet.transformer.dsa_attention.paddle.distributed.get_rank",
+            return_value=0,
+        ):
+            out0 = _align_sp_aux_to_query(full, query)
+        with patch(
+            "paddlefleet.transformer.dsa_attention.paddle.distributed.get_rank",
+            return_value=1,
+        ):
+            out1 = _align_sp_aux_to_query(full, query)
+        self.assertEqual(tuple(out0.shape), (1, 4, 1, 2))
+        self.assertTrue(paddle.equal_all(out0, full[:, 0:4, :, :]))
+        self.assertTrue(paddle.equal_all(out1, full[:, 4:8, :, :]))
 
     def test_align_none_mask_returns_none(self):
         self.assertIsNone(_align_dsa_indexer_mask(None, 60))
@@ -224,6 +356,41 @@ class TestRotateActivation(unittest.TestCase):
         self.assertAlmostEqual(float(diff), 0.0, places=4)
 
 
+class TestUnfusedAbsorbedDSAAttention(unittest.TestCase):
+    def test_matches_explicit_value_projection(self):
+        paddle.seed(2026)
+        b, s, heads, latent, rope, value_dim = 1, 4, 2, 8, 4, 6
+        query = paddle.randn([b, s, heads, latent + rope], dtype="float32")
+        key = paddle.randn([b, s, 1, latent + rope], dtype="float32")
+        value = key[..., :latent]
+        v_up = paddle.randn([heads, latent, value_dim], dtype="float32")
+        mask = paddle.triu(
+            paddle.full([s, s], float("-inf"), dtype="float32"), diagonal=1
+        )[None, None]
+
+        actual = _unfused_absorbed_dsa_attention(
+            query, key, value, v_up, mask, 0.5
+        )
+        probabilities = paddle.nn.functional.softmax(
+            paddle.matmul(
+                query.transpose([0, 2, 1, 3]),
+                key.transpose([0, 2, 3, 1]),
+            )
+            * 0.5
+            + mask,
+            axis=-1,
+        )
+        latent_context = paddle.matmul(
+            probabilities, value.transpose([0, 2, 1, 3])
+        )
+        expected = paddle.einsum(
+            "bhsr,hrd->bshd", latent_context, v_up
+        ).reshape([b, s, heads * value_dim])
+
+        self.assertEqual(actual.shape, [b, s, heads * value_dim])
+        self.assertTrue(paddle.equal_all(actual, expected).item())
+
+
 class TestUnfusedDSAAttention(unittest.TestCase):
     """Test _unfused_dsa_attention function."""
 
@@ -316,6 +483,52 @@ class TestIndexer(unittest.TestCase):
         self.assertEqual(result.shape, [2, 4, 16])
         mock_rope.assert_called()
 
+    def test_indexer_uac_uses_f_linear_not_module_forward(self):
+        import inspect
+
+        from paddlefleet.transformer import dsa_attention as dsa
+
+        source = inspect.getsource(dsa.Indexer.forward_before_topk)
+        self.assertIn("_accuracy_compat_linear", source)
+        self.assertIn("self.wq_b, q_latent", source)
+        self.assertIn("self.wk, hidden_states", source)
+        self.assertIn("self.weights_proj, hidden_states", source)
+        self.assertIn("if _ACCURACY_COMPATIBLE_KERNEL:", source)
+        helper = inspect.getsource(dsa._accuracy_compat_linear)
+        self.assertIn("F.linear(x, projection.weight, bias)", helper)
+
+    def test_uac_absorbed_core_rebuilds_q_from_k_abs_weight(self):
+        import inspect
+
+        from paddlefleet.transformer import dsa_attention as dsa
+
+        source = inspect.getsource(dsa.DSAttention.forward)
+        self.assertIn("k_abs_weight", source)
+        self.assertIn("_absorb_q_nope_k_up", source)
+        self.assertIn("_unfused_dsa_attention", source)
+        self.assertIn("_align_sp_aux_to_query", source)
+        kv_idx = source.index("_kv_c + (_kv_c * 0)")
+        bmm_idx = source.index("paddle.bmm(_lat, _v)")
+        self.assertLess(kv_idx, bmm_idx)
+        absorbed = source[
+            source.index("_kv_c = _align_sp_aux_to_query") : bmm_idx
+        ]
+        self.assertIn("ieee_kernel_enabled()", absorbed)
+        self.assertNotIn("if _ACCURACY_COMPATIBLE_KERNEL:", absorbed)
+
+    def test_unfused_dsa_expands_mqa_key_to_query_heads(self):
+        import inspect
+
+        from paddlefleet.transformer import dsa_attention as dsa
+
+        source = inspect.getsource(dsa._unfused_dsa_attention)
+        self.assertIn("key.shape[2] == 1", source)
+        self.assertIn("key.expand([b, s, nhpp, qk_hd])", source)
+        self.assertIn("_SteQKMatmul.apply", source)
+        self.assertIn(
+            "paddle.slice(key, axes=[-1], starts=[0], ends=[v_hd])", source
+        )
+
     @patch("paddlefleet.transformer.dsa_attention.rotate_activation")
     def test_forward_before_topk_shape(self, mock_rotate):
         mock_rotate.side_effect = lambda x, use_fast_hadamard=False: x
@@ -384,6 +597,20 @@ class TestDSAIndexerLossAutoScaler(unittest.TestCase):
         indexer_loss = paddle.randn([2, 4])
         result = DSAIndexerLossAutoScaler.apply(output, indexer_loss)
         self.assertEqual(result.shape, output.shape)
+
+
+class TestDSATopKSharing(unittest.TestCase):
+    def test_layer_classification(self):
+        from paddlefleet.transformer.dsa_attention import (
+            is_dsa_skip_topk_layer,
+            source_dsa_compute_layer,
+        )
+
+        self.assertFalse(is_dsa_skip_topk_layer(3, 3, 4))
+        self.assertTrue(is_dsa_skip_topk_layer(4, 3, 4))
+        self.assertEqual(source_dsa_compute_layer(4, 3, 4), 3)
+        self.assertFalse(is_dsa_skip_topk_layer(7, 3, 4))
+        self.assertEqual(source_dsa_compute_layer(8, 3, 4), 7)
 
 
 if __name__ == "__main__":

@@ -243,6 +243,24 @@ def _apply_rotary_pos_emb_bshd(
                 freqs = freqs[
                     :, sp_rank * seq_per_rank : (sp_rank + 1) * seq_per_rank, :
                 ]
+        elif freqs.ndim == 4:
+            # k_pos_emb is the local SP shard [s/TP, ...] while the 4-D MLA
+            # cache is still full-seq. Slice only when freqs is an exact
+            # multiple of the token sequence. Always-slice double-cuts an
+            # already-local table (A100 Qwen/GLM-4.5: 2048 vs 512).
+            seq_axis = 0 if time_major else 1
+            seq_len = freqs.shape[seq_axis]
+            t_seq = t.shape[0 if time_major else 1]
+            if seq_len == t_seq:
+                pass
+            elif seq_len % sp_size == 0 and seq_len // sp_size == t_seq:
+                seq_per_rank = seq_len // sp_size
+                start = sp_rank * seq_per_rank
+                end = (sp_rank + 1) * seq_per_rank
+                if time_major:
+                    freqs = freqs[start:end, :, :, :]
+                else:
+                    freqs = freqs[:, start:end, :, :]
 
     # For M-RoPE with sequence parallel, freqs may be [S, B, D] while t is [B, S, H, D].
     # When the first two dims are swapped (same product but different order), transpose

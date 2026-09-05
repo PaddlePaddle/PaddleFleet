@@ -32,8 +32,58 @@ from paddlefleet.models.common.language_loss.language_loss import (
     LanguageLoss,
     MainLanguageLoss,
     MTPLanguageLoss,
+    _accuracy_compatible_cross_entropy,
     subbatch,
 )
+
+
+class TestIeeeKernelEnabled(unittest.TestCase):
+    def test_ieee_kernel_is_opt_in_not_flag(self):
+        from paddlefleet.ieee_kernel import ieee_kernel_enabled
+
+        with patch.dict(
+            os.environ,
+            {
+                "FLAGS_use_accuracy_compatible_kernel": "1",
+                "MODEL_REPRO_IEEE_KERNEL": "0",
+            },
+            clear=False,
+        ):
+            self.assertFalse(ieee_kernel_enabled())
+        with patch.dict(
+            os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"}, clear=False
+        ):
+            self.assertTrue(ieee_kernel_enabled())
+
+    def test_layers_import_does_not_cycle_through_moe_utils(self):
+        import inspect
+
+        from paddlefleet.ieee_kernel import ieee_kernel_enabled
+        from paddlefleet.tensor_parallel import layers
+
+        self.assertIs(layers.ieee_kernel_enabled, ieee_kernel_enabled)
+        src = inspect.getsource(layers)
+        self.assertIn("from ..ieee_kernel import ieee_kernel_enabled", src)
+        self.assertNotIn(
+            "transformer.moe.moe_utils import ieee_kernel_enabled", src
+        )
+
+
+class TestAccuracyCompatibleCrossEntropy(unittest.TestCase):
+    def test_ignored_label_preserves_megatron_signed_zero_gradient(self):
+        logits = paddle.zeros([1, 1, 3], dtype="float32")
+        logits.stop_gradient = False
+        labels = paddle.full([1, 1], -100, dtype="int64")
+
+        loss = _accuracy_compatible_cross_entropy(
+            logits, labels, ignored_index=-100
+        )
+        (loss * paddle.zeros_like(loss)).sum().backward()
+
+        bits = logits.grad.numpy().view("uint32")
+        self.assertEqual(bits[0, 0, 0], 0x80000000)
+        self.assertEqual(bits[0, 0, 1], 0)
+        self.assertEqual(bits[0, 0, 2], 0)
 
 
 class TestSubbatchWithRecompute(unittest.TestCase):

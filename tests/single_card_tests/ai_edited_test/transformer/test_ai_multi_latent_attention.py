@@ -102,6 +102,60 @@ class TestECCompatibleRopeApply(unittest.TestCase):
         self.assertEqual(k_out.dtype, k_pe.dtype)
 
 
+class TestMLAKposEmbSequenceParallelGather(unittest.TestCase):
+    def test_uac_absorbed_core_passes_k_abs_weight(self):
+        import inspect
+
+        from paddlefleet.transformer import multi_latent_attention as mla
+
+        source = inspect.getsource(mla.MLASelfAttention.forward)
+        self.assertIn("k_abs_weight", source)
+        self.assertIn("_dsa_absorbed_enabled()", source)
+        self.assertNotIn("core_kv_compressed", source)
+        helper = inspect.getsource(mla._dsa_absorbed_enabled)
+        self.assertIn("ieee_kernel_enabled()", helper)
+        self.assertIn("MODEL_REPRO_DSA_ABSORBED", helper)
+
+    def test_uac_mla_rope_helper_uses_k_seq_offset_for_sharded_key(self):
+        from paddlefleet.transformer.multi_latent_attention import (
+            _accuracy_compatible_mla_rope_apply,
+        )
+
+        q_pe = paddle.ones([4, 1, 1, 8], dtype="float32")
+        k_pe = paddle.ones([2, 1, 1, 8], dtype="float32")
+        position_ids = paddle.arange(4, dtype="int64")
+        _, k0 = _accuracy_compatible_mla_rope_apply(
+            q_pe,
+            k_pe,
+            10000.0,
+            position_ids,
+            sequence_parallel=True,
+            k_seq_offset=0,
+        )
+        _, k1 = _accuracy_compatible_mla_rope_apply(
+            q_pe,
+            k_pe,
+            10000.0,
+            position_ids,
+            sequence_parallel=True,
+            k_seq_offset=2,
+        )
+        self.assertFalse(bool(paddle.equal_all(k0, k1)))
+
+    def test_uac_mla_rope_live_path_uses_apply_rotary_pos_emb(self):
+        import inspect
+
+        from paddlefleet.transformer import multi_latent_attention as mla
+
+        source = inspect.getsource(mla.MLASelfAttention)
+        self.assertNotIn(
+            "q_pos_emb, k_pos_emb = _accuracy_compatible_mla_rope_apply(",
+            source,
+        )
+        self.assertIn("q_pos_emb = apply_rotary_pos_emb(", source)
+        self.assertIn("k_pos_emb = apply_rotary_pos_emb(", source)
+
+
 class TestDeferredWeightGradLinear(unittest.TestCase):
     """Tests for DeferredWeightGradLinear PyLayer."""
 

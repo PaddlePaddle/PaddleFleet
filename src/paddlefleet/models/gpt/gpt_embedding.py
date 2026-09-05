@@ -13,6 +13,7 @@
 # limitations under the License.
 from __future__ import annotations
 
+import os
 import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -31,6 +32,7 @@ from paddlefleet.context_parallel_utils import (
     ContextParallelScatterOp,
     mark_context_parallel_parameter_disable_scale_grad,
 )
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.models.gpt.utils import fill_feature
 from paddlefleet.parallel_state import (
     get_context_parallel_rank,
@@ -119,6 +121,15 @@ class GPTEmbedding(FleetLayer):
         self.rotary_pos_emb = None
         self.swa_rotary_pos_emb = None
         self.mrope_section = mrope_section
+        # Claim main_grad so MixPrecision skips this Parameter. The
+        # PyLayer deposits IndexingBackward into this buffer (E-471).
+        if os.environ.get("MODEL_REPRO_TWO_FP32_ACCUM", "") == "1":
+            self.embedding.embed_tokens.weight.main_grad = None
+            print(
+                "[TWO-FP32-ACCUM] claimed embed_tokens.weight "
+                "(MixPrecision skipped)",
+                flush=True,
+            )
         self.position_embedding_type = position_embedding_type
         if sublayers_spec.rope_embedding is not None:
             self.rotary_pos_emb = build_spec_layer(
@@ -305,6 +316,28 @@ class GPTEmbedding(FleetLayer):
                     "multi_latent_attention is not supported when gpt_model_use_experimental_version=True and sequence_parallel=True"
                 )
         input_ids = dict_args["input_ids"]
+        # Under IEEE+UAC, zero the MTP carrier tail so offset slices match
+        # Megatron roll-and-zero-fill (E-217). FLAG+UAC alone stays on the
+        # structure carrier. Main path slices input_ids[:, :-num_nextn]
+        # and is unchanged.
+        if (
+            ieee_kernel_enabled()
+            and getattr(self.config, "use_accuracy_compatible", False)
+            and input_ids is not None
+            and self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
+            and input_ids.shape[-1] > self.config.num_nextn_predict_layers
+        ):
+            _mtp_tail = self.config.num_nextn_predict_layers
+            input_ids = paddle.concat(
+                [
+                    input_ids[..., :-_mtp_tail],
+                    paddle.zeros_like(input_ids[..., -_mtp_tail:]),
+                ],
+                axis=-1,
+            )
+            dict_args["input_ids"] = input_ids
         input_ids = inspect_tensor("embedding_input", -1, input_ids)
         labels = dict_args.get("labels", None)
         if labels is not None:
@@ -692,6 +725,58 @@ class GPTEmbedding(FleetLayer):
                                     .permute(1, 0, 2)
                                     .contiguous()
                                 )  # change to [S, B, H]
+                            # Second GradNode after ScatterOp plus fp32
+                            # main_grad scatter. MixPrecision cannot
+                            # add_(bf16) on the second hit.
+                            if os.environ.get(
+                                "MODEL_REPRO_TWO_FP32_ACCUM", ""
+                            ) == "1" and getattr(
+                                self.config, "use_accuracy_compatible", False
+                            ):
+                                seq_length_ids = (
+                                    input_ids.shape[1]
+                                    - self.config.num_nextn_predict_layers
+                                )
+                                mtp_ids = input_ids[
+                                    :,
+                                    (depth + 1) : (depth + 1 + seq_length_ids),
+                                ]
+                                looked = self.embedding(
+                                    input_ids=mtp_ids,
+                                    position_ids=None,
+                                )
+                                if (
+                                    get_context_parallel_world_size() > 1
+                                    and self.config.experimental_dataflow
+                                ):
+                                    looked = ContextParallelScatterOp.apply(
+                                        looked,
+                                        axis=1,
+                                        mode=self.config.cp_balance_mode,
+                                    )
+                                if self.sequence_parallel:
+                                    looked = looked.reshape(
+                                        [-1, looked.shape[-1]]
+                                    )
+                                    looked = ScatterOp.apply(looked)
+                                    looked = (
+                                        looked.reshape(
+                                            [batch_size, -1, hidden_size]
+                                        )
+                                        .permute(1, 0, 2)
+                                        .contiguous()
+                                    )
+                                inputs_embeds_mtp = (
+                                    inputs_embeds_mtp.detach()
+                                    + (looked - looked.detach())
+                                )
+                                print(
+                                    "[TWO-FP32-ACCUM] "
+                                    "second lookup armed depth="
+                                    f"{depth} looked={tuple(looked.shape)} "
+                                    f"carrier={tuple(inputs_embeds_mtp.shape)}",
+                                    flush=True,
+                                )
                             mtp_emb_res.append(inputs_embeds_mtp)
 
             if self.multimodal_embedding:
@@ -953,31 +1038,41 @@ class GPTEmbedding(FleetLayer):
             # this is None (stripped by the None-cleanup loop below).
             "cu_seqlens_q": cu_seqlens_q,
         }
-        # New dataflow: pass mtp_startend_row_indices_all and mtp_hidden_inputs_mask_all
-        # through dict_args to MTP layer. They must both be present or both be absent.
+        # Pass either compressed or dense per-depth MTP masks through to the MTP layer.
         mtp_startend_row_indices_all = dict_args.get(
             "mtp_startend_row_indices_all", None
         )
+        mtp_attn_mask = dict_args.get("mtp_attn_mask", None)
         mtp_hidden_inputs_mask_all = dict_args.get(
             "mtp_hidden_inputs_mask_all", None
         )
-        assert (mtp_startend_row_indices_all is None) == (
-            mtp_hidden_inputs_mask_all is None
-        ), (
-            "mtp_startend_row_indices_all and mtp_hidden_inputs_mask_all must both be None or both be not None, "
-            f"got mtp_startend_row_indices_all={'None' if mtp_startend_row_indices_all is None else 'not None'}, "
-            f"mtp_hidden_inputs_mask_all={'None' if mtp_hidden_inputs_mask_all is None else 'not None'}"
+        assert not (
+            mtp_startend_row_indices_all is not None
+            and mtp_attn_mask is not None
+        ), "MTP compressed and dense attention masks are mutually exclusive"
+        has_mtp_attention_mask = (
+            mtp_startend_row_indices_all is not None
+            or mtp_attn_mask is not None
         )
-        if mtp_startend_row_indices_all is not None:
-            # Ensure tensor is on GPU (dataloader may deliver it as pinned CPU memory).
-            # PP P2P communication (NCCL) cannot send pinned tensors directly.
-            if not mtp_startend_row_indices_all.place.is_gpu_place():
-                mtp_startend_row_indices_all = (
-                    mtp_startend_row_indices_all.cuda()
+        assert has_mtp_attention_mask == (
+            mtp_hidden_inputs_mask_all is not None
+        ), (
+            "an MTP attention mask and mtp_hidden_inputs_mask_all must both be present or both be absent"
+        )
+        if has_mtp_attention_mask:
+            # Ensure tensors are on GPU; PP P2P communication cannot send pinned tensors directly.
+            if mtp_startend_row_indices_all is not None:
+                if not mtp_startend_row_indices_all.place.is_gpu_place():
+                    mtp_startend_row_indices_all = (
+                        mtp_startend_row_indices_all.cuda()
+                    )
+                preproc_output["mtp_startend_row_indices_all"] = (
+                    mtp_startend_row_indices_all
                 )
-            preproc_output["mtp_startend_row_indices_all"] = (
-                mtp_startend_row_indices_all
-            )
+            else:
+                if not mtp_attn_mask.place.is_gpu_place():
+                    mtp_attn_mask = mtp_attn_mask.cuda()
+                preproc_output["mtp_attn_mask"] = mtp_attn_mask
             if not mtp_hidden_inputs_mask_all.place.is_gpu_place():
                 mtp_hidden_inputs_mask_all = mtp_hidden_inputs_mask_all.cuda()
             preproc_output["mtp_hidden_inputs_mask_all"] = (

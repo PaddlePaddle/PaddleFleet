@@ -24,10 +24,12 @@ sys.path.insert(
 )
 
 import unittest
+from unittest import mock
 
 import paddle
 import paddle.nn.functional as F
 
+import paddlefleet.transformer.mlp as mlp_module
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import init_method_normal, scaled_init_method_normal
@@ -61,6 +63,144 @@ def _make_mlp_spec(config):
 
 class TestMLPWithSwigluPath(unittest.TestCase):
     """Tests for MLP with swiglu activation path."""
+
+    def test_accuracy_compatible_swiglu_matches_explicit_formula(self):
+        hidden_states = paddle.randn([2, 4, 16], dtype="float32")
+        gate, linear = paddle.chunk(hidden_states, 2, axis=-1)
+
+        output = mlp_module._accuracy_compatible_swiglu(hidden_states)
+
+        paddle.testing.assert_close(output, F.silu(gate) * linear)
+
+    def test_accuracy_compatible_router_scale_preserves_forward_and_dgrads(
+        self,
+    ):
+        activation = paddle.randn([3, 2048], dtype="bfloat16")
+        activation.stop_gradient = False
+        scale = paddle.randn([3], dtype="float32")
+        scale.stop_gradient = False
+        grad_output = paddle.randn([3, 2048], dtype="bfloat16")
+
+        output = mlp_module._accuracy_compatible_router_scale(
+            activation, scale, reduction_rows=8
+        )
+        expected_output = (activation * scale.unsqueeze(-1)).cast(
+            activation.dtype
+        )
+        self.assertEqual(
+            output.numpy().tobytes(), expected_output.numpy().tobytes()
+        )
+
+        output.backward(grad_output)
+
+        expected_activation_grad = (
+            grad_output * scale.detach().unsqueeze(-1)
+        ).cast(activation.dtype)
+        self.assertEqual(
+            activation.grad.numpy().tobytes(),
+            expected_activation_grad.numpy().tobytes(),
+        )
+        products = activation.detach().cast("float32") * grad_output.cast(
+            "float32"
+        )
+        padded_products = paddle.concat(
+            [products, paddle.zeros([5, 2048], dtype="float32")], axis=0
+        )
+        expected_scale_grad = padded_products.sum(axis=-1)[:3]
+        self.assertEqual(
+            scale.grad.numpy().tobytes(), expected_scale_grad.numpy().tobytes()
+        )
+
+    def _run_with_accuracy_gate(self, enabled):
+        config = _make_config(
+            gated_linear_unit=True, bias_activation_fusion=True
+        )
+        spec = _make_mlp_spec(config)
+        mlp = MLP(config=config, sublayers_spec=spec)
+        hidden_states = paddle.randn([2, 4, 64])
+
+        with (
+            mock.patch.object(
+                mlp_module, "_ACCURACY_COMPATIBLE_KERNEL", enabled
+            ),
+            mock.patch.object(
+                mlp_module,
+                "_accuracy_compatible_swiglu",
+                wraps=mlp_module._accuracy_compatible_swiglu,
+            ) as compatible_swiglu,
+        ):
+            output, _ = mlp(hidden_states)
+
+        self.assertEqual(output.shape, [2, 4, 64])
+        return compatible_swiglu
+
+    def test_accuracy_compatible_projection_matches_functional_linear(self):
+        config = _make_config(gated_linear_unit=True)
+        spec = _make_mlp_spec(config)
+        mlp = MLP(config=config, sublayers_spec=spec)
+        hidden_states = paddle.randn([2, 4, 128])
+
+        output, output_bias = mlp_module._accuracy_compatible_projection(
+            mlp.down_proj, hidden_states
+        )
+
+        expected = F.linear(hidden_states, mlp.down_proj.weight)
+        paddle.testing.assert_close(output, expected)
+        self.assertIsNone(output_bias)
+
+    def test_accuracy_compatible_projection_uses_materialized_dgrad(self):
+        config = _make_config(gated_linear_unit=True)
+        spec = _make_mlp_spec(config)
+        mlp = MLP(config=config, sublayers_spec=spec)
+        hidden_states = paddle.randn([2, 4, 128])
+        hidden_states.stop_gradient = False
+        grad_output = paddle.randn([2, 4, 64])
+
+        output, _ = mlp_module._accuracy_compatible_projection(
+            mlp.down_proj, hidden_states
+        )
+        output.backward(grad_output)
+
+        expected = paddle.matmul(
+            grad_output, mlp.down_proj.weight.transpose([1, 0]).contiguous()
+        )
+        self.assertTrue(paddle.equal_all(hidden_states.grad, expected).item())
+        expected_weight_grad = paddle.matmul(
+            hidden_states.detach()
+            .reshape([-1, hidden_states.shape[-1]])
+            .transpose([1, 0]),
+            grad_output.reshape([-1, grad_output.shape[-1]]),
+        )
+        self.assertTrue(
+            paddle.equal_all(
+                mlp.down_proj.weight.grad, expected_weight_grad
+            ).item()
+        )
+
+    def test_accuracy_gate_selects_both_projections(self):
+        config = _make_config(gated_linear_unit=True)
+        spec = _make_mlp_spec(config)
+        mlp = MLP(config=config, sublayers_spec=spec)
+        hidden_states = paddle.randn([2, 4, 64])
+
+        with (
+            mock.patch.object(mlp_module, "_ACCURACY_COMPATIBLE_KERNEL", True),
+            mock.patch.object(
+                mlp_module,
+                "_accuracy_compatible_projection",
+                wraps=mlp_module._accuracy_compatible_projection,
+            ) as compatible_projection,
+        ):
+            output, _ = mlp(hidden_states)
+
+        self.assertEqual(output.shape, [2, 4, 64])
+        self.assertEqual(compatible_projection.call_count, 2)
+
+    def test_accuracy_gate_selects_explicit_swiglu(self):
+        self._run_with_accuracy_gate(True).assert_called_once()
+
+    def test_default_path_does_not_select_explicit_swiglu(self):
+        self._run_with_accuracy_gate(False).assert_not_called()
 
     def test_forward_with_gated_linear_unit(self):
         """Test MLP forward with gated_linear_unit=True."""

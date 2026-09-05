@@ -2255,9 +2255,8 @@ class TestFusedGateDetachMatmulAccuracyCompatible(unittest.TestCase):
 class TestRouterAccuracyCompatible(unittest.TestCase):
     """Cover the router-level use_accuracy_compatible branches.
 
-    - gate weight dtype follows params_dtype when the flag is on, else fp32
-      (moe_router.py:302-313).
-    - TopKRouter.forward runs the fp64 normalization path (moe_router.py:1446).
+    - gate weight dtype stays float32 even when UAC params_dtype is bf16.
+    - TopKRouter.forward runs the fp64 normalization path.
     """
 
     def _router(self, **overrides):
@@ -2270,17 +2269,31 @@ class TestRouterAccuracyCompatible(unittest.TestCase):
         router.set_layer_number(0)
         return router
 
-    def test_gate_weight_dtype_follows_params_dtype_when_enabled(self):
-        router = self._router(
-            use_accuracy_compatible=True, params_dtype=paddle.bfloat16
-        )
+    def test_gate_weight_dtype_stays_fp32_when_fp32_uac_gate_env_on(self):
+        with patch.dict(
+            os.environ, {"MODEL_REPRO_FP32_UAC_GATE": "1"}, clear=False
+        ):
+            router = self._router(
+                use_accuracy_compatible=True, params_dtype=paddle.bfloat16
+            )
+        self.assertEqual(router.weight.dtype, paddle.float32)
+
+    def test_gate_weight_dtype_follows_params_under_uac_without_env(self):
+        with patch.dict(
+            os.environ, {"MODEL_REPRO_FP32_UAC_GATE": "0"}, clear=False
+        ):
+            router = self._router(
+                use_accuracy_compatible=True, params_dtype=paddle.bfloat16
+            )
         self.assertEqual(router.weight.dtype, paddle.bfloat16)
 
     def test_gate_weight_dtype_is_fp32_when_disabled(self):
-        # Without the flag the weight is always fp32, regardless of params_dtype.
-        router = self._router(
-            use_accuracy_compatible=False, params_dtype=paddle.bfloat16
-        )
+        with patch.dict(
+            os.environ, {"MODEL_REPRO_FP32_UAC_GATE": "0"}, clear=False
+        ):
+            router = self._router(
+                use_accuracy_compatible=False, params_dtype=paddle.bfloat16
+            )
         self.assertEqual(router.weight.dtype, paddle.float32)
 
     def test_forward_fp64_normalization_path(self):

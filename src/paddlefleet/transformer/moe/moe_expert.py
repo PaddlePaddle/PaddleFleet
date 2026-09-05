@@ -29,6 +29,7 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
 )
 
 from paddlefleet import utils
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import module_needs_recompute
 from paddlefleet.tensor_parallel.random import (
@@ -89,6 +90,47 @@ class RuntimeExpertWeights:
 
     def __iter__(self):
         return iter(self.tensors)
+
+
+class _UACExpertFp32WgradCapture(paddle.autograd.PyLayer):
+    """Identity on GEMM output; write fp32 X.T@dY into weight.main_grad[e].
+
+    GroupedMLPExpert UAC uses per-expert TN GEMM on a materialized
+    ``weight[e].t().contiguous()``. That view is not the Parameter, so
+    MixPrecision never sees fused expert wgrad. Must return incoming dY
+    unchanged (reconstructing dX dropped 59/59 in E-476).
+    """
+
+    @staticmethod
+    def forward(ctx, y, x, weight, expert_index):
+        # Token/shard slices are views. save_for_backward(x) attached SliceGrad
+        # and segfaulted on formal TP2. clone() made the capture buffer
+        # contiguous and changed the fp32 X.T@dY stride vs IEEE e468, which
+        # saves the view. Detach keeps the view (same stride as e468) without
+        # a graph edge.
+        ctx.save_for_backward(x.detach())
+        ctx.weight = weight
+        ctx.expert_index = int(expert_index)
+        return y
+
+    @staticmethod
+    def backward(ctx, dy):
+        (x,) = ctx.saved_tensor()
+        if dy is None or x.shape[0] == 0:
+            return dy, None, None
+        wg = paddle.matmul(
+            x.astype("float32"),
+            dy.detach().astype("float32"),
+            transpose_x=True,
+        )
+        weight = ctx.weight
+        e = ctx.expert_index
+        if weight.main_grad is None:
+            weight.main_grad = paddle.zeros(weight.shape, dtype="float32")
+        weight.main_grad[e].add_(wg)
+        if hasattr(weight, "grad_added_to_main_grad"):
+            weight.grad_added_to_main_grad = True
+        return dy, None, None
 
 
 class BMMFunction(paddle.autograd.PyLayer):
@@ -308,6 +350,17 @@ class GroupedMLPExpert(FleetLayer):
                 self.config.output_layer_init_method(self.weight2)
         self.weight1.is_distributed = self.expert_parallel
         self.weight2.is_distributed = self.expert_parallel
+        # Claim main_grad so MixPrecision skips these Parameters. The
+        # identity output capture writes fp32 X.T@dY into this buffer.
+        if ieee_kernel_enabled() and getattr(
+            self.config, "use_accuracy_compatible", False
+        ):
+            self.weight1.main_grad = None
+            self.weight2.main_grad = None
+            # Do not mark fused experts as sequence-parallel. E-811 IEEE
+            # 1-100 (PaddleFleet-e808) left these replicas uncolored; SPGradSync
+            # would all-reduce the already-local ETP=1/TP=2 shards and move
+            # step-2. MoELayer still colors fused experts when EP>1.
 
     def update_activation_recompute(self, layer_number, is_mtp_layer=False):
         """Resolve the ``moe_act`` flag; re-called once the layer id is known.
@@ -399,8 +452,19 @@ class GroupedMLPExpert(FleetLayer):
         expert_weights: (
             RuntimeExpertWeights | tuple[paddle.Tensor, paddle.Tensor] | None
         ) = None,
+        permuted_probs: paddle.Tensor | None = None,
+        row_owner: paddle.Tensor | None = None,
     ):
-        """Forward step of the GroupedMLP without TP/DP."""
+        """Forward step of the GroupedMLP without TP/DP.
+
+        Under use_accuracy_compatible, run per-expert TN GEMM (E-163 / e468)
+        instead of grouped BMM. The two kernels are not bit-identical in bf16.
+        When ``permuted_probs`` is set, fold them into the post-GLU activation
+        before fc2 (mcore experts.py); the caller must then unpermute with
+        ``probs=None``. When ``row_owner`` is set, split each expert's tokens
+        by SP shard so the bf16 GEMM M matches mcore's per-shard calls.
+        MoonEP runtime weight views stay on the grouped BMM path.
+        """
 
         restore_weight1 = restore_weight2 = None
         if isinstance(expert_weights, RuntimeExpertWeights):
@@ -413,14 +477,101 @@ class GroupedMLPExpert(FleetLayer):
         else:
             weight1, weight2 = self.weight1, self.weight2
 
+        gemm_tn = (
+            ieee_kernel_enabled()
+            and getattr(self.config, "use_accuracy_compatible", False)
+            and expert_weights is None
+        )
         if permuted_local_hidden_states.numel() != 0:
             tokens_per_expert = tokens_per_expert.cpu().tolist()
             tokens_per_expert = [int(x) for x in tokens_per_expert]
-
-            if self.moe_deep_gemm:
+            if gemm_tn:
+                out_parts = []
+                x_start = 0
+                shard_split = row_owner is not None
+                for expert_idx, n_tokens in enumerate(tokens_per_expert):
+                    if n_tokens == 0:
+                        continue
+                    xb = permuted_local_hidden_states[
+                        x_start : x_start + n_tokens
+                    ]
+                    wt1 = self.weight1[expert_idx].t().contiguous()
+                    wt2 = self.weight2[expert_idx].t().contiguous()
+                    probs_blk = (
+                        permuted_probs[x_start : x_start + n_tokens]
+                        if permuted_probs is not None
+                        else None
+                    )
+                    if shard_split:
+                        own = row_owner[x_start : x_start + n_tokens]
+                        sub = []
+                        i0 = 0
+                        while i0 < n_tokens:
+                            v = int(own[i0].item())
+                            i1 = i0
+                            while i1 < n_tokens and int(own[i1].item()) == v:
+                                i1 += 1
+                            x_seg = xb[i0:i1]
+                            hidden = paddle.matmul(x_seg, wt1, transpose_y=True)
+                            hidden = _UACExpertFp32WgradCapture.apply(
+                                hidden, x_seg, self.weight1, expert_idx
+                            )
+                            hidden = self.activation_func(hidden)
+                            if probs_blk is not None:
+                                orig_dtype = hidden.dtype
+                                hidden = (
+                                    hidden * probs_blk[i0:i1].unsqueeze(-1)
+                                ).to(orig_dtype)
+                            hidden_in = hidden
+                            hidden = paddle.matmul(
+                                hidden_in, wt2, transpose_y=True
+                            )
+                            hidden = _UACExpertFp32WgradCapture.apply(
+                                hidden, hidden_in, self.weight2, expert_idx
+                            )
+                            sub.append(hidden)
+                            i0 = i1
+                        out_parts.append(paddle.concat(sub, axis=0))
+                    else:
+                        x_blk = xb
+                        hidden = paddle.matmul(x_blk, wt1, transpose_y=True)
+                        hidden = _UACExpertFp32WgradCapture.apply(
+                            hidden, x_blk, self.weight1, expert_idx
+                        )
+                        hidden = self.activation_func(hidden)
+                        if probs_blk is not None:
+                            orig_dtype = hidden.dtype
+                            hidden = (hidden * probs_blk.unsqueeze(-1)).to(
+                                orig_dtype
+                            )
+                        hidden_in = hidden
+                        hidden = paddle.matmul(hidden_in, wt2, transpose_y=True)
+                        out_parts.append(
+                            _UACExpertFp32WgradCapture.apply(
+                                hidden, hidden_in, self.weight2, expert_idx
+                            )
+                        )
+                    x_start += n_tokens
+                fc2_output = paddle.concat(out_parts, axis=0)
+            elif self.moe_deep_gemm:
                 fc1_output = DeepGEMMBMMFunction.apply(
                     permuted_local_hidden_states,
                     weight1,
+                    paddle.to_tensor(tokens_per_expert, dtype="int32"),
+                )
+                if self.activation_recompute:
+                    raise NotImplementedError(
+                        "Recompute in GroupedMLPExpert is not implemented"
+                    )
+                intermediate_parallel = self.activation_func(fc1_output)
+                if permuted_probs is not None:
+                    orig_dtype = intermediate_parallel.dtype
+                    intermediate_parallel = (
+                        intermediate_parallel * permuted_probs.unsqueeze(-1)
+                    ).to(orig_dtype)
+                fc2_output = DeepGEMMBMMFunction.apply(
+                    intermediate_parallel,
+                    weight2,
                     paddle.to_tensor(tokens_per_expert, dtype="int32"),
                 )
             else:
@@ -431,26 +582,23 @@ class GroupedMLPExpert(FleetLayer):
                     False,
                     restore_weight1,
                 )
-            if self.activation_recompute:
-                raise NotImplementedError(
-                    "Recompute in GroupedMLPExpert is not implemented"
-                )
-            else:
+                if self.activation_recompute:
+                    raise NotImplementedError(
+                        "Recompute in GroupedMLPExpert is not implemented"
+                    )
                 intermediate_parallel = self.activation_func(fc1_output)
-                if self.moe_deep_gemm:
-                    fc2_output = DeepGEMMBMMFunction.apply(
-                        intermediate_parallel,
-                        weight2,
-                        paddle.to_tensor(tokens_per_expert, dtype="int32"),
-                    )
-                else:
-                    fc2_output = BMMFunction.apply(
-                        intermediate_parallel,
-                        weight2,
-                        tokens_per_expert,
-                        False,
-                        restore_weight2,
-                    )
+                if permuted_probs is not None:
+                    orig_dtype = intermediate_parallel.dtype
+                    intermediate_parallel = (
+                        intermediate_parallel * permuted_probs.unsqueeze(-1)
+                    ).to(orig_dtype)
+                fc2_output = BMMFunction.apply(
+                    intermediate_parallel,
+                    weight2,
+                    tokens_per_expert,
+                    False,
+                    restore_weight2,
+                )
         else:
             # No token is allocated for local experts.
             assert paddle.count_nonzero(tokens_per_expert) == 0
@@ -463,9 +611,12 @@ class GroupedMLPExpert(FleetLayer):
                 raise NotImplementedError(
                     "Recompute in GroupedMLPExpert is not implemented"
                 )
-            else:
-                h = self.activation_func(h)
-                fc2_output = paddle.matmul(h, w2)
+            h = self.activation_func(h)
+            if permuted_probs is not None:
+                orig_dtype = h.dtype
+                h = h * permuted_probs.unsqueeze(-1)
+                h = h.to(orig_dtype)
+            fc2_output = paddle.matmul(h, w2)
 
         return fc2_output, None
 

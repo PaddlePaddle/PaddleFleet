@@ -27,6 +27,7 @@ sys.path.insert(
 
 import unittest
 from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import paddle
@@ -114,6 +115,34 @@ def _common_patches():
 
 class TestMultiTokenPrediction(unittest.TestCase):
     """Unit tests for multi_token_prediction module."""
+
+    def test_dense_mtp_mask_is_selected_by_prediction_depth(self):
+        from paddlefleet.transformer.multi_token_prediction import (
+            _apply_mtp_layer_masks,
+        )
+
+        dense_mask = paddle.arange(18, dtype="float32").reshape([1, 2, 3, 3])
+        hidden_mask = paddle.arange(6, dtype="float32").reshape([1, 2, 3])
+        dict_args = {
+            "mtp_attn_mask": dense_mask,
+            "mtp_hidden_inputs_mask_all": hidden_mask,
+        }
+
+        _apply_mtp_layer_masks(
+            dict_args,
+            depth=1,
+            config=SimpleNamespace(gpt_model_use_experimental_version=False),
+        )
+
+        self.assertEqual(list(dict_args["attention_mask"].shape), [1, 1, 3, 3])
+        self.assertTrue(
+            paddle.equal_all(dict_args["attention_mask"], dense_mask[:, 1:2])
+        )
+        self.assertEqual(
+            list(dict_args["mtp_hidden_inputs_mask"].shape), [1, 1, 3]
+        )
+        self.assertNotIn("mtp_attn_mask", dict_args)
+        self.assertNotIn("mtp_hidden_inputs_mask_all", dict_args)
 
     def test_mtp_loss_logging_helper_save_loss(self):
         """Test MTPLossLoggingHelper.save_loss_to_tracker."""
@@ -241,6 +270,126 @@ class TestMultiTokenPrediction(unittest.TestCase):
         self.assertIn(AttnMaskType.causal, SUPPORTED_ATTN_MASK)
         self.assertIn(AttnMaskType.no_mask, SUPPORTED_ATTN_MASK)
         self.assertIn(AttnMaskType.padding_causal, SUPPORTED_ATTN_MASK)
+
+    def test_mtp_eh_projection_accuracy_gate(self):
+        """Accuracy mode uses functional linear only for TP=1."""
+        from paddlefleet.transformer import multi_token_prediction as mtp
+
+        class Projection:
+            def __init__(self):
+                self.weight = paddle.randn([4, 3])
+                self.bias = None
+                self.skip_bias_add = False
+                self.called = False
+
+            def __call__(self, hidden_states):
+                self.called = True
+                return paddle.full([2, 3], -1.0), None
+
+        hidden_states = paddle.randn([2, 4])
+        projection = Projection()
+        expected = paddle.nn.functional.linear(hidden_states, projection.weight)
+
+        with patch.object(mtp, "_ACCURACY_COMPATIBLE_KERNEL", True):
+            actual, bias = mtp._mtp_eh_projection(projection, hidden_states, 1)
+            paddle.testing.assert_close(actual, expected)
+            self.assertIsNone(bias)
+            self.assertFalse(projection.called)
+
+            native, bias = mtp._mtp_eh_projection(projection, hidden_states, 2)
+            paddle.testing.assert_close(native, paddle.full([2, 3], -1.0))
+            self.assertIsNone(bias)
+            self.assertTrue(projection.called)
+
+    def test_mtp_shift_position_ids_accuracy_gate(self):
+        """Accuracy mode rolls MTP positions by one plus prediction depth."""
+        from paddlefleet.transformer import multi_token_prediction as mtp
+
+        position_ids = paddle.to_tensor([[0, 1, 2, 3]], dtype="int64")
+        with patch.object(mtp, "_ACCURACY_COMPATIBLE_KERNEL", True):
+            actual = mtp._mtp_shift_position_ids(
+                position_ids,
+                paddle.zeros([1, 4, 2]),
+                layer_number=0,
+                sequence_parallel=False,
+            )
+            self.assertTrue(
+                paddle.equal_all(
+                    actual, paddle.to_tensor([1, 2, 3, 0], dtype="int64")
+                ).item()
+            )
+
+            raw_carrier = paddle.to_tensor(
+                [[0, 1, 2, 3, 4, 5, 6, 0]], dtype="int64"
+            )
+            normalized = mtp._mtp_shift_position_ids(
+                raw_carrier,
+                paddle.zeros([1, 7, 2]),
+                layer_number=0,
+                sequence_parallel=False,
+            )
+            self.assertTrue(
+                paddle.equal_all(
+                    normalized,
+                    paddle.to_tensor([1, 2, 3, 4, 5, 6, 0], dtype="int64"),
+                ).item()
+            )
+            with self.assertRaisesRegex(ValueError, "shorter than"):
+                mtp._mtp_shift_position_ids(
+                    paddle.to_tensor([[0, 1, 2]], dtype="int64"),
+                    paddle.zeros([1, 4, 2]),
+                    layer_number=0,
+                    sequence_parallel=False,
+                )
+
+            actual = mtp._mtp_shift_position_ids(
+                position_ids,
+                paddle.zeros([1, 4, 2]),
+                layer_number=1,
+                sequence_parallel=False,
+            )
+            self.assertTrue(
+                paddle.equal_all(
+                    actual, paddle.to_tensor([2, 3, 0, 1], dtype="int64")
+                ).item()
+            )
+            inferred = mtp._mtp_shift_position_ids(
+                None,
+                paddle.zeros([1, 4, 2]),
+                layer_number=0,
+                sequence_parallel=False,
+            )
+            self.assertTrue(
+                paddle.equal_all(
+                    inferred, paddle.to_tensor([1, 2, 3, 0], dtype="int64")
+                ).item()
+            )
+
+        with patch.object(mtp, "_ACCURACY_COMPATIBLE_KERNEL", False):
+            self.assertIs(
+                mtp._mtp_shift_position_ids(
+                    position_ids,
+                    paddle.zeros([1, 4, 2]),
+                    layer_number=0,
+                    sequence_parallel=False,
+                ),
+                position_ids,
+            )
+
+    def test_proj_and_transformer_layer_passes_unshifted_position_ids(self):
+        """IEEE e468 keeps the unshifted MTP carrier on the live path."""
+        from pathlib import Path
+
+        src_path = (
+            Path(__file__).resolve().parents[4]
+            / "src/paddlefleet/transformer/multi_token_prediction.py"
+        )
+        src = src_path.read_text()
+        start = src.find("def _proj_and_transformer_layer")
+        self.assertNotEqual(start, -1)
+        body = src[start : src.find("\n    def ", start + 1)]
+        self.assertIn('"position_ids": position_ids', body)
+        self.assertNotIn("_mtp_shift_position_ids(", body)
 
     def test_weight_only_mtp_layer_forward(self):
         """Test WeightOnlyMTPLayer.forward returns dict_args."""

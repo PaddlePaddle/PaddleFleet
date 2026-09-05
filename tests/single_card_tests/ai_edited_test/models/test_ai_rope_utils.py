@@ -138,6 +138,32 @@ class TestApplyRotaryPosEmbBSHD(unittest.TestCase):
         )
         self.assertIsNotNone(result)
 
+    def test_bshd_4d_freqs_skips_slice_when_already_local(self):
+        """Already-local 4D freqs must not be sliced again under SP."""
+        t = paddle.randn([1, 8, 1, 16])
+        freqs = paddle.ones([1, 8, 1, 16])
+        sp_group = type("G", (), {"nranks": 2, "rank": 0})()
+        result = _apply_rotary_pos_emb_bshd(
+            t=t,
+            freqs=freqs,
+            sp_group=sp_group,
+            time_major=False,
+        )
+        self.assertEqual(list(result.shape), [1, 8, 1, 16])
+
+    def test_bshd_4d_freqs_slices_full_seq_cache(self):
+        """Full-seq 4D freqs are sliced to the local SP window."""
+        t = paddle.randn([1, 8, 1, 16])
+        freqs = paddle.ones([1, 16, 1, 16])
+        sp_group = type("G", (), {"nranks": 2, "rank": 1})()
+        result = _apply_rotary_pos_emb_bshd(
+            t=t,
+            freqs=freqs,
+            sp_group=sp_group,
+            time_major=False,
+        )
+        self.assertEqual(list(result.shape), [1, 8, 1, 16])
+
 
 class TestGetThdFreqsOnThisCPRank(unittest.TestCase):
     """Test _get_thd_freqs_on_this_cp_rank function."""

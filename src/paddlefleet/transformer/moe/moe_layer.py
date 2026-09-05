@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 from paddlefleet import utils
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.recompute_utils import (
     module_needs_recompute,
     module_needs_refined_recompute,
@@ -66,7 +67,10 @@ from .fusion_layer_utils import (
 from .moe_expert import GroupedMLPExpert, SonicMoEExpert, StandardMLPExpert
 from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
-from .moe_utils import AddAuxiliaryLoss, use_accuracy_compatible_kernel
+from .moe_utils import (
+    AddAuxiliaryLoss,
+    use_accuracy_compatible_kernel,
+)
 from .token_dispatcher import (
     AllGatherTokenDispatcher,
     AllToAllTokenDispatcher,
@@ -110,6 +114,53 @@ from .moe_utils import (
     permute,
     unpermute,
 )
+
+
+class _AccuracyCompatibleMoEInputBranches(PyLayer):
+    """Fan out MoE input branches and combine their dgrads in Megatron order."""
+
+    @staticmethod
+    def forward(ctx, hidden_states):
+        return (
+            hidden_states.clone(),
+            hidden_states.clone(),
+            hidden_states.clone(),
+        )
+
+    @staticmethod
+    def backward(ctx, routed_grad, router_grad, shared_grad):
+        return (routed_grad + router_grad) + shared_grad
+
+
+class _AccuracyCompatibleExpertInputGather(PyLayer):
+    """Gather expert inputs while fixing routed-token dgrad accumulation order."""
+
+    @staticmethod
+    def forward(ctx, hidden_states, token_indices, tokens_per_expert):
+        ctx.hidden_shape = hidden_states.shape
+        ctx.save_for_backward(token_indices, tokens_per_expert)
+        return paddle.index_select(hidden_states, token_indices, axis=0)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        token_indices, tokens_per_expert = ctx.saved_tensor()
+        grad_hidden = paddle.zeros(ctx.hidden_shape, dtype=grad_output.dtype)
+        offset = 0
+        for count in tokens_per_expert.tolist():
+            count = int(count)
+            if count == 0:
+                continue
+            next_offset = offset + count
+            expert_grad = paddle.zeros_like(grad_hidden)
+            expert_grad = paddle.scatter(
+                expert_grad,
+                token_indices[offset:next_offset],
+                grad_output[offset:next_offset],
+                overwrite=False,
+            )
+            grad_hidden = grad_hidden + expert_grad
+            offset = next_offset
+        return grad_hidden, None, None
 
 
 class GradDtypeGuard(PyLayer):
@@ -924,9 +975,13 @@ class MoELayer(nn.Layer):
             elif scale_chunks is None:
                 expert_output = expert(chunk)[0]
             else:
-                expert_output = expert(chunk, per_token_scale=scale_chunks[i])[
-                    0
-                ]
+                expert_output = expert(
+                    chunk,
+                    per_token_scale=scale_chunks[i],
+                    accuracy_compatible_router_reduction_rows=dispatched_input.shape[
+                        0
+                    ],
+                )[0]
             outputs += [expert_output]
 
         if not outputs:
@@ -1290,12 +1345,16 @@ class MoELayer(nn.Layer):
             "moe_dispatch_tokens_per_expert",
             layer_idx,
             tokens_per_expert,
-            pre_save_func=lambda counts: counts
-            if isinstance(counts, paddle.Tensor)
-            else paddle.to_tensor(counts, dtype="int32"),
-            post_load_func=lambda loaded: loaded
-            if isinstance(tokens_per_expert, paddle.Tensor)
-            else loaded.tolist(),
+            pre_save_func=lambda counts: (
+                counts
+                if isinstance(counts, paddle.Tensor)
+                else paddle.to_tensor(counts, dtype="int32")
+            ),
+            post_load_func=lambda loaded: (
+                loaded
+                if isinstance(tokens_per_expert, paddle.Tensor)
+                else loaded.tolist()
+            ),
         )
         dispatched_probs = inspect_tensor(
             "moe_dispatched_probs",
@@ -1732,6 +1791,16 @@ class MoELayer(nn.Layer):
 
         orig_shape = hidden_states.shape
         residuals = hidden_states
+        if (
+            ieee_kernel_enabled()
+            and self.shared_experts is not None
+            and self.expert_model_parallel_size <= 1
+        ):
+            hidden_states, router_hidden_states, residuals = (
+                _AccuracyCompatibleMoEInputBranches.apply(hidden_states)
+            )
+        else:
+            router_hidden_states = hidden_states
 
         layer_idx = getattr(self, "layer_number", None)
 
@@ -1748,7 +1817,12 @@ class MoELayer(nn.Layer):
             )
             residuals = _hs_shared_path
         else:
-            _hs_router_path = _hs_dispatcher_path = hidden_states
+            # ``router_hidden_states`` is ``hidden_states`` unless the
+            # env-gated accuracy-compatible branch above replaced it, so this
+            # keeps that probe path alive while upstream's config-gated
+            # three-path clone takes precedence when it is enabled.
+            _hs_router_path = router_hidden_states
+            _hs_dispatcher_path = hidden_states
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
 
         self._maybe_pre_allgather_overlap(hidden_states)
@@ -1918,6 +1992,25 @@ class MoELayer(nn.Layer):
         tokens_per_expert = expert_mask.reshape([expert_mask.shape[0], -1]).sum(
             axis=-1
         )
+        accuracy_compatible = ieee_kernel_enabled()
+        gathered_state_chunks = None
+        token_counts = [int(count) for count in tokens_per_expert.tolist()]
+        if accuracy_compatible:
+            expert_token_indices = []
+            for expert_idx in range(self.num_experts):
+                _, expert_indices = paddle.where(expert_mask[expert_idx])
+                if tokens_per_expert[expert_idx] > 0.1:
+                    expert_token_indices.append(expert_indices.reshape([-1]))
+            token_indices = paddle.concat(expert_token_indices, axis=0)
+            gathered_states = _AccuracyCompatibleExpertInputGather.apply(
+                hidden_states, token_indices, tokens_per_expert
+            )
+            gathered_state_chunks = paddle.split(
+                gathered_states,
+                num_or_sections=token_counts,
+                axis=0,
+            )
+
         # Loop over all available experts in the model and perform the computation on each expert
         for expert_idx in range(self.num_experts):
             expert_layer = self.experts[expert_idx]
@@ -1927,10 +2020,21 @@ class MoELayer(nn.Layer):
             # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
             if tokens_per_expert[expert_idx] <= 0.1:
                 continue
-            current_state = hidden_states[idx, None].reshape([-1, d_model])
-            expert_out = expert_layer(current_state)[0]
+            if accuracy_compatible:
+                current_state = gathered_state_chunks[expert_idx]
+            else:
+                current_state = hidden_states[idx, None].reshape([-1, d_model])
             current_weight = topk_weights[idx, top_x].unsqueeze(-1)
-            current_hidden_states = expert_out * current_weight
+            if accuracy_compatible:
+                expert_out = expert_layer(
+                    current_state,
+                    per_token_scale=current_weight.squeeze(-1),
+                    accuracy_compatible_router_reduction_rows=selected_experts.numel(),
+                )[0]
+                current_hidden_states = expert_out
+            else:
+                expert_out = expert_layer(current_state)[0]
+                current_hidden_states = expert_out * current_weight
 
             # use scatter to replace index_add
             final_hidden_states_tmp = paddle.zeros_like(final_hidden_states)
@@ -1982,20 +2086,58 @@ class MoELayer(nn.Layer):
             )
             return final_hidden_states.cast(hidden_states.dtype)
         else:
+            # Accuracy-compatible expert path (E-163 / e468). Under
+            # use_accuracy_compatible: permute/unpermute use the MG-aligned
+            # gather/sum PyLayers; fold routing probs into post-GLU before
+            # fc2; batch each expert GEMM per SP shard so bf16 M matches
+            # mcore. Dump / LOCAL_SHARD env knobs stay on the Explore tree.
+            ac_expert_path = ieee_kernel_enabled() and getattr(
+                self.config, "use_accuracy_compatible", False
+            )
             tokens_per_expert = routing_map.sum(axis=0)
             permuted_local_hidden_states, sorted_indices = permute(
-                hidden_states, routing_map, tokens_per_expert
+                hidden_states,
+                routing_map,
+                tokens_per_expert,
+                use_accuracy_compatible=ac_expert_path,
             )
-            grouped_expert_out = self.grouped_gemm_experts(
-                permuted_local_hidden_states, tokens_per_expert
-            )[0]
-            final_hidden_states = unpermute(
-                grouped_expert_out,
-                sorted_indices,
-                restore_shape=hidden_states.shape,
-                probs=probs,
-                routing_map=routing_map,
-            )
+            if ac_expert_path:
+                shard_len = max(
+                    hidden_states.shape[0]
+                    // max(self.tensor_model_parallel_size, 1),
+                    1,
+                )
+                row_owner = sorted_indices // shard_len
+                permuted_probs = None
+                if probs is not None:
+                    permuted_probs = probs.T.contiguous().masked_select(
+                        routing_map.T.contiguous().cast("bool")
+                    )
+                grouped_expert_out = self.grouped_gemm_experts(
+                    permuted_local_hidden_states,
+                    tokens_per_expert,
+                    permuted_probs=permuted_probs,
+                    row_owner=row_owner,
+                )[0]
+                final_hidden_states = unpermute(
+                    grouped_expert_out,
+                    sorted_indices,
+                    restore_shape=hidden_states.shape,
+                    probs=None,
+                    routing_map=routing_map,
+                    use_accuracy_compatible=True,
+                )
+            else:
+                grouped_expert_out = self.grouped_gemm_experts(
+                    permuted_local_hidden_states, tokens_per_expert
+                )[0]
+                final_hidden_states = unpermute(
+                    grouped_expert_out,
+                    sorted_indices,
+                    restore_shape=hidden_states.shape,
+                    probs=probs,
+                    routing_map=routing_map,
+                )
             return final_hidden_states.cast(hidden_states.dtype)
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):

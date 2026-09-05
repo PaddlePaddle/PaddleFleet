@@ -748,6 +748,31 @@ class TestRowParallelLinearBasic(unittest.TestCase):
         repr_str = repr(layer)
         self.assertIn("RowParallelLinear", repr_str)
 
+    def test_ieee_row_parallel_reduce_scatter_stays_bf16(self):
+        """IEEE RowPar SP RS matches e808 FLAG+UAC: no leftover fp32 cast."""
+        import inspect
+
+        from paddlefleet.tensor_parallel.layers import RowParallelLinear
+
+        src = inspect.getsource(RowParallelLinear.forward)
+        self.assertIn("self.sequence_parallel", src)
+        self.assertIn("reduce_scatter_to_sequence_parallel_region", src)
+        self.assertNotIn('output_parallel.cast("float32")', src)
+        self.assertNotIn("ieee_kernel_enabled()", src)
+        self.assertNotIn("os.environ", src)
+
+    def test_ieee_row_parallel_uses_forward_impl_not_flinear_shortcut(self):
+        """IEEE RowPar local GEMM matches e808: Function path, not raw F.linear."""
+        import inspect
+
+        from paddlefleet.tensor_parallel.layers import RowParallelLinear
+
+        src = inspect.getsource(RowParallelLinear.forward)
+        self.assertIn("self._forward_impl", src)
+        self.assertNotIn("F.linear(", src)
+        self.assertNotIn("ieee_kernel_enabled()", src)
+        self.assertNotIn("os.environ", src)
+
 
 class TestVocabParallelEmbeddingBasic(unittest.TestCase):
     """Tests for VocabParallelEmbedding basics."""
@@ -798,6 +823,122 @@ class TestVocabParallelEmbeddingBasic(unittest.TestCase):
         input_ids = paddle.randint(0, 100, shape=[4, 8])
         output = layer(input_ids)
         self.assertEqual(output.shape, [4, 8, 32])
+
+    def test_two_fp32_accum_env_off_uses_weight_index(self):
+        """Env off: UAC lookup stays ``weight[ids]``."""
+        from paddlefleet.tensor_parallel.layers import (
+            VocabParallelEmbedding,
+            _EmbedFp32MainGrad,
+        )
+
+        config = self._make_config()
+        config.use_accuracy_compatible = True
+        init_method = paddle.nn.initializer.Constant(1.0)
+        layer = VocabParallelEmbedding(
+            16,
+            8,
+            init_method=init_method,
+            reduce_scatter_embeddings=False,
+            config=config,
+        )
+        input_ids = paddle.to_tensor([[1, 2, 3, 4]], dtype="int64")
+
+        def _boom(*args, **kwargs):
+            raise AssertionError("env off must not call _EmbedFp32MainGrad")
+
+        with (
+            patch.dict(
+                os.environ, {"MODEL_REPRO_TWO_FP32_ACCUM": ""}, clear=False
+            ),
+            patch.object(_EmbedFp32MainGrad, "apply", side_effect=_boom),
+        ):
+            output = layer(input_ids)
+        np.testing.assert_array_equal(
+            output.numpy(), layer.weight[input_ids].numpy()
+        )
+
+    def test_two_fp32_accum_env_on_uses_embed_fp32_main_grad(self):
+        """Env on: UAC lookup routes through ``_EmbedFp32MainGrad``."""
+        from paddlefleet.tensor_parallel.layers import (
+            VocabParallelEmbedding,
+            _EmbedFp32MainGrad,
+        )
+
+        config = self._make_config()
+        config.use_accuracy_compatible = True
+        init_method = paddle.nn.initializer.Constant(1.0)
+        layer = VocabParallelEmbedding(
+            16,
+            8,
+            init_method=init_method,
+            reduce_scatter_embeddings=False,
+            config=config,
+        )
+        input_ids = paddle.to_tensor([[1, 2, 3, 4]], dtype="int64")
+        seen = {}
+
+        def _spy(weight, ids):
+            seen["weight"] = weight
+            seen["ids"] = ids
+            return weight[ids]
+
+        with (
+            patch.dict(
+                os.environ, {"MODEL_REPRO_TWO_FP32_ACCUM": "1"}, clear=False
+            ),
+            patch.object(_EmbedFp32MainGrad, "apply", side_effect=_spy),
+        ):
+            output = layer(input_ids)
+        self.assertIs(seen["weight"], layer.weight)
+        np.testing.assert_array_equal(seen["ids"].numpy(), input_ids.numpy())
+        np.testing.assert_array_equal(
+            output.numpy(), layer.weight[input_ids].numpy()
+        )
+
+    def test_embed_fp32_main_grad_deposits_fp32_and_suppresses_bf16_grad(self):
+        """TWO_FP32 backward writes fp32 main_grad and returns None wgrad."""
+        from paddlefleet.tensor_parallel.layers import _EmbedFp32MainGrad
+
+        paddle.seed(2026)
+        weight = paddle.randn([16, 8], dtype=paddle.bfloat16)
+        weight.stop_gradient = False
+        ids = paddle.to_tensor([[1, 2, 3, 4]], dtype="int64")
+        looked = _EmbedFp32MainGrad.apply(weight, ids)
+        looked.cast("float32").sum().backward()
+        self.assertIsNotNone(weight.main_grad)
+        self.assertEqual(weight.main_grad.dtype, paddle.float32)
+        self.assertEqual(tuple(weight.main_grad.shape), tuple(weight.shape))
+        self.assertGreater(float(weight.main_grad.abs().sum()), 0.0)
+        self.assertTrue(
+            weight.grad is None or float(weight.grad.abs().sum()) == 0.0
+        )
+
+    def test_embed_fp32_gw_nz_tracks_nonzero_incoming_dy_elements(self):
+        """gw_nz is the count of nonzero wgrad elements, not unique ids.
+
+        Live stack-top hit=1 is ids=(1, 60) gw_nz=233445 vs E-654/e473 233444.
+        The pylayer body matches IEEE e9ac; zeroing one token's dy drops
+        hidden-size elements, so a +1 live count is incoming dy, not this op.
+        """
+        from paddlefleet.tensor_parallel.layers import _EmbedFp32MainGrad
+
+        paddle.seed(2026)
+        vocab, hidden, seq = 32, 8, 16
+        weight = paddle.randn([vocab, hidden], dtype=paddle.bfloat16)
+        weight.stop_gradient = False
+        ids = paddle.arange(seq, dtype="int64").reshape([1, seq])
+        looked = _EmbedFp32MainGrad.apply(weight, ids)
+        looked.backward(paddle.ones_like(looked))
+        nz_all = int((weight.main_grad != 0).astype("int64").sum().item())
+
+        weight2 = paddle.randn([vocab, hidden], dtype=paddle.bfloat16)
+        weight2.stop_gradient = False
+        looked2 = _EmbedFp32MainGrad.apply(weight2, ids)
+        dy2 = paddle.ones_like(looked2)
+        dy2[0, 0, :] = 0
+        looked2.backward(dy2)
+        nz_drop = int((weight2.main_grad != 0).astype("int64").sum().item())
+        self.assertEqual(nz_all - nz_drop, hidden)
 
 
 class TestLinearWithGradAccumulationAndAsyncCommunication(unittest.TestCase):
@@ -939,12 +1080,16 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         )
 
     def test_accuracy_compatible_matches_reference_linear(self):
-        """The compatible branch must match the reference linear result."""
+        """IEEE kernel UAC must match the reference linear result."""
         paddle.seed(0)
         input_tensor = paddle.randn([3, 8], dtype=paddle.float32)
         weight = paddle.randn([8, 5], dtype=paddle.float32)
 
-        out_compat = self._run(True, input_tensor, weight)
+        with patch(
+            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
+            return_value=True,
+        ):
+            out_compat = self._run(True, input_tensor, weight)
         ref = paddle.nn.functional.linear(input_tensor, weight)
         np.testing.assert_allclose(
             out_compat.numpy(), ref.numpy(), rtol=1e-6, atol=1e-6
@@ -958,12 +1103,16 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         weight = paddle.randn([8, 5], dtype=paddle.float32)
         bias = paddle.randn([5], dtype=paddle.float32)
 
-        output, quant_cache = general_gemm(
-            input_tensor,
-            weight,
-            bias=bias,
-            use_accuracy_compatible=True,
-        )
+        with patch(
+            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
+            return_value=True,
+        ):
+            output, quant_cache = general_gemm(
+                input_tensor,
+                weight,
+                bias=bias,
+                use_accuracy_compatible=True,
+            )
         reference = paddle.nn.functional.linear(input_tensor, weight, bias)
 
         self.assertIsNone(quant_cache)
@@ -1009,20 +1158,48 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         input_tensor = paddle.randn([4, 8], dtype=paddle.float32)
         weight = paddle.randn([8, 16], dtype=paddle.float32)
 
-        out = linear_with_grad_accumulation_and_async_allreduce(
-            input_tensor,
-            weight,
-            None,
-            gradient_accumulation_fusion=False,
-            allreduce_dgrad=False,
-            sequence_parallel=False,
-            tp_group=None,
-            use_accuracy_compatible=True,
-        )
+        with patch(
+            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
+            return_value=True,
+        ):
+            out = linear_with_grad_accumulation_and_async_allreduce(
+                input_tensor,
+                weight,
+                None,
+                gradient_accumulation_fusion=False,
+                allreduce_dgrad=False,
+                sequence_parallel=False,
+                tp_group=None,
+                use_accuracy_compatible=True,
+            )
         ref = paddle.nn.functional.linear(input_tensor, weight)
         self.assertEqual(out.shape, [4, 16])
         np.testing.assert_allclose(
             out.numpy(), ref.numpy(), rtol=1e-6, atol=1e-6
+        )
+
+    def test_flag_uac_without_ieee_kernel_keeps_structure_matmul(self):
+        """FLAG+UAC without MODEL_REPRO_IEEE_KERNEL stays on structure GEMM."""
+        from paddlefleet.tensor_parallel.layers import general_gemm
+
+        paddle.seed(3)
+        input_tensor = paddle.randn([3, 8], dtype=paddle.float32)
+        weight = paddle.randn([8, 5], dtype=paddle.float32)
+        with patch(
+            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
+            return_value=False,
+        ):
+            output, quant_cache = general_gemm(
+                input_tensor,
+                weight,
+                bias=None,
+                use_accuracy_compatible=True,
+            )
+        weight_t = weight.T.contiguous()
+        reference = paddle.matmul(input_tensor, weight_t, transpose_y=True)
+        self.assertIsNone(quant_cache)
+        np.testing.assert_allclose(
+            output.numpy(), reference.numpy(), rtol=1e-6, atol=1e-6
         )
 
     def test_compatible_backward_grads(self):
@@ -1033,13 +1210,48 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         weight = paddle.randn([8, 16], dtype=paddle.float32)
         weight.stop_gradient = False
 
-        out = self._run(True, input_tensor, weight)
-        out.sum().backward()
+        with patch(
+            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
+            return_value=True,
+        ):
+            out = self._run(True, input_tensor, weight)
+            out.sum().backward()
 
         self.assertIsNotNone(input_tensor.grad)
         self.assertIsNotNone(weight.grad)
         self.assertEqual(input_tensor.grad.shape, [4, 8])
         self.assertEqual(weight.grad.shape, [8, 16])
+
+    def test_uac_dgrad_matches_e9ac_nn_materialized_t(self):
+        """IEEE e9ac: UAC dgrad is NN GEMM on materialized W^T.
+
+        Live shared-expert down-projection (M=30, K=2048, N=6144) is where
+        routing UAC dgrad through general_gemm's old TN path disagreed with
+        this formula. F.linear autograd itself follows the TN family here.
+        """
+        if not paddle.is_compiled_with_cuda():
+            self.skipTest("Requires CUDA")
+
+        paddle.seed(2026)
+        x = paddle.randn([30, 1, 2048], dtype="bfloat16")
+        w = paddle.randn([2048, 6144], dtype="bfloat16")
+        go = paddle.randn([30, 1, 6144], dtype="bfloat16")
+        x.stop_gradient = False
+        w.stop_gradient = False
+
+        with patch(
+            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
+            return_value=True,
+        ):
+            out = self._run(True, x, w)
+            out.backward(go)
+
+        expected = paddle.matmul(
+            go.reshape([-1, go.shape[-1]]), w.t().contiguous()
+        ).reshape(list(x.shape))
+        self.assertTrue(
+            bool((x.grad.cast("int16") == expected.cast("int16")).all())
+        )
 
 
 class TestGradAccumFusionAvailable(unittest.TestCase):
