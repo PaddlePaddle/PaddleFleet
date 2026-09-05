@@ -3039,6 +3039,39 @@ class CompressedSparseAttention(FleetLayer):
                 )
             compress_topk_idxs = compress_topk_idxs.astype("int32")
 
+            # Backend x compaction for an INDEXER (CSA) layer. The two config
+            # knobs -- ``csa_sparse_attn_backend`` and ``csa_indexer_backend``
+            # -- decide ``indexer_topk`` right here, which in turn drives the
+            # compaction gate in csa_sparse_attn.py (``ctx.compacted_idxs``,
+            # which requires ``indexer_topk == 0``). "compacts?" is the SM100
+            # cuDNN outcome:
+            #
+            #   sparse_attn / indexer   fused-lse?  indexer_topk  compacts?
+            #   ----------------------- ----------  ------------  ---------
+            #   tilelang / any          no          0             NO
+            #   cudnn    / cudnn        yes         > 0           NO
+            #   cudnn    / cudnn        no [1]      0             YES
+            #   cudnn    / tilelang     no          0             YES
+            #
+            #   [1] both cuDNN but the fused-lse path did NOT fire, so
+            #       ``indexer_topk`` stays 0 and it compacts (window-only). This
+            #       is when the indexer is skipped entirely
+            #       (``actual_n_compressed == 0``, the ``else`` below) or the
+            #       layer is eval / no-grad (``tilelang_indexer_loss_state is
+            #       None``). The "> 0 / NO" row above holds ONLY while the
+            #       fused-lse path is live.
+            #
+            #   * tilelang SA: the compaction gate needs the cuDNN backend; the
+            #     tilelang kernel tolerates interior ``-1`` and has no
+            #     ``topk_length``, so compaction is moot.
+            #   * both cuDNN + fused-lse live: the second forward keeps the holey
+            #     ``[compress | window]`` layout so ``lse_indexer`` over the
+            #     first ``indexer_topk`` columns stays valid -> must NOT compact.
+            #   * cuDNN SA + tilelang indexer: the tilelang indexer RECOMPUTES
+            #     the target (reducesum) and never uses ``lse_indexer``, so the
+            #     ``topk_idxs`` layout is free -> ``indexer_topk`` stays 0 and
+            #     the layer compacts.
+            #
             # For cudnn's second forward (both indexer and SA should be cudnn),
             # use [compress, window] order to generate lse_indexer. Otherwise,
             # use [window, compress] order.
