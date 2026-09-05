@@ -284,5 +284,39 @@ class TestNeedFullRecompute(unittest.TestCase):
         self.assertTrue(need_full_recompute(1, config))
 
 
+class TestRecomputeStoreFallback(unittest.TestCase):
+    def test_fallback_store_is_a_noop(self):
+        # CI coverage sees the except ImportError body. Paddle may already
+        # ship RecomputeStore, so force that import to fail and reload.
+        import importlib
+        import sys
+        import types
+        from unittest.mock import patch
+
+        stub = types.ModuleType(
+            "paddle.distributed.fleet.meta_parallel.zero_bubble_utils"
+        )
+        sys.modules.pop("paddlefleet.recompute_utils", None)
+        with patch.dict(
+            sys.modules,
+            {"paddle.distributed.fleet.meta_parallel.zero_bubble_utils": stub},
+        ):
+            import paddlefleet.recompute_utils as ru
+
+            ru = importlib.reload(ru)
+            store = ru.RecomputeStore
+            self.assertFalse(store.enabled)
+            self.assertIsNone(store.put("span"))
+            self.assertIsNone(store.drop("span"))
+            self.assertEqual(store.pending("span"), 0)
+            store.groups = {"span": 1}
+            store.clear()
+            self.assertEqual(store.groups, {})
+        sys.modules.pop("paddlefleet.recompute_utils", None)
+        import paddlefleet.recompute_utils as ru
+
+        importlib.reload(ru)
+
+
 if __name__ == "__main__":
     unittest.main()
