@@ -11,34 +11,33 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""CPU IEEE-gated branches that FLAG+UAC CI does not execute.
+"""IEEE-gated branches. FLAG+UAC without IEEE stays the structure graph.
 
-MODEL_REPRO_IEEE_KERNEL=1 is the GLM-5.2 leaf. FLAG+UAC without it is the
-Minimax / GLM-4.5 Air graph. These tests run the live functions, not source
-string checks.
+Isolation (not a docstring-only claim):
+``ci/single_card_test.sh`` loops ``pytest -s "$test_file"`` / ``coverage run
+-m pytest -s "$test_file"`` — one process per file. This module does not set
+``CUDA_VISIBLE_DEVICES``, does not rewrite ``sys.path`` for ops, and does not
+patch ``paddlefleet_ops`` symbols. Device is saved/restored per test.
+Matching CUDA-built ops query ``get_device_capability()`` at import, so a
+CUDA-hidden process cannot load them; hide GPUs only in a dedicated launch
+command, not here. These tests do not claim the 90% diff-cover gate.
 """
+from __future__ import annotations
+
+import functools
 import os
 import sys
+import unittest
+from unittest.mock import MagicMock, patch
 
-_REPO_ROOT = os.path.dirname(
+sys.path.insert(
+    0,
     os.path.dirname(
         os.path.dirname(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         )
-    )
+    ),
 )
-sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
-
-# Local venv ops can lag this tree. CI builds matching ops; only fill
-# symbols this tree imports that the installed facade may lack.
-import paddlefleet_ops.flash_mask_facade as _flash_mask_facade
-
-if not hasattr(_flash_mask_facade, "uses_cutedsl_backend"):
-    _flash_mask_facade.uses_cutedsl_backend = lambda: False
-
-import functools
-import unittest
-from unittest.mock import MagicMock, patch
 
 import paddle
 import paddle.nn.functional as F
@@ -55,9 +54,37 @@ from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
 from paddlefleet.utils import init_method_normal, scaled_init_method_normal
 
 
+def _independent_unfused_attn(query, key, value, combined_mask, softmax_scale):
+    """Dense (non-MQA) unfused attention oracle. Does not call DSA helpers."""
+    batch, seq, heads, qk_hd = query.shape
+    v_hd = value.shape[-1]
+    q = query.transpose([0, 2, 1, 3]).reshape([batch * heads, seq, qk_hd])
+    k = key.transpose([0, 2, 1, 3]).reshape([batch * heads, seq, qk_hd])
+    v = value.transpose([0, 2, 1, 3]).reshape([batch * heads, seq, v_hd])
+    scores = paddle.matmul(q, k, transpose_y=True) * softmax_scale
+    if combined_mask is not None:
+        mask = combined_mask.expand([batch, heads, seq, seq]).reshape(
+            [batch * heads, seq, seq]
+        )
+        scores = scores + mask.cast(scores.dtype)
+    weights = F.softmax(scores, axis=-1)
+    ctx = paddle.matmul(weights, v)
+    return (
+        ctx.reshape([batch, heads, seq, v_hd])
+        .transpose([0, 2, 1, 3])
+        .reshape([batch, seq, heads * v_hd])
+    )
+
+
+def _causal_mask(seq_len: int) -> paddle.Tensor:
+    idx = paddle.arange(seq_len)
+    allowed = idx.reshape([1, seq_len]) <= idx.reshape([seq_len, 1])
+    zeros = paddle.zeros([seq_len, seq_len], dtype="float32")
+    neginf = paddle.full([seq_len, seq_len], float("-inf"), dtype="float32")
+    return paddle.where(allowed, zeros, neginf).reshape([1, 1, seq_len, seq_len])
+
+
 def _expert_config(**overrides):
-    # Avoid TransformerConfig.__post_init__ (FA3 facade import). The
-    # expert constructor only reads these attributes.
     mock = MagicMock()
     mock.num_hidden_layers = 2
     mock.hidden_size = 16
@@ -89,7 +116,19 @@ def _expert_config(**overrides):
     return mock
 
 
-class TestAbsorbQNopeKUpIeee(unittest.TestCase):
+class _DeviceRestoreCase(unittest.TestCase):
+    def setUp(self):
+        self._saved_device = str(paddle.get_device())
+        paddle.set_device("cpu")
+        device = str(paddle.get_device())
+        if not device.startswith("cpu"):
+            self.skipTest(f"IEEE gated tests require cpu, got {device}")
+
+    def tearDown(self):
+        paddle.set_device(self._saved_device)
+
+
+class TestAbsorbQNopeKUpIeee(_DeviceRestoreCase):
     @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_ieee_absorb_matches_bmm_not_einsum_layout(self):
         paddle.seed(0)
@@ -111,29 +150,96 @@ class TestAbsorbQNopeKUpIeee(unittest.TestCase):
         self.assertTrue(bool(paddle.equal_all(out, expected)))
 
 
-class TestUnfusedDsaIeeeSoftmax(unittest.TestCase):
-    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
-    def test_ieee_unfused_attention_is_finite_and_shaped(self):
-        paddle.seed(2)
+class TestUnfusedDsaIeeeOracle(_DeviceRestoreCase):
+    def _qkv(self, seed):
+        paddle.seed(seed)
         query = paddle.randn([1, 2, 2, 4], dtype="float32")
         key = paddle.randn([1, 2, 2, 4], dtype="float32")
         value = paddle.randn([1, 2, 2, 4], dtype="float32")
-        out = _unfused_dsa_attention(query, key, value, None, 1.0)
+        return query, key, value
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_ieee_matches_independent_oracle_bits(self):
+        query, key, value = self._qkv(2)
+        scale = 0.5
+        out = _unfused_dsa_attention(query, key, value, None, scale)
+        oracle = _independent_unfused_attn(query, key, value, None, scale)
         self.assertEqual(tuple(out.shape), (1, 2, 8))
-        self.assertTrue(bool(paddle.isfinite(out).all()))
+        self.assertFalse(bool(paddle.equal_all(out, paddle.zeros_like(out))))
+        self.assertTrue(
+            bool(paddle.equal_all(out, oracle)),
+            "IEEE unfused forward must match the independent bmm+softmax oracle",
+        )
 
     @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "0"})
-    def test_flag_off_unfused_attention_is_finite_and_shaped(self):
-        paddle.seed(2)
-        query = paddle.randn([1, 2, 2, 4], dtype="float32")
-        key = paddle.randn([1, 2, 2, 4], dtype="float32")
-        value = paddle.randn([1, 2, 2, 4], dtype="float32")
-        out = _unfused_dsa_attention(query, key, value, None, 1.0)
-        self.assertEqual(tuple(out.shape), (1, 2, 8))
-        self.assertTrue(bool(paddle.isfinite(out).all()))
+    def test_flag_off_matches_independent_oracle_bits(self):
+        query, key, value = self._qkv(2)
+        scale = 0.5
+        out = _unfused_dsa_attention(query, key, value, None, scale)
+        oracle = _independent_unfused_attn(query, key, value, None, scale)
+        self.assertFalse(bool(paddle.equal_all(out, paddle.zeros_like(out))))
+        self.assertTrue(bool(paddle.equal_all(out, oracle)))
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_causal_mask_hides_future_value(self):
+        paddle.seed(3)
+        seq = 2
+        query = paddle.ones([1, seq, 1, 2], dtype="float32")
+        key = paddle.ones([1, seq, 1, 2], dtype="float32")
+        value = paddle.to_tensor(
+            [[[[10.0, 10.0], [99.0, 99.0]]]], dtype="float32"
+        )
+        mask = _causal_mask(seq)
+        out = _unfused_dsa_attention(query, key, value, mask, 1.0)
+        oracle = _independent_unfused_attn(query, key, value, mask, 1.0)
+        self.assertTrue(bool(paddle.equal_all(out, oracle)))
+        self.assertTrue(
+            bool(paddle.equal_all(out[:, 0, :], paddle.full([1, 2], 10.0)))
+        )
+        self.assertFalse(bool(paddle.equal_all(out[:, 1, :], out[:, 0, :])))
+
+        value_perturbed = value.clone()
+        value_perturbed[:, 1, :, :] = 0.0
+        out_perturbed = _unfused_dsa_attention(
+            query, key, value_perturbed, mask, 1.0
+        )
+        self.assertTrue(
+            bool(paddle.equal_all(out[:, 0, :], out_perturbed[:, 0, :])),
+            "causal mask must keep y[0] independent of v[1]",
+        )
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_causal_backward_zeros_future_value_grad(self):
+        paddle.seed(4)
+        seq = 2
+        query = paddle.randn([1, seq, 1, 2], dtype="float32")
+        key = paddle.randn([1, seq, 1, 2], dtype="float32")
+        value = paddle.randn([1, seq, 1, 2], dtype="float32")
+        query.stop_gradient = False
+        value.stop_gradient = False
+        mask = _causal_mask(seq)
+        out = _unfused_dsa_attention(query, key, value, mask, 1.0)
+        out[:, 0, :].sum().backward()
+        self.assertIsNotNone(query.grad)
+        self.assertIsNotNone(value.grad)
+        self.assertTrue(bool(paddle.isfinite(query.grad).all()))
+        self.assertFalse(
+            bool(paddle.equal_all(query.grad, paddle.zeros_like(query.grad)))
+        )
+        future_v_grad = value.grad[:, 1, :, :]
+        self.assertTrue(
+            bool(
+                paddle.equal_all(
+                    future_v_grad, paddle.zeros_like(future_v_grad)
+                )
+            ),
+            "d y[0] / d v[1] must be zero under a causal mask",
+        )
+        masked_bits = future_v_grad.numpy().view("uint32")
+        self.assertTrue((masked_bits == 0).all())
 
 
-class TestLanguageLossIeeeCe(unittest.TestCase):
+class TestLanguageLossIeeeCe(_DeviceRestoreCase):
     def _config(self):
         mock = MagicMock()
         mock.parallel_output = True
@@ -159,7 +265,8 @@ class TestLanguageLossIeeeCe(unittest.TestCase):
         logits = paddle.randn([2, 4, 8], dtype="float32")
         labels = paddle.randint(0, 8, [2, 4])
         out = loss_fn.forward_impl(logits, labels)
-        self.assertTrue(paddle.isfinite(out))
+        self.assertTrue(bool(paddle.isfinite(out)))
+        self.assertGreater(float(out), 0.0)
 
     @patch.dict(
         os.environ,
@@ -175,16 +282,15 @@ class TestLanguageLossIeeeCe(unittest.TestCase):
     @patch("paddle.distributed.is_initialized", return_value=False)
     def test_flag_uac_without_ieee_keeps_native_ce(self, _dist, _tp):
         loss_fn = LanguageLoss(config=self._config())
-        self.assertIsInstance(
-            loss_fn.loss_func, paddle.nn.CrossEntropyLoss
-        )
+        self.assertIsInstance(loss_fn.loss_func, paddle.nn.CrossEntropyLoss)
         logits = paddle.randn([2, 4, 8], dtype="float32")
         labels = paddle.randint(0, 8, [2, 4])
         out = loss_fn.forward_impl(logits, labels)
-        self.assertTrue(paddle.isfinite(out))
+        self.assertTrue(bool(paddle.isfinite(out)))
+        self.assertGreater(float(out), 0.0)
 
 
-class TestGroupedMlpIeeeMainGrad(unittest.TestCase):
+class TestGroupedMlpIeeeMainGrad(_DeviceRestoreCase):
     @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_ieee_uac_claims_main_grad_buffer(self):
         expert = GroupedMLPExpert(

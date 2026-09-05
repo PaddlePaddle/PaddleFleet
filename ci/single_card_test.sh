@@ -49,6 +49,10 @@ for test_file in $(find $test_dir -type f -name "test_*.py"); do
 
     echo "Running single card test: $test_file"
     run_count=$((run_count + 1))
+    # Independent process per file: find loop + pytest "$test_file".
+    # The next file cannot inherit this process's CUDA_VISIBLE_DEVICES,
+    # sys.path, or sys.modules. Do not hide CUDA here — matching
+    # paddlefleet_ops queries get_device_capability() at import.
     if [[ "${WITH_COVERAGE:-OFF}" == "ON" ]];then
         # uv run -m coverage run -m pytest -s "$test_file"
         coverage run -m pytest -s "$test_file"
