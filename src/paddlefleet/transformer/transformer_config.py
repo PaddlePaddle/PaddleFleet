@@ -1633,6 +1633,42 @@ class TransformerConfig(ModelParallelConfig):
     interleaved frequencies.
     """
 
+    use_moh: bool = False
+    """Whether to enable Mixture-of-Heads (MoH) routing on the CSA Indexer.
+
+    When True, ``CSAIndexer.forward_before_topk`` scores the ``dsa_index_n_heads``
+    heads per token by ``|weights| + indexer_moh_bias`` and keeps only the
+    top-``num_activated_heads`` heads for the downstream Q/K/weights path. The
+    other heads are dropped (their query and weight entries are zeroed out). A
+    per-head token-count buffer ``local_tokens_per_indexer_moh`` is registered
+    on the indexer so the trainer can update ``indexer_moh_bias`` between steps.
+
+    Requires ``num_activated_heads`` to be a positive integer no greater than
+    ``dsa_index_n_heads``.
+    """
+
+    num_activated_heads: int | None = None
+    """Number of indexer heads kept by MoH routing (see :attr:`use_moh`).
+
+    Ignored when ``use_moh=False``. When ``use_moh=True`` the range checks are:
+
+    * ``1 <= num_activated_heads <= dsa_index_n_heads``
+    * ``CSAIndexer.forward_before_topk`` right-pads the routed head dim from
+      ``num_activated_heads`` up to 16 before the indexer kernel, so the value
+      the kernel actually sees is ``max(num_activated_heads, 16)``. That
+      padded count must satisfy the kernel-specific constraint set by
+      ``csa_indexer_backend``:
+
+      - ``"tilelang"`` — padded heads ``<= 64`` and divisible by 8
+        (i.e. num_activated_heads in ``{1..16, 24, 32, 40, 48, 56, 64}``).
+      - ``"cudnn"``   — padded heads exactly ``32`` or ``64`` (num_activated_heads
+        must equal 32 or 64; the pad-to-16 does not reach 32, so smaller values
+        are rejected).
+      - ``"unfused"`` — no head-count constraint.
+
+    ``__post_init__`` enforces all three.
+    """
+
     ####################
     # CSA / DSv4 Hybrid Attention
     ####################
@@ -1929,6 +1965,9 @@ class TransformerConfig(ModelParallelConfig):
         "indexer_use_sparse_loss": "dsa_indexer_use_sparse_loss",
         "indexer_rotary_interleaved": "dsa_indexer_rotary_interleaved",
         "indexer_rope_interleave": "dsa_indexer_rotary_interleaved",
+        # MoH (Mixture-of-Heads) field mapping
+        "use_moh": "use_moh",
+        "num_activated_heads": "num_activated_heads",
         # CSA / DSv4 Hybrid field mapping
         "csa_window_size": "csa_window_size",
         "csa_compress_ratios": "csa_compress_ratios",
@@ -2988,6 +3027,122 @@ class TransformerConfig(ModelParallelConfig):
                 "train_indexer_only=True is only supported with "
                 "experimental_attention_variant='dsv4_hybrid', got "
                 f"{self.experimental_attention_variant!r}."
+            )
+
+        # MoH (Mixture-of-Heads) indexer routing checks.
+        if self.use_moh:
+            # MoH only routes the CSA indexer heads, and the CSAIndexer is only
+            # built by the dsv4-hybrid stack. Anywhere else the flag would be
+            # read by nothing at all, so reject it instead of letting a run
+            # start with a silently inert switch.
+            if self.experimental_attention_variant != "dsv4_hybrid":
+                raise ValueError(
+                    "use_moh=True is only supported with "
+                    "experimental_attention_variant='dsv4_hybrid' (MoH routes "
+                    "the CSAIndexer heads, and no other variant builds a "
+                    f"CSAIndexer), got {self.experimental_attention_variant!r}."
+                )
+            # Same CSAIndexer existence rule as ``gpt_layer_specs.py``: a CSA
+            # layer (1 < ratio < 128) that ``csa_dense_mode`` has not dropped.
+            # Without one there is no head to route and the flag is inert.
+            if self.csa_dense_mode or not any(
+                1 < int(ratio) < 128
+                for ratio in (self.csa_compress_ratios or ())
+            ):
+                raise ValueError(
+                    "use_moh=True requires the model to build a CSAIndexer, "
+                    "i.e. csa_dense_mode=False plus some "
+                    "1 < csa_compress_ratios[i] < 128. Got "
+                    f"csa_dense_mode={self.csa_dense_mode}, "
+                    f"csa_compress_ratios={self.csa_compress_ratios}."
+                )
+            if (
+                not isinstance(self.dsa_index_n_heads, int)
+                or isinstance(self.dsa_index_n_heads, bool)
+                or self.dsa_index_n_heads <= 0
+            ):
+                raise ValueError(
+                    "use_moh=True routes over the indexer heads and therefore "
+                    "requires dsa_index_n_heads as a positive integer, got "
+                    f"{self.dsa_index_n_heads!r}."
+                )
+            if (
+                not isinstance(self.num_activated_heads, int)
+                or isinstance(self.num_activated_heads, bool)
+                or self.num_activated_heads <= 0
+            ):
+                raise ValueError(
+                    "use_moh=True requires num_activated_heads as a positive "
+                    f"integer, got {self.num_activated_heads!r}."
+                )
+            if self.num_activated_heads > self.dsa_index_n_heads:
+                raise ValueError(
+                    "num_activated_heads must not exceed dsa_index_n_heads "
+                    "(MoH selects a subset of the indexer heads), got "
+                    f"num_activated_heads={self.num_activated_heads} > "
+                    f"dsa_index_n_heads={self.dsa_index_n_heads}."
+                )
+            if self.num_activated_heads == self.dsa_index_n_heads:
+                logger.warning(
+                    "use_moh=True with num_activated_heads == "
+                    f"dsa_index_n_heads ({self.dsa_index_n_heads}) activates "
+                    "every head, so the routing is a no-op that still pays for "
+                    "the top-k and the gather. Set use_moh=False instead, or "
+                    "lower num_activated_heads."
+                )
+
+            # Backend-aware kernel-shape check.
+            #
+            # ``CSAIndexer.forward_before_topk`` (see ``csa_attention.py``)
+            # right-pads the routed head dim from ``num_activated_heads`` up
+            # to ``_TL_MIN_HEADS`` (16) BEFORE handing the tensor to the
+            # indexer kernel, but only when the value is strictly below 16.
+            # So the head count the kernel actually sees is:
+            _MOH_PAD_MIN = 16
+            effective_heads = max(self.num_activated_heads, _MOH_PAD_MIN)
+
+            # TileLang kernel: heads <= 64 AND heads % 8 == 0
+            #   (see tilelang_ops/indexer/csa_indexer_fwd.py assertion:
+            #        assert heads <= 64 and heads % 8 == 0)
+            # cuDNN kernel:    heads in {32, 64}
+            #   (see cudnn_ops/indexer/csa_indexer_fwd_cudnn.py check:
+            #        if heads not in (32, 64): raise)
+            # ``unfused`` uses pure paddle ops and has no head constraint.
+            indexer_backend = self.csa_indexer_backend
+            if indexer_backend == "tilelang":
+                if effective_heads > 64 or effective_heads % 8 != 0:
+                    raise ValueError(
+                        "csa_indexer_backend='tilelang' requires the routed "
+                        "MoH head count (after the implicit pad to 16) to be "
+                        "<= 64 AND divisible by 8, but "
+                        f"num_activated_heads={self.num_activated_heads} pads "
+                        f"to effective heads={effective_heads}. Pick "
+                        "num_activated_heads in {8, 16, 24, 32, 40, 48, 56, 64} "
+                        "(values below 16 all pad up to 16), or switch "
+                        "csa_indexer_backend to 'cudnn' / 'unfused'."
+                    )
+            elif indexer_backend == "cudnn":
+                if effective_heads not in (32, 64):
+                    raise ValueError(
+                        "csa_indexer_backend='cudnn' requires the routed "
+                        "MoH head count (after the implicit pad to 16) to be "
+                        f"exactly 32 or 64, but num_activated_heads="
+                        f"{self.num_activated_heads} pads to effective "
+                        f"heads={effective_heads}. Pick num_activated_heads "
+                        "== 32 or 64 (the pad-to-16 does NOT reach 32; values "
+                        "below 32 are unsupported by cuDNN), or switch "
+                        "csa_indexer_backend to 'tilelang' / 'unfused'."
+                    )
+            # ``unfused`` has no head-count restriction.
+        elif self.num_activated_heads is not None:
+            # A num_activated_heads without use_moh is read by nothing; the
+            # indexer only looks at it inside the ``use_moh`` branch. Silently
+            # ignoring it would make a typo'd switch look like it worked.
+            raise ValueError(
+                "num_activated_heads="
+                f"{self.num_activated_heads} was set without use_moh=True, "
+                "but it is only read by the MoH indexer routing. Set "
+                "use_moh=True or drop num_activated_heads."
             )
 
         # swa_high_precision_norm is only supported for DSv4 models.
