@@ -748,32 +748,29 @@ class TestRowParallelLinearBasic(unittest.TestCase):
         repr_str = repr(layer)
         self.assertIn("RowParallelLinear", repr_str)
 
-    def test_uac_sequence_parallel_reduce_scatter_casts_float32(self):
-        """UAC+SP row-parallel reduce-scatter must run in float32, then restore."""
+    def test_ieee_row_parallel_reduce_scatter_stays_bf16(self):
+        """IEEE RowPar SP RS matches e808 FLAG+UAC: no leftover fp32 cast."""
         import inspect
 
         from paddlefleet.tensor_parallel.layers import RowParallelLinear
 
         src = inspect.getsource(RowParallelLinear.forward)
-        self.assertIn("ieee_kernel_enabled()", src)
-        self.assertIn('self.config, "use_accuracy_compatible", False', src)
         self.assertIn("self.sequence_parallel", src)
-        self.assertIn('output_parallel.cast("float32")', src)
         self.assertIn("reduce_scatter_to_sequence_parallel_region", src)
+        self.assertNotIn('output_parallel.cast("float32")', src)
+        self.assertNotIn("ieee_kernel_enabled()", src)
         self.assertNotIn("os.environ", src)
 
-    def test_uac_row_parallel_local_gemm_uses_contiguous_linear(self):
-        """UAC row-parallel local GEMM must be contiguous F.linear, not env."""
+    def test_ieee_row_parallel_uses_forward_impl_not_flinear_shortcut(self):
+        """IEEE RowPar local GEMM matches e808: Function path, not raw F.linear."""
         import inspect
 
         from paddlefleet.tensor_parallel.layers import RowParallelLinear
 
         src = inspect.getsource(RowParallelLinear.forward)
-        self.assertIn("ieee_kernel_enabled()", src)
-        self.assertIn('self.config, "use_accuracy_compatible", False', src)
-        self.assertIn("F.linear(", src)
-        self.assertIn("input_parallel.contiguous()", src)
-        self.assertIn("self.weight, None", src)
+        self.assertIn("self._forward_impl", src)
+        self.assertNotIn("F.linear(", src)
+        self.assertNotIn("ieee_kernel_enabled()", src)
         self.assertNotIn("os.environ", src)
 
 
