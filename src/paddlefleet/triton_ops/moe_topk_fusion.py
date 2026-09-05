@@ -529,7 +529,7 @@ def _bitwise_or(a, b):
 # [BLOCK_M, BLOCK_K, BLOCK_N] = [64, 16, 128] fp32 intermediate (`matches`).
 # That is 4 KB per thread, i.e. ~1024 registers where the hardware has 255, so
 # ptxas spills it to local memory -- and local memory is DRAM. Measured with
-# ncu on B30Z at tokens 8192 / experts 512 / topk 10:
+# ncu at tokens 8192 / experts 512 / topk 10:
 #   local-memory traffic 899 MB load + 908 MB store per launch,
 #   DRAM 1.49 GB per launch against 18.1 MB of semantically necessary bytes
 #   (82x), 387 us per launch.
@@ -683,16 +683,11 @@ def routing_map_fusion_forward(
     # Initialize dispatch_mask to 0; the kernel accumulates via atomic_add.
     dispatch_mask = paddle.zeros((n_experts,), dtype=paddle.int64)
 
-    # Tuned block sizes.
-    # BLOCK_M: number of rows processed per block.
+    # Block sizes.
+    # BLOCK_M: rows per block, unchanged from the kernel this replaced.
     # BLOCK_N: fixed at 32 by the int32 bit packing in the kernel.
     # BLOCK_K: number of moe_k entries processed per block. Must be a power
     # of 2; use next_power_of_2 to round up.
-    # (BLOCK_M, num_warps) = (64, 2) was picked from a 49-point sweep: 7.16 us
-    # against 7.05 us for the fastest point (BLOCK_M=128), but with half the
-    # register pressure, which matters because the [BLOCK_M, BLOCK_K] index tile
-    # grows with moe_k. The whole sweep stayed within 7.0-14.6 us, i.e. there is
-    # no spill cliff to fall off.
     BLOCK_M = 64
     BLOCK_N = 32
     BLOCK_K = triton.next_power_of_2(moe_k)
@@ -724,7 +719,6 @@ def routing_map_fusion_forward(
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
-        num_warps=2,
     )
 
     return routing_map, topk_indices_out, dispatch_mask
