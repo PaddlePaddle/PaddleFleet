@@ -45,6 +45,8 @@ from paddlefleet.transformer.layer import FleetLayer
 
 from .paddle_norm import RMSNorm, get_norm_extra_args
 
+logger = logging.getLogger(__name__)
+
 try:
     from paddle.distributed.fleet.utils.sequence_parallel_utils import (
         mark_as_sequence_parallel_parameter,
@@ -64,9 +66,37 @@ try:
     )
 
     HAVE_FUSED_ATTNRES = True
-except (ImportError, AttributeError):
+    _FUSED_ATTNRES_IMPORT_ERROR = None
+except (ImportError, AttributeError) as exc:
     _build_ptr_table = fused_attnres_fwd = fused_attnres_bwd = None
     HAVE_FUSED_ATTNRES = False
+    _FUSED_ATTNRES_IMPORT_ERROR = f"{type(exc).__name__}: {exc}"
+
+_fused_attnres_fallback_warned = False
+
+
+def _warn_fused_attnres_unavailable_once():
+    """Warn once per process that the fused kernel was asked for but is missing.
+
+    The fallback to the PyLayer path is silent and is a large perf difference,
+    so a run configured for the fused kernel that never got it would otherwise
+    leave no trace at all. Rank 0 only, or the line shows up once per card.
+    """
+    global _fused_attnres_fallback_warned
+    if _fused_attnres_fallback_warned:
+        return
+    _fused_attnres_fallback_warned = True
+    try:
+        if paddle.distributed.get_rank() != 0:
+            return
+    except Exception:
+        pass
+    logger.warning(
+        "attn_res_fusion is enabled but the FLA fused attnres kernel could "
+        "not be imported (%s); BlockAttnRes falls back to the unfused path "
+        "and timings are not representative of the fused implementation.",
+        _FUSED_ATTNRES_IMPORT_ERROR,
+    )
 
 
 @contextlib.contextmanager
@@ -255,6 +285,14 @@ class FusedAttnResTritonFunc(paddle.autograd.PyLayer):
     @staticmethod
     def forward(ctx, proj_weight, norm_weight, norm_eps, *residuals):
         D = residuals[0].shape[-1]
+        # Paddle requires backward to return None at every forward *Tensor*
+        # position whose stop_gradient is True, or py_layer_node.cc:213 raises
+        # "backward function should return None at N position, because it's
+        # forward Tensor's stopgradient is true". norm_eps is a float and does
+        # not occupy a position. Mirrors BlockAttnResFunc.backward above.
+        ctx.needs_grad = [
+            not t.stop_gradient for t in (proj_weight, norm_weight, *residuals)
+        ]
         flat_residuals = tuple(
             r.reshape([-1, D]).contiguous() for r in residuals
         )
@@ -314,7 +352,10 @@ class FusedAttnResTritonFunc(paddle.autograd.PyLayer):
         # Return order: d_proj_weight, d_norm_weight, *d_residuals
         # (norm_eps is non-tensor, no gradient)
         d_residuals = [dv.reshape(ctx.output_shape) for dv in dvs]
-        return (dq, dw, *d_residuals)
+        raw_grads = (dq, dw, *d_residuals)
+        return tuple(
+            g if need else None for need, g in zip(ctx.needs_grad, raw_grads)
+        )
 
 
 class BlockAttnRes(FleetLayer):
@@ -363,12 +404,17 @@ class BlockAttnRes(FleetLayer):
 
         # Fused Triton kernel (FLA fused_attnres) has highest priority:
         # single kernel for RMSNorm + projection + softmax + weighted sum.
-        self._use_fused = (
-            HAVE_FUSED_ATTNRES
-            and self._use_pylayer
+        # Split out from _use_fused so the two cannot disagree: the warning
+        # below must fire only when the extension is the one missing piece, not
+        # when this instance was never eligible (LayerNorm, deterministic mode).
+        fused_eligible = (
+            self._use_pylayer
             and getattr(config, "attn_res_fusion", True)
             and not getattr(config, "deterministic_mode", False)
         )
+        self._use_fused = HAVE_FUSED_ATTNRES and fused_eligible
+        if fused_eligible and not HAVE_FUSED_ATTNRES:
+            _warn_fused_attnres_unavailable_once()
 
     def forward(self, partial_block: Tensor, blocks: list[Tensor]) -> Tensor:
         """Compute Block Attention Residual.

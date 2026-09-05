@@ -23,15 +23,21 @@ path covered in that case.
 """
 
 import unittest
+from unittest import mock
 
 import paddle
 
 from paddlefleet.transformer.block_attn_res import (
     HAVE_FUSED_ATTNRES,
+    BlockAttnRes,
     BlockAttnResFunc,
+    BlockAttnResSublayersSpec,
     FusedAttnResTritonFunc,
     _block_attn_res_rmsnorm,
 )
+from paddlefleet.transformer.identity_op import IdentityOp
+from paddlefleet.transformer.paddle_norm import RMSNorm
+from paddlefleet.transformer.transformer_config import TransformerConfig
 
 # The FLA extension is optional in production (block_attn_res.py guards its
 # import and falls back), so the tests must not fail at collection time when it
@@ -337,6 +343,93 @@ class TestFusedAttnResPrecision(unittest.TestCase):
             f"norm_weight grad mismatch: {grad_norm_diff:.2e}",
         )
 
+    def test_backward_with_frozen_inputs(self):
+        """Frozen forward inputs must come back as None, not as a gradient.
+
+        Paddle requires a PyLayer's backward to return None at every forward
+        Tensor position whose stop_gradient is True; returning a real gradient
+        raises "backward function should return None at N position, because
+        it's forward Tensor's stopgradient is true" from py_layer_node.cc. Every
+        other fused case here marks all inputs trainable, so dropping
+        FusedAttnResTritonFunc's stop_gradient filtering would leave them green
+        while any frozen parameter blew up at runtime.
+
+        Freezing is applied to proj_weight, norm_weight and one completed block
+        at once, which is also the layout a partially frozen expert produces.
+        The surviving inputs are checked against the unfused reference so a
+        filter that returned None too eagerly fails too.
+        """
+        batch_seq, hidden_size, num_blocks = 4, 256, 3
+        norm_eps = 1e-6
+        frozen_block = 1
+
+        def build():
+            paddle.seed(self.seed)
+            blocks = [
+                paddle.randn([batch_seq, hidden_size], dtype="bfloat16")
+                for _ in range(num_blocks)
+            ]
+            partial = paddle.randn([batch_seq, hidden_size], dtype="bfloat16")
+            proj = paddle.randn([1, hidden_size], dtype="bfloat16")
+            norm_w = (
+                paddle.ones([hidden_size], dtype="bfloat16")
+                + paddle.randn([hidden_size], dtype="bfloat16") * 0.1
+            )
+            return blocks, partial, proj, norm_w
+
+        # Reference: everything trainable, unfused eager math.
+        blocks_ref, partial_ref, proj_ref, norm_ref = build()
+        for t in [*blocks_ref, partial_ref, proj_ref, norm_ref]:
+            t.stop_gradient = False
+        _block_attn_res_rmsnorm(
+            partial_ref, blocks_ref, proj_ref, norm_ref, norm_eps
+        ).astype("float32").sum().backward()
+
+        # Fused: proj_weight, norm_weight and blocks[frozen_block] are frozen.
+        blocks, partial, proj, norm_w = build()
+        partial.stop_gradient = False
+        for i, block in enumerate(blocks):
+            block.stop_gradient = i == frozen_block
+        proj.stop_gradient = True
+        norm_w.stop_gradient = True
+
+        # Without the stop_gradient filtering this call is what raises.
+        FusedAttnResTritonFunc.apply(
+            proj, norm_w, norm_eps, *blocks, partial
+        ).astype("float32").sum().backward()
+
+        self.assertIsNone(proj.grad, "frozen proj_weight must not get a grad")
+        self.assertIsNone(norm_w.grad, "frozen norm_weight must not get a grad")
+        self.assertIsNone(
+            blocks[frozen_block].grad,
+            f"frozen residual[{frozen_block}] must not get a grad",
+        )
+
+        # The trainable inputs still have to carry the same gradients.
+        atol = rtol = 5e-2
+        survivors = [
+            (f"residual[{i}]", blocks[i], blocks_ref[i])
+            for i in range(num_blocks)
+            if i != frozen_block
+        ] + [("partial_block", partial, partial_ref)]
+        for name, got, expected in survivors:
+            self.assertIsNotNone(got.grad, f"{name} lost its gradient")
+            diff = (
+                (got.grad.astype("float32") - expected.grad.astype("float32"))
+                .abs()
+                .max()
+                .item()
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    got.grad.astype("float32"),
+                    expected.grad.astype("float32"),
+                    atol=atol,
+                    rtol=rtol,
+                ).item(),
+                f"{name} grad mismatch with frozen peers: {diff:.2e}",
+            )
+
 
 class TestBlockAttnResFallback(unittest.TestCase):
     """Cover the extension-free fallback path.
@@ -473,6 +566,55 @@ class TestBlockAttnResFallback(unittest.TestCase):
             self.assertTrue(all(h is not None for h in handles))
         else:
             self.assertTrue(all(h is None for h in handles))
+
+    def test_fallback_warning_only_when_fused_was_eligible(self):
+        """The "falls back" warning must track real fused eligibility.
+
+        `_use_fused` needs four things: the extension, RMSNorm, the
+        `attn_res_fusion` flag, and `deterministic_mode` off. A warning keyed on
+        only the first two would fire for a LayerNorm or deterministic-mode
+        layer that was never going to use the fused kernel, which misreads as a
+        missing extension when diagnosing performance.
+        """
+        from paddlefleet.transformer import block_attn_res
+
+        if HAVE_FUSED_ATTNRES:
+            self.skipTest("the warning only exists when the extension is gone")
+
+        def build(norm, **config_kwargs):
+            # Warning is once-per-process; reset so each case is observable.
+            block_attn_res._fused_attnres_fallback_warned = False
+            config = TransformerConfig(
+                hidden_size=16,
+                num_hidden_layers=1,
+                num_attention_heads=2,
+                **config_kwargs,
+            )
+            with mock.patch.object(block_attn_res.logger, "warning") as warning:
+                layer = BlockAttnRes(
+                    config, BlockAttnResSublayersSpec(norm=norm)
+                )
+            return layer, warning.call_count
+
+        eligible, warned = build(RMSNorm)
+        self.assertFalse(eligible._use_fused)
+        self.assertEqual(
+            warned, 1, "an eligible layer must report the missing extension"
+        )
+
+        for label, norm, kwargs in (
+            ("non-RMSNorm", IdentityOp, {}),
+            ("deterministic_mode", RMSNorm, {"deterministic_mode": True}),
+            ("attn_res_fusion off", RMSNorm, {"attn_res_fusion": False}),
+        ):
+            with self.subTest(ineligible=label):
+                layer, warned = build(norm, **kwargs)
+                self.assertFalse(layer._use_fused)
+                self.assertEqual(
+                    warned,
+                    0,
+                    f"{label} was never fused-eligible, so it must stay quiet",
+                )
 
 
 if __name__ == "__main__":
