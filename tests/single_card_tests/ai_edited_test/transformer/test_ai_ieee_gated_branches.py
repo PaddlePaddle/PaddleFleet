@@ -44,19 +44,32 @@ sys.path.insert(
 
 import paddle
 import paddle.nn.functional as F
+from paddle.distributed.fleet.meta_parallel import LayerSpec
 
 from paddlefleet.models.common.language_loss.language_loss import (
     LanguageLoss,
     _accuracy_compatible_cross_entropy,
 )
+from paddlefleet.tensor_parallel.layers import Linear
 from paddlefleet.transformer.dsa_attention import (
+    DSAIndexerSublayersSpec,
+    DSAttention,
+    DSAttentionSublayersSpec,
+    Indexer,
     _absorb_q_nope_k_up,
+    _accuracy_compat_linear,
     _AccuracyCompatibleQKMatmul,
     _AccuracyCompatibleSoftmax,
+    _align_sp_aux_to_query,
     _SteQKMatmul,
     _unfused_dsa_attention,
 )
-from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
+from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.moe.moe_expert import (
+    GroupedMLPExpert,
+    _UACExpertFp32WgradCapture,
+)
+from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import init_method_normal, scaled_init_method_normal
 
 
@@ -567,6 +580,530 @@ class TestGroupedMlpIeeeMainGrad(_DeviceRestoreCase):
         )
         claimed = getattr(expert.weight1, "main_grad", "missing")
         self.assertEqual(claimed, "missing")
+
+
+class _LinearProjection:
+    def __init__(self, weight, bias=None, skip_bias_add=False):
+        self.weight = weight
+        self.bias = bias
+        self.skip_bias_add = skip_bias_add
+
+
+def _concat_axis0(tensor, group=None):
+    return paddle.concat([tensor, tensor], axis=0)
+
+
+class TestAccuracyCompatLinear(_DeviceRestoreCase):
+    def test_fused_bias_matches_f_linear(self):
+        paddle.seed(7)
+        x = paddle.randn([2, 3], dtype="float32")
+        weight = paddle.randn([3, 4], dtype="float32")
+        bias = paddle.randn([4], dtype="float32")
+        out, out_bias = _accuracy_compat_linear(
+            _LinearProjection(weight, bias, skip_bias_add=False), x
+        )
+        expected = F.linear(x, weight, bias)
+        self.assertTrue(bool(paddle.equal_all(out, expected)))
+        self.assertIsNone(out_bias)
+
+    def test_skip_bias_add_returns_bias_separately(self):
+        paddle.seed(8)
+        x = paddle.randn([2, 3], dtype="float32")
+        weight = paddle.randn([3, 4], dtype="float32")
+        bias = paddle.randn([4], dtype="float32")
+        out, out_bias = _accuracy_compat_linear(
+            _LinearProjection(weight, bias, skip_bias_add=True), x
+        )
+        expected = F.linear(x, weight, None)
+        self.assertTrue(bool(paddle.equal_all(out, expected)))
+        self.assertTrue(bool(paddle.equal_all(out_bias, bias)))
+        self.assertFalse(bool(paddle.equal_all(out, expected + bias)))
+
+
+class TestSteQkBf16Cast(_DeviceRestoreCase):
+    def test_ste_qk_casts_dk_to_key_dtype(self):
+        q = paddle.to_tensor(
+            [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0], dtype="float32"
+        ).reshape([1, 2, 2, 2])
+        k = paddle.to_tensor([1.0, 0.0, 0.0, 1.0], dtype="bfloat16").reshape(
+            [1, 1, 2, 2]
+        )
+        k.stop_gradient = False
+        scale = paddle.full([], 0.5, dtype="float32")
+        scores = _SteQKMatmul.apply(q.detach(), k, scale)
+        scores.sum().backward()
+        dS = paddle.ones_like(scores)
+        gk_per_head = paddle.matmul(dS.transpose([0, 1, 3, 2]), q) * 0.5
+        gk_ref = gk_per_head.sum(axis=1, keepdim=True).cast("bfloat16")
+        self.assertEqual(k.grad.dtype, paddle.bfloat16)
+        # CPU has no equal_all kernel for bfloat16.
+        self.assertTrue(
+            (
+                k.grad.numpy().view("uint16") == gk_ref.numpy().view("uint16")
+            ).all()
+        )
+
+
+class TestAlignSpAuxToQuery(_DeviceRestoreCase):
+    def test_none_or_non4d_query_returns_input(self):
+        query3 = paddle.zeros([1, 4, 8], dtype="float32")
+        tensor = paddle.arange(8, dtype="float32").reshape([1, 4, 2])
+        self.assertIsNone(_align_sp_aux_to_query(None, query3))
+        out = _align_sp_aux_to_query(tensor, query3)
+        self.assertTrue(bool(paddle.equal_all(out, tensor)))
+
+    def test_2d_aux_returns_input(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        tensor = paddle.arange(8, dtype="float32").reshape([2, 4])
+        out = _align_sp_aux_to_query(tensor, query)
+        self.assertTrue(bool(paddle.equal_all(out, tensor)))
+
+    def test_3d_batch_first_gather(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        tensor = paddle.arange(6, dtype="float32").reshape([1, 2, 3])
+        with patch(
+            "paddlefleet.transformer.dsa_attention."
+            "gather_from_sequence_parallel_region",
+            side_effect=_concat_axis0,
+        ):
+            out = _align_sp_aux_to_query(tensor, query)
+        expected = paddle.concat(
+            [tensor.transpose([1, 0, 2]), tensor.transpose([1, 0, 2])],
+            axis=0,
+        ).transpose([1, 0, 2])
+        self.assertEqual(tuple(out.shape), (1, 4, 3))
+        self.assertTrue(bool(paddle.equal_all(out, expected)))
+
+    def test_3d_seq_first_gather_transposes(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        tensor = paddle.arange(6, dtype="float32").reshape([2, 1, 3])
+        with patch(
+            "paddlefleet.transformer.dsa_attention."
+            "gather_from_sequence_parallel_region",
+            side_effect=_concat_axis0,
+        ):
+            out = _align_sp_aux_to_query(tensor, query)
+        expected = paddle.concat([tensor, tensor], axis=0).transpose([1, 0, 2])
+        self.assertEqual(tuple(out.shape), (1, 4, 3))
+        self.assertTrue(bool(paddle.equal_all(out, expected)))
+
+    def test_3d_seq_first_gather_keeps_non_seq_batch_layout(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        tensor = paddle.arange(6, dtype="float32").reshape([2, 1, 3])
+
+        def _concat_axis1(t, group=None):
+            return paddle.concat([t, t], axis=1)
+
+        with patch(
+            "paddlefleet.transformer.dsa_attention."
+            "gather_from_sequence_parallel_region",
+            side_effect=_concat_axis1,
+        ):
+            out = _align_sp_aux_to_query(tensor, query)
+        expected = paddle.concat([tensor, tensor], axis=1)
+        self.assertEqual(tuple(out.shape), (2, 2, 3))
+        self.assertTrue(bool(paddle.equal_all(out, expected)))
+
+    def test_4d_keep_and_seq_first_transpose(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        keep = paddle.arange(16, dtype="float32").reshape([1, 4, 2, 2])
+        self.assertTrue(
+            bool(paddle.equal_all(_align_sp_aux_to_query(keep, query), keep))
+        )
+        seq_first = paddle.arange(16, dtype="float32").reshape([4, 1, 2, 2])
+        out = _align_sp_aux_to_query(seq_first, query)
+        self.assertTrue(
+            bool(paddle.equal_all(out, seq_first.transpose([1, 0, 2, 3])))
+        )
+
+    def test_4d_batch_first_gather(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        tensor = paddle.arange(8, dtype="float32").reshape([1, 2, 1, 4])
+        with patch(
+            "paddlefleet.transformer.dsa_attention."
+            "gather_from_sequence_parallel_region",
+            side_effect=_concat_axis0,
+        ):
+            out = _align_sp_aux_to_query(tensor, query)
+        expected = paddle.concat(
+            [
+                tensor.transpose([1, 0, 2, 3]),
+                tensor.transpose([1, 0, 2, 3]),
+            ],
+            axis=0,
+        ).transpose([1, 0, 2, 3])
+        self.assertEqual(tuple(out.shape), (1, 4, 1, 4))
+        self.assertTrue(bool(paddle.equal_all(out, expected)))
+
+    def test_4d_seq_first_gather_transposes(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        tensor = paddle.arange(8, dtype="float32").reshape([2, 1, 1, 4])
+        with patch(
+            "paddlefleet.transformer.dsa_attention."
+            "gather_from_sequence_parallel_region",
+            side_effect=_concat_axis0,
+        ):
+            out = _align_sp_aux_to_query(tensor, query)
+        expected = paddle.concat([tensor, tensor], axis=0).transpose(
+            [1, 0, 2, 3]
+        )
+        self.assertEqual(tuple(out.shape), (1, 4, 1, 4))
+        self.assertTrue(bool(paddle.equal_all(out, expected)))
+
+    def test_4d_unmatched_layout_returns_input(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        tensor = paddle.arange(6, dtype="float32").reshape([2, 3, 1, 1])
+        out = _align_sp_aux_to_query(tensor, query)
+        self.assertTrue(bool(paddle.equal_all(out, tensor)))
+        longer = paddle.arange(12, dtype="float32").reshape([1, 6, 1, 2])
+        out_long = _align_sp_aux_to_query(longer, query)
+        self.assertTrue(bool(paddle.equal_all(out_long, longer)))
+
+
+def _indexer_config(**overrides):
+    defaults = {
+        "num_hidden_layers": 2,
+        "hidden_size": 64,
+        "num_attention_heads": 2,
+        "dsa_index_n_heads": 1,
+        "dsa_index_head_dim": 16,
+        "dsa_index_topk": 2,
+        "qk_rope_head_dim": 8,
+        "q_lora_rank": 16,
+        "dsa_indexer_loss_coeff": 0.0,
+        "init_method": init_method_normal(0.02),
+        "output_layer_init_method": scaled_init_method_normal(0.02, 1, 2.0),
+        "sequence_parallel": False,
+        "use_bias": False,
+        "perform_initialization": False,
+    }
+    defaults.update(overrides)
+    return TransformerConfig(**defaults)
+
+
+def _indexer_spec():
+    return DSAIndexerSublayersSpec(
+        linear_wq_b=Linear,
+        linear_wk=Linear,
+        k_norm=paddle.nn.LayerNorm,
+        linear_weights_proj=Linear,
+    )
+
+
+class TestIndexerIeeeLinear(_DeviceRestoreCase):
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_ieee_indexer_gemms_match_f_linear(self):
+        import paddlefleet.transformer.dsa_attention as dsa_mod
+
+        indexer = Indexer(
+            _indexer_config(), sublayers_spec=_indexer_spec(), layer_number=1
+        )
+        hidden = paddle.randn([2, 4, 64], dtype="float32")
+        q_latent = paddle.randn([2, 4, 16], dtype="float32")
+        q_lin, _ = _accuracy_compat_linear(indexer.wq_b, q_latent)
+        k_lin, _ = _accuracy_compat_linear(indexer.wk, hidden)
+        w_lin, _ = _accuracy_compat_linear(indexer.weights_proj, hidden)
+        self.assertTrue(
+            bool(
+                paddle.equal_all(
+                    q_lin, F.linear(q_latent, indexer.wq_b.weight, None)
+                )
+            )
+        )
+        self.assertTrue(
+            bool(
+                paddle.equal_all(
+                    k_lin, F.linear(hidden, indexer.wk.weight, None)
+                )
+            )
+        )
+        self.assertTrue(
+            bool(
+                paddle.equal_all(
+                    w_lin, F.linear(hidden, indexer.weights_proj.weight, None)
+                )
+            )
+        )
+        with (
+            patch.object(dsa_mod, "_ACCURACY_COMPATIBLE_KERNEL", True),
+            patch.object(
+                indexer,
+                "_apply_rope",
+                side_effect=lambda x, freqs, mscale=1.0: x,
+            ),
+            patch.object(indexer.k_norm, "forward", side_effect=lambda x: x),
+            patch.object(
+                dsa_mod,
+                "rotate_activation",
+                side_effect=lambda x, use_fast_hadamard=False: x,
+            ),
+        ):
+            q, k, weights = indexer.forward_before_topk(hidden, q_latent)
+        self.assertTrue(
+            bool(
+                paddle.equal_all(
+                    q, q_lin.reshape([2, 4, indexer.n_heads, indexer.head_dim])
+                )
+            )
+        )
+        self.assertTrue(bool(paddle.equal_all(k, k_lin)))
+        scale = (indexer.n_heads**-0.5) * indexer.softmax_scale
+        self.assertTrue(bool(paddle.equal_all(weights, w_lin * scale)))
+
+
+class TestDsAttentionAbsorbedCore(_DeviceRestoreCase):
+    def _model(self):
+        config = _indexer_config()
+        config.qk_nope_head_dim = 8
+        config.qk_rope_head_dim = 4
+        config.v_head_dim = 8
+        spec = DSAttentionSublayersSpec(
+            indexer=LayerSpec(layer=Indexer, sublayers_spec=_indexer_spec())
+        )
+        mock_pg = MagicMock()
+        mock_pg.tp = None
+        model = DSAttention(
+            config=config,
+            sublayers_spec=spec,
+            layer_number=1,
+            attn_mask_type=AttnMaskType.causal,
+            attention_type="self",
+            softmax_scale=1.0,
+            pg_collection=mock_pg,
+        )
+        model.eval()
+        return model
+
+    def _inputs(self):
+        paddle.seed(11)
+        b, s, h, nope, rope, kv, v_out = 1, 4, 2, 8, 4, 8, 8
+        query = paddle.randn([b, s, h, nope + rope], dtype="float32")
+        key = paddle.randn([b, s, h, nope + rope], dtype="float32")
+        value = paddle.randn([b, s, h, v_out], dtype="float32")
+        x = paddle.randn([b, s, 64], dtype="bfloat16")
+        qr = paddle.randn([b, s, 16], dtype="bfloat16")
+        kv_c = paddle.randn([b, s, kv], dtype="float32")
+        k_pe = paddle.randn([b, s, rope], dtype="float32")
+        k_abs = paddle.randn([h, nope, kv], dtype="float32")
+        v_b = paddle.randn([h, v_out, kv], dtype="float32")
+        topk = paddle.zeros([b, s, 2], dtype="int64")
+        topk[:, :, 1] = 1
+        return query, key, value, x, qr, kv_c, k_pe, k_abs, v_b, topk
+
+    def _oracle_absorbed(
+        self, query, kv_c, k_pe, k_abs, v_b, topk, softmax_scale, uac
+    ):
+        b, s, h, qk_hd = query.shape
+        rope_hd = int(k_pe.shape[-1])
+        nope_hd = qk_hd - rope_hd
+        q_nope = query[..., :nope_hd]
+        q_pe = query[..., nope_hd:]
+        qn3 = q_nope.reshape([b * s, h, nope_hd]).transpose([1, 0, 2])
+        q_abs_nope = _absorb_q_nope_k_up(qn3, k_abs)
+        q_abs_nope = q_abs_nope.transpose([1, 0, 2]).reshape(
+            [b, s, h, k_abs.shape[-1]]
+        )
+        q_absorbed = paddle.concat([q_abs_nope, q_pe], axis=-1)
+        kv = kv_c + (kv_c * 0) if uac else kv_c
+        k_latent = kv.unsqueeze(2)
+        k_rope = k_pe.unsqueeze(2)
+        key_abs = paddle.concat([k_latent, k_rope], axis=-1)
+        dummy = paddle.zeros(k_latent.shape, dtype=k_latent.dtype)
+        causal = paddle.triu(
+            paddle.full([s, s], float("-inf"), dtype="float32"), diagonal=1
+        )
+        index_mask = paddle.full([b, s, s], float("-inf"), dtype="float32")
+        zeros = paddle.zeros(topk.shape, dtype="float32")
+        index_mask = paddle.put_along_axis(index_mask, topk, zeros, axis=-1)
+        combined = (index_mask + causal.unsqueeze(0)).unsqueeze(1)
+        latent_flat = _unfused_dsa_attention(
+            q_absorbed, key_abs, dummy, combined, softmax_scale
+        )
+        kv_rank = kv.shape[-1]
+        latent_out = latent_flat.reshape([b, s, h, kv_rank])
+        if uac:
+            lat = latent_out.transpose([2, 0, 1, 3]).reshape(
+                [h, b * s, kv_rank]
+            )
+            core = (
+                paddle.bmm(lat, v_b.transpose([0, 2, 1]))
+                .reshape([h, b, s, -1])
+                .transpose([1, 2, 0, 3])
+            )
+        else:
+            core = paddle.einsum("bshc,hdc->bshd", latent_out, v_b)
+        return core.reshape([b, s, h * core.shape[-1]])
+
+    def _run(self, model, inputs, uac):
+        query, key, value, x, qr, kv_c, k_pe, k_abs, v_b, topk = inputs
+        scores = paddle.zeros([1, 4, 4], dtype="float32")
+        env = {"MODEL_REPRO_IEEE_KERNEL": "1" if uac else "0"}
+        with (
+            patch.dict(os.environ, env),
+            patch.object(model.indexer, "forward", return_value=(scores, topk)),
+        ):
+            return model(
+                query,
+                key,
+                value,
+                None,
+                x=x,
+                qr=qr,
+                kv_compressed=kv_c,
+                k_pos_emb=k_pe,
+                k_abs_weight=k_abs,
+                v_b_proj_weight=v_b,
+            )
+
+    def test_ieee_rebuilds_q_and_projects_v_with_bmm(self):
+        model = self._model()
+        inputs = self._inputs()
+        out = self._run(model, inputs, uac=True)
+        query, _, _, _, _, kv_c, k_pe, k_abs, v_b, topk = inputs
+        with patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"}):
+            expected = self._oracle_absorbed(
+                query, kv_c, k_pe, k_abs, v_b, topk, 1.0, True
+            )
+        self.assertEqual(tuple(out.shape), (1, 4, 16))
+        self.assertTrue(bool(paddle.equal_all(out, expected)))
+
+    def test_flag_off_absorbed_uses_einsum_v_up(self):
+        model = self._model()
+        inputs = self._inputs()
+        out = self._run(model, inputs, uac=False)
+        query, _, _, _, _, kv_c, k_pe, k_abs, v_b, topk = inputs
+        with patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "0"}):
+            expected = self._oracle_absorbed(
+                query, kv_c, k_pe, k_abs, v_b, topk, 1.0, False
+            )
+        self.assertEqual(tuple(out.shape), (1, 4, 16))
+        self.assertTrue(bool(paddle.equal_all(out, expected)))
+
+
+def _cpu_float32_expert_weights(expert):
+    """CPU has no bf16 matmul. Keep the live Parameter API, change dtype only."""
+    if not str(paddle.get_device()).startswith("cpu"):
+        return
+    w1 = paddle.create_parameter(
+        shape=list(expert.weight1.shape),
+        dtype="float32",
+        default_initializer=paddle.nn.initializer.Constant(0.0),
+    )
+    w2 = paddle.create_parameter(
+        shape=list(expert.weight2.shape),
+        dtype="float32",
+        default_initializer=paddle.nn.initializer.Constant(0.0),
+    )
+    if hasattr(expert.weight1, "main_grad"):
+        w1.main_grad = None
+        w2.main_grad = None
+    expert.weight1 = w1
+    expert.weight2 = w2
+
+
+class TestUacExpertCaptureAndGemm(_DeviceRestoreCase):
+    def test_empty_token_capture_returns_incoming_dy(self):
+        x = paddle.zeros([0, 5], dtype="float32")
+        x.stop_gradient = False
+        wt = paddle.zeros([5, 4], dtype="float32")
+        y = paddle.matmul(x, wt)
+        weight = paddle.create_parameter(
+            shape=[2, 5, 4],
+            dtype="float32",
+            default_initializer=paddle.nn.initializer.Constant(0.0),
+        )
+        weight.main_grad = None
+        out = _UACExpertFp32WgradCapture.apply(y, x, weight, 0)
+        self.assertEqual(tuple(out.shape), (0, 4))
+        if out.numel() == 0:
+            paddle.autograd.backward(out, paddle.zeros_like(out))
+        else:
+            out.sum().backward()
+        self.assertIsNone(weight.main_grad)
+
+    def test_capture_allocates_main_grad_and_writes_xt_dy(self):
+        paddle.seed(9)
+        x = paddle.randn([3, 5], dtype="float32")
+        x.stop_gradient = False
+        wt = paddle.randn([5, 4], dtype="float32")
+        y = paddle.matmul(x, wt)
+        weight = paddle.create_parameter(
+            shape=[2, 5, 4],
+            dtype="float32",
+            default_initializer=paddle.nn.initializer.Constant(0.0),
+        )
+        weight.main_grad = None
+        out = _UACExpertFp32WgradCapture.apply(y, x, weight, 1)
+        out.sum().backward()
+        wg = paddle.matmul(x, paddle.ones_like(y), transpose_x=True)
+        self.assertIsNotNone(weight.main_grad)
+        self.assertTrue(
+            bool(paddle.equal_all(weight.main_grad[1], wg.cast("float32")))
+        )
+        self.assertTrue(
+            bool(
+                paddle.equal_all(
+                    weight.main_grad[0], paddle.zeros_like(weight.main_grad[0])
+                )
+            )
+        )
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_ieee_tn_gemm_matches_independent_matmul(self):
+        paddle.seed(4)
+        expert = GroupedMLPExpert(
+            num_local_experts=2,
+            config=_expert_config(use_accuracy_compatible=True),
+            moe_deep_gemm=False,
+        )
+        _cpu_float32_expert_weights(expert)
+        dtype = expert.weight1.dtype
+        expert.weight1.set_value(
+            paddle.randn(expert.weight1.shape, dtype=dtype)
+        )
+        expert.weight2.set_value(
+            paddle.randn(expert.weight2.shape, dtype=dtype)
+        )
+        tokens = paddle.randn([4, 16], dtype=dtype)
+        tokens_per_expert = paddle.to_tensor([4, 0], dtype="int64")
+        row_owner = paddle.to_tensor([0, 0, 1, 1], dtype="int64")
+        probs = paddle.to_tensor([1.0, 0.5, 0.25, 2.0], dtype="float32")
+        out, bias = expert(
+            tokens,
+            tokens_per_expert,
+            permuted_probs=probs,
+            row_owner=row_owner,
+        )
+        self.assertIsNone(bias)
+        x = tokens.cast("float32")
+        w1 = expert.weight1[0].cast("float32")
+        w2 = expert.weight2[0].cast("float32")
+        parts = []
+        for sl in (slice(0, 2), slice(2, 4)):
+            hidden = paddle.matmul(x[sl], w1)
+            gate, up = paddle.chunk(hidden, 2, axis=-1)
+            hidden = F.silu(gate) * up
+            hidden = hidden * probs[sl].unsqueeze(-1)
+            parts.append(paddle.matmul(hidden, w2))
+        expected = paddle.concat(parts, axis=0).cast(dtype)
+        self.assertEqual(tuple(out.shape), tuple(expected.shape))
+        self.assertTrue(bool(paddle.equal_all(out, expected)))
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_ieee_zero_tokens_scales_empty_activation(self):
+        expert = GroupedMLPExpert(
+            num_local_experts=2,
+            config=_expert_config(use_accuracy_compatible=True),
+            moe_deep_gemm=False,
+        )
+        _cpu_float32_expert_weights(expert)
+        dtype = expert.weight1.dtype
+        tokens = paddle.zeros([0, 16], dtype=dtype)
+        tokens_per_expert = paddle.to_tensor([0, 0], dtype="int64")
+        probs = paddle.zeros([0], dtype="float32")
+        out, bias = expert(tokens, tokens_per_expert, permuted_probs=probs)
+        self.assertIsNone(bias)
+        self.assertEqual(out.shape[0], 0)
 
 
 if __name__ == "__main__":
