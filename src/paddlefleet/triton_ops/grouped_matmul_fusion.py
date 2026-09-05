@@ -21,9 +21,6 @@ that runs on bf16 Tensor Core (no f32 upcast, no internal transpose).
 Forward:  out[g, m, :] = x[g, m, :] @ w[g, :, :]^T   for each group g
 Backward: dx[g, m, :] = dy[g, m, :] @ w[g, :, :]      for each group g
           dw[g, r, :] = dy[g, :, r]^T @ x[g, :, :]     for each group g
-
-The Triton meta parameters the three kernels launch with are tuned; see
-``_TUNED``.
 """
 
 from functools import partial
@@ -42,67 +39,6 @@ import triton.language as tl
 # fp32) falls back to paddle.einsum in fused_grouped_matmul so it is not
 # silently downcast to fp16.
 _SUPPORTED_DTYPES = (paddle.float16, paddle.bfloat16)
-
-
-# --------------------------------------------------------------------------
-# Triton meta parameters
-#
-# None of the three kernels carries an @triton.autotune and no call site ever
-# overrode the signature defaults, so every launch ran 128x128x64 with Triton's
-# default 4 warps / 3 stages. Swept on B30Z (sm_103) at G=8 M=32768 R=768
-# D=1536 bf16 (cc_workspace/simulate_mfu/opt/gmm), isolated single GPU:
-#
-#   fwd  625.0 -> 538.1 us   (x1.16)   256x256x64 / 8 warps / 3 stages
-#   dx   712.8 -> 585.4 us   (x1.22)   256x256x64 / 8 warps / 3 stages
-#   dw   590.8 -> 410.9 us   (x1.44)   256x256x32 / 8 warps / 4 stages
-#
-# dw in real 8-card training: 602.0 -> 402.5 us, x1.496, spread across the 8
-# devices 3.0% -> 4.4%. All configurations bit-identical to the shipped one,
-# 0 register spills. On Blackwell the 256x256 f32 accumulator lives in tensor
-# memory rather than in registers, which is why the wider tile costs no spills;
-# for dw the tuned tile also drops the grid from 8x72 CTAs of 128 threads to
-# 8x18 of 256, i.e. 144 CTAs = one wave on 148 SMs with no tail.
-#
-# Unconditional: the sweep found every configuration bit-identical to the
-# shipped one, so there is nothing to gate.
-_TUNED = {
-    "fwd": {
-        "BLOCK_M": 256,
-        "BLOCK_N": 256,
-        "BLOCK_K": 64,
-        "num_warps": 8,
-        "num_stages": 3,
-    },
-    "dx": {
-        "BLOCK_M": 256,
-        "BLOCK_N": 256,
-        "BLOCK_K": 64,
-        "num_warps": 8,
-        "num_stages": 3,
-    },
-    "dw": {
-        "BLOCK_M": 256,
-        "BLOCK_N": 256,
-        "BLOCK_K": 32,
-        "num_warps": 8,
-        "num_stages": 4,
-    },
-}
-
-
-def _tuned(which, dim_m, dim_n):
-    """The tuned meta params, or {} to keep the shipped 128x128x64 defaults.
-
-    Only applied when both tiled dimensions are whole multiples of the tile.
-    The kernels mask correctly for any size, but the sweep covers exactly one
-    shape, and on a smaller R or D a 256-wide tile would compute mostly masked
-    lanes -- so any shape that is not an exact fit keeps today's behaviour
-    rather than an extrapolated guess.
-    """
-    cfg = _TUNED[which]
-    if dim_m % cfg["BLOCK_M"] or dim_n % cfg["BLOCK_N"]:
-        return {}
-    return cfg
 
 
 @enable_compat_on_triton_kernel
@@ -410,7 +346,6 @@ def _launch_grouped_dw(
         dw.stride()[1],
         dw.stride()[2],
         tl.bfloat16 if dy_3d.dtype == paddle.bfloat16 else tl.float16,
-        **_tuned("dw", R, D),
     )
     return dw
 
@@ -490,7 +425,6 @@ class GroupedMatmulTriton(paddle.autograd.PyLayer):
             out.stride()[0],  # stride_om: step between rows (M dim)
             out.stride()[2],  # stride_on: step between cols (R dim)
             tl.bfloat16 if x.dtype == paddle.bfloat16 else tl.float16,
-            **_tuned("fwd", M, R),
         )
 
         ctx.save_for_backward(x_3d, w)
@@ -555,7 +489,6 @@ class GroupedMatmulTriton(paddle.autograd.PyLayer):
                 dx.stride()[0],  # stride_dxm
                 dx.stride()[2],  # stride_dxn
                 tl.bfloat16 if dy.dtype == paddle.bfloat16 else tl.float16,
-                **_tuned("dx", M, D),
             )
             # dx is already [M, G, D] -> reshape to [..., G, D]
             dx = dx.reshape(orig_shape)

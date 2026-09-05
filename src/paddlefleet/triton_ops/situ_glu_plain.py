@@ -186,15 +186,13 @@ def _geom(x: paddle.Tensor) -> tuple[int, int]:
 def _launch(n_cols: int) -> tuple[int, int]:
     """(block_n, num_warps).
 
-    1024 / 4 warps = 8 bf16 per thread = 16 B, which is the LSU's widest
-    per-thread access. Picked by a 5 block_n x 5 num_warps sweep at both N=2048
-    and N=14336: it is the joint optimum at both widths, and the whole plateau
-    is the ``8 elements/thread`` diagonal -- ``(512,2)``, ``(1024,4)``,
-    ``(2048,8)`` land within 2%, everything off that diagonal is 15-40% worse.
-    So this is not a magic pair, it is that one constraint.
+    Same rule ``triton_ops/situ_glu.py`` already launches its scale kernel
+    with, so this file introduces no launch geometry of its own. Both kernels
+    here are elementwise, so the choice cannot change any output bit -- see the
+    module docstring.
     """
     block_n = min(1024, triton.next_power_of_2(n_cols))
-    return block_n, max(1, block_n // (32 * 8))
+    return block_n, 8 if block_n >= 512 else 4
 
 
 def situ_glu_plain_forward_triton(
