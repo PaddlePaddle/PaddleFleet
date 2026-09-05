@@ -70,7 +70,7 @@ def _make_embedding(K, B, L, H, *, use_erndata=True, magic_send=False):
     cfg.pad_token_id = 0
     cfg.experimental_dataflow = False
     cfg.apply_rope_fusion = False
-    cfg.cp_balance_mode = "zigzag"
+    cfg.cp_balance_mode = "dualchunk_allgather"
     cfg.clone_scatter_output_in_embedding = False
     cfg.layer_types = []  # -> has_kda_layer property returns False
     emb.config = cfg
@@ -98,7 +98,7 @@ def _make_embedding(K, B, L, H, *, use_erndata=True, magic_send=False):
 def _fake_cp(cp_size=2):
     """Force ``get_context_parallel_world_size`` -> cp_size and rank -> 0 in
     the gpt_embedding namespace so ``if _cp_size > 1`` branches execute.
-    ``extract_local_zigzag_chunks`` is left REAL (pure slicing) so shapes stay
+    ``extract_local_cp_chunks`` is left REAL (pure slicing) so shapes stay
     correct; feed a seq length divisible by 2*cp_size.
     """
     with contextlib.ExitStack() as stack:
@@ -207,7 +207,7 @@ class TestGptEmbeddingMegatronCPSP(unittest.TestCase):
         LanguageLoss._cu_seqlens_q_stash = None
 
     def test_megatron_cp_extract(self) -> None:
-        # cp_size=2 -> real extract_local_zigzag_chunks halves the seq len
+        # cp_size=2 -> real extract_local_cp_chunks halves the seq len
         # (lines 457 and 494). L must be divisible by 2*cp_size.
         K, B, L, H = 2, 1, 8, 4
         emb = _make_embedding(K, B, L, H)

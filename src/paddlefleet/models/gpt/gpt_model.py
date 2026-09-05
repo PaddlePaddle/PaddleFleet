@@ -388,9 +388,14 @@ class GPTModel(PipelineLayer):
 
         if spec.mtp:
             for mtp_spec in spec.mtp:
-                if self.config.enable_mtp_magic_send:
-                    desc = LayerDesc(mtp_spec)
-                elif getattr(self.config, "mtp_shared_last_layer", False):
+                # NOTE: test mtp_shared_last_layer FIRST. It used to sit behind
+                # an `enable_mtp_magic_send` branch that short-circuited to a
+                # plain LayerDesc, which meant that with both flags on the tie
+                # silently did nothing. The two are orthogonal: magic send owns
+                # `mtp_embed` (synced via _mtp_embed_global_group below) while
+                # SharedLayerDesc(shared_submodule_weight_only=True) aliases
+                # only the params under `transformer_layer`.
+                if getattr(self.config, "mtp_shared_last_layer", False):
                     desc = SharedLayerDesc(
                         "mtp_reuse_transformer",
                         mtp_spec,

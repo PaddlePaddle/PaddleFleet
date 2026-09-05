@@ -17,6 +17,9 @@ historical ernie5 L+K layout. Guards checked here:
      forward is only reachable through the MTP layer.
   6. use_erndata=False never trips any of the guards regardless of other MTP
      flags.
+  7. use_erndata + MTP + CP>1 accepts both sequence-scatter layouts
+     (``dualchunk_allgather`` / ``contiguous_allgather``) and rejects
+     ``contiguous_a2a``.
 """
 
 from __future__ import annotations
@@ -129,6 +132,26 @@ class TestUseErndataValidation(unittest.TestCase):
                 )
             )
 
+    def test_erndata_magic_send_error_explains_why(self) -> None:
+        # The rejection is a design decision, not a missing feature: magic send
+        # would only add a replicated vocab table on the MTP stage, because
+        # erndata already delivers input_ids through the pipeline dict. Keep the
+        # reasoning in the message so it does not decay into a bare "not
+        # supported" and get re-implemented by someone reading only the guard.
+        with self.assertRaises(ValueError) as ctx:
+            TransformerConfig(
+                **self._base_kwargs(
+                    use_erndata=True,
+                    num_nextn_predict_layers=1,
+                    enable_mtp_magic_send=True,
+                    pipeline_model_parallel_size=2,
+                )
+            )
+        msg = str(ctx.exception)
+        self.assertIn("does not need", msg)
+        self.assertIn("input_ids", msg)
+        self.assertIn("cu_seqlens_q", msg)
+
     def test_erndata_incompat_with_experimental_dataflow(self) -> None:
         with self.assertRaisesRegex(ValueError, r"experimental_dataflow"):
             TransformerConfig(
@@ -151,17 +174,33 @@ class TestUseErndataValidation(unittest.TestCase):
                 )
             )
 
-    def test_erndata_cp_requires_dualchunk_allgather(self) -> None:
-        # `contiguous_allgather` is not equivalent to MCore's zigzag layout.
-        with self.assertRaisesRegex(
-            ValueError, r"cp_balance_mode='dualchunk_allgather'"
-        ):
+    def test_erndata_cp_accepts_contiguous_allgather(self) -> None:
+        # `contiguous_allgather` is a supported layout since the erndata MTP
+        # path slices through extract_local_cp_chunks (mode-aware) rather than
+        # hard-coding zigzag. It is also *mandatory* for the DSv4 hybrid stack,
+        # whose attention layers assert on it under CP.
+        cfg = TransformerConfig(
+            **self._base_kwargs(
+                use_erndata=True,
+                num_nextn_predict_layers=1,
+                context_parallel_size=2,
+                cp_balance_mode="contiguous_allgather",
+            )
+        )
+        self.assertEqual(cfg.cp_balance_mode, "contiguous_allgather")
+        self.assertEqual(cfg.context_parallel_size, 2)
+
+    def test_erndata_cp_rejects_contiguous_a2a(self) -> None:
+        # Ulysses splits heads inside the attention instead of round-tripping
+        # the sequence through scatter_contiguous, so the local-sequence layout
+        # the MTP path would have to slice with is not established.
+        with self.assertRaisesRegex(ValueError, r"cp_balance_mode"):
             TransformerConfig(
                 **self._base_kwargs(
                     use_erndata=True,
                     num_nextn_predict_layers=1,
                     context_parallel_size=2,
-                    cp_balance_mode="contiguous_allgather",
+                    cp_balance_mode="contiguous_a2a",
                 )
             )
 

@@ -2143,11 +2143,21 @@ class TransformerConfig(ModelParallelConfig):
                 "enable_mtp_magic_send with tie_word_embeddings=True is not yet validated. "
                 "Please disable tie_word_embeddings when using magic send MTP."
             )
-            assert not self.mtp_shared_last_layer, (
-                "enable_mtp_magic_send and mtp_shared_last_layer cannot both be True. "
-                "Magic send uses per-layer mtp_embed with broadcast sync, which is "
-                "incompatible with SharedLayerDesc-based last-layer reuse."
-            )
+            # NOTE: mtp_shared_last_layer is deliberately NOT rejected here.
+            # The two mechanisms are orthogonal: SharedLayerDesc with
+            # shared_submodule_weight_only=True (pp_layers.py) aliases only the
+            # parameters under `dest_layer.transformer_layer`, while magic send
+            # owns `mtp_embed` (synced through gpt_model's dedicated
+            # _mtp_embed_global_group). Their parameter sets do not overlap.
+            #
+            # Precondition worth knowing: _alias_shared_layer asserts
+            # `total_params == aliased_count`, i.e. the tie pivot (the last
+            # backbone layer) and the MTP layer must resolve to the *same*
+            # attention parameter set. For dsv4_hybrid models that holds only
+            # while csa_compress_ratios[num_hidden_layers - 1] and
+            # csa_compress_ratios[num_hidden_layers] agree. If someone makes
+            # those two indices diverge, that assert fires with a confusing
+            # message and this is the place to look.
             if self.num_nextn_predict_layers > 1:
                 assert self.variable_seq_lengths, (
                     "enable_mtp_magic_send with num_nextn_predict_layers > 1 requires "
@@ -2183,9 +2193,69 @@ class TransformerConfig(ModelParallelConfig):
         if self.use_erndata and self.num_nextn_predict_layers > 0:
             # erndata + MTP selects the packed-doc (MCore 8c4df6b07) contract.
             if self.enable_mtp_magic_send:
+                # Refused on purpose, and not because it is hard to implement.
+                #
+                # What magic send actually provides is not a transport for
+                # input_ids -- it is a *word-embedding table on the MTP stage*
+                # (`mtp_embed`, created only under this flag). MTP needs
+                # embed(token_{i+k+1}); the hidden_states arriving at the last
+                # PP stage is the post-backbone representation, so nothing local
+                # can be rolled into a substitute, and under PP>1 the real
+                # word embeddings live on stage 0 only.
+                #
+                # On the erndata path the input_ids half is already redundant:
+                # GPTEmbedding puts full-length global input_ids and cu_seqlens_q
+                # into preproc_output, and no backbone layer touches them
+                # (transformer_layer.py only re-slices input_ids when it is
+                # longer than the backbone sequence, which never happens for
+                # length-L erndata tensors). So they reach the MTP layer intact
+                # regardless of this flag.
+                #
+                # That leaves a bad trade. Enabling it swaps a hidden-state P2P
+                # payload of (K+1)x for 1x, and pays for it with a second
+                # *trainable* vocab table on the MTP stage. The table is tied to
+                # the stage-0 embedding -- gpt_model ties the weights inside a
+                # rank (_tie_mtp_embed_weights_intra_rank), broadcasts them from
+                # stage 0 at init, and allreduces the gradient over a dedicated
+                # mtp_embed sub-group -- so it is *logically* shared but, when
+                # stage 0 and the MTP stage are different ranks (i.e. exactly
+                # the PP>1 case this flag exists for), *physically replicated*.
+                #
+                # For V=201216 / H=1024 / K=1 (~206M params, TP=1) the resident
+                # cost on the MTP stage is:
+                #     bf16 weight            412MB  (not sharded)
+                #     gradient               412MB bf16 / 824MB fp32 main_grad
+                #     fp32 master + m + v   2.47GB  / sharding_parallel_size
+                # is_firstly_shared only dedups grad-norm
+                # (hybrid_parallel_optimizer.py), it does not exclude the param
+                # from sharding, so the optimizer slice really is divided:
+                # ~1.1-1.5GB at sharding=8, ~1.4-1.9GB at sharding=4.
+                #
+                # Against that, one saved carrier slot is ~8MB per P2P hop per
+                # micro-batch (B=1, S_local=4096, H=1024, bf16): ~134MB/step at
+                # PP=2/GA=16, ~403MB/step at PP=4/GA=16 -- and that traffic is
+                # already hidden by overlap_p2p_comm. A clear net loss.
+                #
+                # Keep enable_mtp_magic_send=False: the baseline batch-axis
+                # carrier already supports any PP depth on this path. If K ever
+                # grows enough for (K+1)x to matter, the cheaper fix is to carry
+                # the single *un-transformed* inputs_embeds slot and roll it
+                # locally on the MTP stage -- 2x payload regardless of K, and no
+                # extra vocab table. That is not implemented today.
                 raise ValueError(
-                    "use_erndata=True with MTP is incompatible with "
-                    "enable_mtp_magic_send=True."
+                    "use_erndata=True with MTP does not need (and does not "
+                    "support) enable_mtp_magic_send=True. erndata already "
+                    "delivers full-length input_ids and cu_seqlens_q to the "
+                    "MTP stage through the pipeline dict, so magic send would "
+                    "only add a second trainable vocab embedding table there "
+                    "(~V*H params plus grads and a sharded optimizer state: "
+                    "~1.1-1.9GB at V=201216/H=1024 depending on "
+                    "sharding_parallel_size) in order to shrink the "
+                    "hidden-state P2P payload from (K+1)x to 1x (~8MB per hop "
+                    "per micro-batch, already hidden by overlap_p2p_comm) -- a "
+                    "net memory loss at small K. Set "
+                    "enable_mtp_magic_send=False; the default batch-axis MTP "
+                    "carrier works at any pipeline_model_parallel_size."
                 )
             if self.experimental_dataflow:
                 # experimental_dataflow specifically produces
@@ -2209,15 +2279,31 @@ class TransformerConfig(ModelParallelConfig):
                     "the shifted embeddings from hidden_states, not from "
                     "mtp_decoder_inputs)."
                 )
-            # PaddleFleet's `dualchunk_allgather` scatter layout is the only
-            # mode equivalent to MCore's zigzag balancing; the other two
-            # (`contiguous_allgather`, `contiguous_a2a`) are not covered by
-            # this path's MTP roll semantics.
+            # The erndata MTP path keeps its tensors full-length on every CP
+            # rank and slices them locally (extract_local_cp_chunks) instead of
+            # calling ContextParallelScatterOp, so the layout it slices with has
+            # to be one the rest of the model also uses:
+            #   dualchunk_allgather  -> scatter_balance    (zigzag, MCore-like)
+            #   contiguous_allgather -> scatter_contiguous (rank-order slices)
+            # Both are supported. `contiguous_a2a` (Ulysses) is not: it splits
+            # heads inside the attention rather than round-tripping the sequence
+            # through scatter_contiguous, so its local-sequence layout is not
+            # established for this path.
+            #
+            # contiguous_allgather is mandatory — not merely allowed — for the
+            # DSv4 hybrid stack: dsv4_hybrid_attention.py and
+            # mqa_latent_attention.py build their sparse-attention index tables
+            # over the global sequence and then row-slice this rank's queries,
+            # and assert on cp_balance_mode=='contiguous_allgather' under CP.
             if self.context_parallel_size > 1:
-                if self.cp_balance_mode != "dualchunk_allgather":
+                if self.cp_balance_mode not in (
+                    "dualchunk_allgather",
+                    "contiguous_allgather",
+                ):
                     raise ValueError(
                         f"use_erndata=True with MTP + context_parallel_size>1 "
-                        f"requires cp_balance_mode='dualchunk_allgather', got "
+                        f"requires cp_balance_mode in "
+                        f"{{'dualchunk_allgather', 'contiguous_allgather'}}, got "
                         f"{self.cp_balance_mode!r}."
                     )
             # PP>1 is supported without any external dataloader help:

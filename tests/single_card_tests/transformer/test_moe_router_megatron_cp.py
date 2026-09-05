@@ -26,7 +26,7 @@ it single-card by:
   and ``get_context_parallel_rank`` -> 0;
 - feeding a 3-D ``input`` and an ``input_ids`` whose seq length differs from
   ``input``'s, so the ``elif`` condition is True;
-- replacing the (locally-imported) ``extract_local_zigzag_chunks`` with a
+- replacing the (locally-imported) ``extract_local_cp_chunks`` with a
   sentinel-raiser so execution stops right after line 1520 (before the full
   MoE routing, which needs real gate weights). The raised sentinel proves
   the slice line was reached.
@@ -65,7 +65,7 @@ def _fake_cp_and_extract(cp_size=2):
             mock.patch.object(mr, "get_context_parallel_rank", lambda: 0)
         )
         stack.enter_context(
-            mock.patch.object(mtp, "extract_local_zigzag_chunks", _raise)
+            mock.patch.object(mtp, "extract_local_cp_chunks", _raise)
         )
         yield
 
@@ -76,7 +76,7 @@ class TestTopKRouterMegatronCPSlice(unittest.TestCase):
         cfg = MagicMock()
         cfg.experimental_dataflow = False  # skip the preceding `if`
         cfg.use_erndata = True
-        cfg.cp_balance_mode = "zigzag"
+        cfg.cp_balance_mode = "dualchunk_allgather"
         router.config = cfg
         router.sequence_parallel = False
 
