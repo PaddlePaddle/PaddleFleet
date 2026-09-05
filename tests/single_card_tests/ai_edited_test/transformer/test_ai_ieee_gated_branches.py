@@ -22,6 +22,7 @@ Matching CUDA-built ops query ``get_device_capability()`` at import, so a
 CUDA-hidden process cannot load them; hide GPUs only in a dedicated launch
 command, not here. These tests do not claim the 90% diff-cover gate.
 """
+
 from __future__ import annotations
 
 import functools
@@ -81,7 +82,9 @@ def _causal_mask(seq_len: int) -> paddle.Tensor:
     allowed = idx.reshape([1, seq_len]) <= idx.reshape([seq_len, 1])
     zeros = paddle.zeros([seq_len, seq_len], dtype="float32")
     neginf = paddle.full([seq_len, seq_len], float("-inf"), dtype="float32")
-    return paddle.where(allowed, zeros, neginf).reshape([1, 1, seq_len, seq_len])
+    return paddle.where(allowed, zeros, neginf).reshape(
+        [1, 1, seq_len, seq_len]
+    )
 
 
 def _expert_config(**overrides):
