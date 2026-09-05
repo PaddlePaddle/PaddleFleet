@@ -31,6 +31,8 @@ import sys
 import unittest
 from unittest.mock import MagicMock, patch
 
+import numpy as np
+
 sys.path.insert(
     0,
     os.path.dirname(
@@ -55,8 +57,31 @@ from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
 from paddlefleet.utils import init_method_normal, scaled_init_method_normal
 
 
+def _explicit_masked_softmax(scores, valid_mask):
+    """Stable exp/sum on finite positions. Do not call F.softmax on -inf.
+
+    Paddle CPU F.softmax(-inf) can leave ~1e-28 tail mass. IEEE
+    ``_AccuracyCompatibleSoftmax`` zeros non-finite slots after softmax;
+    causal checks use this explicit reduction instead.
+    """
+    scores = scores.cast("float32")
+    valid = valid_mask.cast("bool")
+    neg_large = paddle.full_like(scores, -1e30)
+    stable = paddle.where(valid, scores, neg_large)
+    row_max = paddle.max(stable, axis=-1, keepdim=True)
+    safe = paddle.where(valid, scores, row_max)
+    exp = paddle.exp(safe - row_max)
+    exp = paddle.where(valid, exp, paddle.zeros_like(exp))
+    denom = paddle.sum(exp, axis=-1, keepdim=True)
+    return exp / denom
+
+
 def _independent_unfused_attn(query, key, value, combined_mask, softmax_scale):
-    """Dense (non-MQA) unfused attention oracle. Does not call DSA helpers."""
+    """Dense (non-MQA) unfused attention oracle. Does not call DSA helpers.
+
+    Unmasked rows use F.softmax. Causal / -inf rows use explicit exp/sum
+    plus a finite mask; F.softmax is not a strict masking rawbits oracle.
+    """
     batch, seq, heads, qk_hd = query.shape
     v_hd = value.shape[-1]
     q = query.transpose([0, 2, 1, 3]).reshape([batch * heads, seq, qk_hd])
@@ -68,7 +93,9 @@ def _independent_unfused_attn(query, key, value, combined_mask, softmax_scale):
             [batch * heads, seq, seq]
         )
         scores = scores + mask.cast(scores.dtype)
-    weights = F.softmax(scores, axis=-1)
+        weights = _explicit_masked_softmax(scores, paddle.isfinite(scores))
+    else:
+        weights = F.softmax(scores, axis=-1)
     ctx = paddle.matmul(weights, v)
     return (
         ctx.reshape([batch, heads, seq, v_hd])
@@ -185,13 +212,15 @@ class TestUnfusedDsaIeeeOracle(_DeviceRestoreCase):
 
     @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_causal_mask_hides_future_value(self):
-        paddle.seed(3)
         seq = 2
         query = paddle.ones([1, seq, 1, 2], dtype="float32")
         key = paddle.ones([1, seq, 1, 2], dtype="float32")
+        # [batch, seq, heads, v_hd]. Nested [[[[10,10],[99,99]]]] is
+        # [1, 1, 2, 2] and CI IndexError'd on value[:, 1].
         value = paddle.to_tensor(
-            [[[[10.0, 10.0], [99.0, 99.0]]]], dtype="float32"
-        )
+            [10.0, 10.0, 99.0, 99.0], dtype="float32"
+        ).reshape([1, seq, 1, 2])
+        self.assertEqual(tuple(value.shape), (1, seq, 1, 2))
         mask = _causal_mask(seq)
         out = _unfused_dsa_attention(query, key, value, mask, 1.0)
         oracle = _independent_unfused_attn(query, key, value, mask, 1.0)
@@ -213,33 +242,88 @@ class TestUnfusedDsaIeeeOracle(_DeviceRestoreCase):
 
     @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_causal_backward_zeros_future_value_grad(self):
-        paddle.seed(4)
-        seq = 2
-        query = paddle.randn([1, seq, 1, 2], dtype="float32")
-        key = paddle.randn([1, seq, 1, 2], dtype="float32")
-        value = paddle.randn([1, seq, 1, 2], dtype="float32")
+        # Row0 is softmax([s0, -inf]) = [1, 0], so y0 = v0 and dq0 is 0.
+        # Use seq=3 and L = sum(y[1]): row1 has two finite keys, q1 is live,
+        # v[2] is future and must be +0 rawbits.
+        seq = 3
+        query = paddle.to_tensor(
+            [1.0, 0.0, 1.0, 0.0, 0.0, 1.0], dtype="float32"
+        ).reshape([1, seq, 1, 2])
+        key = paddle.to_tensor(
+            [1.0, 0.0, 0.0, 1.0, 1.0, 1.0], dtype="float32"
+        ).reshape([1, seq, 1, 2])
+        value = paddle.to_tensor(
+            [1.0, 0.0, 0.0, 2.0, 99.0, 99.0], dtype="float32"
+        ).reshape([1, seq, 1, 2])
+        self.assertEqual(tuple(query.shape), (1, seq, 1, 2))
+        self.assertEqual(tuple(value.shape), (1, seq, 1, 2))
         query.stop_gradient = False
         value.stop_gradient = False
+        q_ref = query.detach().clone()
+        k_ref = key.detach().clone()
+        v_ref = value.detach().clone()
+        q_ref.stop_gradient = False
+        v_ref.stop_gradient = False
         mask = _causal_mask(seq)
+
         out = _unfused_dsa_attention(query, key, value, mask, 1.0)
-        out[:, 0, :].sum().backward()
+        out_ref = _independent_unfused_attn(q_ref, k_ref, v_ref, mask, 1.0)
+        self.assertTrue(bool(paddle.equal_all(out, out_ref)))
+        out[:, 1, :].sum().backward()
+        out_ref[:, 1, :].sum().backward()
+
         self.assertIsNotNone(query.grad)
         self.assertIsNotNone(value.grad)
         self.assertTrue(bool(paddle.isfinite(query.grad).all()))
+        self.assertTrue(bool(paddle.isfinite(value.grad).all()))
+        q1_grad = query.grad[:, 1, :, :]
+        q1_ref = q_ref.grad[:, 1, :, :]
         self.assertFalse(
-            bool(paddle.equal_all(query.grad, paddle.zeros_like(query.grad)))
+            bool(paddle.equal_all(q1_grad, paddle.zeros_like(q1_grad))),
+            "d y[1] / d q[1] must be non-zero (two finite keys)",
         )
-        future_v_grad = value.grad[:, 1, :, :]
+        self.assertFalse(
+            bool(paddle.equal_all(q1_ref, paddle.zeros_like(q1_ref))),
+            "oracle d y[1] / d q[1] must be non-zero",
+        )
+        # IEEE: fp32 bmm + F.softmax + isfinite-zero.
+        # Oracle: fp32 matmul + explicit exp/sum on finite slots.
+        # Different reductions; do not require equal_all. CPU measured
+        # max |q1_ieee-q1_oracle| = 1.4901161193847656e-08 = 1 fp32 ULP
+        # at |q1|≈0.1966. Budget 4 ULP. Not a C7 cross-framework IEEE
+        # zero-diff gate for loss/params.
+        q1_max_abs = float(np.max(np.abs(q1_grad.numpy() - q1_ref.numpy())))
+        q1_mag = float(
+            max(
+                np.max(np.abs(q1_grad.numpy())),
+                np.max(np.abs(q1_ref.numpy())),
+            )
+        )
+        math_oracle_atol = float(4 * np.spacing(np.float32(q1_mag)))
+        self.assertLessEqual(
+            q1_max_abs,
+            math_oracle_atol,
+            "IEEE q[1] vs exp/sum oracle max abs "
+            f"{q1_max_abs} exceeds 4 fp32 ULP atol {math_oracle_atol} "
+            f"(mag={q1_mag}); math-unit only, not C7 bitwise",
+        )
+        future_v_grad = value.grad[:, 2, :, :]
+        future_v_ref = v_ref.grad[:, 2, :, :]
         self.assertTrue(
             bool(
                 paddle.equal_all(
                     future_v_grad, paddle.zeros_like(future_v_grad)
                 )
             ),
-            "d y[0] / d v[1] must be zero under a causal mask",
+            "d y[1] / d v[2] must be zero under a causal mask",
         )
-        masked_bits = future_v_grad.numpy().view("uint32")
-        self.assertTrue((masked_bits == 0).all())
+        self.assertTrue(
+            bool(
+                paddle.equal_all(future_v_ref, paddle.zeros_like(future_v_ref))
+            )
+        )
+        self.assertTrue((future_v_grad.numpy().view("uint32") == 0).all())
+        self.assertTrue((future_v_ref.numpy().view("uint32") == 0).all())
 
 
 class TestLanguageLossIeeeCe(_DeviceRestoreCase):
