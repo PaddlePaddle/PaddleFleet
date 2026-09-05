@@ -51,6 +51,9 @@ from paddlefleet.models.common.language_loss.language_loss import (
 )
 from paddlefleet.transformer.dsa_attention import (
     _absorb_q_nope_k_up,
+    _AccuracyCompatibleQKMatmul,
+    _AccuracyCompatibleSoftmax,
+    _SteQKMatmul,
     _unfused_dsa_attention,
 )
 from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
@@ -324,6 +327,171 @@ class TestUnfusedDsaIeeeOracle(_DeviceRestoreCase):
         )
         self.assertTrue((future_v_grad.numpy().view("uint32") == 0).all())
         self.assertTrue((future_v_ref.numpy().view("uint32") == 0).all())
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_ieee_mqa_uses_ste_qk_and_slices_v_from_key(self):
+        # nhpp>1, key heads=1: V must be key[..., :v_hd], not the dummy value.
+        seq = 2
+        query = paddle.to_tensor(
+            [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0], dtype="float32"
+        ).reshape([1, seq, 2, 2])
+        key = paddle.to_tensor([2.0, 0.0, 0.0, 3.0], dtype="float32").reshape(
+            [1, seq, 1, 2]
+        )
+        dummy_v = paddle.full([1, seq, 1, 2], 99.0, dtype="float32")
+        out = _unfused_dsa_attention(query, key, dummy_v, None, 1.0)
+        v_from_key = key[:, :, :, :2]
+        oracle = _independent_unfused_attn(
+            query,
+            key.expand([1, seq, 2, 2]),
+            v_from_key.expand([1, seq, 2, 2]),
+            None,
+            1.0,
+        )
+        self.assertEqual(tuple(out.shape), (1, seq, 4))
+        self.assertTrue(bool(paddle.equal_all(out, oracle)))
+        self.assertFalse(
+            bool(paddle.equal_all(out, paddle.full_like(out, 99.0))),
+            "MQA IEEE must not attend dummy V=99",
+        )
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_ste_qk_reduces_multihead_dk_to_mqa(self):
+        # Deterministic 4D QK; dK = scale * sum_h (dS^T @ Q).
+        q = paddle.to_tensor(
+            [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0], dtype="float32"
+        ).reshape([1, 2, 2, 2])
+        k = paddle.to_tensor([1.0, 0.0, 0.0, 1.0], dtype="float32").reshape(
+            [1, 1, 2, 2]
+        )
+        k.stop_gradient = False
+        scale = paddle.full([], 0.5, dtype="float32")
+        scores = _SteQKMatmul.apply(q.detach(), k, scale)
+        expected = (
+            paddle.matmul(q, k.transpose([0, 1, 3, 2]).expand([1, 2, 2, 2]))
+            * 0.5
+        )
+        self.assertTrue(bool(paddle.equal_all(scores, expected)))
+        scores.sum().backward()
+        dS = paddle.ones_like(scores)
+        gk_per_head = paddle.matmul(dS.transpose([0, 1, 3, 2]), q) * 0.5
+        gk_ref = gk_per_head.sum(axis=1, keepdim=True)
+        self.assertEqual(tuple(k.grad.shape), (1, 1, 2, 2))
+        self.assertTrue(bool(paddle.equal_all(k.grad, gk_ref)))
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_accuracy_compatible_qk_reduces_key_grad_over_heads(self):
+        q = paddle.to_tensor(
+            [
+                1.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                1.0,
+                1.0,
+                0.0,
+                1.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+            ],
+            dtype="float32",
+        ).reshape([1, 2, 2, 4])
+        k = paddle.to_tensor(
+            [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0], dtype="float32"
+        ).reshape([1, 1, 4, 2])
+        q.stop_gradient = False
+        k.stop_gradient = False
+        scores = _AccuracyCompatibleQKMatmul.apply(q, k)
+        k_exp = k.expand([1, 2, 4, 2])
+        expected = paddle.bmm(
+            q.reshape([2, 2, 4]),
+            k_exp.reshape([2, 4, 2]),
+        ).reshape([1, 2, 2, 2])
+        self.assertTrue(bool(paddle.equal_all(scores, expected)))
+        scores.sum().backward()
+        dS = paddle.ones_like(scores)
+        gq_ref = paddle.bmm(
+            dS.reshape([2, 2, 2]),
+            k_exp.transpose([0, 1, 3, 2]).reshape([2, 2, 4]),
+        ).reshape(q.shape)
+        gk_per_head = paddle.matmul(q.transpose([0, 1, 3, 2]), dS)
+        gk_ref = gk_per_head.sum(axis=1, keepdim=True)
+        self.assertEqual(tuple(k.grad.shape), (1, 1, 4, 2))
+        self.assertTrue(bool(paddle.equal_all(q.grad, gq_ref)))
+        self.assertTrue(bool(paddle.equal_all(k.grad, gk_ref)))
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_accuracy_compatible_softmax_zeros_invalid_backward(self):
+        # sum(p) is identically 1 so dL/dlogit is 0. Use unequal weights.
+        logits = paddle.to_tensor([[0.0, 1.0, float("-inf")]], dtype="float32")
+        logits.stop_gradient = False
+        valid = paddle.isfinite(logits)
+        probs = _AccuracyCompatibleSoftmax.apply(logits, valid)
+        weights = paddle.to_tensor([[1.0, 3.0, 0.0]], dtype="float32")
+        p_ref = _explicit_masked_softmax(logits.detach(), valid)
+        self.assertTrue((probs.numpy()[0, 2].view("uint32") == 0).all())
+        self.assertTrue((p_ref.numpy()[0, 2].view("uint32") == 0).all())
+        (probs * weights).sum().backward()
+        w = weights
+        dlogit_ref = p_ref * (w - paddle.sum(p_ref * w, axis=-1, keepdim=True))
+        dlogit_ref = paddle.where(
+            valid, dlogit_ref, paddle.zeros_like(dlogit_ref)
+        )
+        self.assertTrue((logits.grad.numpy()[0, 2].view("uint32") == 0).all())
+        self.assertTrue(
+            bool(
+                paddle.allclose(
+                    logits.grad[:, :2], dlogit_ref[:, :2], rtol=0.0, atol=1e-6
+                )
+            )
+        )
+        self.assertFalse(
+            bool(
+                paddle.equal_all(
+                    logits.grad[:, :2], paddle.zeros_like(logits.grad[:, :2])
+                )
+            )
+        )
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_unfused_absorbed_ieee_projects_v_up(self):
+        # Import-time _ACCURACY_COMPATIBLE_KERNEL is frozen False unless
+        # MODEL_REPRO_IEEE_KERNEL=1 at import. Patch the live flag so the
+        # IEEE QK/softmax path is the one under test.
+        query = paddle.to_tensor(
+            [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0], dtype="float32"
+        ).reshape([1, 2, 2, 2])
+        key = paddle.to_tensor([1.0, 0.0, 0.0, 1.0], dtype="float32").reshape(
+            [1, 1, 2, 2]
+        )
+        value = paddle.to_tensor([1.0, 0.0, 0.0, 2.0], dtype="float32").reshape(
+            [1, 1, 2, 2]
+        )
+        v_up = paddle.to_tensor(
+            [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0], dtype="float32"
+        ).reshape([2, 2, 2])
+        import paddlefleet.transformer.dsa_attention as dsa_mod
+
+        with patch.object(dsa_mod, "_ACCURACY_COMPATIBLE_KERNEL", True):
+            out = dsa_mod._unfused_absorbed_dsa_attention(
+                query, key, value, v_up, None, 1.0
+            )
+        q4 = query.transpose([0, 2, 1, 3]).cast("float32")
+        k4 = key.transpose([0, 2, 3, 1]).cast("float32")
+        scores = paddle.matmul(q4, k4)
+        probs = F.softmax(scores, axis=-1)
+        latent_v = value.transpose([0, 2, 1, 3])
+        ctx = paddle.matmul(probs.cast(value.dtype), latent_v)
+        projected = paddle.einsum("bhsr,hrd->bshd", ctx, v_up)
+        oracle = projected.reshape([1, 2, 4])
+        self.assertEqual(tuple(out.shape), (1, 2, 4))
+        self.assertTrue(bool(paddle.equal_all(out, oracle)))
 
 
 class TestLanguageLossIeeeCe(_DeviceRestoreCase):
