@@ -82,10 +82,12 @@ collect_ops_uv_pip_args() {
     return 0
 }
 
-# NVIDIA paddlefleet_ops refuses to build when these third_party gitlinks
-# have no .git (packages/paddlefleet_ops/build_utils.py:check_submodule_updated).
-# MoonEP is opt-in via ENABLE_MOONEP=1. cudnn-frontend is a gitlink but is
-# not in that NVIDIA list, so it is not initialized here.
+# NVIDIA source-tree ops build required gitlinks. This is the union of
+# check_submodule_updated() and get_libs() EcosystemLibrary source_rel_path
+# parents under third_party/ (build_utils.py). The guard list is a subset:
+# Python >= 3.12 always registers name="cudnn" at third_party/cudnn-frontend
+# and pip-installs that directory; missing setup.py/pyproject.toml there
+# fails the wheel (Swift 34035298069). MoonEP stays opt-in via ENABLE_MOONEP=1.
 NVIDIA_OPS_BUILD_SUBMODULES=(
     DeepGEMM
     DeepEP
@@ -96,6 +98,7 @@ NVIDIA_OPS_BUILD_SUBMODULES=(
     flash-linear-attention
     FlashMLA
     fast-hadamard-transform
+    cudnn-frontend
 )
 
 _gitlink_sha() {

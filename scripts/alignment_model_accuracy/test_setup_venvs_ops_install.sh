@@ -285,5 +285,201 @@ if grep -q "Building paddlefleet-ops" "${tmp}/ok.out" "${tmp}/ok.err"; then
     exit 1
 fi
 
+# Default required set from get_libs() AST: top-level parent of each
+# source_rel_path under third_party/, excluding the ENABLE_MOONEP branch.
+# Do not hand-copy NVIDIA_OPS_BUILD_SUBMODULES. MoonEP stays opt-in.
+BUILD_UTILS="${SCRIPT_DIR}/../../packages/paddlefleet_ops/build_utils.py"
+expected="$(python3 - "${BUILD_UTILS}" <<'PY'
+import ast
+import sys
+from pathlib import Path
+
+tree = ast.parse(Path(sys.argv[1]).read_text(encoding="utf-8"))
+
+
+class Collect(ast.NodeVisitor):
+    def __init__(self) -> None:
+        self.parents: list[str] = []
+        self._skip = 0
+
+    def visit_If(self, node: ast.If) -> None:
+        skip = "ENABLE_MOONEP" in ast.dump(node.test)
+        if skip:
+            self._skip += 1
+            for child in node.body:
+                self.visit(child)
+            self._skip -= 1
+            for child in node.orelse:
+                self.visit(child)
+            return
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        func = node.func
+        is_lib = isinstance(func, ast.Name) and func.id == "EcosystemLibrary"
+        if is_lib and self._skip == 0:
+            for kw in node.keywords:
+                if kw.arg == "source_rel_path" and isinstance(kw.value, ast.Constant):
+                    parts = str(kw.value.value).split("/")
+                    if len(parts) >= 2 and parts[0] == "third_party":
+                        self.parents.append(parts[1])
+        self.generic_visit(node)
+
+
+for node in tree.body:
+    if isinstance(node, ast.FunctionDef) and node.name == "get_libs":
+        visitor = Collect()
+        visitor.visit(node)
+        seen: set[str] = set()
+        for parent in visitor.parents:
+            if parent not in seen:
+                seen.add(parent)
+                print(parent)
+PY
+)"
+if [[ -z "${expected}" ]]; then
+    echo "FAIL: get_libs AST produced no third_party parents" >&2
+    exit 1
+fi
+if grep -Fxq MoonEP <<<"${expected}"; then
+    echo "FAIL: AST extract included opt-in MoonEP" >&2
+    exit 1
+fi
+if ! grep -Fxq cudnn-frontend <<<"${expected}"; then
+    echo "FAIL: get_libs AST missing cudnn-frontend parent" >&2
+    echo "${expected}" >&2
+    exit 1
+fi
+listed="$(awk '
+    $0 ~ /^NVIDIA_OPS_BUILD_SUBMODULES=\(/ {inlist=1; next}
+    inlist && $0 ~ /^\)/ {exit}
+    inlist {gsub(/[[:space:]]/,""); if ($0!="") print}
+' "${SETUP}")"
+if [[ "$(sort <<<"${listed}")" != "$(sort <<<"${expected}")" ]]; then
+    echo "FAIL: NVIDIA_OPS_BUILD_SUBMODULES != get_libs AST parents" >&2
+    echo "listed:" >&2
+    echo "${listed}" >&2
+    echo "expected:" >&2
+    echo "${expected}" >&2
+    exit 1
+fi
+
+git_file() {
+    GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=protocol.file.allow GIT_CONFIG_VALUE_0=always \
+        GIT_ALLOW_PROTOCOL=file "$@"
+}
+
+# One empty legal child repo reused as every default parent gitlink.
+leaf="${tmp}/leaf.git"
+mkdir -p "${leaf}"
+git -C "${leaf}" init -q
+git -C "${leaf}" config user.email "fixture@example.invalid"
+git -C "${leaf}" config user.name "fixture"
+echo leaf >"${leaf}/README"
+git -C "${leaf}" add README
+git -C "${leaf}" commit -qm "legal empty parent"
+leaf_sha="$(git -C "${leaf}" rev-parse HEAD)"
+
+record_parents() {
+    local super="$1"
+    shift
+    local name
+    : >"${super}/.gitmodules"
+    mkdir -p "${super}/packages/paddlefleet_ops"
+    echo ops >"${super}/packages/paddlefleet_ops/README"
+    git -C "${super}" add packages/paddlefleet_ops/README
+    for name in "$@"; do
+        printf '[submodule "third_party/%s"]\n\tpath = packages/paddlefleet_ops/third_party/%s\n\turl = %s\n' \
+            "${name}" "${name}" "${leaf}" >>"${super}/.gitmodules"
+        git -C "${super}" update-index --add --cacheinfo \
+            160000,"${leaf_sha}",packages/paddlefleet_ops/third_party/"${name}"
+    done
+    git -C "${super}" add .gitmodules
+    git -C "${super}" commit -qm "default parents"
+    for name in "$@"; do
+        if ! git -C "${super}" ls-tree HEAD -- "packages/paddlefleet_ops/third_party/${name}" | grep -q '^160000'; then
+            echo "FAIL: missing mode 160000 gitlink for ${name}" >&2
+            git -C "${super}" ls-tree HEAD >&2
+            exit 1
+        fi
+    done
+}
+
+mapfile -t expected_names <<<"${expected}"
+without_cudnn=()
+for name in "${expected_names[@]}"; do
+    if [[ "${name}" != "cudnn-frontend" ]]; then
+        without_cudnn+=("${name}")
+    fi
+done
+
+# Fail: every default parent except cudnn-frontend is a real gitlink.
+# Default prepare (no OVERRIDE) must refuse on cudnn-frontend, not DeepGEMM.
+missing="${tmp}/missing-cudnn.git"
+mkdir -p "${missing}"
+git -C "${missing}" init -q
+git -C "${missing}" config user.email "fixture@example.invalid"
+git -C "${missing}" config user.name "fixture"
+git -C "${missing}" commit --allow-empty -qm "init"
+record_parents "${missing}" "${without_cudnn[@]}"
+set +e
+unset NVIDIA_OPS_BUILD_SUBMODULES_OVERRIDE || true
+git_file bash "${SETUP}" --prepare-ops-submodules "${missing}/packages/paddlefleet_ops" \
+    >"${tmp}/missing.out" 2>"${tmp}/missing.err"
+missing_rc=$?
+set -e
+if [[ "${missing_rc}" -eq 0 ]]; then
+    echo "FAIL: default list skipped cudnn-frontend and continued" >&2
+    cat "${tmp}/missing.err" >&2
+    exit 1
+fi
+if ! grep -q "cudnn-frontend" "${tmp}/missing.err"; then
+    echo "FAIL: default prepare did not fail on cudnn-frontend" >&2
+    cat "${tmp}/missing.err" >&2
+    exit 1
+fi
+if grep -q "Building paddlefleet-ops" "${tmp}/missing.out" "${tmp}/missing.err"; then
+    echo "FAIL: missing cudnn-frontend continued into a build" >&2
+    exit 1
+fi
+
+# Success: every default parent including cudnn-frontend is a real gitlink.
+# Default prepare (no OVERRIDE) must init them and not build.
+complete="${tmp}/complete.git"
+mkdir -p "${complete}"
+git -C "${complete}" init -q
+git -C "${complete}" config user.email "fixture@example.invalid"
+git -C "${complete}" config user.name "fixture"
+git -C "${complete}" commit --allow-empty -qm "init"
+record_parents "${complete}" "${expected_names[@]}"
+set +e
+unset NVIDIA_OPS_BUILD_SUBMODULES_OVERRIDE || true
+git_file bash "${SETUP}" --prepare-ops-submodules "${complete}/packages/paddlefleet_ops" \
+    >"${tmp}/complete.out" 2>"${tmp}/complete.err"
+complete_rc=$?
+set -e
+if [[ "${complete_rc}" -ne 0 ]]; then
+    echo "FAIL: default prepare of the full AST parent set failed" >&2
+    cat "${tmp}/complete.out" >&2
+    cat "${tmp}/complete.err" >&2
+    exit 1
+fi
+for name in "${expected_names[@]}"; do
+    if [[ ! -e "${complete}/packages/paddlefleet_ops/third_party/${name}/.git" ]]; then
+        echo "FAIL: default prepare did not check out ${name}" >&2
+        cat "${tmp}/complete.out" >&2
+        exit 1
+    fi
+    actual="$(git -C "${complete}/packages/paddlefleet_ops/third_party/${name}" rev-parse HEAD)"
+    if [[ "${actual}" != "${leaf_sha}" ]]; then
+        echo "FAIL: ${name} HEAD ${actual} != leaf pin ${leaf_sha}" >&2
+        exit 1
+    fi
+done
+if grep -q "Building paddlefleet-ops" "${tmp}/complete.out" "${tmp}/complete.err"; then
+    echo "FAIL: default success prepare continued into a build" >&2
+    exit 1
+fi
+
 echo "setup_venvs ops-install argv PASS (dir isolated-off, wheel/url unchanged)"
-echo "setup_venvs ops-submodule prepare PASS (bare/empty/nested fail closed; legal nested gitlink prepares)"
+echo "setup_venvs ops-submodule prepare PASS (bare/empty/nested fail closed; legal nested gitlink prepares; default AST list fail/success on cudnn-frontend)"
