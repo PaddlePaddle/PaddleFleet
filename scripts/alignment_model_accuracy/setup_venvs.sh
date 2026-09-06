@@ -82,6 +82,131 @@ collect_ops_uv_pip_args() {
     return 0
 }
 
+# NVIDIA paddlefleet_ops refuses to build when these third_party gitlinks
+# have no .git (packages/paddlefleet_ops/build_utils.py:check_submodule_updated).
+# MoonEP is opt-in via ENABLE_MOONEP=1. cudnn-frontend is a gitlink but is
+# not in that NVIDIA list, so it is not initialized here.
+NVIDIA_OPS_BUILD_SUBMODULES=(
+    DeepGEMM
+    DeepEP
+    HybridEP
+    quack
+    sonic-moe
+    flash-attention
+    flash-linear-attention
+    FlashMLA
+    fast-hadamard-transform
+)
+
+_gitlink_sha() {
+    local repo="$1"
+    local path="$2"
+    git -C "${repo}" ls-tree HEAD -- "${path}" | awk '{print $3}'
+}
+
+# Walk every mode-160000 gitlink recorded at HEAD, then recurse. Include
+# paths and vendored trees are not gitlinks and are not required here.
+# A recorded gitlink whose worktree has no .git, or whose HEAD differs
+# from the recorded SHA, is a hard error — never rewrite the pin.
+_verify_recorded_gitlinks() {
+    local repo="$1"
+    local prefix="$2"
+    local meta path mode recorded actual
+    while IFS=$'\t' read -r meta path; do
+        [[ -n "${meta}" && -n "${path}" ]] || continue
+        mode="${meta%% *}"
+        [[ "${mode}" == "160000" ]] || continue
+        recorded="$(printf '%s\n' "${meta}" | awk '{print $3}')"
+        if [[ ! "${recorded}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "[setup_venvs] ${prefix}${path} gitlink SHA is unusable; refuse source-tree paddlefleet-ops build" >&2
+            return 1
+        fi
+        if [[ ! -e "${repo}/${path}/.git" ]]; then
+            echo "[setup_venvs] nested ${prefix}${path} still has no .git after recursive init; refuse source-tree paddlefleet-ops build" >&2
+            return 1
+        fi
+        actual="$(git -C "${repo}/${path}" rev-parse HEAD)"
+        if [[ "${actual}" != "${recorded}" ]]; then
+            echo "[setup_venvs] nested ${prefix}${path} HEAD ${actual} != recorded gitlink ${recorded}; refuse to rewrite the pin" >&2
+            return 1
+        fi
+        echo "[setup_venvs] ${prefix}${path} @ ${recorded}"
+        _verify_recorded_gitlinks "${repo}/${path}" "${prefix}${path}/"
+    done < <(git -C "${repo}" ls-tree -r HEAD)
+}
+
+# Initialize the NVIDIA build-required gitlinks at the commits recorded in
+# the superproject (the source pin), including nested gitlinks required by
+# the NVIDIA compile. Does not rewrite gitlinks. Missing git, missing
+# .gitmodules, or an uninitialized nested path after update is a hard
+# error — never continue into uv build.
+prepare_ops_build_submodules() {
+    local ops_path="$1"
+    local repo_root
+    local name
+    local rel
+    local recorded
+    local actual
+    local -a names
+    if [[ -n "${NVIDIA_OPS_BUILD_SUBMODULES_OVERRIDE:-}" ]]; then
+        # CPU fixtures name a subset. Production leaves this unset.
+        read -r -a names <<<"${NVIDIA_OPS_BUILD_SUBMODULES_OVERRIDE}"
+    else
+        names=("${NVIDIA_OPS_BUILD_SUBMODULES[@]}")
+        if [[ "${ENABLE_MOONEP:-0}" == "1" ]]; then
+            names+=("MoonEP")
+        fi
+    fi
+
+    if ! command -v git >/dev/null 2>&1; then
+        echo "[setup_venvs] git is required to initialize paddlefleet_ops submodules" >&2
+        return 1
+    fi
+    repo_root="$(git -C "${ops_path}" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [[ -z "${repo_root}" ]]; then
+        echo "[setup_venvs] ${ops_path} is not inside a git work tree; refuse source-tree paddlefleet-ops build" >&2
+        return 1
+    fi
+    if [[ ! -f "${repo_root}/.gitmodules" ]]; then
+        echo "[setup_venvs] missing ${repo_root}/.gitmodules; refuse source-tree paddlefleet-ops build" >&2
+        return 1
+    fi
+
+    echo "[setup_venvs] initializing paddlefleet_ops build submodules at recorded gitlinks"
+    for name in "${names[@]}"; do
+        rel="packages/paddlefleet_ops/third_party/${name}"
+        if ! git -C "${repo_root}" config -f .gitmodules --get-regexp '^submodule\..*\.path$' \
+            | awk '{print $2}' | grep -Fxq "${rel}"; then
+            echo "[setup_venvs] no gitmodules entry for ${rel}; refuse source-tree paddlefleet-ops build" >&2
+            return 1
+        fi
+        recorded="$(_gitlink_sha "${repo_root}" "${rel}")"
+        if [[ ! "${recorded}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "[setup_venvs] no recorded gitlink for ${rel} at HEAD; refuse source-tree paddlefleet-ops build" >&2
+            return 1
+        fi
+        # Recursive so nested cutlass (DeepGEMM, flash-attention/flashmask)
+        # is present before check_submodule_updated only looks at parent .git.
+        # No --depth: a shallow fetch of the default branch can miss the
+        # gitlink commit recorded in the superproject pin.
+        if ! git -C "${repo_root}" submodule update --init --recursive -- "${rel}"; then
+            echo "[setup_venvs] git submodule update --init --recursive failed for ${rel} (recorded ${recorded})" >&2
+            return 1
+        fi
+        if [[ ! -e "${repo_root}/${rel}/.git" ]]; then
+            echo "[setup_venvs] ${rel} still has no .git after init; refuse source-tree paddlefleet-ops build" >&2
+            return 1
+        fi
+        actual="$(git -C "${repo_root}/${rel}" rev-parse HEAD)"
+        if [[ "${actual}" != "${recorded}" ]]; then
+            echo "[setup_venvs] ${rel} HEAD ${actual} != recorded gitlink ${recorded}; refuse to rewrite the pin" >&2
+            return 1
+        fi
+        echo "[setup_venvs] ${rel} @ ${recorded}"
+        _verify_recorded_gitlinks "${repo_root}/${rel}" "${rel}/"
+    done
+}
+
 setup_proxy() {
     if [[ -z "${PROXY_URL:-}" ]]; then
         echo "[setup_venvs] warning: PROXY_URL is not set, continuing without a proxy." >&2
@@ -190,6 +315,7 @@ setup_paddle_venv() {
             echo "[setup_venvs] paddle not importable in ${paddle_py}; refuse source-tree paddlefleet-ops build" >&2
             exit 1
         fi
+        prepare_ops_build_submodules "${PADDLEFLEET_OPS_WHEEL}"
         echo "[setup_venvs] paddlefleet_ops source tree ${PADDLEFLEET_OPS_WHEEL} (--no-build-isolation)"
     else
         echo "[setup_venvs] paddlefleet_ops ${OPS_UV_KIND} ${PADDLEFLEET_OPS_WHEEL}"
@@ -212,6 +338,10 @@ main() {
         printf 'KIND=%s\n' "${OPS_UV_KIND}"
         printf 'ARG:%s\n' "${OPS_UV_ARGS[@]}"
         exit 0
+    fi
+    if [[ ${1:-} == "--prepare-ops-submodules" ]]; then
+        prepare_ops_build_submodules "${2:?ops-path}"
+        exit $?
     fi
 
     setup_proxy
