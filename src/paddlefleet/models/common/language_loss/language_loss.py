@@ -361,9 +361,10 @@ class LanguageLoss(FleetLayer):
         if return_label_rank:
             assert not self.enable_parallel_cross_entropy, (
                 "mtp_loss_mask_after_wrong needs the label's rank over the FULL "
-                "vocab, but parallel_output=True shards the vocab across tensor-"
-                "parallel ranks. Use fused_linear_ce_loss_chunk>0 (which keeps the "
-                "vocab whole) or set parallel_output=False."
+                "vocab, but tensor_model_parallel_size>1 with parallel_output=True "
+                "shards the vocab across tensor-parallel ranks, so a local count "
+                "would only see one shard. Use fused_linear_ce_loss_chunk>0 (which "
+                "keeps the vocab whole) or set parallel_output=False."
             )
             with paddle.no_grad():
                 safe_labels = paddle.where(
@@ -790,6 +791,18 @@ class LanguageLoss(FleetLayer):
             if logs is not None and hasattr(logs, "update"):
                 for i, loss_val in enumerate(mtp_loss):
                     logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
+                    # mtp_loss_mask_after_wrong's survival rate has to ride this
+                    # channel too. The mtp_loss_tracker route is dead for the
+                    # ernie5 pretraining trainer: the code that drains the tracker
+                    # lives in PaddleFormers' Trainer._maybe_log_save_evaluate,
+                    # which ernie5 overrides, so tracker-only keys never surface.
+                    _keep_ratio = LanguageLoss.mtp_loss_tracker.get(
+                        f"mtp_{i + 1}_keep_ratio"
+                    )
+                    if _keep_ratio is not None:
+                        logs.update(
+                            **{f"mtp_{i + 1}_keep_ratio": _keep_ratio}
+                        )
                 if not isinstance(lm_loss, float):
                     logs.update(main_lm_loss=lm_loss.detach())
 

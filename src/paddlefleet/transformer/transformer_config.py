@@ -155,8 +155,12 @@ class TransformerConfig(ModelParallelConfig):
     The label's rank is obtained from the loss path itself. In the fused path
     (fused_linear_ce_loss_chunk>0) it is accumulated inside the triton kernel's
     existing scan over the logits, so it needs no second [BT, V] projection, no extra
-    pass, and no temporary tensor. Requires the full vocab on one rank: incompatible
-    with parallel_output=True (vocab-sharded logits).
+    pass, and no temporary tensor.
+
+    Needs the whole vocab visible on one rank, so it does not work when the logits are
+    vocab-sharded, i.e. when tensor_model_parallel_size>1 AND parallel_output=True.
+    `parallel_output=True` on its own is fine (with TP=1 nothing is sharded), and the
+    fused path already rejects that combination anyway.
 
     (Doing the count in Python as `(logits > label_logit).sum(-1)` looks equivalent
     but OOMs at vocab scale: paddle casts the bool tensor to int64 before reducing, so
