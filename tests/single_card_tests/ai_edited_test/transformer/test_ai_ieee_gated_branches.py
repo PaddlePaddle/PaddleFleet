@@ -1109,9 +1109,7 @@ class TestUacExpertCaptureAndGemm(_DeviceRestoreCase):
         tokens = paddle.randn([4, 16], dtype=dtype)
         tokens_per_expert = paddle.to_tensor([2, 2], dtype="int64")
         probs = paddle.to_tensor([1.0, 0.5, 0.25, 2.0], dtype="float32")
-        out, bias = expert(
-            tokens, tokens_per_expert, permuted_probs=probs
-        )
+        out, bias = expert(tokens, tokens_per_expert, permuted_probs=probs)
         self.assertIsNone(bias)
         x = tokens.cast("float32")
         parts = []
@@ -1212,9 +1210,7 @@ class TestUacExpertCaptureAndGemm(_DeviceRestoreCase):
             patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "0"}),
             patch.object(BMMFunction, "apply", side_effect=_apply),
         ):
-            out, bias = expert(
-                tokens, tokens_per_expert, permuted_probs=probs
-            )
+            out, bias = expert(tokens, tokens_per_expert, permuted_probs=probs)
         self.assertIsNone(bias)
         hidden = expert.activation_func(fc1)
         scaled = (hidden * probs.unsqueeze(-1)).cast(dtype)
@@ -1268,9 +1264,7 @@ class TestUacExpertCaptureAndGemm(_DeviceRestoreCase):
             patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "0"}),
             patch.object(DeepGEMMBMMFunction, "apply", side_effect=_apply),
         ):
-            out, bias = expert(
-                tokens, tokens_per_expert, permuted_probs=probs
-            )
+            out, bias = expert(tokens, tokens_per_expert, permuted_probs=probs)
         self.assertIsNone(bias)
         hidden = expert.activation_func(fc1)
         scaled = (hidden * probs.unsqueeze(-1)).cast(dtype)

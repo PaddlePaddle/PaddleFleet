@@ -59,6 +59,29 @@ require_command() {
     fi
 }
 
+# Populate OPS_UV_KIND and OPS_UV_ARGS for `uv pip install`.
+# dir  → --no-build-isolation so setup.py can `import paddle` from this venv.
+# file → local wheel; same argv as before (no --no-build-isolation).
+# url  → default nightly / remote wheel; same argv as file.
+collect_ops_uv_pip_args() {
+    local paddle_py="$1"
+    local ops_path="$2"
+    OPS_UV_ARGS=(--python "${paddle_py}" --force-reinstall)
+    if [[ -d "${ops_path}" ]]; then
+        OPS_UV_KIND="dir"
+        OPS_UV_ARGS+=(--no-build-isolation "${ops_path}")
+        return 0
+    fi
+    if [[ -f "${ops_path}" ]]; then
+        OPS_UV_KIND="wheel"
+        OPS_UV_ARGS+=("${ops_path}")
+        return 0
+    fi
+    OPS_UV_KIND="url"
+    OPS_UV_ARGS+=("${ops_path}")
+    return 0
+}
+
 setup_proxy() {
     if [[ -z "${PROXY_URL:-}" ]]; then
         echo "[setup_venvs] warning: PROXY_URL is not set, continuing without a proxy." >&2
@@ -157,11 +180,21 @@ setup_paddle_venv() {
     #             --index "paddlepaddle-gpu=${PADDLE_INDEX_URL}"
     # )
 
-    # paddlefleet_ops
-    UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --python "${paddle_py}" --force-reinstall \
-        "${PADDLEFLEET_OPS_WHEEL}"
-    # uv pip install --python "${paddle_py}" -v --no-build-isolation \
-    #     -e ./PaddleFleet/packages/paddlefleet_ops
+    # paddlefleet_ops: a prebuilt wheel (or URL) stays on the historical
+    # isolated install. A source tree must compile against paddle already
+    # in this venv — isolated uv builds fail with No module named paddle
+    # (paired Mega 33968412986).
+    collect_ops_uv_pip_args "${paddle_py}" "${PADDLEFLEET_OPS_WHEEL}"
+    if [[ "${OPS_UV_KIND}" == "dir" ]]; then
+        if ! "${paddle_py}" -c "import paddle" >/dev/null 2>&1; then
+            echo "[setup_venvs] paddle not importable in ${paddle_py}; refuse source-tree paddlefleet-ops build" >&2
+            exit 1
+        fi
+        echo "[setup_venvs] paddlefleet_ops source tree ${PADDLEFLEET_OPS_WHEEL} (--no-build-isolation)"
+    else
+        echo "[setup_venvs] paddlefleet_ops ${OPS_UV_KIND} ${PADDLEFLEET_OPS_WHEEL}"
+    fi
+    UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install "${OPS_UV_ARGS[@]}"
 
     # PaddleFormers
     UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --python "${paddle_py}" --force-reinstall \
@@ -172,6 +205,12 @@ setup_paddle_venv() {
 main() {
     if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
         usage
+        exit 0
+    fi
+    if [[ ${1:-} == "--ops-install-argv" ]]; then
+        collect_ops_uv_pip_args "${2:?python}" "${3:?ops-path}"
+        printf 'KIND=%s\n' "${OPS_UV_KIND}"
+        printf 'ARG:%s\n' "${OPS_UV_ARGS[@]}"
         exit 0
     fi
 
