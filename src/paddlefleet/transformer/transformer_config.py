@@ -153,10 +153,14 @@ class TransformerConfig(ModelParallelConfig):
     here is per-token and depends on the current prediction.
 
     The label's rank is obtained from the loss path itself. In the fused path
-    (fused_linear_ce_loss_chunk>0) the per-chunk logits already exist before the
-    kernel overwrites them with gradients, so the rank costs one elementwise compare
-    plus a reduction — no second [BT, V] projection. Requires the full vocab on one
-    rank: incompatible with parallel_output=True (vocab-sharded logits).
+    (fused_linear_ce_loss_chunk>0) it is accumulated inside the triton kernel's
+    existing scan over the logits, so it needs no second [BT, V] projection, no extra
+    pass, and no temporary tensor. Requires the full vocab on one rank: incompatible
+    with parallel_output=True (vocab-sharded logits).
+
+    (Doing the count in Python as `(logits > label_logit).sum(-1)` looks equivalent
+    but OOMs at vocab scale: paddle casts the bool tensor to int64 before reducing, so
+    it allocates ~9 bytes per [chunk, V] element -- 30 GB at production shapes.)
 
     Ties: the rank counts STRICTLY greater logits, so a label tied with higher-ranked
     entries counts as being inside the top-K (best case under tie-breaking). bf16

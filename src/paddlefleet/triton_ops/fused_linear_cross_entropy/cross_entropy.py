@@ -36,14 +36,22 @@ def liger_cross_entropy_kernel(
     Y_stride,
     loss_ptr,
     loss_stride,
+    rank_ptr,
+    rank_stride,
     n_cols,
     n_non_ignore,
     ignore_index,
     reduction: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     HAS_GRADIENTS: tl.constexpr,
+    RETURN_RANK: tl.constexpr,
 ):
-    """计算交叉熵 loss，并可选地原地写回梯度。"""
+    """计算交叉熵 loss，并可选地原地写回梯度。
+
+    RETURN_RANK=True 时额外写出 label 的 0-based 排名（严格大于 label logit 的
+    个数）到 rank_ptr。该计数复用主扫描循环，不额外读 logits、不分配临时张量；
+    ignore_index 的行会在最前面提前返回，不写 rank_ptr，由调用方保证缓冲区已清零。
+    """
     program_id = tl.program_id(0).to(tl.int64)
 
     Y_ptr += program_id * Y_stride
@@ -62,6 +70,12 @@ def liger_cross_entropy_kernel(
     m = float("-inf")
     d = 0.0
     ori_X_y = tl.load(X_ptr + y).cast(tl.float32)
+    # Number of logits strictly greater than the label's, i.e. the label's 0-based
+    # rank. Accumulated inside the existing scan, so it costs no extra pass over the
+    # logits and no [n_rows, n_cols] temporary. Doing this in Python instead would
+    # allocate one: paddle's sum over a bool tensor casts the whole thing to int64
+    # first (9 bytes/element counting the bool), which OOMs at vocab scale.
+    n_greater = 0
 
     for i in range(0, n_cols, BLOCK_SIZE):
         X_offsets = i + tl.arange(0, BLOCK_SIZE)
@@ -74,8 +88,16 @@ def liger_cross_entropy_kernel(
         m_new = tl.maximum(m, block_max)
         d = d * tl.exp(m - m_new) + tl.sum(tl.exp(X_block - m_new))
         m = m_new
+        if RETURN_RANK:
+            # Padded lanes hold -inf, so they never count. Ties are NOT counted
+            # (strict >), i.e. a tied label ranks as high as possible.
+            n_greater += tl.sum((X_block > ori_X_y).to(tl.int32))
 
     lse = m + tl.log(d)
+
+    if RETURN_RANK:
+        rank_ptr += program_id * rank_stride
+        tl.store(rank_ptr, n_greater)
 
     if HAS_GRADIENTS:
         for i in range(0, n_cols, BLOCK_SIZE):

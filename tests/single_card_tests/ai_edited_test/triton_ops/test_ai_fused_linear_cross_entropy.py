@@ -57,6 +57,7 @@ class TestLigerCrossEntropyKernelGPU(unittest.TestCase):
         logits = paddle.randn([BT, V], dtype=paddle.float32)
         target = paddle.randint(0, V, [BT])
         loss_1d = paddle.zeros([BT], dtype=paddle.float32)
+        rank_dummy = paddle.zeros([1], dtype=paddle.int32)
 
         logits = logits.contiguous()
         target = target.contiguous()
@@ -72,10 +73,13 @@ class TestLigerCrossEntropyKernelGPU(unittest.TestCase):
             Y_stride=target.stride(-1),
             loss_ptr=loss_1d,
             loss_stride=loss_1d.stride(-1),
+            rank_ptr=rank_dummy,
+            rank_stride=rank_dummy.stride(-1),
             n_cols=V,
             n_non_ignore=n_non_ignore,
             ignore_index=ignore_index,
             reduction="none",
+            RETURN_RANK=False,
             HAS_GRADIENTS=False,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=32,
@@ -98,6 +102,7 @@ class TestLigerCrossEntropyKernelGPU(unittest.TestCase):
         logits = paddle.randn([BT, V], dtype=paddle.float32)
         target = paddle.randint(0, V, [BT])
         loss_1d = paddle.zeros([BT], dtype=paddle.float32)
+        rank_dummy = paddle.zeros([1], dtype=paddle.int32)
 
         logits = logits.contiguous()
         target = target.contiguous()
@@ -113,10 +118,13 @@ class TestLigerCrossEntropyKernelGPU(unittest.TestCase):
             Y_stride=target.stride(-1),
             loss_ptr=loss_1d,
             loss_stride=loss_1d.stride(-1),
+            rank_ptr=rank_dummy,
+            rank_stride=rank_dummy.stride(-1),
             n_cols=V,
             n_non_ignore=n_non_ignore,
             ignore_index=ignore_index,
             reduction="none",
+            RETURN_RANK=False,
             HAS_GRADIENTS=True,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=32,
@@ -138,6 +146,7 @@ class TestLigerCrossEntropyKernelGPU(unittest.TestCase):
         logits = paddle.randn([BT, V], dtype=paddle.float32)
         target = paddle.to_tensor([0, -100, 5, 3])
         loss_1d = paddle.zeros([BT], dtype=paddle.float32)
+        rank_dummy = paddle.zeros([1], dtype=paddle.int32)
 
         logits = logits.contiguous()
         target = target.contiguous()
@@ -153,10 +162,13 @@ class TestLigerCrossEntropyKernelGPU(unittest.TestCase):
             Y_stride=target.stride(-1),
             loss_ptr=loss_1d,
             loss_stride=loss_1d.stride(-1),
+            rank_ptr=rank_dummy,
+            rank_stride=rank_dummy.stride(-1),
             n_cols=V,
             n_non_ignore=n_non_ignore,
             ignore_index=ignore_index,
             reduction="none",
+            RETURN_RANK=False,
             HAS_GRADIENTS=True,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=32,
@@ -178,6 +190,7 @@ class TestLigerCrossEntropyKernelGPU(unittest.TestCase):
         logits = paddle.randn([BT, V], dtype=paddle.float32)
         target = paddle.randint(0, V, [BT])
         loss_1d = paddle.zeros([BT], dtype=paddle.float32)
+        rank_dummy = paddle.zeros([1], dtype=paddle.int32)
 
         logits = logits.contiguous()
         target = target.contiguous()
@@ -193,10 +206,13 @@ class TestLigerCrossEntropyKernelGPU(unittest.TestCase):
             Y_stride=target.stride(-1),
             loss_ptr=loss_1d,
             loss_stride=loss_1d.stride(-1),
+            rank_ptr=rank_dummy,
+            rank_stride=rank_dummy.stride(-1),
             n_cols=V,
             n_non_ignore=n_non_ignore,
             ignore_index=ignore_index,
             reduction="mean",
+            RETURN_RANK=False,
             HAS_GRADIENTS=True,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=32,

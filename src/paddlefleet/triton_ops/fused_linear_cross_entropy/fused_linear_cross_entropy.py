@@ -59,9 +59,9 @@ def fused_linear_cross_entropy_forward(
         label_rank_sink: 可选的 list。传入时，额外产出 [BT] 的 int32 张量并 append
                   进去，值为「logits 中严格大于 label logit 的个数」，即 label 的
                   0-based 排名：0 表示 label 就是 argmax，< k 表示 label 在 top-k 内。
-                  在 kernel 就地把 logits 覆写成梯度之前计算，因此不需要额外的
-                  [chunk, V] 投影，只多一次逐元素比较 + 规约。ignore_index 的行
-                  也会算出一个值（按 label=0 处理），无意义，调用方必须用
+                  计数在 triton kernel 的主扫描循环里累加（那里已经在逐块加载 logits
+                  并求行最大值），因此不额外读 logits、不分配 [chunk, V] 临时张量。
+                  ignore_index 的行不写入，保持初始的 0；该值无意义，调用方必须用
                   target != ignore_index 自行屏蔽。
                   该张量与 autograd 无关（不作为 PyLayer 输出返回）。
     """
@@ -102,6 +102,12 @@ def fused_linear_cross_entropy_forward(
         if label_rank_sink is not None
         else None
     )
+    # Triton still needs a pointer for the unused rank argument.
+    _rank_dummy = (
+        paddle.zeros([1], dtype=paddle.int32)
+        if label_rank_1d is None
+        else None
+    )
 
     target_mask = target != ignore_index
     total_n_non_ignore = target_mask.sum().item()
@@ -124,20 +130,9 @@ def fused_linear_cross_entropy_forward(
         target_chunk = target_chunk.contiguous()
 
         if label_rank_1d is not None:
-            # MUST run before the kernel: it overwrites logits_chunk in place
-            # with the gradient.
-            with paddle.no_grad():
-                safe_target = paddle.where(
-                    target_chunk == ignore_index,
-                    paddle.zeros_like(target_chunk),
-                    target_chunk,
-                )
-                label_logit = logits_chunk.take_along_axis(
-                    safe_target.unsqueeze(-1).cast("int64"), axis=-1
-                )
-                label_rank_1d[start_idx:end_idx] = (
-                    (logits_chunk > label_logit).sum(axis=-1).cast("int32")
-                )
+            rank_slice = label_rank_1d[start_idx:end_idx]
+        else:
+            rank_slice = _rank_dummy
 
         liger_cross_entropy_kernel[(n_rows,)](
             X_ptr=logits_chunk,
@@ -146,16 +141,21 @@ def fused_linear_cross_entropy_forward(
             Y_stride=target_chunk.stride(-1),
             loss_ptr=loss_1d_slice,
             loss_stride=loss_1d_slice.stride(-1),
+            rank_ptr=rank_slice,
+            rank_stride=rank_slice.stride(-1),
             n_cols=V,
             n_non_ignore=total_n_non_ignore,
             ignore_index=ignore_index,
             reduction=reduction,
             HAS_GRADIENTS=input_requires_grad,
+            RETURN_RANK=label_rank_1d is not None,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=32,
         )
 
         loss_1d[start_idx:end_idx] = loss_1d_slice
+        if label_rank_1d is not None:
+            label_rank_1d[start_idx:end_idx] = rank_slice
         # kernel 已将梯度原地写回 logits_chunk（现在是 grad_logits，尚未归一化）
         grad_logits_chunk = logits_chunk
 
