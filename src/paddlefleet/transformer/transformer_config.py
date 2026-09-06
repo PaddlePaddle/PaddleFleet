@@ -88,10 +88,31 @@ class TransformerConfig(ModelParallelConfig):
     - None: disabled — always run all num_nextn_predict_layers depths (default).
     - list[float] of length D=num_nextn_predict_layers: a probability distribution
       P(K=k), k=1..D (must sum to 1). Each step samples a prefix length K and runs
-      only MTP depths 1..K; depths >K are skipped (no forward, no loss). The loss
-      denominator stays D, so the sampling frequency P(K>=i) acts as depth i's
-      effective (survival-shaped) weight. K is sampled once and synced across all
-      ranks (required so MoE expert-parallel all-to-all stays consistent)."""
+      only MTP depths 1..K; depths >K are skipped (no forward, no loss). K is sampled
+      once and synced across all ranks (required so MoE expert-parallel all-to-all
+      stays consistent).
+
+    Effective per-depth weight: the MTP loss is divided by the number of depths that
+    actually ran this step, i.e. by K and NOT by D (`num_mtp = len(mtp_loss)` in
+    LanguageLoss.forward). So depth i's run FREQUENCY is f_i = P(K>=i) -- with
+    f_1 == 1 always, and sum_i f_i == E[K] == the step cost -- but its effective loss
+    WEIGHT is
+
+        w_i = E[1{K>=i} / K] = sum_{k>=i} P(K=k) / k,   and   sum_i w_i == 1.
+
+    Compare on `[0.558, 0.276, 0.069, 0.052, 0.045]` (D=5, E[K]=1.75):
+    f = [1.0, 0.442, 0.166, 0.097, 0.045] but w = [0.741, 0.183, 0.045, 0.022, 0.009].
+    Use w, not f, when reasoning about how much supervision a depth receives.
+
+    Two consequences worth knowing before tuning this list:
+    - Total MTP gradient is fixed at mtp_loss_scaling_factor regardless of D or E[K],
+      because sum_i w_i == 1. Raising the budget does not buy more supervision, it
+      only moves weight off depth 1 and onto the deeper ones -- the allocation is
+      strictly zero-sum, so there is no "add a cheap shallow tail for free".
+    - With sampling disabled K == D every step, so the total weight is 1 either way;
+      dividing by K is what keeps a sampled run comparable to an unsampled one.
+      (An earlier version of this docstring claimed the denominator stays D, which
+      would instead scale the total down to E[K]/D -- 0.35 for the example above.)"""
 
     mtp_loss_mask_after_wrong: bool = False
     """Mask out the MTP loss at every token position whose shallower depths did not
