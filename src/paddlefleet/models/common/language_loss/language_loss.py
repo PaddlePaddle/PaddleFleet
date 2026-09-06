@@ -233,7 +233,13 @@ class LanguageLoss(FleetLayer):
         )
         self.use_subbatch = self.loss_subbatch_sequence_length > 0
 
-    def forward_impl(self, logits: Tensor | tuple, labels: Tensor) -> Tensor:
+    def forward_impl(
+        self,
+        logits: Tensor | tuple,
+        labels: Tensor,
+        return_per_token: bool = False,
+        return_label_rank: bool = False,
+    ) -> Tensor:
         # Fused linear + cross-entropy path: `logits` is actually a
         # (hidden_states, weight, bias) tuple emitted by GPTLMHead when
         # config.fused_linear_ce_loss_chunk > 0. Dispatch to the fused kernel
@@ -252,6 +258,11 @@ class LanguageLoss(FleetLayer):
             _input = hidden_states.reshape([-1, H])
             _labels = labels.reshape([-1])
 
+            # Ask the fused op for the label's 0-based rank among the logits.
+            # It is computed from the per-chunk logits that already exist, so
+            # this adds one elementwise compare + reduce, no extra projection.
+            rank_sink = [] if return_label_rank else None
+
             loss_1d = LigerFusedLinearCrossEntropyFunction.apply(
                 _input,
                 weight,
@@ -263,20 +274,36 @@ class LanguageLoss(FleetLayer):
                 getattr(
                     self.config, "gpt_model_use_experimental_version", False
                 ),
+                rank_sink,
             )
             # Reshape back to [B, S] so downstream CP gather / lossmask
             # handling matches the non-fused path exactly.
             loss = loss_1d.reshape([B, S])
+            label_rank = (
+                rank_sink[0].reshape([B, S]) if return_label_rank else None
+            )
 
             if get_context_parallel_world_size() > 1:
                 loss = ContextParallelGatherOp.apply(
                     loss, axis=1, mode=self.config.cp_balance_mode
                 )
+                if label_rank is not None:
+                    label_rank = ContextParallelGatherOp.apply(
+                        label_rank, axis=1, mode=self.config.cp_balance_mode
+                    )
                 labels = ContextParallelGatherOp.apply(
                     labels, axis=1, mode=self.config.cp_balance_mode
                 )
 
             lossmask = labels != self.ignored_index
+            if return_per_token:
+                # Caller reduces itself (mtp_loss_mask_after_wrong). Shapes are
+                # [B, S] throughout so the cross-depth chain can be built directly.
+                return (
+                    loss.cast(paddle.float32).reshape(labels.shape),
+                    lossmask.cast(paddle.float32),
+                    label_rank,
+                )
             if (~lossmask).all():
                 return paddle.mean(loss) * 0.0
 
@@ -330,15 +357,47 @@ class LanguageLoss(FleetLayer):
         else:
             loss = self.loss_func(logits.cast("float32"), labels)
 
+        label_rank = None
+        if return_label_rank:
+            assert not self.enable_parallel_cross_entropy, (
+                "mtp_loss_mask_after_wrong needs the label's rank over the FULL "
+                "vocab, but parallel_output=True shards the vocab across tensor-"
+                "parallel ranks. Use fused_linear_ce_loss_chunk>0 (which keeps the "
+                "vocab whole) or set parallel_output=False."
+            )
+            with paddle.no_grad():
+                safe_labels = paddle.where(
+                    labels == self.ignored_index,
+                    paddle.zeros_like(labels),
+                    labels,
+                )
+                label_logit = logits.take_along_axis(
+                    safe_labels.unsqueeze(-1).cast("int64"), axis=-1
+                )
+                label_rank = (
+                    (logits > label_logit).sum(axis=-1).cast("int32")
+                )
+
         if get_context_parallel_world_size() > 1:
             loss = ContextParallelGatherOp.apply(
                 loss, axis=1, mode=self.config.cp_balance_mode
             )
+            if label_rank is not None:
+                label_rank = ContextParallelGatherOp.apply(
+                    label_rank, axis=1, mode=self.config.cp_balance_mode
+                )
             labels = ContextParallelGatherOp.apply(
                 labels, axis=1, mode=self.config.cp_balance_mode
             )
 
         lossmask = labels != self.ignored_index
+        if return_per_token:
+            # Caller reduces itself (mtp_loss_mask_after_wrong).
+            return (
+                loss.cast(paddle.float32).reshape(labels.shape),
+                lossmask.cast(paddle.float32),
+                label_rank,
+            )
         if (~lossmask).all():
             loss = paddle.mean(loss) * 0.0
         else:
@@ -419,7 +478,13 @@ class LanguageLoss(FleetLayer):
 
         return loss
 
-    def _forward(self, logits: Tensor | tuple, labels: Tensor):
+    def _forward(
+        self,
+        logits: Tensor | tuple,
+        labels: Tensor,
+        return_per_token: bool = False,
+        return_label_rank: bool = False,
+    ):
         if (
             get_context_parallel_world_size() > 1
             and self.config.experimental_dataflow
@@ -428,12 +493,83 @@ class LanguageLoss(FleetLayer):
             labels = ContextParallelScatterOp.apply(
                 labels, axis=1, mode=self.config.cp_balance_mode
             )
+        if return_per_token:
+            # Recompute is skipped on this path: the caller keeps the returned
+            # tensors alive to build the cross-depth mask, so re-running the loss
+            # would not save the activation it is meant to save.
+            return self.forward_impl(
+                logits,
+                labels,
+                return_per_token=True,
+                return_label_rank=return_label_rank,
+            )
         if (
             self.config.recompute_modules is not None
             and "loss_fn" in self.config.recompute_modules
         ):
             return recompute(self.forward_impl, logits, labels)
         return self.forward_impl(logits, labels)
+
+    def _mtp_loss_masked_after_wrong(
+        self, mtp_logits: list, labels_ori: Tensor, seq_length: int
+    ) -> list:
+        """Per-depth MTP loss with each position dropped once a shallower depth
+        failed there (config.mtp_loss_mask_after_wrong).
+
+        MTP depth k reads the hidden state produced by depth k-1 at the SAME token
+        index, so gating depth k's position i on depths 0..k-1 at position i follows
+        exactly that chain. Depth 0 is never gated.
+
+        A position counts as "correct" at a depth when the ground-truth label is
+        inside that depth's top-`config.mtp_loss_mask_topk` logits. The rank comes
+        back from the loss path itself (see forward_impl / the fused op's
+        label_rank_sink), so no extra vocab projection is needed.
+
+        Returns the list of scalar losses for the depths actually computed this step
+        (mtp_depth_sampling skips a suffix), same contract as the unmasked path.
+        """
+        top_k = self.config.mtp_loss_mask_topk
+
+        losses = []
+        chain_ok = None  # [B, S] 1.0 where every shallower depth was correct
+        for depth in range(self.config.num_nextn_predict_layers):
+            # Depth sampling emits None for skipped depths; they are always a
+            # suffix, so the chain below never has a hole in it.
+            if mtp_logits[depth] is None:
+                continue
+            labels_cur_depth = labels_ori[
+                :, (depth + 1) : (depth + 1 + seq_length)
+            ]
+            # The deepest computed depth gates nothing, so skip its rank.
+            need_rank = depth + 1 < self.config.num_nextn_predict_layers and (
+                mtp_logits[depth + 1] is not None
+            )
+            loss_2d, valid_2d, label_rank = self._forward(
+                mtp_logits[depth],
+                labels_cur_depth,
+                return_per_token=True,
+                return_label_rank=need_rank,
+            )
+
+            keep = valid_2d if chain_ok is None else valid_2d * chain_ok
+            # Zero surviving tokens -> numerator is 0 too, so this yields 0.0
+            # without a device sync on the count.
+            kept = keep.sum()
+            denom = paddle.clip(kept, min=1.0)
+            losses.append((loss_2d * keep).sum() / denom)
+
+            # Survival rate per depth, so the right top-k can be read off a run
+            # instead of guessed. Detached; the trainer calls .item() at log steps.
+            LanguageLoss.mtp_loss_tracker[f"mtp_{depth + 1}_keep_ratio"] = (
+                kept / paddle.clip(valid_2d.sum(), min=1.0)
+            ).detach()
+
+            if need_rank:
+                # Hard 0/1 gate, never a gradient path.
+                correct = (label_rank < top_k).cast(paddle.float32) * valid_2d
+                chain_ok = correct if chain_ok is None else chain_ok * correct
+
+        return losses
 
     def forward(self, logits: Tensor | list, labels: Tensor) -> Tensor:
         if isinstance(logits, list):
@@ -456,7 +592,17 @@ class LanguageLoss(FleetLayer):
                 else:
                     lm_loss = self._forward(logits[0], lm_labels)
 
-                for depth in range(self.config.num_nextn_predict_layers):
+                if self.config.mtp_loss_mask_after_wrong:
+                    # Chain-gated variant: needs every computed depth's per-token
+                    # loss at once, so it cannot be folded into the loop below.
+                    mtp_loss = self._mtp_loss_masked_after_wrong(
+                        mtp_logits, labels_ori, seq_length
+                    )
+                    depth_range = range(0)
+                else:
+                    depth_range = range(self.config.num_nextn_predict_layers)
+
+                for depth in depth_range:
                     # MTP depth sampling: the LM head emits None for depths not
                     # computed this step; skip them so mtp_loss holds only the K
                     # computed depths (loss then averages over K). No effect when
@@ -631,6 +777,9 @@ class LanguageLoss(FleetLayer):
             # sparse-but-correct instead of flat).
             for _d in range(len(mtp_loss), self.config.num_nextn_predict_layers):
                 LanguageLoss.mtp_loss_tracker.pop(f"mtp_{_d + 1}_loss", None)
+                LanguageLoss.mtp_loss_tracker.pop(
+                    f"mtp_{_d + 1}_keep_ratio", None
+                )
 
             # Track the standalone main (non-MTP) LM loss so it can be logged
             # separately from the combined total loss.

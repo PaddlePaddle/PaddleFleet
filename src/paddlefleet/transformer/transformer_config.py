@@ -93,6 +93,55 @@ class TransformerConfig(ModelParallelConfig):
       effective (survival-shaped) weight. K is sampled once and synced across all
       ranks (required so MoE expert-parallel all-to-all stays consistent)."""
 
+    mtp_loss_mask_after_wrong: bool = False
+    """Mask out the MTP loss at every token position whose shallower depths did not
+    already predict correctly, i.e. stop supervising a depth once the chain feeding
+    it is known to be broken.
+
+    Motivation: MTP depth k consumes the hidden state produced by depth k-1. Training
+    is teacher-forced on the token side (the ground-truth embedding of token i+k is
+    fed in), so tokens never go wrong, but the hidden-state chain still degrades. If
+    depth k-1 already failed at a position, depth k is being asked to extrapolate from
+    a feature that is known to be bad, and at inference that draft position would have
+    been discarded anyway (speculative decoding truncates at the first rejection).
+
+    Semantics when True: for each token position, depth 0 is always supervised; depth
+    k (k>=1) is supervised only if depths 0..k-1 were all "correct" at that position.
+    "Correct" means the ground-truth label was inside that depth's top-K logits, with
+    K = mtp_loss_mask_topk. Each depth's loss is then averaged over its own surviving
+    token count, so the per-depth loss scale stays comparable instead of shrinking
+    with the survival rate.
+
+    No effect when False (default) — the loss is bit-identical to before."""
+
+    mtp_loss_mask_topk: int = 3
+    """Top-K membership that defines "predicted correctly" for
+    mtp_loss_mask_after_wrong. A position counts as correct at a depth when the
+    ground-truth label is among that depth's K highest logits.
+
+    K=1 is exact argmax correctness, which matches greedy speculative-decoding
+    acceptance but starves the deep depths: with the measured per-depth top-1
+    acceptance (0.83 / 0.57 / 0.48) the chain survival would be ~0.83 / 0.47 / 0.23.
+    The default 3 keeps the schedule healthy (estimated ~0.92 / 0.69 / 0.45) while
+    still cutting the positions where the feeding hidden state is clearly bad.
+    Watch the logged `mtp_{i}_keep_ratio` and retune from the measured survival
+    instead of guessing.
+
+    NOTE: this is NOT EAGLE's "truncated lm_head". That is a static high-frequency
+    vocabulary truncation of the draft head (draft_vocab_size + d2t map); the gate
+    here is per-token and depends on the current prediction.
+
+    The label's rank is obtained from the loss path itself. In the fused path
+    (fused_linear_ce_loss_chunk>0) the per-chunk logits already exist before the
+    kernel overwrites them with gradients, so the rank costs one elementwise compare
+    plus a reduction — no second [BT, V] projection. Requires the full vocab on one
+    rank: incompatible with parallel_output=True (vocab-sharded logits).
+
+    Ties: the rank counts STRICTLY greater logits, so a label tied with higher-ranked
+    entries counts as being inside the top-K (best case under tie-breaking). bf16
+    logits tie often, so this is a real effect, not a corner case — it makes the gate
+    marginally more permissive, which is the safe direction here."""
+
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
 
@@ -1005,6 +1054,27 @@ class TransformerConfig(ModelParallelConfig):
             _s = float(sum(self.mtp_depth_sampling))
             assert abs(_s - 1.0) < 1e-3, (
                 f"mtp_depth_sampling must sum to 1.0 (P(K=k)), got sum={_s}"
+            )
+        if self.mtp_loss_mask_after_wrong:
+            assert self.num_nextn_predict_layers > 1, (
+                "mtp_loss_mask_after_wrong needs num_nextn_predict_layers>1; with a "
+                "single depth there is no shallower depth to gate on."
+            )
+            assert not self.mtp_distillation_loss, (
+                "mtp_loss_mask_after_wrong is not supported with "
+                "mtp_distillation_loss=True (the distillation branch has no "
+                "per-token cross-entropy to threshold)."
+            )
+            assert not self.separate_mtp_headloss, (
+                "mtp_loss_mask_after_wrong is not supported with "
+                "separate_mtp_headloss=True (depths are reduced independently, so the "
+                "cross-depth chain is not visible in one place)."
+            )
+            assert isinstance(self.mtp_loss_mask_topk, int) and (
+                self.mtp_loss_mask_topk >= 1
+            ), (
+                "mtp_loss_mask_topk must be an int >= 1, got "
+                f"{self.mtp_loss_mask_topk}"
             )
         if self.enable_mtp_magic_send:
             assert self.num_nextn_predict_layers == 1, (

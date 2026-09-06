@@ -40,6 +40,7 @@ def fused_linear_cross_entropy_forward(
     reduction="none",
     num_chunks=1,
     ec_align=False,
+    label_rank_sink=None,
 ):
     """前向：分 chunk 计算 logits / loss / grad_input / grad_weight。
 
@@ -55,6 +56,14 @@ def fused_linear_cross_entropy_forward(
                   grad_weight 使用 [H, V] 布局（GEMM [H,C]@[C,V]），
                   与 ernie-core 的 fused_linear_param_grad_add 调用完全相同。
                   backward 中 main_grad.add_(grad_weight.T)。
+        label_rank_sink: 可选的 list。传入时，额外产出 [BT] 的 int32 张量并 append
+                  进去，值为「logits 中严格大于 label logit 的个数」，即 label 的
+                  0-based 排名：0 表示 label 就是 argmax，< k 表示 label 在 top-k 内。
+                  在 kernel 就地把 logits 覆写成梯度之前计算，因此不需要额外的
+                  [chunk, V] 投影，只多一次逐元素比较 + 规约。ignore_index 的行
+                  也会算出一个值（按 label=0 处理），无意义，调用方必须用
+                  target != ignore_index 自行屏蔽。
+                  该张量与 autograd 无关（不作为 PyLayer 输出返回）。
     """
     input_requires_grad = not _input.stop_gradient
     weight_requires_grad = not weight.stop_gradient
@@ -88,6 +97,11 @@ def fused_linear_cross_entropy_forward(
     )
 
     loss_1d = paddle.zeros([BT], dtype=paddle.float32)
+    label_rank_1d = (
+        paddle.zeros([BT], dtype=paddle.int32)
+        if label_rank_sink is not None
+        else None
+    )
 
     target_mask = target != ignore_index
     total_n_non_ignore = target_mask.sum().item()
@@ -108,6 +122,22 @@ def fused_linear_cross_entropy_forward(
 
         logits_chunk = logits_chunk.contiguous()
         target_chunk = target_chunk.contiguous()
+
+        if label_rank_1d is not None:
+            # MUST run before the kernel: it overwrites logits_chunk in place
+            # with the gradient.
+            with paddle.no_grad():
+                safe_target = paddle.where(
+                    target_chunk == ignore_index,
+                    paddle.zeros_like(target_chunk),
+                    target_chunk,
+                )
+                label_logit = logits_chunk.take_along_axis(
+                    safe_target.unsqueeze(-1).cast("int64"), axis=-1
+                )
+                label_rank_1d[start_idx:end_idx] = (
+                    (logits_chunk > label_logit).sum(axis=-1).cast("int32")
+                )
 
         liger_cross_entropy_kernel[(n_rows,)](
             X_ptr=logits_chunk,
@@ -173,6 +203,9 @@ def fused_linear_cross_entropy_forward(
         loss = loss_1d
     else:
         loss = paddle.sum(loss_1d)
+
+    if label_rank_sink is not None:
+        label_rank_sink.append(label_rank_1d)
 
     return loss, grad_input, grad_weight, grad_bias
 
@@ -254,6 +287,9 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
         reduction = args[5]
         num_chunks = args[6]
         ec_align = args[7]
+        # Optional 9th arg: a list that collects the [BT] int32 label-rank tensor.
+        # Kept out of the return value so autograd sees a single output.
+        label_rank_sink = args[8] if len(args) > 8 else None
 
         loss, grad_input, grad_weight, grad_bias = (
             fused_linear_cross_entropy_forward(
@@ -265,6 +301,7 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
                 reduction=reduction,
                 num_chunks=num_chunks,
                 ec_align=ec_align,
+                label_rank_sink=label_rank_sink,
             )
         )
 
