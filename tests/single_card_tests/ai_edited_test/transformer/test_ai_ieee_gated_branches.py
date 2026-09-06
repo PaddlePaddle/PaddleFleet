@@ -66,6 +66,8 @@ from paddlefleet.transformer.dsa_attention import (
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.moe.moe_expert import (
+    BMMFunction,
+    DeepGEMMBMMFunction,
     GroupedMLPExpert,
     _UACExpertFp32WgradCapture,
 )
@@ -704,6 +706,12 @@ class TestAlignSpAuxToQuery(_DeviceRestoreCase):
         self.assertEqual(tuple(out.shape), (2, 2, 3))
         self.assertTrue(bool(paddle.equal_all(out, expected)))
 
+    def test_3d_unmatched_layout_returns_input(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        tensor = paddle.arange(6, dtype="float32").reshape([2, 3, 1])
+        out = _align_sp_aux_to_query(tensor, query)
+        self.assertTrue(bool(paddle.equal_all(out, tensor)))
+
     def test_4d_keep_and_seq_first_transpose(self):
         query = paddle.zeros([1, 4, 2, 8], dtype="float32")
         keep = paddle.arange(16, dtype="float32").reshape([1, 4, 2, 2])
@@ -748,6 +756,23 @@ class TestAlignSpAuxToQuery(_DeviceRestoreCase):
             [1, 0, 2, 3]
         )
         self.assertEqual(tuple(out.shape), (1, 4, 1, 4))
+        self.assertTrue(bool(paddle.equal_all(out, expected)))
+
+    def test_4d_seq_first_gather_keeps_non_seq_batch_layout(self):
+        query = paddle.zeros([1, 4, 2, 8], dtype="float32")
+        tensor = paddle.arange(8, dtype="float32").reshape([2, 1, 1, 4])
+
+        def _concat_axis1(t, group=None):
+            return paddle.concat([t, t], axis=1)
+
+        with patch(
+            "paddlefleet.transformer.dsa_attention."
+            "gather_from_sequence_parallel_region",
+            side_effect=_concat_axis1,
+        ):
+            out = _align_sp_aux_to_query(tensor, query)
+        expected = paddle.concat([tensor, tensor], axis=1)
+        self.assertEqual(tuple(out.shape), (2, 2, 1, 4))
         self.assertTrue(bool(paddle.equal_all(out, expected)))
 
     def test_4d_unmatched_layout_returns_input(self):
@@ -1048,6 +1073,63 @@ class TestUacExpertCaptureAndGemm(_DeviceRestoreCase):
             )
         )
 
+    def test_capture_marks_grad_added_to_main_grad(self):
+        paddle.seed(10)
+        x = paddle.randn([3, 5], dtype="float32")
+        x.stop_gradient = False
+        wt = paddle.randn([5, 4], dtype="float32")
+        y = paddle.matmul(x, wt)
+        weight = paddle.create_parameter(
+            shape=[2, 5, 4],
+            dtype="float32",
+            default_initializer=paddle.nn.initializer.Constant(0.0),
+        )
+        weight.main_grad = None
+        weight.grad_added_to_main_grad = False
+        out = _UACExpertFp32WgradCapture.apply(y, x, weight, 1)
+        out.sum().backward()
+        self.assertTrue(weight.grad_added_to_main_grad)
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_ieee_tn_gemm_without_row_owner_matches_independent_matmul(self):
+        paddle.seed(5)
+        expert = GroupedMLPExpert(
+            num_local_experts=2,
+            config=_expert_config(use_accuracy_compatible=True),
+            moe_deep_gemm=False,
+        )
+        _cpu_float32_expert_weights(expert)
+        dtype = expert.weight1.dtype
+        expert.weight1.set_value(
+            paddle.randn(expert.weight1.shape, dtype=dtype)
+        )
+        expert.weight2.set_value(
+            paddle.randn(expert.weight2.shape, dtype=dtype)
+        )
+        tokens = paddle.randn([4, 16], dtype=dtype)
+        tokens_per_expert = paddle.to_tensor([2, 2], dtype="int64")
+        probs = paddle.to_tensor([1.0, 0.5, 0.25, 2.0], dtype="float32")
+        out, bias = expert(
+            tokens, tokens_per_expert, permuted_probs=probs
+        )
+        self.assertIsNone(bias)
+        x = tokens.cast("float32")
+        parts = []
+        start = 0
+        for expert_idx, n_tokens in enumerate((2, 2)):
+            xb = x[start : start + n_tokens]
+            w1 = expert.weight1[expert_idx].cast("float32")
+            w2 = expert.weight2[expert_idx].cast("float32")
+            hidden = paddle.matmul(xb, w1)
+            gate, up = paddle.chunk(hidden, 2, axis=-1)
+            hidden = F.silu(gate) * up
+            hidden = hidden * probs[start : start + n_tokens].unsqueeze(-1)
+            parts.append(paddle.matmul(hidden, w2))
+            start += n_tokens
+        expected = paddle.concat(parts, axis=0).cast(dtype)
+        self.assertEqual(tuple(out.shape), tuple(expected.shape))
+        self.assertTrue(bool(paddle.equal_all(out, expected)))
+
     @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_ieee_tn_gemm_matches_independent_matmul(self):
         paddle.seed(4)
@@ -1104,6 +1186,118 @@ class TestUacExpertCaptureAndGemm(_DeviceRestoreCase):
         out, bias = expert(tokens, tokens_per_expert, permuted_probs=probs)
         self.assertIsNone(bias)
         self.assertEqual(out.shape[0], 0)
+
+    def test_bmm_path_scales_activation_by_permuted_probs(self):
+        paddle.seed(6)
+        expert = GroupedMLPExpert(
+            num_local_experts=2,
+            config=_expert_config(use_accuracy_compatible=False),
+            moe_deep_gemm=False,
+        )
+        _cpu_float32_expert_weights(expert)
+        dtype = expert.weight1.dtype
+        tokens = paddle.randn([4, 16], dtype=dtype)
+        tokens_per_expert = paddle.to_tensor([2, 2], dtype="int64")
+        probs = paddle.to_tensor([1.0, 0.5, 0.25, 2.0], dtype="float32")
+        fc1 = paddle.ones([4, 64], dtype=dtype)
+        seen = []
+
+        def _apply(x, y, batch_sizes, trans_y=False, restore_weight=None):
+            seen.append(x)
+            if len(seen) == 1:
+                return fc1
+            return x[:, :16]
+
+        with (
+            patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "0"}),
+            patch.object(BMMFunction, "apply", side_effect=_apply),
+        ):
+            out, bias = expert(
+                tokens, tokens_per_expert, permuted_probs=probs
+            )
+        self.assertIsNone(bias)
+        hidden = expert.activation_func(fc1)
+        scaled = (hidden * probs.unsqueeze(-1)).cast(dtype)
+        self.assertTrue(bool(paddle.equal_all(seen[1], scaled)))
+        self.assertTrue(bool(paddle.equal_all(out, scaled[:, :16])))
+
+    def test_bmm_path_activation_recompute_raises(self):
+        expert = GroupedMLPExpert(
+            num_local_experts=2,
+            config=_expert_config(use_accuracy_compatible=False),
+            moe_deep_gemm=False,
+        )
+        _cpu_float32_expert_weights(expert)
+        dtype = expert.weight1.dtype
+        expert.activation_recompute = True
+        tokens = paddle.randn([4, 16], dtype=dtype)
+        tokens_per_expert = paddle.to_tensor([2, 2], dtype="int64")
+        with (
+            patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "0"}),
+            patch.object(
+                BMMFunction,
+                "apply",
+                return_value=paddle.ones([4, 64], dtype=dtype),
+            ),
+            self.assertRaises(NotImplementedError),
+        ):
+            expert(tokens, tokens_per_expert)
+
+    def test_deep_gemm_path_scales_activation_by_permuted_probs(self):
+        paddle.seed(7)
+        expert = GroupedMLPExpert(
+            num_local_experts=2,
+            config=_expert_config(use_accuracy_compatible=False),
+            moe_deep_gemm=True,
+        )
+        _cpu_float32_expert_weights(expert)
+        dtype = expert.weight1.dtype
+        tokens = paddle.randn([4, 16], dtype=dtype)
+        tokens_per_expert = paddle.to_tensor([2, 2], dtype="int64")
+        probs = paddle.to_tensor([1.0, 0.5, 0.25, 2.0], dtype="float32")
+        fc1 = paddle.ones([4, 64], dtype=dtype)
+        seen = []
+
+        def _apply(x, y, batch_sizes):
+            seen.append(x)
+            if len(seen) == 1:
+                return fc1
+            return x[:, :16]
+
+        with (
+            patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "0"}),
+            patch.object(DeepGEMMBMMFunction, "apply", side_effect=_apply),
+        ):
+            out, bias = expert(
+                tokens, tokens_per_expert, permuted_probs=probs
+            )
+        self.assertIsNone(bias)
+        hidden = expert.activation_func(fc1)
+        scaled = (hidden * probs.unsqueeze(-1)).cast(dtype)
+        self.assertTrue(bool(paddle.equal_all(seen[1], scaled)))
+        self.assertTrue(bool(paddle.equal_all(out, scaled[:, :16])))
+
+    def test_deep_gemm_path_activation_recompute_raises(self):
+        expert = GroupedMLPExpert(
+            num_local_experts=2,
+            config=_expert_config(use_accuracy_compatible=False),
+            moe_deep_gemm=True,
+        )
+        _cpu_float32_expert_weights(expert)
+        dtype = expert.weight1.dtype
+        expert.activation_recompute = True
+        tokens = paddle.randn([4, 16], dtype=dtype)
+        tokens_per_expert = paddle.to_tensor([2, 2], dtype="int64")
+        with (
+            patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "0"}),
+            patch.object(
+                DeepGEMMBMMFunction,
+                "apply",
+                return_value=paddle.ones([4, 64], dtype=dtype),
+            ),
+            self.assertRaises(NotImplementedError),
+        ):
+            expert(tokens, tokens_per_expert)
 
 
 if __name__ == "__main__":
