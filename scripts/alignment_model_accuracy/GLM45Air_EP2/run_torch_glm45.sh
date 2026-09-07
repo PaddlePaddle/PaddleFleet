@@ -64,6 +64,8 @@ mkdir -p "${TORCH_LOG_DIR}" "${MG_TENSOR_DEBUG_DIR}"
 ARGS=(
     ### model
     --model /home/.cache/PaddleFormers/GLM-4.5-Air-tiny-2L
+    # Match Paddle MTP=0; the HF config otherwise enables a random MTP layer.
+    --mtp_num_layers 0
 
     ### data
     --dataset /home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP/alignment_torch.jsonl
