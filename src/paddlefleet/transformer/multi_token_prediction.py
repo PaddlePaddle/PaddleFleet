@@ -72,7 +72,8 @@ SUPPORTED_ATTN_MASK = [
 #   * cp_group is None or size==1 → non-CP path.
 #   * cp_group.nranks > 1 with cu_seqlens_q → NotImplementedError; the
 #     mirror-chunk (DualChunkSwap) CP variant is not implemented on this path
-#     (CP is instead handled by extract_local_zigzag_chunks at the call site).
+#     (CP is instead handled by extract_local_cp_chunks at the call site,
+#     which follows config.cp_balance_mode).
 #
 # Note: we consciously do NOT wrap cu_seqlens_q in an MCore-style
 # PackedSeqParams dataclass. ernie5's model backend consumes doc boundaries
@@ -229,8 +230,8 @@ def roll_tensor(
     already holds a full-length ``[B, L]`` copy — no zigzag scatter happens
     before the model. Consequently rolling reduces to standard CP=1
     semantics on the full-length tensor, and callers should invoke
-    ``extract_local_zigzag_chunks`` after ``roll_tensor`` to obtain their
-    local slice before embedding / loss.
+    ``extract_local_cp_chunks`` (which follows ``config.cp_balance_mode``)
+    after ``roll_tensor`` to obtain their local slice before embedding / loss.
 
     Args:
         tensor: input tensor.
@@ -399,7 +400,9 @@ def extract_local_cp_chunks(tensor_full, cp_rank, cp_size, axis=1, *, mode):
     builds its sparse-attention index tables over the *global* sequence and then
     row-slices this rank's queries, which is only correct under the contiguous
     layout — those layers assert on it under CP. So the MTP path must follow the
-    model's mode rather than hard-coding zigzag.
+    model's mode rather than hard-coding zigzag. (Necessary, not sufficient:
+    TransformerConfig separately rejects erndata + MTP + CP for models that build
+    an Indexer, whose loss-mask path still assumes a CP-local ``input_ids``.)
 
     Args:
         tensor_full: ``[..., L, ...]`` full-length tensor present on every rank.
@@ -414,6 +417,13 @@ def extract_local_cp_chunks(tensor_full, cp_rank, cp_size, axis=1, *, mode):
 
     Returns:
         ``[..., L / cp_size, ...]`` tensor holding this rank's slice.
+
+    Note:
+        ``cp_size == 1`` returns ``tensor_full`` *itself*, not a copy — unlike
+        ``scatter_balance`` (which clones) and ``scatter_contiguous`` (which
+        ``paddle.assign``s). Do not write into the result in place. Every call
+        site today guards with ``if cp_size > 1`` and treats the slice as
+        read-only, so this is a documented property rather than a live hazard.
     """
     if cp_size == 1:
         return tensor_full
@@ -425,10 +435,14 @@ def extract_local_cp_chunks(tensor_full, cp_rank, cp_size, axis=1, *, mode):
         return extract_local_contiguous_chunk(
             tensor_full, cp_rank, cp_size, axis=axis
         )
-    # contiguous_a2a (Ulysses) splits the *head* axis inside the attention and
-    # never round-trips through scatter_contiguous at the sequence level, so its
-    # local-slice layout is not established here. Fail loudly instead of
-    # guessing: a wrong layout is a silent-wrong-loss bug.
+    # contiguous_a2a (Ulysses) is refused, but not because its sequence layout
+    # is unknown: ContextParallelScatterOp dispatches on
+    # mode.startswith("contiguous"), so a2a shards the sequence contiguously and
+    # extract_local_contiguous_chunk would be the matching slice. What differs
+    # is the attention-side mask contract (dot_product_attention.py:532 skips
+    # the CP row-index expansion under a2a), and that has not been validated on
+    # this path. Fail loudly instead of assuming: a wrong layout is a
+    # silent-wrong-loss bug.
     raise ValueError(
         f"extract_local_cp_chunks: unsupported cp_balance_mode={mode!r} for the "
         "use_erndata MTP path; expected 'dualchunk_allgather' or "
@@ -1949,7 +1963,8 @@ class MultiTokenPredictionLayer(FleetLayer):
     # Constraints: experimental_dataflow=False and enable_mtp_magic_send
     # disabled (both enforced at TransformerConfig.__post_init__). Context
     # parallelism is handled at the embedding / loss call sites via
-    # extract_local_zigzag_chunks rather than inside roll_tensor.
+    # extract_local_cp_chunks (layout picked by config.cp_balance_mode) rather
+    # than inside roll_tensor.
     # ------------------------------------------------------------------ #
 
     def _forward_megatron_style(self, dict_args: dict) -> dict:

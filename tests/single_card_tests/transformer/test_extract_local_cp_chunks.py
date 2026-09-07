@@ -124,7 +124,10 @@ class TestExtractLocalContiguousChunk(unittest.TestCase):
 
 class TestExtractLocalCpChunksDispatch(unittest.TestCase):
     def test_dualchunk_matches_scatter_balance(self) -> None:
-        cp_size, length = 2, 16
+        # cp_size=4: with only two ranks the zigzag layout degenerates to
+        # "first quarter + last quarter", which several wrong implementations
+        # also produce. Four ranks pin the interleaving.
+        cp_size, length = 4, 16
         t = _arange_bl(2, length)
         for rank in range(cp_size):
             got = extract_local_cp_chunks(
@@ -137,7 +140,7 @@ class TestExtractLocalCpChunksDispatch(unittest.TestCase):
             self.assertTrue(bool((got == expected).all()))
 
     def test_contiguous_matches_scatter_contiguous(self) -> None:
-        cp_size, length = 2, 16
+        cp_size, length = 4, 16
         t = _arange_bl(2, length)
         for rank in range(cp_size):
             got = extract_local_cp_chunks(
@@ -199,6 +202,11 @@ class TestExtractLocalCpChunksDispatch(unittest.TestCase):
             extract_local_cp_chunks(t, 1, 2, 1, "dualchunk_allgather")
 
     def test_cp_size_one_is_identity_for_any_mode(self) -> None:
+        # Identity, not a copy: this deliberately differs from scatter_balance
+        # (clone) and scatter_contiguous (paddle.assign), so an in-place write
+        # on the result would reach the caller's full-length tensor. Pinned here
+        # because it is a property callers rely on for the cheap CP=1 path, not
+        # an accident -- see the Note in extract_local_cp_chunks' docstring.
         t = _arange_bl(2, 7)
         for mode in (
             "dualchunk_allgather",

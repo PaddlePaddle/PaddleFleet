@@ -52,7 +52,9 @@ def _make_cu(seq_lens):
     return paddle.to_tensor(cu, dtype="int32")
 
 
-def _make_loss(K, *, distill, use_erndata=True):
+def _make_loss(
+    K, *, distill, use_erndata=True, cp_balance_mode="dualchunk_allgather"
+):
     loss = LanguageLoss.__new__(LanguageLoss)
     cfg = MagicMock()
     cfg.num_nextn_predict_layers = K
@@ -66,7 +68,7 @@ def _make_loss(K, *, distill, use_erndata=True):
     cfg.add_mtp_loss = True
     cfg.mtp_loss_scaling_factor = 1.0
     cfg.experimental_dataflow = False
-    cfg.cp_balance_mode = "dualchunk_allgather"
+    cfg.cp_balance_mode = cp_balance_mode
     cfg.recompute_modules = None
     loss.config = cfg
     loss.ignored_index = -100
@@ -175,13 +177,22 @@ def _fake_cp(cp_size=2):
 
     - module-level ``get_context_parallel_world_size`` -> cp_size;
     - source-module ``get_context_parallel_rank`` (local import) -> 0;
-    - ``extract_local_cp_chunks`` (local import) -> identity;
+    - ``extract_local_cp_chunks`` (local import) -> identity, recording the
+      kwargs it was called with;
     - CP scatter/gather PyLayers -> identity;
     - ``dist.all_reduce`` -> no-op and ``fleet`` -> MagicMock (the
       distillation branch all-reduces the per-depth loss).
+
+    Yields the recorded ``extract_local_cp_chunks`` calls.
     """
 
+    calls = []
+
     def identity(t, *a, **k):
+        return t
+
+    def recording_identity(t, *a, **k):
+        calls.append((a, k))
         return t
 
     with contextlib.ExitStack() as stack:
@@ -194,7 +205,9 @@ def _fake_cp(cp_size=2):
             mock.patch.object(ps, "get_context_parallel_rank", lambda: 0)
         )
         stack.enter_context(
-            mock.patch.object(mtp, "extract_local_cp_chunks", identity)
+            mock.patch.object(
+                mtp, "extract_local_cp_chunks", recording_identity
+            )
         )
         stack.enter_context(
             mock.patch.object(ll.ContextParallelScatterOp, "apply", identity)
@@ -202,11 +215,30 @@ def _fake_cp(cp_size=2):
         stack.enter_context(
             mock.patch.object(ll.ContextParallelGatherOp, "apply", identity)
         )
+
+        # The distillation branch swaps the gather for MTPDistillationLossShift
+        # under contiguous_allgather (language_loss.py:789-795). That PyLayer
+        # needs a real hybrid communicate group, so stand in for it with a
+        # shape-faithful stub: it consumes [B, S, H] and returns
+        # [B, S + K - 1, H] (the local slice plus the boundary window its P2P
+        # exchange fetches), which is what the per-depth
+        # ``target_p_self_op_dist[:, depth : depth + out_logp.shape[1]]`` slice
+        # downstream assumes.
+        def shift_stub(tensor, num_nextn_predict_layers, *a, **k):
+            b, _s, h = tensor.shape
+            tail = paddle.zeros(
+                [b, num_nextn_predict_layers, h], dtype=tensor.dtype
+            )
+            return paddle.concat([tensor[:, 1:], tail], axis=1)
+
+        stack.enter_context(
+            mock.patch.object(ll.MTPDistillationLossShift, "apply", shift_stub)
+        )
         stack.enter_context(
             mock.patch.object(ll.dist, "all_reduce", lambda *a, **k: None)
         )
         stack.enter_context(mock.patch.object(ll, "fleet", MagicMock()))
-        yield
+        yield calls
 
 
 class TestLanguageLossMegatronCP(unittest.TestCase):
@@ -247,6 +279,47 @@ class TestLanguageLossMegatronCP(unittest.TestCase):
         with _fake_cp(cp_size=2):
             out = loss.forward(logits, labels)
         self.assertEqual(out.dtype, paddle.float32)
+
+
+class TestLanguageLossCpBalanceMode(unittest.TestCase):
+    """Every CP slice here must use ``config.cp_balance_mode``.
+
+    The identity mock above keeps shapes self-consistent whatever layout is
+    requested, so the two tests before this one pass even if the mode is
+    hard-coded -- which is exactly the defect this change fixes. Assert on the
+    recorded kwarg instead, for both layouts and both loss branches.
+    """
+
+    def setUp(self) -> None:
+        LanguageLoss._cu_seqlens_q_stash = None
+
+    def tearDown(self) -> None:
+        LanguageLoss._cu_seqlens_q_stash = None
+
+    def _modes_used(self, *, distill, cp_balance_mode):
+        K, B, L, V = 2, 1, 8, 5
+        loss = _make_loss(K, distill=distill, cp_balance_mode=cp_balance_mode)
+        LanguageLoss._cu_seqlens_q_stash = _make_cu([3, 5])
+        logits = [
+            paddle.randn([B, L, V], dtype="float32") for _ in range(K + 1)
+        ]
+        labels = paddle.arange(B * L, dtype="int64").reshape([B, L])
+        with _fake_cp(cp_size=2) as calls:
+            loss.forward(logits, labels)
+        self.assertTrue(calls, "no CP slice happened, so nothing was checked")
+        return [kwargs.get("mode") for _args, kwargs in calls]
+
+    def test_non_distill_forwards_configured_mode(self) -> None:
+        for mode in ("dualchunk_allgather", "contiguous_allgather"):
+            with self.subTest(mode=mode):
+                used = self._modes_used(distill=False, cp_balance_mode=mode)
+                self.assertEqual(set(used), {mode})
+
+    def test_distill_forwards_configured_mode(self) -> None:
+        for mode in ("dualchunk_allgather", "contiguous_allgather"):
+            with self.subTest(mode=mode):
+                used = self._modes_used(distill=True, cp_balance_mode=mode)
+                self.assertEqual(set(used), {mode})
 
 
 if __name__ == "__main__":

@@ -20,6 +20,12 @@ historical ernie5 L+K layout. Guards checked here:
   7. use_erndata + MTP + CP>1 accepts both sequence-scatter layouts
      (``dualchunk_allgather`` / ``contiguous_allgather``) and rejects
      ``contiguous_a2a``.
+  8. use_erndata + MTP + CP>1 rejects ``gpt_model_use_experimental_version``
+     (2-column mask the CP expansion refuses without experimental_dataflow),
+     while CP==1 keeps accepting it.
+  9. use_erndata + MTP + CP>1 rejects a model that builds an Indexer, whose
+     loss-mask path assumes a CP-local ``input_ids``; configs that build no
+     Indexer, and CP==1, stay legal.
 """
 
 from __future__ import annotations
@@ -209,6 +215,89 @@ class TestUseErndataValidation(unittest.TestCase):
         )
         self.assertEqual(cfg.cp_balance_mode, "dualchunk_allgather")
         self.assertEqual(cfg.context_parallel_size, 2)
+
+    def test_erndata_cp_rejects_experimental_version(self) -> None:
+        # gpt_model_use_experimental_version makes GPTEmbedding build a 2-column
+        # attn_mask_startend_row_indices, which the CP mask expansion accepts
+        # only under experimental_dataflow -- forbidden with erndata. Without
+        # this guard the combination dies as "Invalid attention mask shape"
+        # inside DotProductAttention, naming neither flag.
+        with self.assertRaisesRegex(
+            ValueError, r"gpt_model_use_experimental_version"
+        ):
+            TransformerConfig(
+                **self._base_kwargs(
+                    use_erndata=True,
+                    num_nextn_predict_layers=1,
+                    context_parallel_size=2,
+                    cp_balance_mode="contiguous_allgather",
+                    gpt_model_use_experimental_version=True,
+                )
+            )
+
+    def test_erndata_experimental_version_ok_without_cp(self) -> None:
+        # The 2-column mask is only a problem for the CP expansion path, so
+        # CP == 1 must stay legal.
+        cfg = TransformerConfig(
+            **self._base_kwargs(
+                use_erndata=True,
+                num_nextn_predict_layers=1,
+                gpt_model_use_experimental_version=True,
+            )
+        )
+        self.assertTrue(cfg.gpt_model_use_experimental_version)
+
+    def _dsv4_kwargs(self, **overrides):
+        """Smallest config that reaches the dsv4_hybrid validation block.
+
+        ``csa_compress_ratios`` must be num_hidden_layers +
+        num_nextn_predict_layers long, and a ratio in [2, 127] with
+        ``csa_dense_mode=False`` is what makes gpt_layer_specs build a
+        CSAIndexer.
+        """
+        kwargs = {
+            "num_hidden_layers": 2,
+            "hidden_size": 64,
+            "num_attention_heads": 4,
+            "use_erndata": True,
+            "num_nextn_predict_layers": 1,
+            "cp_balance_mode": "contiguous_allgather",
+            "experimental_attention_variant": "dsv4_hybrid",
+            "csa_compress_ratios": [4, 4, 4],
+        }
+        kwargs.update(overrides)
+        return kwargs
+
+    def test_erndata_cp_rejects_indexer_model(self) -> None:
+        # Widening the cp_balance_mode check to accept contiguous_allgather made
+        # erndata + MTP + CP + DSv4 config-legal for the first time, and that
+        # combination is broken downstream: the Indexer loss-mask path
+        # (csa_attention.py:2884-2911, mqa_latent_attention.py:2494-2502)
+        # all-gathers input_ids whenever CP>1 and experimental_dataflow is off,
+        # then reshapes to [b, cp_size * s_local] -- but erndata hands the model
+        # a full-length global input_ids that nothing trims, so the gather
+        # over-counts by cp_size. Keep the rejection at config time instead of
+        # letting it resurface as a shape error inside attention.
+        with self.assertRaisesRegex(ValueError, r"Indexer"):
+            TransformerConfig(**self._dsv4_kwargs(context_parallel_size=2))
+
+    def test_erndata_indexer_ok_without_cp(self) -> None:
+        # CP == 1 never enters the gather branch.
+        cfg = TransformerConfig(**self._dsv4_kwargs(context_parallel_size=1))
+        self.assertEqual(cfg.context_parallel_size, 1)
+
+    def test_erndata_cp_ok_when_no_indexer_is_built(self) -> None:
+        # csa_dense_mode drops the CSAIndexer, and ratio 128 (HCA) never builds
+        # one, so neither config reaches the input_ids gather.
+        for label, overrides in (
+            ("csa_dense_mode", {"csa_dense_mode": True}),
+            ("hca_only", {"csa_compress_ratios": [128, 128, 128]}),
+        ):
+            with self.subTest(label):
+                cfg = TransformerConfig(
+                    **self._dsv4_kwargs(context_parallel_size=2, **overrides)
+                )
+                self.assertEqual(cfg.context_parallel_size, 2)
 
     def test_erndata_accepts_pp_gt_1(self) -> None:
         # PP>1 is supported: cu_seqlens_q is threaded through

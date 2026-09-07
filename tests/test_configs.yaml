@@ -224,8 +224,9 @@ tests:
   - test_case: [tests/multi_card_tests/test_separate_mtp_input_cp.py]
     products:
       - num_gpus: 2
-  # use_erndata=True + CP=2: the RoPE tables must follow the same
-  # zigzag layout the megatron MTP branch slices the embeddings with.
+  # use_erndata=True + CP=2: the RoPE tables must follow the same layout
+  # (config.cp_balance_mode) the megatron MTP branch slices the embeddings
+  # with -- checked for dualchunk_allgather and contiguous_allgather.
   - test_case: [tests/multi_card_tests/test_gpt_mtp_megatron_cp.py]
     products:
       - num_gpus: 2

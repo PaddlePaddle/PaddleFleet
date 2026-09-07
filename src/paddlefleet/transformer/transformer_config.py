@@ -2305,16 +2305,27 @@ class TransformerConfig(ModelParallelConfig):
             # to be one the rest of the model also uses:
             #   dualchunk_allgather  -> scatter_balance    (zigzag, MCore-like)
             #   contiguous_allgather -> scatter_contiguous (rank-order slices)
-            # Both are supported. `contiguous_a2a` (Ulysses) is not: it splits
-            # heads inside the attention rather than round-tripping the sequence
-            # through scatter_contiguous, so its local-sequence layout is not
-            # established for this path.
             #
-            # contiguous_allgather is mandatory — not merely allowed — for the
-            # DSv4 hybrid stack: dsv4_hybrid_attention.py and
-            # mqa_latent_attention.py build their sparse-attention index tables
-            # over the global sequence and then row-slice this rank's queries,
-            # and assert on cp_balance_mode=='contiguous_allgather' under CP.
+            # `contiguous_a2a` (Ulysses) is refused, but NOT because its
+            # sequence layout is unknown: ContextParallelScatterOp dispatches on
+            # `mode.startswith("contiguous")` (context_parallel_utils.py:533),
+            # so a2a shards the sequence contiguously too and
+            # extract_local_contiguous_chunk would be the matching local slice.
+            # What differs is the *mask* contract: dot_product_attention.py:532
+            # skips expand_attn_mask_startend_row_indices_for_cp under a2a
+            # because the head-axis all-to-all leaves each rank holding all
+            # sequence positions for a head subset, so the full-length
+            # row-index tensor this path builds is consumed differently. That
+            # combination has never been run end-to-end here, so it is rejected
+            # rather than assumed to work.
+            #
+            # contiguous_allgather is a *necessary* condition for the DSv4
+            # hybrid stack -- dsv4_hybrid_attention.py:997 and
+            # mqa_latent_attention.py:686 assert on it under CP because they
+            # build sparse-attention index tables over the global sequence and
+            # row-slice this rank's queries. It is not a sufficient one: see the
+            # separate erndata + Indexer + CP rejection in the dsv4_hybrid block
+            # below for a path that is still broken downstream.
             if self.context_parallel_size > 1:
                 if self.cp_balance_mode not in (
                     "dualchunk_allgather",
@@ -2325,6 +2336,28 @@ class TransformerConfig(ModelParallelConfig):
                         f"requires cp_balance_mode in "
                         f"{{'dualchunk_allgather', 'contiguous_allgather'}}, got "
                         f"{self.cp_balance_mode!r}."
+                    )
+                if self.gpt_model_use_experimental_version:
+                    # gpt_embedding.py:467 passes
+                    # include_position_axis=gpt_model_use_experimental_version to
+                    # build_startend_row_indices_from_cu_seqlens, so the mask
+                    # becomes [B, 1, L, 2]. Under CP,
+                    # expand_attn_mask_startend_row_indices_for_cp
+                    # (dot_product_attention.py:470-480) accepts a 2-column mask
+                    # only when config.experimental_dataflow is True -- which
+                    # this same block forbids for erndata -- and otherwise
+                    # raises "Invalid attention mask shape" from inside
+                    # attention. Reject here instead, where the offending flag
+                    # is named.
+                    raise ValueError(
+                        "use_erndata=True with MTP + context_parallel_size>1 is "
+                        "incompatible with "
+                        "gpt_model_use_experimental_version=True: it makes "
+                        "GPTEmbedding emit a 2-column "
+                        "attn_mask_startend_row_indices, which the CP mask "
+                        "expansion only accepts under "
+                        "experimental_dataflow=True (forbidden with erndata). "
+                        "Set gpt_model_use_experimental_version=False."
                     )
             # PP>1 is supported without any external dataloader help:
             # cu_seqlens_q travels down the pipeline dict (like position_ids)
@@ -2853,6 +2886,48 @@ class TransformerConfig(ModelParallelConfig):
             has_mqa_indexer = self.hybrid_mla_attention == "mqa_dsa" and any(
                 int(ratio) == -2 for ratio in self.csa_compress_ratios
             )
+            if (
+                (has_csa_indexer or has_mqa_indexer)
+                and self.use_erndata
+                and self.num_nextn_predict_layers > 0
+                and self.context_parallel_size > 1
+            ):
+                # Both Indexers derive their token-count denominator from
+                # input_ids, and both assume input_ids arrives CP-*local*:
+                # csa_attention.py:2884-2911 and
+                # mqa_latent_attention.py:2494-2502 gather it whenever
+                # `cp_world_size > 1 and not experimental_dataflow` and then
+                # reshape to [b, cp_size * s_local].
+                #
+                # That condition is exactly the erndata condition -- erndata
+                # forbids experimental_dataflow -- but the premise is wrong on
+                # this path: erndata hands the model a full-length global
+                # input_ids and nothing trims it (transformer_layer.py:800-811
+                # compares in global units, so its re-slice never fires). The
+                # gather therefore produces b * L * cp_size elements for a
+                # b * L reshape and dies with a shape error deep inside
+                # attention, and the position_offset = cp_rank * sq slice below
+                # it would be wrong even if the reshape were fixed.
+                #
+                # Before cp_balance_mode became configurable on this path the
+                # combination was unreachable: erndata + MTP + CP required
+                # dualchunk_allgather while the DSv4 layers assert
+                # contiguous_allgather. Widening that check made it
+                # config-legal, so keep the rejection explicit here rather than
+                # letting it resurface as a runtime crash. Making it work means
+                # teaching the Indexer loss-mask path that input_ids may already
+                # be global -- not done.
+                raise ValueError(
+                    "use_erndata=True with MTP + context_parallel_size>1 does "
+                    "not support a model that builds an Indexer (CSAIndexer="
+                    f"{has_csa_indexer}, DSAIndexer={has_mqa_indexer}). The "
+                    "Indexer loss-mask path all-gathers input_ids and reshapes "
+                    "to [b, cp_size * s_local], but erndata already delivers "
+                    "input_ids full-length and global, so the gather "
+                    "over-counts by cp_size and fails inside attention. Run "
+                    "this model with context_parallel_size=1, or without "
+                    "use_erndata."
+                )
             if (
                 (has_csa_indexer or has_mqa_indexer)
                 and self.dsa_indexer_use_sparse_loss
