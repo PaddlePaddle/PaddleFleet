@@ -439,10 +439,10 @@ def extract_local_cp_chunks(tensor_full, cp_rank, cp_size, axis=1, *, mode):
     # is unknown: ContextParallelScatterOp dispatches on
     # mode.startswith("contiguous"), so a2a shards the sequence contiguously and
     # extract_local_contiguous_chunk would be the matching slice. What differs
-    # is the attention-side mask contract (dot_product_attention.py:532 skips
-    # the CP row-index expansion under a2a), and that has not been validated on
-    # this path. Fail loudly instead of assuming: a wrong layout is a
-    # silent-wrong-loss bug.
+    # is the attention-side mask contract (DotProductAttention.forward skips
+    # expand_attn_mask_startend_row_indices_for_cp under a2a), and that has not
+    # been validated on this path. Fail loudly instead of assuming: a wrong
+    # layout is a silent-wrong-loss bug.
     raise ValueError(
         f"extract_local_cp_chunks: unsupported cp_balance_mode={mode!r} for the "
         "use_erndata MTP path; expected 'dualchunk_allgather' or "

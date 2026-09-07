@@ -216,8 +216,8 @@ def _fake_cp(cp_size=2):
             mock.patch.object(ll.ContextParallelGatherOp, "apply", identity)
         )
 
-        # The distillation branch swaps the gather for MTPDistillationLossShift
-        # under contiguous_allgather (language_loss.py:789-795). That PyLayer
+        # The distillation branch of LanguageLoss.forward swaps the gather for
+        # MTPDistillationLossShift under contiguous_allgather. That PyLayer
         # needs a real hybrid communicate group, so stand in for it with a
         # shape-faithful stub: it consumes [B, S, H] and returns
         # [B, S + K - 1, H] (the local slice plus the boundary window its P2P

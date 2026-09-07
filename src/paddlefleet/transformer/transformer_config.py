@@ -2308,11 +2308,11 @@ class TransformerConfig(ModelParallelConfig):
             #
             # `contiguous_a2a` (Ulysses) is refused, but NOT because its
             # sequence layout is unknown: ContextParallelScatterOp dispatches on
-            # `mode.startswith("contiguous")` (context_parallel_utils.py:533),
-            # so a2a shards the sequence contiguously too and
-            # extract_local_contiguous_chunk would be the matching local slice.
-            # What differs is the *mask* contract: dot_product_attention.py:532
-            # skips expand_attn_mask_startend_row_indices_for_cp under a2a
+            # `mode.startswith("contiguous")`, so a2a shards the sequence
+            # contiguously too and extract_local_contiguous_chunk would be the
+            # matching local slice. What differs is the *mask* contract:
+            # DotProductAttention.forward skips
+            # expand_attn_mask_startend_row_indices_for_cp under a2a
             # because the head-axis all-to-all leaves each rank holding all
             # sequence positions for a head subset, so the full-length
             # row-index tensor this path builds is consumed differently. That
@@ -2320,8 +2320,8 @@ class TransformerConfig(ModelParallelConfig):
             # rather than assumed to work.
             #
             # contiguous_allgather is a *necessary* condition for the DSv4
-            # hybrid stack -- dsv4_hybrid_attention.py:997 and
-            # mqa_latent_attention.py:686 assert on it under CP because they
+            # hybrid stack -- DSv4HybridAttention.forward and
+            # MQALatentAttention.__init__ assert on it under CP because they
             # build sparse-attention index tables over the global sequence and
             # row-slice this rank's queries. It is not a sufficient one: see the
             # separate erndata + Indexer + CP rejection in the dsv4_hybrid block
@@ -2338,12 +2338,12 @@ class TransformerConfig(ModelParallelConfig):
                         f"{self.cp_balance_mode!r}."
                     )
                 if self.gpt_model_use_experimental_version:
-                    # gpt_embedding.py:467 passes
+                    # GPTEmbedding.forward passes
                     # include_position_axis=gpt_model_use_experimental_version to
                     # build_startend_row_indices_from_cu_seqlens, so the mask
                     # becomes [B, 1, L, 2]. Under CP,
-                    # expand_attn_mask_startend_row_indices_for_cp
-                    # (dot_product_attention.py:470-480) accepts a 2-column mask
+                    # DotProductAttention.expand_attn_mask_startend_row_indices_for_cp
+                    # accepts a 2-column mask
                     # only when config.experimental_dataflow is True -- which
                     # this same block forbids for erndata -- and otherwise
                     # raises "Invalid attention mask shape" from inside
@@ -2894,15 +2894,15 @@ class TransformerConfig(ModelParallelConfig):
             ):
                 # Both Indexers derive their token-count denominator from
                 # input_ids, and both assume input_ids arrives CP-*local*:
-                # csa_attention.py:2884-2911 and
-                # mqa_latent_attention.py:2494-2502 gather it whenever
+                # CompressedSparseAttention.forward and
+                # MQALatentAttention._indexer_loss_mask gather it whenever
                 # `cp_world_size > 1 and not experimental_dataflow` and then
                 # reshape to [b, cp_size * s_local].
                 #
                 # That condition is exactly the erndata condition -- erndata
                 # forbids experimental_dataflow -- but the premise is wrong on
                 # this path: erndata hands the model a full-length global
-                # input_ids and nothing trims it (transformer_layer.py:800-811
+                # input_ids and nothing trims it (TransformerLayer.forward
                 # compares in global units, so its re-slice never fires). The
                 # gather therefore produces b * L * cp_size elements for a
                 # b * L reshape and dies with a shape error deep inside

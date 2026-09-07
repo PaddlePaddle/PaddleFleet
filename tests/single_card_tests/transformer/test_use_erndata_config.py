@@ -272,7 +272,8 @@ class TestUseErndataValidation(unittest.TestCase):
         # Widening the cp_balance_mode check to accept contiguous_allgather made
         # erndata + MTP + CP + DSv4 config-legal for the first time, and that
         # combination is broken downstream: the Indexer loss-mask path
-        # (csa_attention.py:2884-2911, mqa_latent_attention.py:2494-2502)
+        # (CompressedSparseAttention.forward,
+        # MQALatentAttention._indexer_loss_mask)
         # all-gathers input_ids whenever CP>1 and experimental_dataflow is off,
         # then reshapes to [b, cp_size * s_local] -- but erndata hands the model
         # a full-length global input_ids that nothing trims, so the gather

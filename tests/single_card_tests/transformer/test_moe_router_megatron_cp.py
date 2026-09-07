@@ -16,8 +16,8 @@
 
 The router's ``forward`` has an ``elif`` that, under CP>1 +
 use_erndata=True, slices ``input_ids`` down to this rank's chunk to match the
-embedding (moe_router.py:1500, 1514, 1518-1520) — in whatever layout
-``config.cp_balance_mode`` names. We reach it single-card by:
+embedding — in whatever layout ``config.cp_balance_mode`` names. We reach it
+single-card by:
 
 - ``TopKRouter.__new__`` + MagicMock config (experimental_dataflow=False so
   the preceding ``if`` is skipped and the ``elif`` is evaluated;
@@ -28,7 +28,7 @@ embedding (moe_router.py:1500, 1514, 1518-1520) — in whatever layout
   ``input``'s, so the ``elif`` condition is True;
 - replacing the (locally-imported) ``extract_local_cp_chunks`` with a recorder
   that captures its kwargs and then raises a sentinel, so execution stops right
-  after line 1520 (before the full MoE routing, which needs real gate weights).
+  after the slice (before the full MoE routing, which needs real gate weights).
   The sentinel proves the slice line was reached; the captured ``mode`` proves
   the router read ``config.cp_balance_mode`` instead of assuming a layout.
 """
