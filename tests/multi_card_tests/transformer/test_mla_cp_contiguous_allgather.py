@@ -207,6 +207,17 @@ def build_cfg(cp_size, sink=False, attn_mode="mha"):
     c.dsa_index_topk = 128
     c.dsa_indexer_rotary_interleaved = False
     c.dsa_indexer_use_sparse_loss = True
+    # The indexer's ranking reaches attention only through ``topk`` indices,
+    # which carry no gradient, so its parameters join the backward graph *only*
+    # via the KL loss -- and ``_needs_indexer_loss``
+    # (mqa_latent_attention.py:990) gates that on a positive coefficient. At the
+    # default 0.0 no ``indexer.*`` parameter can ever get a gradient, which is
+    # what ``test_6b`` asserts about. Same knob and magnitude as
+    # ``test_mqa_dsa_cp.py::test_7_indexer_loss_normalisation``, whose subject
+    # is the loss *denominator*; here the loss is the means by which the
+    # indexer's own CP path is compared against CP=1 through the whole MLA
+    # layer.
+    c.dsa_indexer_loss_coeff = 0.1
     c.csa_window_size = 128
     c.add_full_attention_sink_bias = sink
     c.rope_type = "rope"
