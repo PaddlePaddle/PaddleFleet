@@ -402,6 +402,41 @@ class TestMTPMegatronCPContiguousRope(unittest.TestCase):
             masks["dualchunk_allgather"], masks["contiguous_allgather"]
         )
 
+    def test_cp_invariant_loss_contiguous(self):
+        """End-to-end loss under ``contiguous_allgather``, not just the layout.
+
+        The layout checks above stop at ``GPTEmbedding``; everything after it --
+        ``roll_tensor`` + ``extract_local_cp_chunks`` per MTP depth, the CP
+        flashmask attention (``FlashMaskContextParallel`` with
+        ``mode="contiguous_allgather"``), and LanguageLoss's per-depth label
+        scatter -- is only exercised by a real forward/backward. Same ``REF_LOSS``
+        as the zigzag test: ``cp_balance_mode`` is a no-op at ``cp_size == 1``, so
+        the single-card reference is shared, and a correct implementation is
+        CP-invariant in either layout.
+        """
+        if (
+            not paddle.device.current_device_is_cpu
+            and paddle.device.get_device_capability()[0] < 9
+        ):
+            self.skipTest("requires SM90+ for the CP flashmask kernels")
+
+        paddle.seed(SEED)
+        model = gpt_builder(
+            _make_config(cp_balance_mode="contiguous_allgather"), num_stages=1
+        )
+        model = paddle.amp.decorate(
+            models=model, optimizers=None, level="O2", dtype="bfloat16"
+        )
+        loss = _forward_backward(model, _make_inputs())
+
+        val = float(loss.astype("float32"))
+        print(
+            f"[MTP-MEGATRON-CP] cp={CP_SIZE} mode=contiguous loss={val}",
+            flush=True,
+        )
+        self.assertTrue(np.isfinite(val), f"loss must be finite, got {val}")
+        np.testing.assert_allclose(val, REF_LOSS, rtol=5e-3, atol=0)
+
 
 class TestMTPMegatronCP(unittest.TestCase):
     def test_cp_invariant_loss(self):

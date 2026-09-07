@@ -20,6 +20,7 @@ import sys
 import unittest
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import paddle
@@ -346,6 +347,38 @@ class TestTransformerConfig(unittest.TestCase):
         )
         self.assertTrue(cfg.enable_mtp_magic_send)
         self.assertTrue(cfg.mtp_shared_last_layer)
+
+    def test_magic_send_rejects_tie_word_embeddings(self):
+        """``tie_word_embeddings`` wins the desc branch and drops mtp_embed.
+
+        get_layer_desc_list tests the tie before enable_mtp_magic_send, so with
+        both on no ``mtp_embed`` desc is emitted, _mtp_embed_global_group
+        collapses to None and _synchronize_mtp_embed_weight broadcasts a zero
+        buffer into the MTP stage's real (perform_initialization=False) table:
+        training proceeds on an all-zero, never-synced vocab table. A ValueError
+        rather than an assert, for the reason spelled out in
+        test_multimodal_rejection_survives_optimized_mode.
+
+        Reached through ``from_config`` because ``tie_word_embeddings`` is not a
+        TransformerConfig field -- it arrives via register_attributes' setattr
+        fallback, which is exactly how a model_config.json delivers it.
+        """
+        cfg_in = SimpleNamespace(
+            num_hidden_layers=2,
+            hidden_size=64,
+            num_attention_heads=4,
+            enable_mtp_magic_send=True,
+            num_nextn_predict_layers=1,
+            pipeline_model_parallel_size=2,
+            tie_word_embeddings=True,
+        )
+        with self.assertRaisesRegex(ValueError, r"tie_word_embeddings"):
+            TransformerConfig.from_config(cfg_in)
+
+        # tie_word_embeddings=False must leave magic send alone.
+        cfg_in.tie_word_embeddings = False
+        cfg = TransformerConfig.from_config(cfg_in)
+        self.assertTrue(cfg.enable_mtp_magic_send)
 
     def test_magic_send_rejects_multimodal_embedding(self):
         """Magic send does not produce mtp_emb_res, which the multimodal

@@ -399,7 +399,11 @@ class GPTModel(PipelineLayer):
                 #
                 # The pivot for this key is emitted above, on the last backbone
                 # TransformerLayer; aliasing needs both on the same rank (see the
-                # co-location note in transformer_config.py).
+                # co-location note in transformer_config.py). All K descs reuse
+                # the one key, so at K > 1 an off-stage pivot aborts the build
+                # rather than degrading to broadcast -- depth 0 becomes the stored
+                # shared layer and depth 1 aliases against its
+                # `transformer_layer.`-prefixed names.
                 if getattr(self.config, "mtp_shared_last_layer", False):
                     desc = SharedLayerDesc(
                         "mtp_reuse_transformer",

@@ -373,6 +373,12 @@ def extract_local_contiguous_chunk(tensor_full, cp_rank, cp_size, axis=1):
             f"is not divisible by cp_size={cp_size}."
         )
     chunk = seq_len // cp_size
+    # Deliberately a bare slice, unlike scatter_contiguous's paddle.assign: the
+    # per-depth caller keeps only this result, so a view holds F while a copy
+    # holds F + F/cp until the source is freed. Measured peaks over the roll
+    # loop are (2K+1)F for views vs 2F + K*F + (K+1)F/cp for assign -- worse at
+    # K=1 (every erndata model config here), even at K=3. The dominant term in
+    # both is roll_tensor's own grad-node retention, which neither changes.
     return paddle.slice(
         tensor_full,
         axes=[dim],

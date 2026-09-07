@@ -2139,10 +2139,23 @@ class TransformerConfig(ModelParallelConfig):
                 )
 
         if self.enable_mtp_magic_send:
-            assert not getattr(self, "tie_word_embeddings", False), (
-                "enable_mtp_magic_send with tie_word_embeddings=True is not yet validated. "
-                "Please disable tie_word_embeddings when using magic send MTP."
-            )
+            # Raise, not assert, for the same reason as multimodal_embedding
+            # below: stripped by ``python -O``, this one fails silently rather
+            # than loudly. get_layer_desc_list tests tie_word_embeddings before
+            # enable_mtp_magic_send, so the tie wins and `mtp_embed` is never
+            # emitted; _mtp_embed_global_group then collapses to None and
+            # _synchronize_mtp_embed_weight broadcasts a zero buffer from
+            # stage 0 into the MTP stage's real (perform_initialization=False)
+            # table. Training proceeds on an all-zero, never-synced vocab table.
+            if getattr(self, "tie_word_embeddings", False):
+                raise ValueError(
+                    "enable_mtp_magic_send with tie_word_embeddings=True is "
+                    "not yet validated: the embedding desc branch emits the "
+                    "tie and drops magic send's `mtp_embed`, leaving the MTP "
+                    "stage with an all-zero vocab table and no gradient sync. "
+                    "Please disable tie_word_embeddings when using magic send "
+                    "MTP."
+                )
             # NOTE: mtp_shared_last_layer is deliberately NOT rejected here. The
             # two are orthogonal -- SharedLayerDesc with
             # shared_submodule_weight_only=True aliases only the params under
@@ -2156,6 +2169,15 @@ class TransformerConfig(ModelParallelConfig):
             #    descs inside this rank's range, so a PP boundary between them
             #    downgrades _alias_shared_layer to _construct_shared_comm: still
             #    numerically tied, but two copies, so the memory saving is gone.
+            #    At num_nextn_predict_layers > 1 an off-stage pivot is worse than
+            #    that -- it aborts construction. paddle stores the *whole* first
+            #    desc it sees for the key, so on an MTP-only stage depth 0 becomes
+            #    shared_layers['mtp_reuse_transformer'] and depth 1 aliases
+            #    against it: source names carry the `transformer_layer.` prefix,
+            #    dest names (taken from dest_layer.transformer_layer) do not,
+            #    every lookup misses, and the assert below fires with
+            #    "miss parameters:N". Only seg_method="layer:..." keeps them
+            #    co-located; paddle's default is "uniform", which can split them.
             # 2. _alias_shared_layer asserts `total_params == aliased_count`, so
             #    the pivot and the MTP layer must resolve to the same attention
             #    parameter set -- for dsv4_hybrid, csa_compress_ratios at indices
@@ -2273,22 +2295,47 @@ class TransformerConfig(ModelParallelConfig):
                         f"{self.cp_balance_mode!r}."
                     )
                 if self.gpt_model_use_experimental_version:
-                    # GPTEmbedding passes
-                    # include_position_axis=gpt_model_use_experimental_version to
-                    # build_startend_row_indices_from_cu_seqlens, making the mask
-                    # [B, 1, L, 2]. Under CP the mask expansion accepts a
-                    # 2-column mask only when experimental_dataflow is True,
-                    # which this same block forbids; otherwise attention raises
-                    # "Invalid attention mask shape", naming neither flag.
+                    # Not a mask-shape problem, despite what the CP mask
+                    # expansion in DotProductAttention.forward suggests: the
+                    # erndata loader co-emits attn_mask_startend_row_indices
+                    # [B, 1, L, 1] with cu_seqlens (both under pack_by_cu_seqlen,
+                    # which defaults True), so GPTEmbedding's
+                    # include_position_axis branch -- gated on the mask being
+                    # absent -- never fires and no 2-column mask is ever built.
+                    #
+                    # What the flag does change here is the attention entry
+                    # point: it routes query/key through _apply_ec_complex_3d_mrope,
+                    # which indexes position_ids on a 3-way last axis, while
+                    # erndata delivers position_ids as [B, L] and
+                    # transformer_layer leaves it untouched. It also nulls the
+                    # rotary tables, making the CP RoPE slicing this path relies
+                    # on inert. Neither has been run under CP, so refuse rather
+                    # than let it fail deep inside attention.
                     raise ValueError(
                         "use_erndata=True with MTP + context_parallel_size>1 is "
                         "incompatible with "
-                        "gpt_model_use_experimental_version=True: it makes "
-                        "GPTEmbedding emit a 2-column "
-                        "attn_mask_startend_row_indices, which the CP mask "
-                        "expansion only accepts under "
-                        "experimental_dataflow=True (forbidden with erndata). "
-                        "Set gpt_model_use_experimental_version=False."
+                        "gpt_model_use_experimental_version=True: that flag "
+                        "switches attention to the EC 3-axis MRoPE path, which "
+                        "expects position_ids with a mode axis, while erndata "
+                        "delivers [B, L]. Set "
+                        "gpt_model_use_experimental_version=False."
+                    )
+                if self.mtp_distillation_loss:
+                    # LanguageLoss's distillation branch builds lossmask from
+                    # labels_cur_depth, which the erndata path has already sliced
+                    # to L/cp, and then scatters it again -- the sibling
+                    # non-distillation branch skips that second scatter for
+                    # erndata, this one does not. The result is
+                    # [B, L/cp**2, 1] * [B, L/cp, V]. Its `xishu` normaliser is a
+                    # rank-local token count divided into a CP-all-reduced sum on
+                    # top of that. Both are pre-existing; reject the combination
+                    # here rather than ship a broadcast error.
+                    raise ValueError(
+                        "use_erndata=True with MTP + context_parallel_size>1 is "
+                        "incompatible with mtp_distillation_loss=True: the "
+                        "distillation branch double-scatters its loss mask and "
+                        "normalises a CP-reduced sum by a rank-local token "
+                        "count. Set mtp_distillation_loss=False."
                     )
             # PP>1 is supported without any external dataloader help:
             # cu_seqlens_q travels down the pipeline dict (like position_ids)
@@ -2298,6 +2345,33 @@ class TransformerConfig(ModelParallelConfig):
             # writes the same stash on the PP=1 / first stage. If the stash is
             # ever missing on the loss rank, LanguageLoss.forward raises rather
             # than silently rolling labels across packed-doc boundaries.
+
+        if self.use_erndata and self.context_parallel_size > 1:
+            # Under erndata nothing upstream shards by CP: the loader broadcasts
+            # every tensor full-length to the whole CP group
+            # (erndata_paddle_adapter._get_cp_group_and_src) and the model is
+            # expected to take its own slice. The only place that happens is
+            # GPTEmbedding's MTP branch, gated on num_nextn_predict_layers > 0
+            # and not mtp_load_weight_only; the generic
+            # ContextParallelScatterOp fallback beside it is gated on
+            # experimental_dataflow, which the block above forbids. So with MTP
+            # off (or weight-only) the hidden states stay length L while
+            # DotProductAttention computes seq_len = key.shape[1] * cp_size and
+            # expand() fails against an L-row mask -- a shape error naming
+            # neither use_erndata nor cp_balance_mode. Note use_erndata is set
+            # implicitly by erniebot whenever the YAML carries an `erndata:`
+            # section, so this is reachable without any MTP-specific flag.
+            if self.num_nextn_predict_layers <= 0 or self.mtp_load_weight_only:
+                raise ValueError(
+                    "use_erndata=True with context_parallel_size>1 requires "
+                    "MTP (num_nextn_predict_layers>0, mtp_load_weight_only="
+                    "False): the erndata loader hands every CP rank the "
+                    "full-length sequence and only the MTP branch of "
+                    "GPTEmbedding slices it, so with MTP off no CP sharding "
+                    "happens at all. Got num_nextn_predict_layers="
+                    f"{self.num_nextn_predict_layers}, mtp_load_weight_only="
+                    f"{self.mtp_load_weight_only}."
+                )
 
         if self.intermediate_size is None:
             self.intermediate_size = 4 * self.hidden_size

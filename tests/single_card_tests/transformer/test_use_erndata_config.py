@@ -26,6 +26,10 @@ historical ernie5 L+K layout. Guards checked here:
   9. use_erndata + MTP + CP>1 rejects a model that builds an Indexer, whose
      loss-mask path assumes a CP-local ``input_ids``; configs that build no
      Indexer, and CP==1, stay legal.
+ 10. use_erndata + MTP + CP>1 rejects ``mtp_distillation_loss`` (that branch
+     double-scatters its loss mask).
+ 11. use_erndata + CP>1 requires a real MTP layer at all: nothing else shards
+     the full-length tensors the loader broadcasts.
 """
 
 from __future__ import annotations
@@ -305,6 +309,89 @@ class TestUseErndataValidation(unittest.TestCase):
         )
         self.assertEqual(cfg.pipeline_model_parallel_size, 2)
         self.assertTrue(cfg.use_erndata)
+
+    def test_erndata_cp_rejects_mtp_distillation_loss(self) -> None:
+        # LanguageLoss's distillation branch derives lossmask from the
+        # already-CP-sliced labels_cur_depth and then scatters it a second time,
+        # unlike its non-distillation sibling. Nothing else in __post_init__
+        # looked at mtp_distillation_loss, so the combination used to reach a
+        # broadcast error at `lossmask * plogp`.
+        with self.assertRaisesRegex(ValueError, r"mtp_distillation_loss"):
+            TransformerConfig(
+                **self._base_kwargs(
+                    use_erndata=True,
+                    num_nextn_predict_layers=1,
+                    context_parallel_size=2,
+                    cp_balance_mode="contiguous_allgather",
+                    mtp_distillation_loss=True,
+                )
+            )
+
+    def test_erndata_distillation_ok_without_cp(self) -> None:
+        # The double scatter only exists on the CP branch.
+        cfg = TransformerConfig(
+            **self._base_kwargs(
+                use_erndata=True,
+                num_nextn_predict_layers=1,
+                mtp_distillation_loss=True,
+            )
+        )
+        self.assertTrue(cfg.mtp_distillation_loss)
+
+    def test_erndata_cp_requires_mtp(self) -> None:
+        # GPTEmbedding only slices the erndata tensors inside its MTP branch, and
+        # the generic ContextParallelScatterOp fallback beside it needs
+        # experimental_dataflow, which erndata forbids. With MTP off nothing
+        # shards at all and attention dies on a shape mismatch naming neither
+        # flag. Reachable without any MTP-specific setting, since erniebot sets
+        # use_erndata implicitly from the YAML's `erndata:` section.
+        with self.assertRaisesRegex(ValueError, r"num_nextn_predict_layers"):
+            TransformerConfig(
+                **self._base_kwargs(
+                    use_erndata=True,
+                    num_nextn_predict_layers=0,
+                    context_parallel_size=2,
+                )
+            )
+
+    def test_erndata_cp_rejects_weight_only_mtp(self) -> None:
+        # WeightOnlyMTPLayer.forward returns its inputs unchanged, so the
+        # embedding's slicing branch is gated off and this collapses to the
+        # no-MTP case above.
+        with self.assertRaisesRegex(ValueError, r"mtp_load_weight_only"):
+            TransformerConfig(
+                **self._base_kwargs(
+                    use_erndata=True,
+                    num_nextn_predict_layers=1,
+                    context_parallel_size=2,
+                    cp_balance_mode="contiguous_allgather",
+                    mtp_load_weight_only=True,
+                )
+            )
+
+    def test_erndata_without_mtp_still_ok_at_cp1(self) -> None:
+        # Regression guard for the check above: CP==1 needs no sharding, so the
+        # K==0 erndata config must stay legal.
+        cfg = TransformerConfig(
+            **self._base_kwargs(
+                use_erndata=True,
+                num_nextn_predict_layers=0,
+                context_parallel_size=1,
+            )
+        )
+        self.assertTrue(cfg.use_erndata)
+
+    def test_non_erndata_cp_without_mtp_is_untouched(self) -> None:
+        # The new check must not leak into the default dataflow, where
+        # ContextParallelScatterOp does the sharding.
+        cfg = TransformerConfig(
+            **self._base_kwargs(
+                num_nextn_predict_layers=0,
+                context_parallel_size=2,
+            )
+        )
+        self.assertFalse(cfg.use_erndata)
+        self.assertEqual(cfg.context_parallel_size, 2)
 
     def test_non_erndata_compatible_with_all_flags(self) -> None:
         # Default path must never trip a new guard, even when other MTP flags
