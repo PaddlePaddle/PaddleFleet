@@ -27,10 +27,13 @@ Four fused operations:
   - compute_h:    fused r * proj * alpha + bias, plus the two sigmoid heads
 """
 
+import logging
 import math
 
 import paddle
 from paddle import Tensor
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Check cuTile availability
@@ -54,46 +57,92 @@ def _get_cuda_stream():
     return paddle.device.current_stream().stream_base.cuda_stream
 
 
+# The align proj_rms kernel is tiled 32 columns wide over 256-element k blocks
+# and only takes bf16 x, so it does not cover the whole public mHC config range
+# (num_residual_streams=8 gives N = n*n+2*n = 80). Unsupported shapes fall back
+# to cuTile instead of asserting, so enabling the bit-compare cannot crash a
+# model that trains fine. The post kernel gcd's its tile, so it is shape-general.
+def align_proj_rms_unsupported(x: Tensor, weight: Tensor) -> str:
+    """Return why the align proj_rms kernel cannot run, or "" if it can."""
+    N = weight.shape[0]
+    K = x.shape[1]
+    if N > 32:
+        return f"N={N} exceeds the 32-wide GEMM tile"
+    if K % 256 != 0:
+        return f"K={K} is not a multiple of 256"
+    if x.dtype != paddle.bfloat16:
+        return f"x is {x.dtype}, the kernel only takes bf16"
+    if weight.dtype not in (paddle.float32, paddle.bfloat16):
+        return f"weight is {weight.dtype}, only fp32/bf16 upcast exactly"
+    return ""
+
+
+def align_h_post_bda_unsupported(
+    h_res: Tensor,
+    original_residual: Tensor,
+    h_post: Tensor,
+    x: Tensor,
+    bias: Tensor | None,
+    fuse_cast: bool,
+) -> str:
+    """Return why the align h_post_bda kernel cannot run, or "" if it can."""
+    if bias is not None:
+        return "bias is not None, the kernel is bias-free"
+    if not fuse_cast:
+        return "fuse_cast=False, the kernel always stores bf16"
+    if original_residual.dtype != paddle.bfloat16 or x.dtype != paddle.bfloat16:
+        # fuse_cast only says "x may be narrow", not "x is bf16".
+        return (
+            f"residual/x are {original_residual.dtype}/{x.dtype}, "
+            f"the kernel only takes bf16"
+        )
+    if h_res.dtype != paddle.float32 or h_post.dtype != paddle.float32:
+        return f"h_res/h_post are {h_res.dtype}/{h_post.dtype}, expected fp32"
+    return ""
+
+
+_align_fallback_logged = False
+
+
+def _log_align_fallback(site: str, reason: str) -> None:
+    """Warn once. A silent fallback would look like a passing bit-compare."""
+    global _align_fallback_logged
+    if not _align_fallback_logged:
+        _align_fallback_logged = True
+        logger.warning(
+            "mHC %s: sglang-aligned kernel unsupported (%s); using cuTile. "
+            "Train/infer bits will not match at this site.",
+            site,
+            reason,
+        )
+
+
 def _tilelang_proj_rms_fwd_align(
     x: Tensor, weight: Tensor, eps: float
 ) -> tuple[Tensor, Tensor, Tensor]:
     """tilelang proj_rms forward with the sglang mhc_pre accumulation order.
 
-    Computes ``proj = x @ weight^T``, ``r = 1/(sqrt(ss)/sqrt(K) + eps)`` (the
-    cuTile formula, unchanged) and ``norm = sqrt(ss)`` with the SAME
-    accumulation order as the sglang inference single-chain ``mhc_pre`` kernel
-    (``mhc_pre_gemm_sqrsum_tilelang``): four stride-4 chain accumulators across
-    the whole of K and one 4->1 reduce tree at the end of the chain (see
-    ``paddlefleet.tilelang_ops.mhc.proj_rms_align``). Only the accumulation
-    order is aligned; ``eps``/sinkhorn ``exp`` stay as-is because the
-    inference side's ``mhc_align_fleet`` gate (ernie) already matches the
-    training forms. Memory and behavior otherwise mirror
-    ``_cutile_proj_rms_fwd`` (bf16 x, fp32/bf16 weight, fp32 outputs, ``norm``
-    kept for ``_ct_proj_rms_bwd``).
+    Same outputs and memory behavior as ``_cutile_proj_rms_fwd`` (bf16 x,
+    fp32/bf16 weight, fp32 outputs, ``norm`` kept for the backward), but the
+    sum_sq accumulation order matches sglang's ``mhc_pre_gemm_sqrsum_tilelang``
+    so the two sides can be bit-compared. See
+    ``paddlefleet.tilelang_ops.mhc.proj_rms_align``.
 
-    Only used when ``ABLATION_INSPECT_TENSOR=1`` (train/infer bit-compare run);
-    the cuTile path is unchanged.
+    Only used when ``ABLATION_INSPECT_TENSOR=1``; cuTile path unchanged.
+    Callers gate on ``align_proj_rms_unsupported``; the assert below only
+    catches a direct call that skipped it.
     """
     K = x.shape[1]
     N = weight.shape[0]
-    assert N <= 32, f"align path requires N <= 32, got {N}"
-    assert x.dtype == paddle.bfloat16, (
-        f"align path requires bf16 x (fuse_cast=True), got {x.dtype}"
-    )
-    assert weight.dtype in (paddle.float32, paddle.bfloat16), (
-        f"align path requires fp32 or bf16 weight (exact upcast), "
-        f"got {weight.dtype}"
-    )
-    # Mirror the inference kernel: the GEMM tile is 32 columns wide (only the
-    # first hc_mult3 are stored), so pad fn to 32 rows with zeros. bf16->fp32
-    # is lossless, so a bf16 gate weight produces the same bits as an fp32 one.
+    reason = align_proj_rms_unsupported(x, weight)
+    assert not reason, f"align proj_rms on unsupported input: {reason}"
+    # The GEMM tile is 32 columns wide (only the first N are stored), so pad fn
+    # to 32 rows. bf16->fp32 is lossless, so a bf16 weight gives the same bits.
     fn = paddle.zeros([32, K], dtype="float32")
     fn[:N] = weight.detach().astype("float32")
     from paddlefleet.tilelang_ops.mhc import proj_rms_align
 
     kernel = proj_rms_align.mhc_align_proj_rms_fwd(N, K, float(eps))
-    # The kernel allocates its own outputs (out_idx) and returns them; the
-    # paddle compat layer converts the returned tensors back to paddle.
     proj, norm, r = kernel(x.detach().contiguous(), fn)
     return proj, norm, r
 
@@ -106,53 +155,29 @@ def _tilelang_h_post_bda_fwd_align(
 ) -> Tensor:
     """tilelang h_post_bda forward with the sglang mhc_post FMA contraction.
 
-    Computes the same expression as ``_cutile_h_post_bda_fwd`` in its
-    ``fuse_cast=True``, ``bias=None`` form -- ``out = h_res^T @ orig + h_post
-    (outer) x`` in an fp32 accumulator with a single bf16 store -- but by
-    running the sglang inference kernel verbatim
-    (``paddlefleet.tilelang_ops.mhc.h_post_bda_align.mhc_post_tilelang``), so
-    the two sides make the same choice about which of the two multiplies in
-    ``h_post*x + h_res[0]*orig[0]`` is absorbed into the single FFMA and which
-    is left as a rounding FMUL. cuTile absorbs ``h_res[0]*orig[0]``, TileLang
-    absorbs ``h_post*x``; both are legal ``-fmad=true`` contractions, ~1 fp32
-    ULP apart, and the gap only becomes visible on bf16 rounding ties. See the
-    module docstring of ``h_post_bda_align`` for the evidence.
+    Same expression as ``_cutile_h_post_bda_fwd`` in its ``fuse_cast=True``,
+    ``bias=None`` form, but run through the sglang kernel verbatim so ptxas
+    makes the same contraction choice for ``h_post*x + h_res[0]*orig[0]``. See
+    ``paddlefleet.tilelang_ops.mhc.h_post_bda_align``.
 
-    The index conventions already agree, so unlike
-    ``_tilelang_proj_rms_fwd_align`` there is no padding and no transpose --
-    only a reshape to the kernel's 3D/2D contract.
-
-    Only used when ``ABLATION_INSPECT_TENSOR=1`` (train/infer bit-compare run);
-    the cuTile path is unchanged.
+    Only used when ``ABLATION_INSPECT_TENSOR=1``; cuTile path unchanged.
+    Callers gate on ``align_h_post_bda_unsupported``; the assert below only
+    catches a direct call that skipped it.
     """
     s, b, n, C = original_residual.shape
     sb = s * b
-    # Narrow contract: the tilelang kernel has no bias term and only the
-    # bf16-in / fp32-accumulate / bf16-out form. The caller (FusedHPostBDA)
-    # gates on ``bias is None and fuse_cast``, which is exactly this shape.
-    assert original_residual.dtype == paddle.bfloat16, (
-        f"align path requires bf16 original_residual (fuse_cast=True), "
-        f"got {original_residual.dtype}"
+    # bias/fuse_cast are the caller's branch condition, hence fixed here.
+    reason = align_h_post_bda_unsupported(
+        h_res, original_residual, h_post, x, None, True
     )
-    assert x.dtype == paddle.bfloat16, (
-        f"align path requires bf16 x (fuse_cast=True), got {x.dtype}"
-    )
-    assert h_res.dtype == paddle.float32, (
-        f"align path requires fp32 h_res, got {h_res.dtype}"
-    )
-    assert h_post.dtype == paddle.float32, (
-        f"align path requires fp32 h_post, got {h_post.dtype}"
-    )
-    # detach: required inside PyLayer.forward. contiguous: the tilelang tvm_ffi
-    # backend performs NO stride or contiguity validation (those checks only
-    # exist in the cython backend), so a non-contiguous input would silently
-    # produce garbage instead of raising.
+    assert not reason, f"align h_post_bda on unsupported input: {reason}"
+    # contiguous: the tilelang tvm_ffi backend does NO stride validation, so a
+    # non-contiguous input would silently produce garbage instead of raising.
     a = h_res.detach().reshape([sb, n, n]).contiguous()
     b_res = original_residual.detach().reshape([sb, n, C]).contiguous()
     c = h_post.detach().reshape([sb, n]).contiguous()
     d = x.detach().reshape([sb, C]).contiguous()
-    # The kernel writes into a caller-allocated buffer (sglang convention: the
-    # output is the 5th positional argument, not an ``out_idx``).
+    # sglang convention: the output buffer is a positional arg, not an out_idx.
     out = paddle.empty(shape=[sb, n, C], dtype=original_residual.dtype)
     from paddlefleet.tilelang_ops.mhc import h_post_bda_align
 
@@ -1884,14 +1909,15 @@ else:
             align_sglang: bool = False,
         ):
             """cuTile/tilelang fused h_post_bda forward."""
-            if align_sglang and bias is None and fuse_cast:
-                # Alignment mode: same expression and same rounding budget as
-                # the cuTile kernel, but run through the sglang tilelang kernel
-                # so ptxas makes the same FMA-contraction choice (which of
-                # h_post*x and h_res[0]*orig[0] gets absorbed into the FFMA).
-                # Restricted to the bias-free fuse_cast form, which is the only
-                # one the tilelang kernel implements; everything else falls back
-                # rather than silently computing something different.
+            use_align = align_sglang
+            if use_align:
+                reason = align_h_post_bda_unsupported(
+                    h_res, original_residual, h_post, x, bias, fuse_cast
+                )
+                if reason:
+                    _log_align_fallback("h_post_bda", reason)
+                    use_align = False
+            if use_align:
                 output = _tilelang_h_post_bda_fwd_align(
                     h_res, original_residual, h_post, x
                 )
@@ -1919,12 +1945,11 @@ else:
 
         @staticmethod
         def backward(ctx, grad_output):
-            """cuTile fused h_post_bda backward (unchanged by alignment mode:
+            """cuTile fused h_post_bda backward.
 
-            the forward is bilinear in (h_res, orig, h_post, x), so every
-            gradient is a plain sum and is invariant to both the accumulation
-            order and the FMA contraction choice. Nothing order-dependent is
-            saved either -- the saved tensors are the forward's inputs."""
+            Shared by both forwards: the forward is bilinear, so every gradient
+            is a plain sum, invariant to the FMA contraction choice.
+            """
             if ctx.has_bias:
                 h_res, orig_res, h_post, x, bias = ctx.saved_tensor()
                 g_hr, g_res, g_hp, g_x, g_bias = _cutile_h_post_bda_bwd(
@@ -1973,7 +1998,13 @@ else:
             original_shape = x.shape
             K = original_shape[-1]
             x_2d = x.reshape([-1, K])
-            if align_sglang:
+            use_align = align_sglang
+            if use_align:
+                reason = align_proj_rms_unsupported(x_2d, weight)
+                if reason:
+                    _log_align_fallback("proj_rms", reason)
+                    use_align = False
+            if use_align:
                 proj, norm, r = _tilelang_proj_rms_fwd_align(x_2d, weight, eps)
             else:
                 proj, norm, r = _cutile_proj_rms_fwd(
@@ -1991,12 +2022,12 @@ else:
 
         @staticmethod
         def backward(ctx, grad_proj, grad_r):
-            """cuTile fused proj_rms backward (unchanged by alignment mode:
+            """cuTile fused proj_rms backward.
 
-            r depends on sum_sq only through 1/sqrt(ss/K + eps), so the
-            cuTile-order and align-order forwards are the same function and the
-            gradient formulas are identical; only the saved ``norm`` (sqrt(ss))
-            carries the align-order rounding."""
+            Shared by both forwards: they compute the same function of sum_sq,
+            so the gradient formulas are identical; only the saved ``norm``
+            carries the align-order rounding.
+            """
             x_2d, weight, norm = ctx.saved_tensor()
             original_shape = ctx.original_shape
             grad_proj_2d = grad_proj.reshape([-1, grad_proj.shape[-1]])
@@ -2160,9 +2191,8 @@ else:
                 be inferred from dtypes -- ``h_res`` is fp32 either way.
                 Declined when ``bias`` is not None, since ``g_bias`` reduces
                 over ``g_x`` and would lose precision if ``g_x`` were narrow.
-            align_sglang: when True, use the tilelang h_post_bda forward, which
-                inherits the sglang mhc_post FMA-contraction choice (bit-compare
-                verification only; see ``_tilelang_h_post_bda_fwd_align``).
+            align_sglang: when True, use the tilelang forward, which inherits
+                the sglang mhc_post FMA-contraction choice (bit-compare only).
                 Ignored unless ``bias is None and fuse_cast``.
 
         Returns:
@@ -2212,9 +2242,8 @@ else:
             fuse_cast: when True, ``x``/``weight`` may be narrow; the kernel
                 widens ``x`` in-register and returns ``proj``/``r`` in fp32 so
                 the mappings built from them keep their precision.
-            align_sglang: when True, use the tilelang proj_rms forward with the
-                sglang mhc_pre single-chain accumulation order (verification
-                only; see ``_tilelang_proj_rms_fwd_align``).
+            align_sglang: when True, use the tilelang forward, which inherits
+                the sglang mhc_pre accumulation order (bit-compare only).
 
         Returns:
             proj: [..., N] = x @ weight^T

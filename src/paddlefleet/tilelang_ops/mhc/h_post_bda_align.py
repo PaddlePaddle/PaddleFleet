@@ -14,47 +14,23 @@
 
 """TileLang mHC h_post_bda forward mirroring the sglang inference kernel.
 
-The mHC post site computes, for every token, output stream ``i`` and channel
-``h``::
+The post site computes ``out = comb^T @ res + post (outer) x`` in an fp32
+accumulator with a single bf16 store::
 
     out[i][h] = post[i] * x[h] + sum_{j=0..3} comb[j][i] * res[j][h]
 
-i.e. ``out = comb^T @ res + post (outer) x``, in an fp32 accumulator with a
-single bf16 round-to-nearest-even store at the end.
+The cuTile kernel (``fused_mhc_kernels._ct_hpb_fwd_kernel``) and sglang's
+``mhc_post_tilelang`` compile to the same instruction budget yet differ in bits:
+``post*x + comb[0]*res[0]`` has two multiplies but one FFMA slot, so one of them
+must round as a standalone FMUL. cuTile rounds ``post*x``, ptxas rounds
+``comb[0]*res[0]``. Both are legal ``-fmad=true`` contractions, ~1 fp32 ULP
+apart, visible in bf16 only on rounding ties. So this module is the sglang
+kernel body verbatim, inheriting its contraction choice -- do not "clean it up",
+any edit risks changing what ptxas contracts and silently losing the alignment.
 
-The training cuTile kernel (``fused_mhc_kernels._ct_hpb_fwd_kernel``) and the
-sglang inference TileLang kernel (``mhc_post_tilelang``) implement the SAME
-expression with the SAME rounding budget -- both compile to one multiply plus
-four fused multiply-adds per output, zero plain adds, and the identical
-``F2FP.BF16.F32.PACK_AB`` store -- yet they are not bit-identical. The reason is
-narrow: ``post*x + comb[0]*res[0]`` contains two multiplies but only one FFMA
-slot, so exactly one of them must be issued as a standalone (rounding) FMUL and
-the other is absorbed exactly into the FFMA. cuTile's codegen absorbs
-``comb[0]*res[0]`` and rounds ``post*x``; TileLang -> nvcc -> ptxas does the
-opposite. Both are legal ``-fmad=true`` contractions -- IEEE-754 addition is
-commutative and bit-exact, so this is a contraction choice, not a reassociation,
-and neither side is "more correct". The gap is ~1 fp32 ULP and is invisible in
-bf16 except for elements sitting on a bf16 rounding tie.
-
-Brute-forcing all 120 orderings of the five product terms against the actual
-run's dumps gives a unique consistent solution across both the attn and the ffn
-segment: inference evaluates ``comb[0]*res[0], post*x, comb[1], comb[2],
-comb[3]`` and training evaluates ``post*x, comb[0], comb[1], comb[2],
-comb[3]``.
-
-This module therefore does not re-derive anything: it is the sglang kernel body
-verbatim, so that the training side goes through the same TileLang -> TVM TIR ->
-CUDA C -> nvcc -> ptxas chain and inherits the same contraction choice. Do not
-"clean up" the kernel below -- any edit risks changing what ptxas contracts and
-silently undoing the alignment.
-
-Only the forward is re-implemented; the backward stays on the cuTile kernel.
-The post-site forward is bilinear in ``(comb, res, post, x)``, so every gradient
-is a plain sum and is mathematically invariant to the accumulation order and to
-the FMA contraction choice -- only the forward output is bit-compared.
-
-Only used when ``ABLATION_INSPECT_TENSOR=1`` (train/infer bit-compare run); the
-training hot path keeps the cuTile kernel.
+Forward only; the backward keeps the cuTile kernel, which is bilinear and hence
+invariant to both the order and the contraction choice.
+Used when ``ABLATION_INSPECT_TENSOR=1``; the hot path is unchanged.
 """
 
 import math
@@ -62,8 +38,7 @@ import math
 import tilelang
 from tilelang import language as T
 
-# Same pass configuration as sglang's mhc_post_tilelang so the compiler choices
-# (warp specialization, TMA, ptxas register budget) match the inference build.
+# Must match sglang's mhc_post_tilelang so ptxas makes the same choices.
 _PASS_CONFIGS = {
     tilelang.PassConfigKey.TL_DISABLE_WARP_SPECIALIZED: True,
     tilelang.PassConfigKey.TL_DISABLE_TMA_LOWER: True,
@@ -79,24 +54,17 @@ def mhc_post_tilelang(
 ):
     """sglang ``mhc_post_tilelang`` verbatim (PDL intrinsics excepted).
 
-    Unlike ``proj_rms_align.mhc_align_proj_rms_fwd`` this is NOT a kernel
-    factory: it follows the sglang convention where the tensors are the
-    function's own parameters (annotated inline) and the output buffer ``x`` is
-    passed in by the caller rather than allocated via ``out_idx``. Keeping that
-    convention is part of the alignment -- it is what the generated TIR is
-    compared against.
+    Follows the sglang convention rather than PaddleFleet's: tensors are
+    annotated inline and the output ``x`` is caller-allocated, not ``out_idx``.
 
     Args:
-        a: [num_tokens, hc, hc] fp32 -- ``comb``, the residual mixing matrix
-            (training ``h_res``). Indexed ``a[j, i]``: j is the input stream,
-            i the output stream.
-        b: [num_tokens, hc, hidden] bf16 -- ``res``, the n-stream residual
-            (training ``original_residual``). No transpose is needed: the cuTile
-            and TileLang index conventions already agree.
-        c: [num_tokens, hc] fp32 -- ``post``, the expansion weights (training
-            ``h_post``), squeezed of its trailing 1.
-        d: [num_tokens, hidden] bf16 -- ``x``, the layer (attn/mlp) output.
-        x: [num_tokens, hc, hidden] bf16 -- OUTPUT, allocated by the caller.
+        a: [num_tokens, hc, hc] fp32 ``comb`` (training ``h_res``), indexed
+            ``a[j, i]`` -- j input stream, i output stream.
+        b: [num_tokens, hc, hidden] bf16 ``res`` (``original_residual``); the
+            cuTile and TileLang index conventions already agree, no transpose.
+        c: [num_tokens, hc] fp32 ``post`` (``h_post``), trailing 1 squeezed.
+        d: [num_tokens, hidden] bf16 ``x``, the attn/mlp output.
+        x: [num_tokens, hc, hidden] bf16 OUTPUT, allocated by the caller.
         hc: number of residual streams (4 for EB5).
         hidden: channels per stream (4096 for EB5).
         n_thr / h_blk: tile shape, must match inference.
@@ -136,11 +104,8 @@ def mhc_post_tilelang(
             T.copy(b_shared, b_local)
             T.copy(d_shared, d_local)
             # fmt: off
-            # Kept textually identical to sglang mhc.py's mhc_post_tilelang so
-            # the two can be diffed line-for-line. Wrapping would not change
-            # the emitted CUDA, but the expression order below (post*x first,
-            # then the comb chain) is what the FMA contraction alignment
-            # depends on, so this block is left exactly as inference has it.
+            # Left byte-identical to sglang's mhc_post_tilelang: the expression
+            # order below is what the FMA contraction alignment depends on.
             for i_hco, i1_h in T.Parallel(hc, h_blk):
                 x_local[i_hco, i1_h] = c_local[i_hco] * d_local[i1_h]
                 for i_hci in T.serial(hc):

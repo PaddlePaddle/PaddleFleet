@@ -1865,8 +1865,8 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             )
         aggregated = aggregated.to(ori_dtype)
 
-        inspect_tensor("mhc_attn_post", self.layer_number, h_post)
-        inspect_tensor("mhc_attn_comb", self.layer_number, h_res)
+        h_post = inspect_tensor("mhc_attn_post", self.layer_number, h_post)
+        h_res = inspect_tensor("mhc_attn_comb", self.layer_number, h_res)
 
         # LayerNorm on aggregated single stream
         if self.recompute_input_layernorm:
@@ -1874,8 +1874,12 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         else:
             input_layernorm_output = self.input_layernorm(aggregated)
 
+        # Observation only: "Attn_input" below owns this tensor's injection.
         inspect_tensor(
-            "mhc_attn_pre", self.layer_number, input_layernorm_output
+            "mhc_attn_pre",
+            self.layer_number,
+            input_layernorm_output,
+            load=False,
         )
         self._log_md5(
             input_layernorm_output, "input_layernorm_out", self.layer_number
@@ -2033,8 +2037,8 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             aggregated, h_res, h_post = self.mlp_hyper_connection(hidden_states)
         aggregated = aggregated.to(ori_dtype)
 
-        inspect_tensor("mhc_mlp_post", self.layer_number, h_post)
-        inspect_tensor("mhc_mlp_comb", self.layer_number, h_res)
+        h_post = inspect_tensor("mhc_mlp_post", self.layer_number, h_post)
+        h_res = inspect_tensor("mhc_mlp_comb", self.layer_number, h_res)
 
         # LayerNorm on aggregated single stream
         if self.recompute_post_attention_layernorm:
@@ -2046,8 +2050,12 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 aggregated
             )
 
+        # Observation only: "moe_or_dense_input" below owns the injection.
         inspect_tensor(
-            "mhc_mlp_pre", self.layer_number, post_attention_layernorm_output
+            "mhc_mlp_pre",
+            self.layer_number,
+            post_attention_layernorm_output,
+            load=False,
         )
         self._log_md5(
             post_attention_layernorm_output,
@@ -2120,7 +2128,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         hidden_states = self._cast_and_discard_fused_bda(
             hidden_states, ori_dtype, fused_span
         )
-        inspect_tensor(
+        hidden_states = inspect_tensor(
             "mhc_mlp_residual_output", self.layer_number, hidden_states
         )
 

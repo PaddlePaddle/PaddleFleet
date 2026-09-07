@@ -445,10 +445,8 @@ class HyperConnectionModule(nn.Layer):
             # reference keeps the arithmetic in the incoming dtype and so must
             # the kernel. The BDA site opts out again when a bias is present.
             self._widen_in_kernel = config.high_precision_mhc
-            # Run both mHC sites on the sglang tilelang kernels instead of the
-            # cuTile ones while bit-comparing against inference (same env as
-            # inspect_tensor): the pre site to pin the proj_rms accumulation
-            # order, the post site to pin the h_post_bda FMA contraction.
+            # Under the bit-compare run (same env gate as inspect_tensor), run
+            # both mHC sites on the sglang tilelang kernels instead of cuTile.
             # Normal training keeps the cuTile fused kernels.
             self._align_sglang = (
                 os.environ.get("ABLATION_INSPECT_TENSOR", "0") == "1"
@@ -1038,7 +1036,9 @@ class HyperConnectionExpandLayer(FleetLayer):
         dict_args["hidden_states"] = HyperConnectionModule.input_expand(
             dict_args["hidden_states"], self.n
         )
-        inspect_tensor("mhc_expand_output", -1, dict_args["hidden_states"])
+        dict_args["hidden_states"] = inspect_tensor(
+            "mhc_expand_output", -1, dict_args["hidden_states"]
+        )
         return dict_args
 
 
