@@ -888,6 +888,11 @@ class _DSv4SharedSlotProbe(DSv4HybridAttention):
         self.config = config
         self.layer_number = 1
         self.recompute_full_attn = False
+        # forward closes every selective span it may have opened, so it reads
+        # these two holders whether or not the switches are on. The gated_attn
+        # one is behind a hasattr and needs no stand-in.
+        self._qkv_recompute = None
+        self._post_core_recompute = None
         self.csa_mask_group = ("main",)
         self.core_attention = SimpleNamespace(compress_ratio=4)
         self.o_proj = lambda out: (out, None)

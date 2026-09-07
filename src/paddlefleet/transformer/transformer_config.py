@@ -803,11 +803,19 @@ class TransformerConfig(ModelParallelConfig):
     ``list[str]``: every listed submodule shares the layers picked by
     ``recompute_num_layers`` + ``recompute_method`` (all layers if the count is
     None). ``dict[str, spec]``: per-submodule, where ``spec`` is ``"all"``
-    (negative int / None equivalent), a list of global 0-based layer ids
-    (empty head/tail layers included), or a count resolved through
-    ``recompute_method``::
+    (negative int / None equivalent), a list of layer ids, or a count resolved
+    through ``recompute_method``::
 
         recompute_modules: {core_attn: [0, 1, 2], mlp: 2, moe_gate_up: all}
+
+    Layer ids are 0-based in the same space ``csa_compress_ratios`` indexes:
+    ``0 .. num_hidden_layers - 1`` are the backbone layers, then
+    ``num_hidden_layers + i`` addresses MTP layer ``i``. The
+    ``num_empty_layers_add_in_head`` / ``_tail`` layers hold no submodule and
+    are not addressable, so they take up no ids -- an id is a real layer.
+
+    A count selector is resolved over the physical layer number instead, which
+    is how ``recompute_method`` has always counted, empty layers included.
 
     ``flash_attn`` / ``moe_combine`` are refined-recompute entries and invert
     the spec: selected layers keep plain recompute, RR runs on the rest.

@@ -362,7 +362,7 @@ class GroupedMLPExpert(FleetLayer):
             # would all-reduce the already-local ETP=1/TP=2 shards and move
             # step-2. MoELayer still colors fused experts when EP>1.
 
-    def update_activation_recompute(self, layer_number):
+    def update_activation_recompute(self, layer_number, is_mtp_layer=False):
         """Resolve the ``moe_act`` flag; re-called once the layer id is known.
 
         ``layer_number=None`` (construction time) means a count-based selector
@@ -375,6 +375,7 @@ class GroupedMLPExpert(FleetLayer):
                 layer_number,
                 self.config,
                 defer_if_layer_unknown=True,
+                is_mtp_layer=is_mtp_layer,
             )
         )
         if self.activation_recompute and self.config.fp8:
