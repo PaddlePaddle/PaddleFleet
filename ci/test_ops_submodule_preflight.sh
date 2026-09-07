@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory() as directory:
     mocks = {
         'git': '''#!/usr/bin/env bash
 set -eu
-[[ "$*" == "submodule update --init --recursive" ]]
+[[ "$*" == "submodule update --init --recursive --force" ]]
 echo prepare >> "$TRACE"
 n=$(grep -c prepare "$TRACE")
 case "$CASE" in
@@ -83,5 +83,62 @@ exec "$@"
         assert lines.count('install') == (2 if code == 0 else 0), (case, lines)
         assert lines.count('build') == (1 if code == 0 else 0), (case, lines)
         print(f'PASS: extracted workflow {case}, attempts={count}, exit={code}')
+# Exercise Git itself: an aborted clone can leave an apparently current HEAD
+# with no checked-out files. A normal retry returns success without repairing it.
+with tempfile.TemporaryDirectory() as directory:
+    work = pathlib.Path(directory)
+    env = dict(os.environ, GIT_CONFIG_COUNT='1',
+               GIT_CONFIG_KEY_0='protocol.file.allow', GIT_CONFIG_VALUE_0='always')
+
+    def git(path, *args, check=True):
+        return subprocess.run(['git', '-C', str(path), *args], env=env,
+                              capture_output=True, text=True, check=check, timeout=10)
+
+    for name in ['leaf', 'good', 'bad', 'super']:
+        repo = work / name
+        repo.mkdir()
+        git(repo, 'init', '-q')
+        git(repo, 'config', 'user.name', 'fixture')
+        git(repo, 'config', 'user.email', 'fixture@example.invalid')
+        git(repo, 'config', 'commit.gpgsign', 'false')
+        (repo / 'payload').write_text(name)
+        git(repo, 'add', 'payload')
+        git(repo, 'commit', '-qm', 'fixture')
+
+    def add_links(repo, links):
+        (repo / '.gitmodules').write_text(''.join(
+            f'[submodule "{name}"]\n path = {name}\n url = {url}\n'
+            for name, url, sha in links))
+        git(repo, 'add', '.gitmodules')
+        for name, url, sha in links:
+            git(repo, 'update-index', '--add', '--cacheinfo', f'160000,{sha},{name}')
+        git(repo, 'commit', '-qm', 'submodules')
+
+    leaf_sha = git(work / 'leaf', 'rev-parse', 'HEAD').stdout.strip()
+    add_links(work / 'good', [('nested', work / 'leaf', leaf_sha)])
+    good_sha = git(work / 'good', 'rev-parse', 'HEAD').stdout.strip()
+    bad_sha = git(work / 'bad', 'rev-parse', 'HEAD').stdout.strip()
+    repo = work / 'super'
+    add_links(repo, [('a_good', work / 'good', good_sha),
+                     ('z_bad', work / 'missing', bad_sha)])
+    first = git(repo, 'submodule', 'update', '--init', '--recursive', check=False)
+    assert first.returncode != 0
+    assert not (repo / 'a_good/payload').exists()
+    git(repo, 'config', 'submodule.z_bad.url', str(work / 'bad'))
+    retry = git(repo, 'submodule', 'update', '--init', '--recursive', check=False)
+    assert retry.returncode == 0, retry.stderr
+    assert not (repo / 'a_good/payload').exists()
+    print('PASS: real Git ordinary retry returns 0 with incomplete checkout')
+    prepared = subprocess.run(['bash', str(root / 'ci/prepare_ops_submodules.sh')],
+                              cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    assert prepared.returncode == 0, prepared.stderr
+    for name, sha, payload in [('a_good', good_sha, 'good'),
+                               ('a_good/nested', leaf_sha, 'leaf'),
+                               ('z_bad', bad_sha, 'bad')]:
+        checkout = repo / name
+        assert (checkout / 'payload').read_text() == payload
+        assert git(checkout, 'rev-parse', 'HEAD').stdout.strip() == sha
+        git(checkout, 'diff', '--exit-code')
+    print('PASS: real preflight restores all pinned parent/child worktrees')
 print('All ops submodule preflight fixtures passed')
 PY
