@@ -5,34 +5,24 @@
 
 """``mtp_shared_last_layer`` must survive ``enable_mtp_magic_send``.
 
-``GPTModel.get_layer_desc_list`` emits two descs for the last-layer tie:
+``GPTModel.get_layer_desc_list`` emits two descs keyed ``mtp_reuse_transformer``
+for the last-layer tie: the *pivot* (the last backbone TransformerLayer) and the
+*MTP layer* (with ``shared_submodule_weight_only=True``, so paddle's
+``_alias_shared_layer`` aliases only the parameters under
+``transformer_layer``). Both are required -- paddle only aliases when a shared
+key has more than one member.
 
-  * the *pivot* -- the last backbone TransformerLayer, keyed
-    ``mtp_reuse_transformer``;
-  * the *MTP layer* -- keyed the same way, with
-    ``shared_submodule_weight_only=True`` so paddle's ``_alias_shared_layer``
-    aliases only the parameters under ``transformer_layer``.
-
-Both are required: paddle only aliases when a shared key has more than one
-member. The MTP-side branch used to test ``enable_mtp_magic_send`` first and
+The MTP-side branch used to test ``enable_mtp_magic_send`` first and
 short-circuit to a plain ``LayerDesc``, so with both flags on the tie silently
-did nothing -- the model trained an extra full MTP attention block while the
-config claimed it was shared. That was only reachable under ``python -O``,
-because ``TransformerConfig`` assert-rejected the combination and ``-O`` strips
-asserts; the rejection is gone now, so the branch order matters unconditionally
-and is pinned here.
+did nothing and the model trained a full extra MTP attention block while the
+config claimed it was shared. The two are in fact orthogonal: magic send owns
+``mtp_embed`` (its own ``SharedLayerDesc``, synced through gpt_model's
+``_mtp_embed_global_group``), and the tie touches only ``transformer_layer``.
 
-The two mechanisms are orthogonal: magic send owns ``mtp_embed`` (a separate
-``SharedLayerDesc`` keyed ``mtp_embed``, synced through gpt_model's dedicated
-``_mtp_embed_global_group``), and the tie touches only ``transformer_layer``
-params. Their parameter sets do not overlap.
-
-Scope note: these are desc-shape assertions. Whether paddle then *aliases* or
-falls back to a cross-stage broadcast+allreduce depends on the pivot and the MTP
-desc landing on the same rank (``PipelineLayer._build_layer_impl`` only fills
-``shared_layers`` from this rank's range) -- see the co-location note in
-``transformer_config.py``. That is not covered here and has not been checked
-end-to-end.
+Scope: desc-shape assertions only. Whether paddle then *aliases* or falls back
+to a cross-stage broadcast+allreduce depends on the pivot and the MTP desc
+landing on the same rank (see the co-location note in
+``transformer_config.py``), which is not covered here.
 """
 
 from __future__ import annotations
@@ -137,9 +127,8 @@ class TestMagicSendSharedLastLayerDesc(unittest.TestCase):
     def test_tie_with_k_gt_1_ties_every_mtp_layer_to_one_pivot(self) -> None:
         # K > 1 emits K MTP descs under the same key, so the shared group is
         # K + 1 members: one pivot plus K submodule-only aliases. All K MTP
-        # blocks therefore share the *same* backbone attention parameters --
-        # worth pinning, because a reader could reasonably expect one pivot per
-        # depth instead. Untested end-to-end; this is a desc-shape assertion.
+        # blocks therefore share the *same* backbone attention parameters, which
+        # a reader could reasonably expect to be one pivot per depth.
         layers = _layer_descs(
             num_mtp=3,
             enable_mtp_magic_send=True,

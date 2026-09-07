@@ -355,11 +355,9 @@ def extract_local_zigzag_chunks(tensor_full, cp_rank, cp_size, axis=1):
 def extract_local_contiguous_chunk(tensor_full, cp_rank, cp_size, axis=1):
     """Extract this CP rank's contiguous chunk from a full-length tensor.
 
-    Mirrors PaddleFleet's ``scatter_contiguous`` layout
-    (``context_parallel_utils.scatter_contiguous``): rank ``r`` owns exactly one
-    slice ``tensor_full[..., chunk*r : chunk*(r+1), ...]`` with
-    ``chunk = L / cp_size``. ``test_extract_local_cp_chunks.py`` pins that parity
-    against the real scatter helper, so a layout change there fails here.
+    Mirrors ``context_parallel_utils.scatter_contiguous``: rank ``r`` owns the
+    single slice ``tensor_full[..., chunk*r : chunk*(r+1), ...]`` with
+    ``chunk = L / cp_size``.
 
     Extraction only — no CP communication, same contract as
     ``extract_local_zigzag_chunks``.
@@ -386,44 +384,32 @@ def extract_local_contiguous_chunk(tensor_full, cp_rank, cp_size, axis=1):
 def extract_local_cp_chunks(tensor_full, cp_rank, cp_size, axis=1, *, mode):
     """Layout-aware local-slice extraction for the ``use_erndata`` MTP path.
 
-    The erndata MTP path keeps int/float tensors full-length on every CP rank
-    and slices them locally instead of calling ``ContextParallelScatterOp``
-    (which would redo the embedding lookup ``cp_size`` times). That slice has to
-    use *exactly* the layout the rest of the model uses for its own scatter,
-    i.e. ``config.cp_balance_mode``:
+    That path keeps its tensors full-length on every CP rank and slices them
+    locally instead of calling ``ContextParallelScatterOp`` (which would redo the
+    embedding lookup ``cp_size`` times), so the slice must use the same layout
+    the rest of the model scatters with, i.e. ``config.cp_balance_mode``:
 
-    * ``dualchunk_allgather``  -> ``scatter_balance``      -> two zigzag chunks
-    * ``contiguous_allgather`` -> ``scatter_contiguous``   -> one contiguous chunk
+    * ``dualchunk_allgather``  -> ``scatter_balance``    -> two zigzag chunks
+    * ``contiguous_allgather`` -> ``scatter_contiguous`` -> one contiguous chunk
 
-    ``contiguous_allgather`` is not optional for every model: the DSv4 hybrid
-    attention stack (``dsv4_hybrid_attention.py``, ``mqa_latent_attention.py``)
-    builds its sparse-attention index tables over the *global* sequence and then
-    row-slices this rank's queries, which is only correct under the contiguous
-    layout — those layers assert on it under CP. So the MTP path must follow the
-    model's mode rather than hard-coding zigzag. (Necessary, not sufficient:
-    TransformerConfig separately rejects erndata + MTP + CP for models that build
-    an Indexer, whose loss-mask path still assumes a CP-local ``input_ids``.)
+    ``contiguous_allgather`` is mandatory for the DSv4 hybrid stack, whose
+    attention layers assert on it under CP, so hard-coding zigzag here is wrong.
 
     Args:
         tensor_full: ``[..., L, ...]`` full-length tensor present on every rank.
         cp_rank: this rank's index inside the CP group.
         cp_size: CP world size; ``1`` returns ``tensor_full`` unchanged.
         axis: sequence axis (default 1 for ``[B, L, ...]``).
-        mode: ``config.cp_balance_mode``. Keyword-only and required *on purpose*.
-            The bug this function exists to fix was a call site that assumed a
-            layout instead of reading the config, so a default here would just
-            re-open that door for the next caller: picking the wrong layout is
-            not a crash, it is a silently wrong loss.
+        mode: ``config.cp_balance_mode``. Keyword-only and required: the bug this
+            helper exists to fix was a call site that assumed a layout, and the
+            wrong layout is a silently wrong loss rather than a crash.
 
     Returns:
         ``[..., L / cp_size, ...]`` tensor holding this rank's slice.
 
     Note:
-        ``cp_size == 1`` returns ``tensor_full`` *itself*, not a copy — unlike
-        ``scatter_balance`` (which clones) and ``scatter_contiguous`` (which
-        ``paddle.assign``s). Do not write into the result in place. Every call
-        site today guards with ``if cp_size > 1`` and treats the slice as
-        read-only, so this is a documented property rather than a live hazard.
+        ``cp_size == 1`` returns ``tensor_full`` itself, not a copy — do not
+        write into the result in place.
     """
     if cp_size == 1:
         return tensor_full
@@ -435,14 +421,10 @@ def extract_local_cp_chunks(tensor_full, cp_rank, cp_size, axis=1, *, mode):
         return extract_local_contiguous_chunk(
             tensor_full, cp_rank, cp_size, axis=axis
         )
-    # contiguous_a2a (Ulysses) is refused, but not because its sequence layout
-    # is unknown: ContextParallelScatterOp dispatches on
-    # mode.startswith("contiguous"), so a2a shards the sequence contiguously and
-    # extract_local_contiguous_chunk would be the matching slice. What differs
-    # is the attention-side mask contract (DotProductAttention.forward skips
-    # expand_attn_mask_startend_row_indices_for_cp under a2a), and that has not
-    # been validated on this path. Fail loudly instead of assuming: a wrong
-    # layout is a silent-wrong-loss bug.
+    # contiguous_a2a shards the sequence contiguously too, so the slice would
+    # match, but its mask contract differs (DotProductAttention.forward skips
+    # expand_attn_mask_startend_row_indices_for_cp under a2a) and has never been
+    # run on this path. Refuse rather than guess.
     raise ValueError(
         f"extract_local_cp_chunks: unsupported cp_balance_mode={mode!r} for the "
         "use_erndata MTP path; expected 'dualchunk_allgather' or "
@@ -1369,8 +1351,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         # roll_tensor(cu_seqlens_q=...).
         #
         # enable_mtp_magic_send cannot reach here under erndata: TransformerConfig
-        # refuses the combination outright (see the rejection in
-        # transformer_config.py for why it buys nothing on this path).
+        # rejects the combination.
         if getattr(self.config, "use_erndata", False):
             return self._forward_megatron_style(dict_args)
 
@@ -1484,12 +1465,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                         mtp_input_embeds, input_ids == pad_token_id, 0
                     )
 
-                # Shifted embedding slice for current depth. This is the L+K
-                # contract: input_ids is longer than the backbone sequence, so
-                # depth d's embedding is a window offset by d+1. erndata carries
-                # length-L tensors and would need per-document rolls instead,
-                # which is one of the reasons TransformerConfig refuses
-                # use_erndata + enable_mtp_magic_send.
+                # Shifted embedding slice for current depth: the L+K contract,
+                # where input_ids is longer than the backbone sequence, so
+                # depth d's embedding is a window offset by d+1.
                 decoder_input = mtp_input_embeds[
                     :, (depth + 1) : (depth + 1 + seq_len), :
                 ]

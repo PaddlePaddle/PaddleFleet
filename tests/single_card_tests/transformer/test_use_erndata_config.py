@@ -129,12 +129,9 @@ class TestUseErndataValidation(unittest.TestCase):
         # enable_mtp_magic_send also requires PP>1 (checked earlier in
         # __post_init__), so we build a config that would pass that check.
         #
-        # The rejection is a design decision, not a missing feature: erndata
-        # already delivers input_ids and cu_seqlens_q to the MTP stage through
-        # the pipeline dict, so magic send would only add a replicated vocab
-        # table there. That reasoning lives in the comment above the guard, and
-        # this test deliberately asserts on the flag name alone -- pinning the
-        # prose would make every rewording a CI failure.
+        # Assert on the flag name alone, not the prose: the reasoning for the
+        # rejection lives in the comment above the guard, and pinning it here
+        # would make every rewording a CI failure.
         with self.assertRaisesRegex(ValueError, r"enable_mtp_magic_send"):
             TransformerConfig(
                 **self._base_kwargs(
@@ -184,14 +181,13 @@ class TestUseErndataValidation(unittest.TestCase):
         self.assertEqual(cfg.context_parallel_size, 2)
 
     def test_erndata_cp_rejects_contiguous_a2a(self) -> None:
-        # Ulysses splits heads inside the attention instead of round-tripping
-        # the sequence through scatter_contiguous, so the local-sequence layout
-        # the MTP path would have to slice with is not established.
+        # Ulysses splits heads inside the attention, so the local-sequence mask
+        # contract the MTP path would slice against is not established.
         #
         # Match the erndata-specific wording, not the bare flag name: a plain
         # `cp_balance_mode` regex would also be satisfied by the generic
-        # cp_balance_mode validation later in __post_init__, so this test would
-        # keep passing even if the erndata guard were deleted.
+        # cp_balance_mode validation later in __post_init__, so the test would
+        # keep passing even if this guard were deleted.
         with self.assertRaisesRegex(
             ValueError, r"use_erndata=True with MTP \+ context_parallel_size>1"
         ):
@@ -269,16 +265,12 @@ class TestUseErndataValidation(unittest.TestCase):
         return kwargs
 
     def test_erndata_cp_rejects_indexer_model(self) -> None:
-        # Widening the cp_balance_mode check to accept contiguous_allgather made
-        # erndata + MTP + CP + DSv4 config-legal for the first time, and that
-        # combination is broken downstream: the Indexer loss-mask path
-        # (CompressedSparseAttention.forward,
-        # MQALatentAttention._indexer_loss_mask)
-        # all-gathers input_ids whenever CP>1 and experimental_dataflow is off,
-        # then reshapes to [b, cp_size * s_local] -- but erndata hands the model
-        # a full-length global input_ids that nothing trims, so the gather
-        # over-counts by cp_size. Keep the rejection at config time instead of
-        # letting it resurface as a shape error inside attention.
+        # Accepting contiguous_allgather made erndata + MTP + CP + DSv4
+        # config-legal for the first time, and that combination is broken
+        # downstream: the Indexer loss-mask path all-gathers input_ids and
+        # reshapes to [b, cp_size * s_local], but erndata delivers input_ids
+        # full-length and global, so the gather over-counts by cp_size. Reject at
+        # config time instead of as a shape error inside attention.
         with self.assertRaisesRegex(ValueError, r"Indexer"):
             TransformerConfig(**self._dsv4_kwargs(context_parallel_size=2))
 

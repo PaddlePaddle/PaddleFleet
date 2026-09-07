@@ -5,32 +5,22 @@
 
 """Layout-aware CP slicing for the ``use_erndata`` MTP path.
 
-The erndata MTP path never calls ``ContextParallelScatterOp``: it keeps its
-tensors full-length on every CP rank and slices the local part itself. That
-slice must reproduce, bit for bit, the layout the rest of the model scatters
-with — otherwise the labels/embeddings a rank holds belong to *other* ranks'
-tokens and the loss is silently wrong. So the parity checks here call
-``context_parallel_utils``' own scatter helpers directly:
+That path never calls ``ContextParallelScatterOp``: it keeps its tensors
+full-length on every CP rank and slices the local part itself. The slice must
+reproduce the layout the rest of the model scatters with, or a rank holds
+*other* ranks' tokens and the loss is silently wrong. So the parity checks call
+``context_parallel_utils``' own scatter helpers rather than a hand-written
+slice, which would keep passing while the real scatter drifted underneath:
 
   ``dualchunk_allgather``  -> ``scatter_balance``    (two zigzag chunks)
   ``contiguous_allgather`` -> ``scatter_contiguous`` (one rank-order chunk)
 
-Both helpers only read ``group.nranks`` and ``group.rank``, so ``_FakeGroup``
-below is enough to exercise them single-card with no distributed init. That
-matters: comparing against a hand-written slice would pass forever while the
-real scatter drifted underneath us, which is precisely the failure this whole
-change is about.
+Both helpers read only ``group.nranks`` / ``group.rank``, so ``_FakeGroup``
+below is enough to exercise them single-card with no distributed init.
 
-Covered:
-  1. ``extract_local_contiguous_chunk`` == ``scatter_contiguous`` for every
-     rank, and the ranks tile the sequence exactly once.
-  2. ``extract_local_cp_chunks`` == ``scatter_balance`` / ``scatter_contiguous``
-     for the mode each one implements.
-  3. ``mode`` is required and keyword-only — no default layout to fall into.
-  4. Unsupported modes (``contiguous_a2a``, typos) raise ValueError rather than
-     silently defaulting to a layout.
-  5. Divisibility guards.
-  6. Negative ``axis`` and non-sequence axes behave like the zigzag helper.
+Also covered: ``mode`` is required and keyword-only, unsupported modes raise
+instead of defaulting to a layout, divisibility guards, and negative /
+non-sequence axes.
 """
 
 from __future__ import annotations
@@ -187,10 +177,8 @@ class TestExtractLocalCpChunksDispatch(unittest.TestCase):
         self.assertFalse(bool((zig == con).all()))
 
     def test_mode_is_required(self) -> None:
-        # No default layout on purpose. The defect this function fixes was a
-        # call site that assumed zigzag instead of reading cp_balance_mode; a
-        # default would hand the next caller the same silent-wrong-loss bug
-        # instead of a TypeError at import-time-obvious call sites.
+        # No default layout on purpose: the defect this helper fixes was a call
+        # site that assumed zigzag instead of reading cp_balance_mode.
         t = _arange_bl(1, 16)
         with self.assertRaises(TypeError):
             extract_local_cp_chunks(t, 1, 2, axis=1)
@@ -202,11 +190,10 @@ class TestExtractLocalCpChunksDispatch(unittest.TestCase):
             extract_local_cp_chunks(t, 1, 2, 1, "dualchunk_allgather")
 
     def test_cp_size_one_is_identity_for_any_mode(self) -> None:
-        # Identity, not a copy: this deliberately differs from scatter_balance
-        # (clone) and scatter_contiguous (paddle.assign), so an in-place write
-        # on the result would reach the caller's full-length tensor. Pinned here
-        # because it is a property callers rely on for the cheap CP=1 path, not
-        # an accident -- see the Note in extract_local_cp_chunks' docstring.
+        # Identity, not a copy -- unlike scatter_balance (clone) and
+        # scatter_contiguous (paddle.assign), so an in-place write on the result
+        # would reach the caller's full-length tensor. Pinned because callers
+        # rely on it for the cheap CP=1 path.
         t = _arange_bl(2, 7)
         for mode in (
             "dualchunk_allgather",

@@ -2143,37 +2143,23 @@ class TransformerConfig(ModelParallelConfig):
                 "enable_mtp_magic_send with tie_word_embeddings=True is not yet validated. "
                 "Please disable tie_word_embeddings when using magic send MTP."
             )
-            # NOTE: mtp_shared_last_layer is deliberately NOT rejected here.
-            # The two mechanisms are orthogonal: SharedLayerDesc with
-            # shared_submodule_weight_only=True (pp_layers.py) aliases only the
-            # parameters under `dest_layer.transformer_layer`, while magic send
-            # owns `mtp_embed` (synced through gpt_model's dedicated
-            # _mtp_embed_global_group). Their parameter sets do not overlap.
+            # NOTE: mtp_shared_last_layer is deliberately NOT rejected here. The
+            # two are orthogonal -- SharedLayerDesc with
+            # shared_submodule_weight_only=True aliases only the params under
+            # `transformer_layer`, while magic send owns `mtp_embed` (synced via
+            # gpt_model's _mtp_embed_global_group) -- so their parameter sets do
+            # not overlap.
             #
-            # Two preconditions worth knowing before relying on this
-            # combination; neither is asserted anywhere, both were verified by
-            # reading paddle rather than by an end-to-end run.
-            #
-            # 1. Same-rank co-location. PipelineLayer._build_layer_impl fills
-            #    `self.shared_layers` only from descs inside *this* rank's
-            #    [start, end) range, so _alias_shared_layer runs only when the
-            #    tie pivot (the last backbone layer, gpt_model.get_layer_desc_list)
-            #    and the MTP desc land on the same rank. If a PP boundary
-            #    separates them, the MTP desc becomes the first member of the key
-            #    on its own stage and falls back to _construct_shared_comm: two
-            #    parameter copies, broadcast at init and gradient-allreduced
-            #    across stages. Numerically that is still a tie, but the memory
-            #    saving mtp_shared_last_layer exists for is gone -- and PP>1 is
-            #    exactly the case magic send is for.
-            #
-            # 2. Identical parameter sets. _alias_shared_layer asserts
-            #    `total_params == aliased_count`, i.e. the pivot and the MTP
-            #    layer must resolve to the *same* attention parameter set. For
-            #    dsv4_hybrid models that holds only while
-            #    csa_compress_ratios[num_hidden_layers - 1] and
-            #    csa_compress_ratios[num_hidden_layers] agree. If someone makes
-            #    those two indices diverge, that assert fires with a confusing
-            #    message and this is the place to look.
+            # Two preconditions the combination relies on, neither asserted:
+            # 1. The tie pivot (last backbone layer) and the MTP desc must land
+            #    on the same rank. PipelineLayer._build_layer_impl registers only
+            #    descs inside this rank's range, so a PP boundary between them
+            #    downgrades _alias_shared_layer to _construct_shared_comm: still
+            #    numerically tied, but two copies, so the memory saving is gone.
+            # 2. _alias_shared_layer asserts `total_params == aliased_count`, so
+            #    the pivot and the MTP layer must resolve to the same attention
+            #    parameter set -- for dsv4_hybrid, csa_compress_ratios at indices
+            #    num_hidden_layers-1 and num_hidden_layers must agree.
             if self.num_nextn_predict_layers > 1:
                 assert self.variable_seq_lengths, (
                     "enable_mtp_magic_send with num_nextn_predict_layers > 1 requires "
@@ -2209,73 +2195,33 @@ class TransformerConfig(ModelParallelConfig):
         if self.use_erndata and self.num_nextn_predict_layers > 0:
             # erndata + MTP selects the packed-doc (MCore 8c4df6b07) contract.
             if self.enable_mtp_magic_send:
-                # Refused on purpose, and not because it is hard to implement.
+                # Refused by design, not for lack of implementation. erndata
+                # already puts full-length input_ids and cu_seqlens_q into
+                # preproc_output and no backbone layer consumes them (
+                # transformer_layer only re-slices input_ids when it is longer
+                # than the backbone sequence, which never happens for length-L
+                # erndata tensors), so they reach the MTP layer intact without
+                # magic send.
                 #
-                # What magic send actually provides is not a transport for
-                # input_ids -- it is a *word-embedding table on the MTP stage*
-                # (`mtp_embed`, created only under this flag). MTP needs
-                # embed(token_{i+k+1}); the hidden_states arriving at the last
-                # PP stage is the post-backbone representation, so nothing local
-                # can be rolled into a substitute, and under PP>1 the real
-                # word embeddings live on stage 0 only.
-                #
-                # On the erndata path the input_ids half is already redundant:
-                # GPTEmbedding puts full-length global input_ids and cu_seqlens_q
-                # into preproc_output, and no backbone layer touches them
-                # (transformer_layer.py only re-slices input_ids when it is
-                # longer than the backbone sequence, which never happens for
-                # length-L erndata tensors). So they reach the MTP layer intact
-                # regardless of this flag.
-                #
-                # That leaves a bad trade. Enabling it swaps a hidden-state P2P
-                # payload of (K+1)x for 1x, and pays for it with a second
-                # *trainable* vocab table on the MTP stage. The table is tied to
-                # the stage-0 embedding -- gpt_model ties the weights inside a
-                # rank (_tie_mtp_embed_weights_intra_rank), broadcasts them from
-                # stage 0 at init, and allreduces the gradient over a dedicated
-                # mtp_embed sub-group -- so it is *logically* shared but, when
-                # stage 0 and the MTP stage are different ranks (i.e. exactly
-                # the PP>1 case this flag exists for), *physically replicated*.
-                #
-                # The table costs V*H per copy in weight, the same again in
-                # gradient, and 3x that in fp32 master+m+v divided by
-                # sharding_parallel_size (is_firstly_shared only dedups
-                # grad-norm in hybrid_parallel_optimizer.py; it does not exclude
-                # the param from sharding). The saved carrier slot costs
-                # B*S_local*H bf16 per P2P hop per micro-batch, and that traffic
-                # is already hidden by overlap_p2p_comm.
-                #
-                # Worked example for ONE configuration -- ernielite 4B-A500M,
-                # V=201216 / H=1024 / K=1 / TP=1 (~206M params). Scale it
-                # yourself for any other model; the numbers below describe this
-                # config only:
-                #     bf16 weight            412MB  (not sharded)
-                #     gradient               412MB bf16 / 824MB fp32 main_grad
-                #     fp32 master + m + v   2.47GB  / sharding_parallel_size
-                #     => ~1.1-1.5GB resident at sharding=8, ~1.4-1.9GB at 4
-                # against ~8MB per hop per micro-batch (B=1, S_local=4096):
-                # ~134MB/step at PP=2/GA=16, ~403MB/step at PP=4/GA=16.
-                # A clear net loss at this scale.
-                #
-                # Keep enable_mtp_magic_send=False: the baseline batch-axis
-                # carrier already supports any PP depth on this path. If K ever
-                # grows enough for (K+1)x to matter, the cheaper fix is to carry
-                # the single *un-transformed* inputs_embeds slot and roll it
-                # locally on the MTP stage -- 2x payload regardless of K, and no
-                # extra vocab table. That is not implemented today.
+                # What the flag would still add is its other half: a second
+                # *trainable* vocab table (`mtp_embed`) on the MTP stage, tied to
+                # the stage-0 embedding logically but physically replicated
+                # whenever stage 0 is a different rank -- exactly the PP>1 case
+                # the flag exists for. That costs V*H in weights, the same in
+                # gradients and 3x in fp32 master+m+v (only the optimizer state
+                # is sharded) to shrink the hidden-state P2P payload from (K+1)x
+                # to 1x, traffic overlap_p2p_comm already hides. Keep the default
+                # batch-axis carrier, which already supports any PP depth here.
                 raise ValueError(
                     "use_erndata=True with MTP does not need (and does not "
                     "support) enable_mtp_magic_send=True. erndata already "
-                    "delivers full-length input_ids and cu_seqlens_q to the "
-                    "MTP stage through the pipeline dict, so magic send would "
-                    "only add a second trainable vocab embedding table on that "
-                    "stage (V*H weights, the same in gradients, plus a sharded "
-                    "fp32 optimizer state) in order to shrink the hidden-state "
-                    "P2P payload from (K+1)x to 1x -- traffic that "
-                    "overlap_p2p_comm already hides. Set "
-                    "enable_mtp_magic_send=False; the default batch-axis MTP "
-                    "carrier works at any pipeline_model_parallel_size. See the "
-                    "comment above this check for the memory arithmetic."
+                    "delivers full-length input_ids and cu_seqlens_q to the MTP "
+                    "stage through the pipeline dict, so magic send would only "
+                    "add a replicated trainable vocab table on that stage in "
+                    "order to shrink a P2P payload that overlap_p2p_comm "
+                    "already hides. Set enable_mtp_magic_send=False; the "
+                    "default batch-axis MTP carrier works at any "
+                    "pipeline_model_parallel_size."
                 )
             if self.experimental_dataflow:
                 # experimental_dataflow specifically produces
@@ -2299,33 +2245,22 @@ class TransformerConfig(ModelParallelConfig):
                     "the shifted embeddings from hidden_states, not from "
                     "mtp_decoder_inputs)."
                 )
-            # The erndata MTP path keeps its tensors full-length on every CP
-            # rank and slices them locally (extract_local_cp_chunks) instead of
-            # calling ContextParallelScatterOp, so the layout it slices with has
-            # to be one the rest of the model also uses:
+            # The erndata MTP path slices its full-length tensors locally
+            # (extract_local_cp_chunks) instead of calling
+            # ContextParallelScatterOp, so cp_balance_mode has to name a layout
+            # the rest of the model also uses:
             #   dualchunk_allgather  -> scatter_balance    (zigzag, MCore-like)
             #   contiguous_allgather -> scatter_contiguous (rank-order slices)
             #
-            # `contiguous_a2a` (Ulysses) is refused, but NOT because its
-            # sequence layout is unknown: ContextParallelScatterOp dispatches on
-            # `mode.startswith("contiguous")`, so a2a shards the sequence
-            # contiguously too and extract_local_contiguous_chunk would be the
-            # matching local slice. What differs is the *mask* contract:
-            # DotProductAttention.forward skips
-            # expand_attn_mask_startend_row_indices_for_cp under a2a
-            # because the head-axis all-to-all leaves each rank holding all
-            # sequence positions for a head subset, so the full-length
-            # row-index tensor this path builds is consumed differently. That
-            # combination has never been run end-to-end here, so it is rejected
-            # rather than assumed to work.
+            # contiguous_a2a shards the sequence contiguously too, but its mask
+            # contract differs (DotProductAttention.forward skips
+            # expand_attn_mask_startend_row_indices_for_cp under a2a) and has
+            # never been run here, so it is refused rather than assumed to work.
             #
-            # contiguous_allgather is a *necessary* condition for the DSv4
-            # hybrid stack -- DSv4HybridAttention.forward and
-            # MQALatentAttention.__init__ assert on it under CP because they
-            # build sparse-attention index tables over the global sequence and
-            # row-slice this rank's queries. It is not a sufficient one: see the
-            # separate erndata + Indexer + CP rejection in the dsv4_hybrid block
-            # below for a path that is still broken downstream.
+            # contiguous_allgather is necessary but not sufficient for the DSv4
+            # hybrid stack: DSv4HybridAttention/MQALatentAttention assert on it
+            # under CP, and the Indexer rejection in the dsv4_hybrid block below
+            # still rules the combination out.
             if self.context_parallel_size > 1:
                 if self.cp_balance_mode not in (
                     "dualchunk_allgather",
@@ -2338,17 +2273,13 @@ class TransformerConfig(ModelParallelConfig):
                         f"{self.cp_balance_mode!r}."
                     )
                 if self.gpt_model_use_experimental_version:
-                    # GPTEmbedding.forward passes
+                    # GPTEmbedding passes
                     # include_position_axis=gpt_model_use_experimental_version to
-                    # build_startend_row_indices_from_cu_seqlens, so the mask
-                    # becomes [B, 1, L, 2]. Under CP,
-                    # DotProductAttention.expand_attn_mask_startend_row_indices_for_cp
-                    # accepts a 2-column mask
-                    # only when config.experimental_dataflow is True -- which
-                    # this same block forbids for erndata -- and otherwise
-                    # raises "Invalid attention mask shape" from inside
-                    # attention. Reject here instead, where the offending flag
-                    # is named.
+                    # build_startend_row_indices_from_cu_seqlens, making the mask
+                    # [B, 1, L, 2]. Under CP the mask expansion accepts a
+                    # 2-column mask only when experimental_dataflow is True,
+                    # which this same block forbids; otherwise attention raises
+                    # "Invalid attention mask shape", naming neither flag.
                     raise ValueError(
                         "use_erndata=True with MTP + context_parallel_size>1 is "
                         "incompatible with "
@@ -2892,31 +2823,21 @@ class TransformerConfig(ModelParallelConfig):
                 and self.num_nextn_predict_layers > 0
                 and self.context_parallel_size > 1
             ):
-                # Both Indexers derive their token-count denominator from
-                # input_ids, and both assume input_ids arrives CP-*local*:
+                # Both Indexers assume input_ids arrives CP-*local*:
                 # CompressedSparseAttention.forward and
-                # MQALatentAttention._indexer_loss_mask gather it whenever
-                # `cp_world_size > 1 and not experimental_dataflow` and then
-                # reshape to [b, cp_size * s_local].
+                # MQALatentAttention._indexer_loss_mask all-gather it whenever
+                # `cp_world_size > 1 and not experimental_dataflow` and reshape
+                # to [b, cp_size * s_local]. That condition is exactly the
+                # erndata condition, but the premise is wrong here -- erndata
+                # hands the model a full-length global input_ids and nothing
+                # trims it -- so the gather over-counts by cp_size and dies on
+                # the reshape, and the position_offset = cp_rank * sq slice below
+                # it would be wrong even with the reshape fixed.
                 #
-                # That condition is exactly the erndata condition -- erndata
-                # forbids experimental_dataflow -- but the premise is wrong on
-                # this path: erndata hands the model a full-length global
-                # input_ids and nothing trims it (TransformerLayer.forward
-                # compares in global units, so its re-slice never fires). The
-                # gather therefore produces b * L * cp_size elements for a
-                # b * L reshape and dies with a shape error deep inside
-                # attention, and the position_offset = cp_rank * sq slice below
-                # it would be wrong even if the reshape were fixed.
-                #
-                # Before cp_balance_mode became configurable on this path the
-                # combination was unreachable: erndata + MTP + CP required
-                # dualchunk_allgather while the DSv4 layers assert
-                # contiguous_allgather. Widening that check made it
-                # config-legal, so keep the rejection explicit here rather than
-                # letting it resurface as a runtime crash. Making it work means
-                # teaching the Indexer loss-mask path that input_ids may already
-                # be global -- not done.
+                # Accepting contiguous_allgather above made this combination
+                # config-legal for the first time (it previously required
+                # dualchunk_allgather, which the DSv4 layers reject), so reject
+                # it here rather than let it resurface as a runtime crash.
                 raise ValueError(
                     "use_erndata=True with MTP + context_parallel_size>1 does "
                     "not support a model that builds an Indexer (CSAIndexer="

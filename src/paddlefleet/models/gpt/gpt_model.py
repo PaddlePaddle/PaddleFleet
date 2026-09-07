@@ -388,21 +388,18 @@ class GPTModel(PipelineLayer):
 
         if spec.mtp:
             for mtp_spec in spec.mtp:
-                # NOTE: test mtp_shared_last_layer FIRST. It used to sit behind
-                # an `enable_mtp_magic_send` branch that short-circuited to a
-                # plain LayerDesc, so with both flags on the tie silently did
-                # nothing. That was only reachable under `python -O` (the
-                # combination was assert-rejected in TransformerConfig, and
-                # asserts are stripped there), but the rejection is gone now, so
-                # the order matters for real. The two are orthogonal: magic send
-                # owns `mtp_embed` (synced via _mtp_embed_global_group below)
-                # while SharedLayerDesc(shared_submodule_weight_only=True)
-                # aliases only the params under `transformer_layer`.
+                # NOTE: test mtp_shared_last_layer FIRST. It used to sit behind an
+                # `enable_mtp_magic_send` branch that short-circuited to a plain
+                # LayerDesc, so with both flags on the tie silently did nothing.
+                # The two are orthogonal -- magic send owns `mtp_embed` (synced
+                # via _mtp_embed_global_group below) while SharedLayerDesc(
+                # shared_submodule_weight_only=True) aliases only the params
+                # under `transformer_layer` -- and TransformerConfig no longer
+                # rejects the combination, so the order matters for real.
                 #
                 # The pivot for this key is emitted above, on the last backbone
-                # TransformerLayer. Aliasing needs both on the same rank; see the
-                # co-location note in transformer_config.py for what happens when
-                # a PP boundary splits them.
+                # TransformerLayer; aliasing needs both on the same rank (see the
+                # co-location note in transformer_config.py).
                 if getattr(self.config, "mtp_shared_last_layer", False):
                     desc = SharedLayerDesc(
                         "mtp_reuse_transformer",

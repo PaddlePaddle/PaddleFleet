@@ -233,16 +233,14 @@ class TestGptEmbeddingMegatronCPSP(unittest.TestCase):
         )
 
     def test_megatron_cp_slice_follows_cp_balance_mode(self) -> None:
-        # The defect this whole change exists to fix: the megatron branch used
-        # to hard-code the zigzag slice instead of reading cp_balance_mode, so a
-        # contiguous_allgather model got labels/embeddings belonging to other
-        # ranks' tokens -- a silently wrong loss, not a crash.
+        # The defect this change fixes: the megatron branch hard-coded the zigzag
+        # slice instead of reading cp_balance_mode, so a contiguous_allgather
+        # model got embeddings belonging to other ranks' tokens -- a silently
+        # wrong loss, not a crash.
         #
-        # test_megatron_cp_extract above only asserts the *shape*, which the
-        # zigzag and contiguous layouts share, and every other CP test in this
-        # repo configures dualchunk. So this is the only assertion that fails if
-        # the mode is ignored: it pins the actual values against the mode the
-        # config asked for, at a rank where the two layouts disagree.
+        # test_megatron_cp_extract above only asserts the *shape*, which both
+        # layouts share, so this is the only assertion that fails when the mode
+        # is ignored: it pins values at a rank where the layouts disagree.
         K, B, L, H = 2, 1, 8, 4
         cp_size, cp_rank = 2, 1
         full = paddle.arange(B * L * H, dtype="float32").reshape([B, L, H])
