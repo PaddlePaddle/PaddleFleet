@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Numeric record for the sglang-aligned mHC forwards (``align_sglang=True``).
+"""Numeric record for the sglang-aligned mHC forwards (``ABLATION_INSPECT_TENSOR=1``).
 
 Two tilelang forwards reproduce sglang's reduction order and FMA contraction so
 a training run can be bit-compared against inference; the backward stays cuTile
@@ -24,13 +24,15 @@ for both. What the tests pin down:
     under exact arithmetic, fp32-ULP apart otherwise;
   - the shared cuTile backward still works and is unaffected by which forward
     ran (only the saved ``norm`` carries the align-order rounding);
-  - ``align_sglang=False`` leaves the original path bit-for-bit untouched;
+  - ``ABLATION_INSPECT_TENSOR`` unset or off leaves the original path
+    bit-for-bit untouched;
   - unsupported N/K/dtype fall back to cuTile instead of asserting, so turning
     the bit-compare on cannot crash a model that trains fine.
 
 Shapes match production: n=4, C=4096, so proj_rms reduces over K=16384.
 """
 
+import contextlib
 import os
 import unittest
 from unittest import mock
@@ -47,6 +49,23 @@ from paddlefleet.fusions.fused_mhc_kernels import (
 _S, _B, _N, _C = 4, 2, 4, 4096
 _K = _N * _C
 _NMAP = _N * _N + 2 * _N
+
+
+@contextlib.contextmanager
+def _env_align(value):
+    """Set the switch the kernel reads; ``None`` removes it.
+
+    The forwards take no ``align_sglang`` argument -- they read
+    ``ABLATION_INSPECT_TENSOR`` themselves so the mHC layers need not plumb a
+    bit-compare switch through -- so the tests set the variable instead.
+    ``mock.patch.dict`` restores whatever the environment had.
+    """
+    with mock.patch.dict(os.environ):
+        if value is None:
+            os.environ.pop("ABLATION_INSPECT_TENSOR", None)
+        else:
+            os.environ["ABLATION_INSPECT_TENSOR"] = value
+        yield
 
 
 def _rand(*shape, dtype="float32"):
@@ -125,9 +144,8 @@ class TestProjRmsAlign(_AlignCase):
         for t in (x_leaf, w_leaf):
             t.stop_gradient = False
 
-        proj, r = fused_proj_rms(
-            x_leaf, w_leaf, 1e-6, fuse_cast=True, align_sglang=align
-        )
+        with _env_align("1" if align else "0"):
+            proj, r = fused_proj_rms(x_leaf, w_leaf, 1e-6, fuse_cast=True)
         # weight both outputs so neither gradient path is left untested
         (proj.astype("float32").sum() + r.astype("float32").sum()).backward()
         return {
@@ -188,15 +206,10 @@ class TestHPostBDAAlign(_AlignCase):
         for t in (h_res, h_post, res_leaf, x_leaf):
             t.stop_gradient = False
 
-        out = fused_h_post_bda(
-            h_res,
-            res_leaf,
-            h_post,
-            x_leaf,
-            None,
-            fuse_cast=True,
-            align_sglang=align,
-        )
+        with _env_align("1" if align else "0"):
+            out = fused_h_post_bda(
+                h_res, res_leaf, h_post, x_leaf, None, fuse_cast=True
+            )
         out.astype("float32").sum().backward()
         return {
             "out": out,
@@ -338,25 +351,34 @@ class TestAlignSupportPredicates(unittest.TestCase):
     def test_proj_rms_supported_production_shape(self):
         x = paddle.zeros([2, _K], dtype="bfloat16")
         w = paddle.zeros([_NMAP, _K], dtype="float32")
-        self.assertEqual(align_proj_rms_unsupported(x, w), "")
+        self.assertEqual(align_proj_rms_unsupported(x, w, True), "")
 
     def test_proj_rms_rejects_wide_n(self):
         # num_residual_streams=8 is inside the public config range and gives
         # N = n*n + 2*n = 80, past the 32-wide GEMM tile.
         x = paddle.zeros([2, 8 * _C], dtype="bfloat16")
         w = paddle.zeros([80, 8 * _C], dtype="float32")
-        self.assertIn("N=80", align_proj_rms_unsupported(x, w))
+        self.assertIn("N=80", align_proj_rms_unsupported(x, w, True))
 
     def test_proj_rms_rejects_unaligned_k(self):
         x = paddle.zeros([2, _K + 128], dtype="bfloat16")
         w = paddle.zeros([_NMAP, _K + 128], dtype="float32")
-        self.assertIn("not a multiple of 256", align_proj_rms_unsupported(x, w))
+        self.assertIn(
+            "not a multiple of 256", align_proj_rms_unsupported(x, w, True)
+        )
 
     def test_proj_rms_rejects_non_bf16_x(self):
         # fuse_cast only promises "x may be narrow", not "x is bf16".
         x = paddle.zeros([2, _K], dtype="float32")
         w = paddle.zeros([_NMAP, _K], dtype="float32")
-        self.assertIn("only takes bf16", align_proj_rms_unsupported(x, w))
+        self.assertIn("only takes bf16", align_proj_rms_unsupported(x, w, True))
+
+    def test_proj_rms_rejects_no_fuse_cast(self):
+        # cuTile returns x.dtype without fuse_cast; the align kernel is fp32
+        # only, so running it would change the output dtype, not just its bits.
+        x = paddle.zeros([2, _K], dtype="bfloat16")
+        w = paddle.zeros([_NMAP, _K], dtype="float32")
+        self.assertIn("fuse_cast", align_proj_rms_unsupported(x, w, False))
 
     def _bda_args(self, res_dtype="bfloat16", x_dtype="bfloat16"):
         return (
@@ -399,10 +421,8 @@ class TestAlignFallbackIsCutile(unittest.TestCase):
             paddle.seed(17)
             x = _small_int(_S, _B, k, dtype="bfloat16")
             w = _small_int(k, nmap, dtype="bfloat16")
-            proj, r = fused_proj_rms(
-                x, w, 1e-6, fuse_cast=True, align_sglang=align
-            )
-            return proj, r
+            with _env_align("1" if align else "0"):
+                return fused_proj_rms(x, w, 1e-6, fuse_cast=True)
 
         for ref, got in zip(run(False), run(True)):
             self.assertTrue(_cmp(ref, got)[0], "fallback diverged from cuTile")
@@ -412,15 +432,15 @@ class TestAlignFallbackIsCutile(unittest.TestCase):
 
         def run(align):
             paddle.seed(19)
-            return fused_h_post_bda(
-                _small_int(_S, _B, _N, _N),
-                _small_int(_S, _B, _N, _C, dtype="bfloat16"),
-                _small_int(_S, _B, _N),
-                _small_int(_S, _B, _C, dtype="bfloat16"),
-                _small_int(_C, dtype="bfloat16"),
-                fuse_cast=False,
-                align_sglang=align,
-            )
+            with _env_align("1" if align else "0"):
+                return fused_h_post_bda(
+                    _small_int(_S, _B, _N, _N),
+                    _small_int(_S, _B, _N, _C, dtype="bfloat16"),
+                    _small_int(_S, _B, _N),
+                    _small_int(_S, _B, _C, dtype="bfloat16"),
+                    _small_int(_C, dtype="bfloat16"),
+                    fuse_cast=False,
+                )
 
         self.assertTrue(
             _cmp(run(False), run(True))[0], "fallback diverged from cuTile"
@@ -429,43 +449,56 @@ class TestAlignFallbackIsCutile(unittest.TestCase):
 
 @unittest.skipUnless(is_cutile_available(), "cuTile not available")
 class TestAlignOffIsUntouched(unittest.TestCase):
-    """``align_sglang=False`` must be the pre-existing call, bit for bit."""
+    """Only ``ABLATION_INSPECT_TENSOR=1`` may leave the cuTile path.
 
-    def setUp(self):
-        # Pin the env gate off: the default is now "ask the environment", so
-        # an exported ABLATION_INSPECT_TENSOR would otherwise skew ``run()``.
-        patcher = mock.patch.dict(os.environ, {"ABLATION_INSPECT_TENSOR": "0"})
-        patcher.start()
-        self.addCleanup(patcher.stop)
+    "Off" has more than one spelling now that the kernel reads the variable
+    itself: unset, ``"0"``, and any other value. All of them must produce the
+    pre-existing cuTile result, bit for bit.
+    """
+
+    _OFF = (None, "0", "true")
+
+    def _all_off_agree(self, run):
+        ref = None
+        for value in self._OFF:
+            with _env_align(value):
+                got = run()
+            if ref is None:
+                ref = got
+                continue
+            for a, b in zip(ref, got):
+                self.assertTrue(
+                    _cmp(a, b)[0], f"ABLATION_INSPECT_TENSOR={value!r} diverged"
+                )
 
     def test_proj_rms(self):
         from paddlefleet.fusions.fused_mhc_kernels import fused_proj_rms
 
-        def run(**kw):
+        def run():
             paddle.seed(23)
             x = _rand(_S, _B, _K, dtype="bfloat16")
             w = _rand(_K, _NMAP, dtype="bfloat16")
-            return fused_proj_rms(x, w, 1e-6, fuse_cast=True, **kw)
+            return fused_proj_rms(x, w, 1e-6, fuse_cast=True)
 
-        for ref, got in zip(run(), run(align_sglang=False)):
-            self.assertTrue(_cmp(ref, got)[0])
+        self._all_off_agree(run)
 
     def test_h_post_bda(self):
         from paddlefleet.fusions.fused_mhc_kernels import fused_h_post_bda
 
-        def run(**kw):
+        def run():
             paddle.seed(29)
-            return fused_h_post_bda(
-                _rand(_S, _B, _N, _N),
-                _rand(_S, _B, _N, _C, dtype="bfloat16"),
-                _rand(_S, _B, _N),
-                _rand(_S, _B, _C, dtype="bfloat16"),
-                None,
-                fuse_cast=True,
-                **kw,
+            return (
+                fused_h_post_bda(
+                    _rand(_S, _B, _N, _N),
+                    _rand(_S, _B, _N, _C, dtype="bfloat16"),
+                    _rand(_S, _B, _N),
+                    _rand(_S, _B, _C, dtype="bfloat16"),
+                    None,
+                    fuse_cast=True,
+                ),
             )
 
-        self.assertTrue(_cmp(run(), run(align_sglang=False))[0])
+        self._all_off_agree(run)
 
 
 if __name__ == "__main__":

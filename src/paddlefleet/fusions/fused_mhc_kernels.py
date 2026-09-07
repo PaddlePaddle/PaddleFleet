@@ -63,10 +63,15 @@ def _get_cuda_stream():
 # (num_residual_streams=8 gives N = n*n+2*n = 80). Unsupported shapes fall back
 # to cuTile instead of asserting, so enabling the bit-compare cannot crash a
 # model that trains fine. The post kernel gcd's its tile, so it is shape-general.
-def align_proj_rms_unsupported(x: Tensor, weight: Tensor) -> str:
+def align_proj_rms_unsupported(
+    x: Tensor, weight: Tensor, fuse_cast: bool
+) -> str:
     """Return why the align proj_rms kernel cannot run, or "" if it can."""
     N = weight.shape[0]
     K = x.shape[1]
+    if not fuse_cast:
+        # cuTile returns x.dtype here; the align kernel always returns fp32.
+        return "fuse_cast=False, the kernel always returns fp32"
     if N > 32:
         return f"N={N} exceeds the 32-wide GEMM tile"
     if K % 256 != 0:
@@ -139,7 +144,8 @@ def _tilelang_proj_rms_fwd_align(
     """
     K = x.shape[1]
     N = weight.shape[0]
-    reason = align_proj_rms_unsupported(x, weight)
+    # fuse_cast is the caller's branch condition, hence fixed here.
+    reason = align_proj_rms_unsupported(x, weight, True)
     assert not reason, f"align proj_rms on unsupported input: {reason}"
     # The GEMM tile is 32 columns wide (only the first N are stored), so pad fn
     # to 32 rows. bf16->fp32 is lossless, so a bf16 weight gives the same bits.
@@ -1911,14 +1917,9 @@ else:
             x: Tensor,
             bias: Tensor | None,
             fuse_cast: bool = False,
-            align_sglang: bool | None = None,
         ):
             """cuTile/tilelang fused h_post_bda forward."""
-            use_align = (
-                _align_sglang_from_env()
-                if align_sglang is None
-                else align_sglang
-            )
+            use_align = _align_sglang_from_env()
             if use_align:
                 reason = align_h_post_bda_unsupported(
                     h_res, original_residual, h_post, x, bias, fuse_cast
@@ -2001,19 +2002,14 @@ else:
             weight: Tensor,
             eps: float = 1e-6,
             fuse_cast: bool = False,
-            align_sglang: bool | None = None,
         ):
             """cuTile/tilelang fused proj_rms forward."""
             original_shape = x.shape
             K = original_shape[-1]
             x_2d = x.reshape([-1, K])
-            use_align = (
-                _align_sglang_from_env()
-                if align_sglang is None
-                else align_sglang
-            )
+            use_align = _align_sglang_from_env()
             if use_align:
-                reason = align_proj_rms_unsupported(x_2d, weight)
+                reason = align_proj_rms_unsupported(x_2d, weight, fuse_cast)
                 if reason:
                     _log_align_fallback("proj_rms", reason)
                     use_align = False
@@ -2187,7 +2183,6 @@ else:
         x: Tensor,
         bias: Tensor | None,
         fuse_cast: bool = False,
-        align_sglang: bool | None = None,
     ) -> Tensor:
         """Fused H_res @ residual + H_post * (x + bias).
 
@@ -2204,11 +2199,12 @@ else:
                 be inferred from dtypes -- ``h_res`` is fp32 either way.
                 Declined when ``bias`` is not None, since ``g_bias`` reduces
                 over ``g_x`` and would lose precision if ``g_x`` were narrow.
-            align_sglang: when True, use the tilelang forward, which inherits
-                the sglang mhc_post FMA-contraction choice (bit-compare only).
-                Ignored unless ``bias is None and fuse_cast``. Defaults to
-                None, meaning read ``ABLATION_INSPECT_TENSOR`` in the kernel,
-                so callers need not plumb the bit-compare switch through.
+
+        Under ``ABLATION_INSPECT_TENSOR=1`` the forward switches to the tilelang
+        kernel, which inherits the sglang mhc_post FMA-contraction choice
+        (bit-compare only); the switch is read here rather than passed in, so
+        callers stay unaware of it. Ignored unless ``bias is None and
+        fuse_cast``.
 
         Returns:
             [s, b, n, C] fused output
@@ -2238,7 +2234,7 @@ else:
             f"fused_h_post_bda: C={C} exceeds int32 max ({_INT32_MAX})"
         )
         return FusedHPostBDA.apply(
-            h_res, original_residual, h_post, x, bias, fuse_cast, align_sglang
+            h_res, original_residual, h_post, x, bias, fuse_cast
         )
 
     def fused_proj_rms(
@@ -2246,7 +2242,6 @@ else:
         weight: Tensor,
         eps: float = 1e-6,
         fuse_cast: bool = False,
-        align_sglang: bool | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Fused projection + RMS normalization.
 
@@ -2257,10 +2252,11 @@ else:
             fuse_cast: when True, ``x``/``weight`` may be narrow; the kernel
                 widens ``x`` in-register and returns ``proj``/``r`` in fp32 so
                 the mappings built from them keep their precision.
-            align_sglang: when True, use the tilelang forward, which inherits
-                the sglang mhc_pre accumulation order (bit-compare only).
-                Defaults to None, meaning read ``ABLATION_INSPECT_TENSOR`` in
-                the kernel, so callers need not plumb the switch through.
+
+        Under ``ABLATION_INSPECT_TENSOR=1`` the forward switches to the tilelang
+        kernel, which inherits the sglang mhc_pre accumulation order
+        (bit-compare only); the switch is read here rather than passed in, so
+        callers stay unaware of it.
 
         Returns:
             proj: [..., N] = x @ weight^T
@@ -2289,4 +2285,4 @@ else:
         assert K <= _INT32_MAX, (
             f"fused_proj_rms: K={K} exceeds int32 max ({_INT32_MAX})"
         )
-        return FusedProjRms.apply(x, weight, eps, fuse_cast, align_sglang)
+        return FusedProjRms.apply(x, weight, eps, fuse_cast)
