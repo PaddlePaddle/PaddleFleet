@@ -471,11 +471,14 @@ class TestMLAContiguousAllgatherCP(unittest.TestCase):
     def _check_mqa(self, attn_mode):
         # ``mqa_full_causal`` (and the phase-2 warmup) accept dense FA4 only --
         # ``MQALatentAttention._assert_dense_fa4`` raises otherwise -- and a bare
-        # launcher process leaves the flag at the image default 2. Pin it to the
-        # value ``TrainingArguments.__post_init__`` derives on these SM100 boxes.
+        # launcher process leaves the flag at the image default 2. ``_fa4_pin``
+        # reproduces both flags ``TrainingArguments.__post_init__`` /production
+        # imply on these SM100 boxes: version 4 *and* determinism off, since
+        # ``ci/multi-card_test.sh`` exports ``FLAGS_cudnn_deterministic=1`` and
+        # that alone degrades the (576, 512) pair back to FA2.
         # Call-site scoped, not module scoped: ``test_4`` asserts on the refusal
         # the *default* flag produces.
-        with U._flash_attn_version(4):
+        with U._fa4_pin():
             r = run_mla_cp(_row_end([200, 150, 162], 512), attn_mode=attn_mode)
         self.assertLess(r["fwd"], FWD_RTOL, f"{attn_mode}: forward")
         self.assertLess(r["dH"], GRAD_RTOL, f"{attn_mode}: dH")
