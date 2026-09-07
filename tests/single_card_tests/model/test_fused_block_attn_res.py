@@ -22,6 +22,9 @@ either is missing; `TestBlockAttnResFallback` keeps the extension-free fallback
 path covered in that case.
 """
 
+import builtins
+import importlib.util
+import sys
 import unittest
 from unittest import mock
 
@@ -29,9 +32,7 @@ import paddle
 
 from paddlefleet.transformer.block_attn_res import (
     HAVE_FUSED_ATTNRES,
-    BlockAttnRes,
     BlockAttnResFunc,
-    BlockAttnResSublayersSpec,
     FusedAttnResTritonFunc,
     _block_attn_res_rmsnorm,
 )
@@ -567,8 +568,101 @@ class TestBlockAttnResFallback(unittest.TestCase):
         else:
             self.assertTrue(all(h is None for h in handles))
 
-    def test_fallback_warning_only_when_fused_was_eligible(self):
-        """The "falls back" warning must track real fused eligibility.
+
+def _import_block_attn_res_without_extension():
+    """Execute a private copy of block_attn_res with the FLA import blocked.
+
+    Exercises the `except (ImportError, AttributeError)` arm of the optional
+    import, which is dead code wherever the extension is installed. The copy
+    lives under a private module name that is dropped again afterwards, so the
+    real `paddlefleet.transformer.block_attn_res` object and every class
+    identity other tests compare against stay untouched -- a plain
+    `importlib.reload` would swap `BlockAttnRes` out from under them.
+    """
+    from paddlefleet.transformer import block_attn_res
+
+    blocked = "paddlefleet_ops.fla.ops.attnres.fused"
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == blocked:
+            raise ImportError(f"blocked by {__name__}: {name}")
+        return real_import(name, *args, **kwargs)
+
+    name = "paddlefleet.transformer._block_attn_res_no_fla"
+    spec = importlib.util.spec_from_file_location(name, block_attn_res.__file__)
+    module = importlib.util.module_from_spec(spec)
+    # `@dataclass` resolves string annotations through sys.modules, so the copy
+    # has to be registered while its body runs.  patch.dict unregisters it
+    # again, keeping the private name out of the rest of the process.
+    with (
+        mock.patch.dict(sys.modules, {name: module}),
+        mock.patch.object(builtins, "__import__", guarded_import),
+    ):
+        spec.loader.exec_module(module)
+    return module
+
+
+class TestFusedAttnResUnavailable(unittest.TestCase):
+    """The missing-extension gating and its once-per-process warning.
+
+    `HAVE_FUSED_ATTNRES` is patched instead of skipped: on a machine with the
+    extension these lines are otherwise unreachable, and on one without it the
+    fused tests are unreachable, so a skip in either direction means the branch
+    is never covered by the same job that covers the fused path.
+    """
+
+    def setUp(self):
+        from paddlefleet.transformer import block_attn_res
+
+        self.mod = block_attn_res
+        paddle.set_device("gpu:0" if _HAVE_GPU else "cpu")
+        # The warning is once-per-process state owned by the real module;
+        # restore it so test order cannot change what a later test observes.
+        self.addCleanup(
+            setattr,
+            block_attn_res,
+            "_fused_attnres_fallback_warned",
+            block_attn_res._fused_attnres_fallback_warned,
+        )
+
+    def _build(self, module=None, norm=RMSNorm, have_fused=False, **kwargs):
+        """Build a BlockAttnRes and return it with the captured warning mock."""
+        module = module or self.mod
+        module._fused_attnres_fallback_warned = False
+        config = TransformerConfig(
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            **kwargs,
+        )
+        with (
+            mock.patch.object(module, "HAVE_FUSED_ATTNRES", have_fused),
+            mock.patch.object(module.logger, "warning") as warning,
+        ):
+            layer = module.BlockAttnRes(
+                config, module.BlockAttnResSublayersSpec(norm=norm)
+            )
+        return layer, warning
+
+    def test_eligible_layer_reports_the_import_failure(self):
+        """An eligible layer must warn, and name why the import failed.
+
+        The recorded import error is the only clue the operator gets, so it has
+        to reach the log rather than a bare "not available".
+        """
+        reason = "ImportError: sentinel from test"
+        with mock.patch.object(self.mod, "_FUSED_ATTNRES_IMPORT_ERROR", reason):
+            layer, warning = self._build()
+
+        self.assertFalse(layer._use_fused)
+        self.assertEqual(
+            warning.call_count, 1, "the missing extension must be reported"
+        )
+        self.assertIn(reason, warning.call_args.args)
+
+    def test_ineligible_layers_stay_quiet(self):
+        """The warning tracks real eligibility, not just the missing extension.
 
         `_use_fused` needs four things: the extension, RMSNorm, the
         `attn_res_fusion` flag, and `deterministic_mode` off. A warning keyed on
@@ -576,45 +670,87 @@ class TestBlockAttnResFallback(unittest.TestCase):
         layer that was never going to use the fused kernel, which misreads as a
         missing extension when diagnosing performance.
         """
-        from paddlefleet.transformer import block_attn_res
-
-        if HAVE_FUSED_ATTNRES:
-            self.skipTest("the warning only exists when the extension is gone")
-
-        def build(norm, **config_kwargs):
-            # Warning is once-per-process; reset so each case is observable.
-            block_attn_res._fused_attnres_fallback_warned = False
-            config = TransformerConfig(
-                hidden_size=16,
-                num_hidden_layers=1,
-                num_attention_heads=2,
-                **config_kwargs,
-            )
-            with mock.patch.object(block_attn_res.logger, "warning") as warning:
-                layer = BlockAttnRes(
-                    config, BlockAttnResSublayersSpec(norm=norm)
-                )
-            return layer, warning.call_count
-
-        eligible, warned = build(RMSNorm)
-        self.assertFalse(eligible._use_fused)
-        self.assertEqual(
-            warned, 1, "an eligible layer must report the missing extension"
-        )
-
         for label, norm, kwargs in (
             ("non-RMSNorm", IdentityOp, {}),
             ("deterministic_mode", RMSNorm, {"deterministic_mode": True}),
             ("attn_res_fusion off", RMSNorm, {"attn_res_fusion": False}),
         ):
             with self.subTest(ineligible=label):
-                layer, warned = build(norm, **kwargs)
+                layer, warning = self._build(norm=norm, **kwargs)
                 self.assertFalse(layer._use_fused)
                 self.assertEqual(
-                    warned,
+                    warning.call_count,
                     0,
                     f"{label} was never fused-eligible, so it must stay quiet",
                 )
+
+    def test_eligible_layer_with_extension_uses_fused_and_stays_quiet(self):
+        """The other side of the gate: present extension, no warning."""
+        layer, warning = self._build(have_fused=True)
+
+        self.assertTrue(layer._use_fused)
+        self.assertEqual(warning.call_count, 0)
+
+    def test_warning_is_emitted_once_per_process(self):
+        """Every layer of a deep model hits this; only the first may log."""
+        self.mod._fused_attnres_fallback_warned = False
+        with mock.patch.object(self.mod.logger, "warning") as warning:
+            self.mod._warn_fused_attnres_unavailable_once()
+            self.mod._warn_fused_attnres_unavailable_once()
+
+        self.assertEqual(warning.call_count, 1)
+
+    def test_warning_is_rank_zero_only(self):
+        """Otherwise the line is repeated once per card on every job."""
+        self.mod._fused_attnres_fallback_warned = False
+        with (
+            mock.patch.object(paddle.distributed, "get_rank", return_value=1),
+            mock.patch.object(self.mod.logger, "warning") as warning,
+        ):
+            self.mod._warn_fused_attnres_unavailable_once()
+
+        self.assertEqual(warning.call_count, 0)
+
+    def test_warning_survives_an_unavailable_rank(self):
+        """`get_rank()` raises before `fleet.init`, and the warning still matters.
+
+        BlockAttnRes is built while the model is being constructed, which for
+        some entrypoints happens before the collective is up. Letting that
+        exception escape would turn a diagnostic into a crash.
+        """
+        self.mod._fused_attnres_fallback_warned = False
+        with (
+            mock.patch.object(
+                paddle.distributed,
+                "get_rank",
+                side_effect=RuntimeError("collective not initialized"),
+            ),
+            mock.patch.object(self.mod.logger, "warning") as warning,
+        ):
+            self.mod._warn_fused_attnres_unavailable_once()
+
+        self.assertEqual(warning.call_count, 1)
+
+    def test_module_imports_without_the_extension(self):
+        """Importing with no FLA extension must degrade, not raise."""
+        module = _import_block_attn_res_without_extension()
+
+        self.assertFalse(module.HAVE_FUSED_ATTNRES)
+        self.assertIsNone(module.fused_attnres_fwd)
+        self.assertIsNone(module.fused_attnres_bwd)
+        self.assertIsNone(module._build_ptr_table)
+        self.assertIn("ImportError", module._FUSED_ATTNRES_IMPORT_ERROR)
+
+        # And an eligible layer built against it reports that same reason,
+        # without any patching of the availability flag.
+        layer, warning = self._build(
+            module=module, have_fused=module.HAVE_FUSED_ATTNRES
+        )
+        self.assertFalse(layer._use_fused)
+        self.assertEqual(warning.call_count, 1)
+        self.assertIn(
+            module._FUSED_ATTNRES_IMPORT_ERROR, warning.call_args.args
+        )
 
 
 if __name__ == "__main__":
