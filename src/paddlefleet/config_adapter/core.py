@@ -70,6 +70,10 @@ ADAPTER_CONTROLLED_FIELDS = frozenset(
 )
 
 
+#: YAML key that carries the training sequence length.
+SEQ_FIELD = "max_seq_length"
+
+
 def _yaml_truthy(value):
     """Loose YAML bool: accepts real bools plus "true"/"yes"/"1" spellings."""
     if isinstance(value, str):
@@ -91,6 +95,7 @@ class ConfigAdapter:
         output_dir="./adapted_configs",
         in_place=False,
         force=False,
+        scale_seq_length=None,
     ):
         self.options = options
         self.target_nodes = target_nodes
@@ -104,6 +109,10 @@ class ConfigAdapter:
         self.output_dir = Path(output_dir)
         self.in_place = in_place
         self.force = force
+        # --scale-seq-length: rewrite max_seq_length and scale CP with it.
+        self.scale_seq_length = (
+            int(scale_seq_length) if scale_seq_length is not None else None
+        )
 
         self.scale_tag = f"{self.target_cards}cards"
         self.yaml_writer = YamlWriter()
@@ -138,6 +147,12 @@ class ConfigAdapter:
                 f"以下字段由适配器统一计算，不能用 --set 锁定：{pinned}。"
                 f"锁定后生成的配置会与报告里的并行度 / sharding 不一致；"
                 f"请去掉对应的 --set，或直接改源 YAML 后再适配"
+            )
+
+        if self.scale_seq_length is not None and SEQ_FIELD in requested:
+            return False, (
+                f"--scale-seq-length 与 --set {SEQ_FIELD} 冲突："
+                f"两者都要决定序列长度，请只保留其一"
             )
 
         config = self.yaml_writer.load(input_path)
@@ -191,9 +206,15 @@ class ConfigAdapter:
 
         self._apply_auto_overrides(config, model_config, log)
 
+        dims_planned, seq_warnings, err = self._apply_seq_scaling(
+            config, dims_before, model_config, log
+        )
+        if err:
+            return False, f"{input_path.name}: {err}"
+
         plan, err = plan_parallelism(
             config,
-            dims_before,
+            dims_planned,
             self.target_cards,
             self.cards_per_node,
             self.options,
@@ -205,6 +226,7 @@ class ConfigAdapter:
         )
         if err:
             return False, f"{input_path.name}: {err}"
+        plan.warnings.extend(seq_warnings)
 
         for key, value, reason in plan.json_changes:
             log.record(
@@ -327,6 +349,122 @@ class ConfigAdapter:
                     + "）",
                 )
 
+    def _apply_seq_scaling(self, config, dims_before, model_config, log):
+        """Rewrite ``max_seq_length`` and scale CP by the same ratio.
+
+        A longer sequence multiplies activation memory per card, so growing
+        ``max_seq_length`` N-fold grows ``context_parallel_size`` N-fold to
+        keep the per-card sequence slice (and thus activation memory) at the
+        source level.  Shrinking the sequence shrinks CP the same way, floored
+        at 1.  Returns ``(dims_for_planning, warnings, error_or_None)``; the
+        two rewritten fields are pinned like ``--set`` values so no later
+        stage may touch them.
+        """
+        if self.scale_seq_length is None:
+            return dims_before, [], None
+
+        new_seq = self.scale_seq_length
+        if new_seq < 1:
+            return dims_before, [], "--scale-seq-length 必须 >= 1"
+
+        raw = config.get(SEQ_FIELD)
+        try:
+            old_seq = int(raw)
+        except (TypeError, ValueError):
+            old_seq = 0
+        if old_seq < 1:
+            return (
+                dims_before,
+                [],
+                (
+                    f"--scale-seq-length 需要源 YAML 声明 {SEQ_FIELD}"
+                    f"（当前值：{raw!r}），否则无法计算 CP 的缩放比例"
+                ),
+            )
+
+        tp, pp, ep, cp, sep = dims_before
+        warnings = []
+        if new_seq == old_seq:
+            cp_new = cp
+            warnings.append(
+                f"--scale-seq-length {new_seq} 与源 {SEQ_FIELD} 相同，"
+                f"序列长度与 CP 均保持不变"
+            )
+        elif new_seq > old_seq:
+            if new_seq % old_seq != 0:
+                return (
+                    dims_before,
+                    [],
+                    (
+                        f"--scale-seq-length {new_seq} 不是源 {SEQ_FIELD}="
+                        f"{old_seq} 的整数倍，CP 无法同比例扩大；请改用 "
+                        f"{old_seq} 的整数倍（如 {old_seq * 2} / {old_seq * 4}）"
+                    ),
+                )
+            cp_new = cp * (new_seq // old_seq)
+        else:
+            if old_seq % new_seq != 0:
+                return (
+                    dims_before,
+                    [],
+                    (
+                        f"--scale-seq-length {new_seq} 不能整除源 {SEQ_FIELD}="
+                        f"{old_seq}，CP 无法同比例缩小；请改用能整除 "
+                        f"{old_seq} 的值"
+                    ),
+                )
+            factor = old_seq // new_seq
+            cp_new, remainder = divmod(cp, factor)
+            cp_new = max(cp_new, 1)
+            if remainder:
+                warnings.append(
+                    f"序列长度缩小 {factor} 倍但源 CP={cp} 不能被整除，"
+                    f"CP 取下整为 {cp_new}（每卡序列片段比按比例缩短的值"
+                    f"更长一点，显存只会更省，不影响正确性）"
+                )
+
+        if sep > 1 and cp_new > 1:
+            return (
+                dims_before,
+                [],
+                (
+                    f"序列长度缩放要求 CP {cp} -> {cp_new}，但源配置 SEP={sep}"
+                    f" > 1，框架禁止 sep parallel 与 context parallel 同时使用"
+                    f"（C5）；请先在源 YAML 里去掉 SEP 或 CP，再做序列长度缩放"
+                ),
+            )
+
+        if model_config is not None:
+            max_pos = model_config.get("max_position_embeddings")
+            if max_pos is not None and int(max_pos) < new_seq:
+                warnings.append(
+                    f"新序列长度 {new_seq} 超过 model_config.json 的 "
+                    f"max_position_embeddings={max_pos}，训练可能因位置编码"
+                    f"越界报错；请确认模型支持长度外推，或改小序列长度"
+                )
+
+        log.record(
+            "yaml",
+            self.yaml_writer.apply_config_map(config, {SEQ_FIELD: new_seq}),
+            f"--scale-seq-length：序列长度 {old_seq} -> {new_seq}",
+        )
+        if cp_new != cp:
+            direction = "扩大" if new_seq > old_seq else "缩小"
+            log.record(
+                "yaml",
+                self.yaml_writer.apply_config_map(
+                    config, {PARALLEL_FIELDS["cp"]: cp_new}
+                ),
+                f"序列长度{direction} {max(new_seq, old_seq) // min(new_seq, old_seq)} "
+                f"倍，context parallel 同比例{direction}：CP {cp} -> {cp_new}，"
+                f"保持每卡序列片段不长于源配置，防止长序列 OOM",
+            )
+        # Pin both fields exactly like --set values: nothing later in the
+        # pipeline may rewrite what the user asked for explicitly.
+        self.yaml_overrides[SEQ_FIELD] = new_seq
+        self.yaml_overrides[PARALLEL_FIELDS["cp"]] = cp_new
+        return (tp, pp, ep, cp_new, sep), warnings, None
+
     def _load_json(self, config, input_path):
         """Load ``model_config.json`` when it may be needed.
 
@@ -339,6 +477,8 @@ class ConfigAdapter:
             self.options.needs_model_config
             or bool(self.json_overrides)
             or bool(self.auto_overrides)
+            # the seq scaling wants max_position_embeddings for its warning
+            or self.scale_seq_length is not None
         )
         if not needed:
             return None, None, None, "本次运行不需要 model_config.json"
