@@ -12,12 +12,12 @@ from unittest.mock import patch
 import paddle
 
 from paddlefleet.transformer.csa_attention import (
-    CompressOrSkip,
     CompressedSparseAttention,
+    CompressOrSkip,
     IndexCacheServedDistillLossAutoScaler,
-    TilelangIndexerLossState,
     TileLangCSAIndexerDistillBridge,
     TileLangCSAIndexerLossAutoScaler,
+    TilelangIndexerLossState,
     _indexcache_offload_saved_delta,
     _indexcache_restore_saved_delta,
     _unpack_indexcache_pipeline_topk,
@@ -560,6 +560,9 @@ class TestIndexCacheCoreState(unittest.TestCase):
         if action == "F":
             self.assertIs(cache_topk.call_args.args[0], original)
             self.assertIs(fused_target.call_args.args[2], original)
+            self.assertFalse(
+                fused_target.call_args.kwargs["lse_indexer_matches_topk"]
+            )
             self.assertIs(result[1], packed_state)
         else:
             cache_topk.assert_not_called()
@@ -572,6 +575,125 @@ class TestIndexCacheCoreState(unittest.TestCase):
                     self._assert_replay_only_changes_attention(
                         action, cp_enabled
                     )
+
+    def test_replay_status_supports_legacy_and_explicit_hooks(self):
+        config = _layer_config("F")
+        layer = _make_layer(config, 1)
+        native = paddle.zeros([1, 2, 2], dtype="int32")
+        replay = paddle.ones_like(native)
+
+        with patch.object(
+            CompressedSparseAttention,
+            "_postprocess_indexer_replay",
+            return_value=native,
+        ):
+            result, applied = layer._apply_indexer_replay(native, 2, 4)
+        self.assertIs(result, native)
+        self.assertFalse(applied)
+
+        with patch.object(
+            CompressedSparseAttention,
+            "_postprocess_indexer_replay",
+            return_value=replay,
+        ):
+            result, applied = layer._apply_indexer_replay(native, 2, 4)
+        self.assertIs(result, replay)
+        self.assertTrue(applied)
+
+        with patch.object(
+            CompressedSparseAttention,
+            "_postprocess_indexer_replay",
+            return_value=(replay, True),
+        ):
+            result, applied = layer._apply_indexer_replay(native, 2, 4)
+        self.assertIs(result, replay)
+        self.assertTrue(applied)
+
+        with patch.object(
+            CompressedSparseAttention,
+            "_postprocess_indexer_replay",
+            return_value=(native.clone(), False),
+        ):
+            result, applied = layer._apply_indexer_replay(native, 2, 4)
+        self.assertFalse(applied)
+        self.assertTrue(paddle.equal_all(result, native).item())
+
+        with patch.object(
+            CompressedSparseAttention,
+            "_postprocess_indexer_replay",
+            return_value=None,
+        ), self.assertRaisesRegex(TypeError, "must return"):
+            layer._apply_indexer_replay(native, 2, 4)
+
+    def test_replay_status_preserves_legacy_hook_call_signature(self):
+        config = _layer_config("F")
+        layer = _make_layer(config, 1)
+        native = paddle.zeros([1, 2, 2], dtype="int32")
+
+        def legacy_hook(topk_indices, n_compressed, offset):
+            self.assertEqual((n_compressed, offset), (2, 4))
+            return topk_indices
+
+        with patch.object(
+            CompressedSparseAttention,
+            "_postprocess_indexer_replay",
+            side_effect=legacy_hook,
+        ) as hook:
+            result, applied = layer._apply_indexer_replay(native, 2, 4)
+
+        self.assertIs(result, native)
+        self.assertFalse(applied)
+        hook.assert_called_once_with(native, 2, 4)
+
+    def test_fused_target_falls_back_when_lse_does_not_match_topk(self):
+        config = _layer_config(
+            "F",
+            csa_indexer_backend="cudnn",
+            dsa_indexer_loss_coeff=0.0,
+        )
+        layer = _make_layer(config, 1)
+        object.__setattr__(layer, "indexer_backend", "cudnn")
+        object.__setattr__(layer, "indexer_loss_coeff", 0.0)
+        object.__setattr__(layer, "softmax_scale", 1.0)
+
+        query = paddle.zeros([1, 2, 1, 2], dtype="float32")
+        key = paddle.zeros([1, 4, 2], dtype="float32")
+        native_indices = paddle.to_tensor(
+            [[[2, 3], [2, -1]]], dtype="int32"
+        )
+        topk_probs = paddle.to_tensor(
+            [[[0.5, 0.5], [1.0, 0.0]]], dtype="float32"
+        )
+        replay_lse = paddle.zeros([1, 2, 1], dtype="float32")
+        expected = paddle.full_like(topk_probs, 0.5)
+
+        with (
+            patch(
+                "paddlefleet.tilelang_ops.csa_attn_target_reducesum",
+                return_value=expected,
+            ) as fallback,
+            patch(
+                "paddlefleet_ops.cudnn.deepseek_sparse_attention."
+                "sparse_attn_score_recompute_wrapper"
+            ) as cudnn_target,
+        ):
+            actual = layer._compute_fused_indexer_target(
+                query,
+                key,
+                native_indices,
+                topk_probs,
+                replay_lse,
+                lse_indexer_matches_topk=False,
+            )
+
+        fallback.assert_called_once()
+        fallback_args = fallback.call_args.args
+        self.assertIs(fallback_args[0], query)
+        self.assertIs(fallback_args[1], key)
+        self.assertIs(fallback_args[2], native_indices)
+        self.assertEqual(fallback_args[3], layer.softmax_scale)
+        cudnn_target.assert_not_called()
+        self.assertIs(actual, expected)
 
     def test_train_debug_is_driven_by_config(self):
         config = _layer_config("F", indexcache_train_debug=True)

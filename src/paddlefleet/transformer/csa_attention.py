@@ -3498,6 +3498,65 @@ class CompressedSparseAttention(FleetLayer):
         """
         return compress_topk_idxs
 
+    def _apply_indexer_replay(
+        self,
+        compress_topk_idxs: Tensor,
+        n_compressed: int,
+        offset: int,
+        *,
+        position_offset: int = 0,
+        q_positions: Tensor | None = None,
+    ) -> tuple[Tensor, bool]:
+        """Apply the optional Replay hook and report whether it supplied data.
+
+        The native compressed top-k table is used by IndexCache state and all
+        Indexer losses.  The hook may return either the historical Tensor-only
+        result or ``(Tensor, bool)`` where the boolean explicitly says that a
+        Replay payload was applied.  For the historical API, returning the
+        exact input object means "no-op"; a distinct Tensor is treated as a
+        possible Replay result and therefore cannot share the attention
+        ``lse_indexer`` with the native loss table.
+
+        Implementations must not mutate ``compress_topk_idxs`` in place.  The
+        identity fallback keeps existing PaddleRL integrations source
+        compatible while allowing them to opt into an explicit status later.
+        """
+        # Keep the original three-argument hook call for the ordinary path.
+        # A number of downstream integrations override this extension point
+        # without accepting the CP-only keyword arguments.  CP callers provide
+        # the extra context explicitly because Replay rows must be sliced and
+        # mapped against global query positions there.
+        if position_offset == 0 and q_positions is None:
+            replay_result = self._postprocess_indexer_replay(
+                compress_topk_idxs,
+                n_compressed,
+                offset,
+            )
+        else:
+            replay_result = self._postprocess_indexer_replay(
+                compress_topk_idxs,
+                n_compressed,
+                offset,
+                position_offset=position_offset,
+                q_positions=q_positions,
+            )
+        replay_applied = False
+        if (
+            isinstance(replay_result, tuple)
+            and len(replay_result) == 2
+            and isinstance(replay_result[1], bool)
+        ):
+            replayed_topk_idxs, replay_applied = replay_result
+        else:
+            replayed_topk_idxs = replay_result
+            replay_applied = replayed_topk_idxs is not compress_topk_idxs
+        if not isinstance(replayed_topk_idxs, paddle.Tensor):
+            raise TypeError(
+                "Indexer Replay hook must return a paddle.Tensor or "
+                "(paddle.Tensor, bool), got "
+                f"{type(replay_result).__name__}."
+            )
+        return replayed_topk_idxs, bool(replay_applied)
 
     def _resolve_topk_effective(self, n_compressed: int):
         """Return the CSA indexer top-k width for current phase.
@@ -3836,14 +3895,22 @@ class CompressedSparseAttention(FleetLayer):
         lse_indexer: Tensor | None = None,
         loss_mask: Tensor | None = None,
         global_valid_count: float | None = None,
+        lse_indexer_matches_topk: bool = True,
     ) -> Tensor:
         """
         Compute indexer target and track indexer loss for cudnn/tilelang
-        backend. The cudnn target kernel is used only when both indexer
-        and sparse_attn use cudnn backend.
+        backend. The cudnn target kernel is used only when both indexer and
+        sparse_attn use cudnn backend and ``lse_indexer`` was produced from the
+        same columns as ``topk_indices``.  Replay changes the columns consumed
+        by attention, so its LSE must not be paired with the native IndexCache
+        loss table.
         """
 
-        if self.indexer_backend == "cudnn" and lse_indexer is not None:
+        if (
+            self.indexer_backend == "cudnn"
+            and lse_indexer is not None
+            and lse_indexer_matches_topk
+        ):
             from paddlefleet_ops.cudnn.deepseek_sparse_attention import (
                 sparse_attn_score_recompute_wrapper,
             )
@@ -3869,6 +3936,10 @@ class CompressedSparseAttention(FleetLayer):
                 self.softmax_scale,
             )["target"]
         else:
+            # Replay can change the columns consumed by sparse attention.  In
+            # that case its ``lse_indexer`` describes a different set, so
+            # recompute the selected-set target directly from the native
+            # IndexCache table instead of pairing mismatched columns.
             from paddlefleet.tilelang_ops import csa_attn_target_reducesum
 
             target = csa_attn_target_reducesum(
@@ -4419,6 +4490,7 @@ class CompressedSparseAttention(FleetLayer):
         indexcache_served_loss_state = None
         indexcache_producer_loss_fused = False
         indexcache_loss_topk_idxs = None
+        replay_applied = False
 
         if (
             self.compress_ratio > 1
@@ -4537,10 +4609,12 @@ class CompressedSparseAttention(FleetLayer):
                 # learned/reused top-k table. Replay is an attention-only
                 # postprocess and must never redefine those tensors.
                 indexcache_loss_topk_idxs = compress_topk_idxs
-                compress_topk_idxs = self._postprocess_indexer_replay(
-                    compress_topk_idxs,
-                    n_compressed,
-                    offset,
+                compress_topk_idxs, replay_applied = (
+                    self._apply_indexer_replay(
+                        compress_topk_idxs,
+                        n_compressed,
+                        offset,
+                    )
                 )
             compress_topk_idxs = compress_topk_idxs.astype("int32")
 
@@ -4593,6 +4667,7 @@ class CompressedSparseAttention(FleetLayer):
                 lse_indexer,
                 loss_mask,
                 global_valid_count,
+                lse_indexer_matches_topk=not replay_applied,
             )
             tilelang_indexer_loss_state = tilelang_indexer_loss_state._replace(
                 target=target
@@ -4896,6 +4971,7 @@ class CompressedSparseAttention(FleetLayer):
         indexcache_served_loss_state = None
         indexcache_producer_loss_fused = False
         indexcache_loss_topk_idxs = None
+        replay_applied = False
 
         if (
             self.compress_ratio > 1
@@ -5021,12 +5097,14 @@ class CompressedSparseAttention(FleetLayer):
                 # Preserve the native F/S table for the cached state and loss.
                 # Replay may replace only the table consumed by attention.
                 indexcache_loss_topk_idxs = compress_topk_idxs
-                compress_topk_idxs = self._postprocess_indexer_replay(
-                    compress_topk_idxs,
-                    n_compressed_global,
-                    offset,
-                    position_offset=position_offset,
-                    q_positions=q_positions,
+                compress_topk_idxs, replay_applied = (
+                    self._apply_indexer_replay(
+                        compress_topk_idxs,
+                        n_compressed_global,
+                        offset,
+                        position_offset=position_offset,
+                        q_positions=q_positions,
+                    )
                 )
             compress_topk_idxs = compress_topk_idxs.astype("int32")
 
@@ -5073,6 +5151,7 @@ class CompressedSparseAttention(FleetLayer):
                 lse_indexer,
                 loss_mask,
                 global_valid_count,
+                lse_indexer_matches_topk=not replay_applied,
             )
             tilelang_indexer_loss_state = tilelang_indexer_loss_state._replace(
                 target=target
