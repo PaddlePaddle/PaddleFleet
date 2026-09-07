@@ -2346,16 +2346,25 @@ class TransformerConfig(ModelParallelConfig):
             # ever missing on the loss rank, LanguageLoss.forward raises rather
             # than silently rolling labels across packed-doc boundaries.
 
-        if self.use_erndata and self.context_parallel_size > 1:
+        if (
+            self.use_erndata
+            and self.context_parallel_size > 1
+            and not self.experimental_dataflow
+        ):
             # Under erndata nothing upstream shards by CP: the loader broadcasts
             # every tensor full-length to the whole CP group
             # (erndata_paddle_adapter._get_cp_group_and_src) and the model is
-            # expected to take its own slice. The only place that happens is
-            # GPTEmbedding's MTP branch, gated on num_nextn_predict_layers > 0
-            # and not mtp_load_weight_only; the generic
-            # ContextParallelScatterOp fallback beside it is gated on
-            # experimental_dataflow, which the block above forbids. So with MTP
-            # off (or weight-only) the hidden states stay length L while
+            # expected to take its own slice. Exactly two paths do that:
+            #   * GPTEmbedding's MTP branch (extract_local_cp_chunks), gated on
+            #     num_nextn_predict_layers > 0 and not mtp_load_weight_only;
+            #   * the plain-path ContextParallelScatterOp beside it, gated on
+            #     experimental_dataflow, which also scatters the RoPE tables and
+            #     -- in LanguageLoss._forward -- the labels. The MTP block above
+            #     forbids experimental_dataflow whenever
+            #     num_nextn_predict_layers > 0, so this path is only reachable at
+            #     K == 0, and there it is legal: hence the guard is skipped
+            #     rather than applied to it.
+            # With neither active the hidden states stay length L while
             # DotProductAttention computes seq_len = key.shape[1] * cp_size and
             # expand() fails against an L-row mask -- a shape error naming
             # neither use_erndata nor cp_balance_mode. Note use_erndata is set
@@ -2363,12 +2372,13 @@ class TransformerConfig(ModelParallelConfig):
             # section, so this is reachable without any MTP-specific flag.
             if self.num_nextn_predict_layers <= 0 or self.mtp_load_weight_only:
                 raise ValueError(
-                    "use_erndata=True with context_parallel_size>1 requires "
-                    "MTP (num_nextn_predict_layers>0, mtp_load_weight_only="
-                    "False): the erndata loader hands every CP rank the "
-                    "full-length sequence and only the MTP branch of "
-                    "GPTEmbedding slices it, so with MTP off no CP sharding "
-                    "happens at all. Got num_nextn_predict_layers="
+                    "use_erndata=True with context_parallel_size>1 needs some "
+                    "path that slices the loader's full-length sequence: "
+                    "either MTP (num_nextn_predict_layers>0, "
+                    "mtp_load_weight_only=False), which slices in GPTEmbedding, "
+                    "or experimental_dataflow=True, whose plain-path "
+                    "ContextParallelScatterOp does it. With neither, no CP "
+                    "sharding happens at all. Got num_nextn_predict_layers="
                     f"{self.num_nextn_predict_layers}, mtp_load_weight_only="
                     f"{self.mtp_load_weight_only}."
                 )
