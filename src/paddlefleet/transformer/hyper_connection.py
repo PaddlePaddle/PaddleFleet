@@ -32,6 +32,7 @@ import paddle.nn.functional as F
 from paddle import Tensor, nn
 
 from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
+from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
@@ -444,6 +445,14 @@ class HyperConnectionModule(nn.Layer):
             # reference keeps the arithmetic in the incoming dtype and so must
             # the kernel. The BDA site opts out again when a bias is present.
             self._widen_in_kernel = config.high_precision_mhc
+            # Run both mHC sites on the sglang tilelang kernels instead of the
+            # cuTile ones while bit-comparing against inference (same env as
+            # inspect_tensor): the pre site to pin the proj_rms accumulation
+            # order, the post site to pin the h_post_bda FMA contraction.
+            # Normal training keeps the cuTile fused kernels.
+            self._align_sglang = (
+                os.environ.get("ABLATION_INSPECT_TENSOR", "0") == "1"
+            )
         else:
             self._sinkhorn_op = native_sinkhorn
             self._h_aggregate_op = native_h_aggregate
@@ -550,7 +559,11 @@ class HyperConnectionModule(nn.Layer):
                 # either; the kernel widens what it has to and returns proj/r
                 # in fp32.
                 proj, r = self._proj_rms_op(
-                    x, self.mapping_proj.weight, self.norm_eps, fuse_cast=True
+                    x,
+                    self.mapping_proj.weight,
+                    self.norm_eps,
+                    fuse_cast=True,
+                    align_sglang=self._align_sglang,
                 )
             else:
                 proj, r = self._proj_rms_op(
@@ -978,6 +991,7 @@ class HyperConnectionModule(nn.Layer):
                         x,
                         bias,
                         fuse_cast=True,
+                        align_sglang=self._align_sglang,
                     )
                 else:
                     output = self._h_post_bda_op(
@@ -1018,9 +1032,13 @@ class HyperConnectionExpandLayer(FleetLayer):
         self.n = config.num_residual_streams
 
     def forward(self, dict_args: dict) -> dict:
+        dict_args["hidden_states"] = inspect_tensor(
+            "mhc_expand_input", -1, dict_args["hidden_states"]
+        )
         dict_args["hidden_states"] = HyperConnectionModule.input_expand(
             dict_args["hidden_states"], self.n
         )
+        inspect_tensor("mhc_expand_output", -1, dict_args["hidden_states"])
         return dict_args
 
 
