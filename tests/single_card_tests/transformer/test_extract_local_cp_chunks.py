@@ -9,21 +9,28 @@ The erndata MTP path never calls ``ContextParallelScatterOp``: it keeps its
 tensors full-length on every CP rank and slices the local part itself. That
 slice must reproduce, bit for bit, the layout the rest of the model scatters
 with — otherwise the labels/embeddings a rank holds belong to *other* ranks'
-tokens and the loss is silently wrong. So the parity checks here are against
-``context_parallel_utils``' own scatter helpers:
+tokens and the loss is silently wrong. So the parity checks here call
+``context_parallel_utils``' own scatter helpers directly:
 
   ``dualchunk_allgather``  -> ``scatter_balance``    (two zigzag chunks)
   ``contiguous_allgather`` -> ``scatter_contiguous`` (one rank-order chunk)
 
+Both helpers only read ``group.nranks`` and ``group.rank``, so ``_FakeGroup``
+below is enough to exercise them single-card with no distributed init. That
+matters: comparing against a hand-written slice would pass forever while the
+real scatter drifted underneath us, which is precisely the failure this whole
+change is about.
+
 Covered:
-  1. ``extract_local_contiguous_chunk`` == the slice ``scatter_contiguous``
-     computes, for every rank, and the ranks tile the sequence exactly once.
-  2. ``extract_local_cp_chunks`` dispatch: dualchunk -> zigzag helper,
-     contiguous_allgather -> contiguous helper, ``cp_size == 1`` -> identity.
-  3. Unsupported modes (``contiguous_a2a``, typos) raise ValueError rather than
+  1. ``extract_local_contiguous_chunk`` == ``scatter_contiguous`` for every
+     rank, and the ranks tile the sequence exactly once.
+  2. ``extract_local_cp_chunks`` == ``scatter_balance`` / ``scatter_contiguous``
+     for the mode each one implements.
+  3. ``mode`` is required and keyword-only — no default layout to fall into.
+  4. Unsupported modes (``contiguous_a2a``, typos) raise ValueError rather than
      silently defaulting to a layout.
-  4. Divisibility guards.
-  5. Negative ``axis`` and non-sequence axes behave like the zigzag helper.
+  5. Divisibility guards.
+  6. Negative ``axis`` and non-sequence axes behave like the zigzag helper.
 """
 
 from __future__ import annotations
@@ -32,11 +39,27 @@ import unittest
 
 import paddle
 
+from paddlefleet.context_parallel_utils import (
+    scatter_balance,
+    scatter_contiguous,
+)
 from paddlefleet.transformer.multi_token_prediction import (
     extract_local_contiguous_chunk,
     extract_local_cp_chunks,
     extract_local_zigzag_chunks,
 )
+
+
+class _FakeGroup:
+    """Minimal stand-in for a paddle CP group.
+
+    ``scatter_balance`` and ``scatter_contiguous`` touch nothing but these two
+    attributes, so this keeps the parity checks single-card.
+    """
+
+    def __init__(self, rank: int, nranks: int) -> None:
+        self.rank = rank
+        self.nranks = nranks
 
 
 def _arange_bl(batch: int, length: int) -> paddle.Tensor:
@@ -46,14 +69,15 @@ def _arange_bl(batch: int, length: int) -> paddle.Tensor:
 
 class TestExtractLocalContiguousChunk(unittest.TestCase):
     def test_matches_scatter_contiguous_layout(self) -> None:
-        # scatter_contiguous: rank r gets [r*chunk, (r+1)*chunk).
+        # Parity against the real scatter, not a re-derivation of it.
         cp_size, length = 4, 16
         t = _arange_bl(2, length)
-        chunk = length // cp_size
         for rank in range(cp_size):
             local = extract_local_contiguous_chunk(t, rank, cp_size, axis=1)
-            expected = t[:, rank * chunk : (rank + 1) * chunk]
-            self.assertEqual(local.shape, [2, chunk])
+            expected = scatter_contiguous(
+                t, group=_FakeGroup(rank, cp_size), axis=1
+            )
+            self.assertEqual(local.shape, expected.shape)
             self.assertTrue(bool((local == expected).all()))
 
     def test_ranks_tile_the_sequence_exactly_once(self) -> None:
@@ -99,6 +123,32 @@ class TestExtractLocalContiguousChunk(unittest.TestCase):
 
 
 class TestExtractLocalCpChunksDispatch(unittest.TestCase):
+    def test_dualchunk_matches_scatter_balance(self) -> None:
+        cp_size, length = 2, 16
+        t = _arange_bl(2, length)
+        for rank in range(cp_size):
+            got = extract_local_cp_chunks(
+                t, rank, cp_size, axis=1, mode="dualchunk_allgather"
+            )
+            expected = scatter_balance(
+                t, group=_FakeGroup(rank, cp_size), axis=1
+            )
+            self.assertEqual(got.shape, expected.shape)
+            self.assertTrue(bool((got == expected).all()))
+
+    def test_contiguous_matches_scatter_contiguous(self) -> None:
+        cp_size, length = 2, 16
+        t = _arange_bl(2, length)
+        for rank in range(cp_size):
+            got = extract_local_cp_chunks(
+                t, rank, cp_size, axis=1, mode="contiguous_allgather"
+            )
+            expected = scatter_contiguous(
+                t, group=_FakeGroup(rank, cp_size), axis=1
+            )
+            self.assertEqual(got.shape, expected.shape)
+            self.assertTrue(bool((got == expected).all()))
+
     def test_dualchunk_delegates_to_zigzag(self) -> None:
         cp_size, length = 2, 16
         t = _arange_bl(2, length)
@@ -133,17 +183,20 @@ class TestExtractLocalCpChunksDispatch(unittest.TestCase):
         self.assertEqual(zig.shape, con.shape)
         self.assertFalse(bool((zig == con).all()))
 
-    def test_default_mode_is_dualchunk(self) -> None:
-        # Callers that predate the mode argument must keep the old layout.
+    def test_mode_is_required(self) -> None:
+        # No default layout on purpose. The defect this function fixes was a
+        # call site that assumed zigzag instead of reading cp_balance_mode; a
+        # default would hand the next caller the same silent-wrong-loss bug
+        # instead of a TypeError at import-time-obvious call sites.
         t = _arange_bl(1, 16)
-        self.assertTrue(
-            bool(
-                (
-                    extract_local_cp_chunks(t, 1, 2, axis=1)
-                    == extract_local_zigzag_chunks(t, 1, 2, axis=1)
-                ).all()
-            )
-        )
+        with self.assertRaises(TypeError):
+            extract_local_cp_chunks(t, 1, 2, axis=1)
+
+    def test_mode_is_keyword_only(self) -> None:
+        # Positional passing would let `axis` and `mode` be swapped silently.
+        t = _arange_bl(1, 16)
+        with self.assertRaises(TypeError):
+            extract_local_cp_chunks(t, 1, 2, 1, "dualchunk_allgather")
 
     def test_cp_size_one_is_identity_for_any_mode(self) -> None:
         t = _arange_bl(2, 7)

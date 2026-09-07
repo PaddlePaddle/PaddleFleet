@@ -326,12 +326,17 @@ class TestTransformerConfig(unittest.TestCase):
         SharedLayerDesc(shared_submodule_weight_only=True) aliases only the
         parameters under ``transformer_layer``, while magic send owns
         ``mtp_embed`` (its own SharedLayerDesc key, synced through gpt_model's
-        dedicated sub-group). The parameter sets do not overlap. Worse, the
-        rejection hid a real bug: ``get_layer_desc_list`` tested
+        dedicated sub-group). The parameter sets do not overlap. The rejection
+        also hid a latent bug: ``get_layer_desc_list`` tested
         ``enable_mtp_magic_send`` before ``mtp_shared_last_layer`` and
-        short-circuited to a plain LayerDesc, so anyone who bypassed the assert
-        got a silently untied MTP block. See
-        test_magic_send_shared_last_layer_desc.py.
+        short-circuited to a plain LayerDesc, so anyone running under
+        ``python -O`` -- where this very assert was stripped -- got a silently
+        untied MTP block. See test_magic_send_shared_last_layer_desc.py.
+
+        Caveat recorded in the co-location note in transformer_config.py: the
+        tie only *aliases* when the pivot and the MTP desc land on the same
+        rank. Across a PP boundary it degrades to broadcast + gradient
+        allreduce -- same numerics, none of the memory saving.
         """
         cfg = TransformerConfig(
             enable_mtp_magic_send=True,

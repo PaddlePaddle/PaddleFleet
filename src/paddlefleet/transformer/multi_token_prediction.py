@@ -355,8 +355,10 @@ def extract_local_contiguous_chunk(tensor_full, cp_rank, cp_size, axis=1):
     """Extract this CP rank's contiguous chunk from a full-length tensor.
 
     Mirrors PaddleFleet's ``scatter_contiguous`` layout
-    (``context_parallel_utils.py:402-430``): rank ``r`` owns exactly one slice
-    ``tensor_full[..., chunk*r : chunk*(r+1), ...]`` with ``chunk = L / cp_size``.
+    (``context_parallel_utils.scatter_contiguous``): rank ``r`` owns exactly one
+    slice ``tensor_full[..., chunk*r : chunk*(r+1), ...]`` with
+    ``chunk = L / cp_size``. ``test_extract_local_cp_chunks.py`` pins that parity
+    against the real scatter helper, so a layout change there fails here.
 
     Extraction only — no CP communication, same contract as
     ``extract_local_zigzag_chunks``.
@@ -380,9 +382,7 @@ def extract_local_contiguous_chunk(tensor_full, cp_rank, cp_size, axis=1):
     )
 
 
-def extract_local_cp_chunks(
-    tensor_full, cp_rank, cp_size, axis=1, mode="dualchunk_allgather"
-):
+def extract_local_cp_chunks(tensor_full, cp_rank, cp_size, axis=1, *, mode):
     """Layout-aware local-slice extraction for the ``use_erndata`` MTP path.
 
     The erndata MTP path keeps int/float tensors full-length on every CP rank
@@ -406,7 +406,11 @@ def extract_local_cp_chunks(
         cp_rank: this rank's index inside the CP group.
         cp_size: CP world size; ``1`` returns ``tensor_full`` unchanged.
         axis: sequence axis (default 1 for ``[B, L, ...]``).
-        mode: ``config.cp_balance_mode``.
+        mode: ``config.cp_balance_mode``. Keyword-only and required *on purpose*.
+            The bug this function exists to fix was a call site that assumed a
+            layout instead of reading the config, so a default here would just
+            re-open that door for the next caller: picking the wrong layout is
+            not a crash, it is a silently wrong loss.
 
     Returns:
         ``[..., L / cp_size, ...]`` tensor holding this rank's slice.

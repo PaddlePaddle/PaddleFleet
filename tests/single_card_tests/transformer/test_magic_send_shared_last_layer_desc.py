@@ -17,13 +17,22 @@ Both are required: paddle only aliases when a shared key has more than one
 member. The MTP-side branch used to test ``enable_mtp_magic_send`` first and
 short-circuit to a plain ``LayerDesc``, so with both flags on the tie silently
 did nothing -- the model trained an extra full MTP attention block while the
-config claimed it was shared. That is a wrong-parameter-count bug that no assert
-caught, which is why it is pinned here.
+config claimed it was shared. That was only reachable under ``python -O``,
+because ``TransformerConfig`` assert-rejected the combination and ``-O`` strips
+asserts; the rejection is gone now, so the branch order matters unconditionally
+and is pinned here.
 
 The two mechanisms are orthogonal: magic send owns ``mtp_embed`` (a separate
 ``SharedLayerDesc`` keyed ``mtp_embed``, synced through gpt_model's dedicated
 ``_mtp_embed_global_group``), and the tie touches only ``transformer_layer``
 params. Their parameter sets do not overlap.
+
+Scope note: these are desc-shape assertions. Whether paddle then *aliases* or
+falls back to a cross-stage broadcast+allreduce depends on the pivot and the MTP
+desc landing on the same rank (``PipelineLayer._build_layer_impl`` only fills
+``shared_layers`` from this rank's range) -- see the co-location note in
+``transformer_config.py``. That is not covered here and has not been checked
+end-to-end.
 """
 
 from __future__ import annotations
@@ -72,7 +81,7 @@ def _make_config(**overrides):
     return SimpleNamespace(**cfg)
 
 
-def _layer_descs(**config_overrides):
+def _layer_descs(num_mtp=1, **config_overrides):
     """Call get_layer_desc_list without building a real GPTModel.
 
     The method only touches ``self.config`` and ``self.add_sequential_layer``,
@@ -85,7 +94,7 @@ def _layer_descs(**config_overrides):
         ),
     )
     return GPTModel.get_layer_desc_list(
-        fake_self, _make_spec(), tie_word_embeddings=False
+        fake_self, _make_spec(num_mtp=num_mtp), tie_word_embeddings=False
     )
 
 
@@ -124,6 +133,25 @@ class TestMagicSendSharedLastLayerDesc(unittest.TestCase):
             enable_mtp_magic_send=True, mtp_shared_last_layer=True
         )
         self.assertEqual(len(_shared_descs(layers, "mtp_embed")), 1)
+
+    def test_tie_with_k_gt_1_ties_every_mtp_layer_to_one_pivot(self) -> None:
+        # K > 1 emits K MTP descs under the same key, so the shared group is
+        # K + 1 members: one pivot plus K submodule-only aliases. All K MTP
+        # blocks therefore share the *same* backbone attention parameters --
+        # worth pinning, because a reader could reasonably expect one pivot per
+        # depth instead. Untested end-to-end; this is a desc-shape assertion.
+        layers = _layer_descs(
+            num_mtp=3,
+            enable_mtp_magic_send=True,
+            mtp_shared_last_layer=True,
+            num_nextn_predict_layers=3,
+        )
+        tied = _shared_descs(layers, "mtp_reuse_transformer")
+        self.assertEqual(len(tied), 4)
+        submodule_only = [
+            d for d in tied if getattr(d, "shared_submodule_weight_only", False)
+        ]
+        self.assertEqual(len(submodule_only), 3)
 
     def test_no_tie_keeps_plain_layer_desc(self) -> None:
         layers = _layer_descs(

@@ -2150,14 +2150,30 @@ class TransformerConfig(ModelParallelConfig):
             # owns `mtp_embed` (synced through gpt_model's dedicated
             # _mtp_embed_global_group). Their parameter sets do not overlap.
             #
-            # Precondition worth knowing: _alias_shared_layer asserts
-            # `total_params == aliased_count`, i.e. the tie pivot (the last
-            # backbone layer) and the MTP layer must resolve to the *same*
-            # attention parameter set. For dsv4_hybrid models that holds only
-            # while csa_compress_ratios[num_hidden_layers - 1] and
-            # csa_compress_ratios[num_hidden_layers] agree. If someone makes
-            # those two indices diverge, that assert fires with a confusing
-            # message and this is the place to look.
+            # Two preconditions worth knowing before relying on this
+            # combination; neither is asserted anywhere, both were verified by
+            # reading paddle rather than by an end-to-end run.
+            #
+            # 1. Same-rank co-location. PipelineLayer._build_layer_impl fills
+            #    `self.shared_layers` only from descs inside *this* rank's
+            #    [start, end) range, so _alias_shared_layer runs only when the
+            #    tie pivot (the last backbone layer, gpt_model.get_layer_desc_list)
+            #    and the MTP desc land on the same rank. If a PP boundary
+            #    separates them, the MTP desc becomes the first member of the key
+            #    on its own stage and falls back to _construct_shared_comm: two
+            #    parameter copies, broadcast at init and gradient-allreduced
+            #    across stages. Numerically that is still a tie, but the memory
+            #    saving mtp_shared_last_layer exists for is gone -- and PP>1 is
+            #    exactly the case magic send is for.
+            #
+            # 2. Identical parameter sets. _alias_shared_layer asserts
+            #    `total_params == aliased_count`, i.e. the pivot and the MTP
+            #    layer must resolve to the *same* attention parameter set. For
+            #    dsv4_hybrid models that holds only while
+            #    csa_compress_ratios[num_hidden_layers - 1] and
+            #    csa_compress_ratios[num_hidden_layers] agree. If someone makes
+            #    those two indices diverge, that assert fires with a confusing
+            #    message and this is the place to look.
             if self.num_nextn_predict_layers > 1:
                 assert self.variable_seq_lengths, (
                     "enable_mtp_magic_send with num_nextn_predict_layers > 1 requires "
@@ -2221,20 +2237,25 @@ class TransformerConfig(ModelParallelConfig):
                 # stage 0 and the MTP stage are different ranks (i.e. exactly
                 # the PP>1 case this flag exists for), *physically replicated*.
                 #
-                # For V=201216 / H=1024 / K=1 (~206M params, TP=1) the resident
-                # cost on the MTP stage is:
+                # The table costs V*H per copy in weight, the same again in
+                # gradient, and 3x that in fp32 master+m+v divided by
+                # sharding_parallel_size (is_firstly_shared only dedups
+                # grad-norm in hybrid_parallel_optimizer.py; it does not exclude
+                # the param from sharding). The saved carrier slot costs
+                # B*S_local*H bf16 per P2P hop per micro-batch, and that traffic
+                # is already hidden by overlap_p2p_comm.
+                #
+                # Worked example for ONE configuration -- ernielite 4B-A500M,
+                # V=201216 / H=1024 / K=1 / TP=1 (~206M params). Scale it
+                # yourself for any other model; the numbers below describe this
+                # config only:
                 #     bf16 weight            412MB  (not sharded)
                 #     gradient               412MB bf16 / 824MB fp32 main_grad
                 #     fp32 master + m + v   2.47GB  / sharding_parallel_size
-                # is_firstly_shared only dedups grad-norm
-                # (hybrid_parallel_optimizer.py), it does not exclude the param
-                # from sharding, so the optimizer slice really is divided:
-                # ~1.1-1.5GB at sharding=8, ~1.4-1.9GB at sharding=4.
-                #
-                # Against that, one saved carrier slot is ~8MB per P2P hop per
-                # micro-batch (B=1, S_local=4096, H=1024, bf16): ~134MB/step at
-                # PP=2/GA=16, ~403MB/step at PP=4/GA=16 -- and that traffic is
-                # already hidden by overlap_p2p_comm. A clear net loss.
+                #     => ~1.1-1.5GB resident at sharding=8, ~1.4-1.9GB at 4
+                # against ~8MB per hop per micro-batch (B=1, S_local=4096):
+                # ~134MB/step at PP=2/GA=16, ~403MB/step at PP=4/GA=16.
+                # A clear net loss at this scale.
                 #
                 # Keep enable_mtp_magic_send=False: the baseline batch-axis
                 # carrier already supports any PP depth on this path. If K ever
@@ -2247,15 +2268,14 @@ class TransformerConfig(ModelParallelConfig):
                     "support) enable_mtp_magic_send=True. erndata already "
                     "delivers full-length input_ids and cu_seqlens_q to the "
                     "MTP stage through the pipeline dict, so magic send would "
-                    "only add a second trainable vocab embedding table there "
-                    "(~V*H params plus grads and a sharded optimizer state: "
-                    "~1.1-1.9GB at V=201216/H=1024 depending on "
-                    "sharding_parallel_size) in order to shrink the "
-                    "hidden-state P2P payload from (K+1)x to 1x (~8MB per hop "
-                    "per micro-batch, already hidden by overlap_p2p_comm) -- a "
-                    "net memory loss at small K. Set "
+                    "only add a second trainable vocab embedding table on that "
+                    "stage (V*H weights, the same in gradients, plus a sharded "
+                    "fp32 optimizer state) in order to shrink the hidden-state "
+                    "P2P payload from (K+1)x to 1x -- traffic that "
+                    "overlap_p2p_comm already hides. Set "
                     "enable_mtp_magic_send=False; the default batch-axis MTP "
-                    "carrier works at any pipeline_model_parallel_size."
+                    "carrier works at any pipeline_model_parallel_size. See the "
+                    "comment above this check for the memory arithmetic."
                 )
             if self.experimental_dataflow:
                 # experimental_dataflow specifically produces

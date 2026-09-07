@@ -122,6 +122,13 @@ class TestUseErndataValidation(unittest.TestCase):
     def test_erndata_incompat_with_magic_send(self) -> None:
         # enable_mtp_magic_send also requires PP>1 (checked earlier in
         # __post_init__), so we build a config that would pass that check.
+        #
+        # The rejection is a design decision, not a missing feature: erndata
+        # already delivers input_ids and cu_seqlens_q to the MTP stage through
+        # the pipeline dict, so magic send would only add a replicated vocab
+        # table there. That reasoning lives in the comment above the guard, and
+        # this test deliberately asserts on the flag name alone -- pinning the
+        # prose would make every rewording a CI failure.
         with self.assertRaisesRegex(ValueError, r"enable_mtp_magic_send"):
             TransformerConfig(
                 **self._base_kwargs(
@@ -131,26 +138,6 @@ class TestUseErndataValidation(unittest.TestCase):
                     pipeline_model_parallel_size=2,
                 )
             )
-
-    def test_erndata_magic_send_error_explains_why(self) -> None:
-        # The rejection is a design decision, not a missing feature: magic send
-        # would only add a replicated vocab table on the MTP stage, because
-        # erndata already delivers input_ids through the pipeline dict. Keep the
-        # reasoning in the message so it does not decay into a bare "not
-        # supported" and get re-implemented by someone reading only the guard.
-        with self.assertRaises(ValueError) as ctx:
-            TransformerConfig(
-                **self._base_kwargs(
-                    use_erndata=True,
-                    num_nextn_predict_layers=1,
-                    enable_mtp_magic_send=True,
-                    pipeline_model_parallel_size=2,
-                )
-            )
-        msg = str(ctx.exception)
-        self.assertIn("does not need", msg)
-        self.assertIn("input_ids", msg)
-        self.assertIn("cu_seqlens_q", msg)
 
     def test_erndata_incompat_with_experimental_dataflow(self) -> None:
         with self.assertRaisesRegex(ValueError, r"experimental_dataflow"):
@@ -194,7 +181,14 @@ class TestUseErndataValidation(unittest.TestCase):
         # Ulysses splits heads inside the attention instead of round-tripping
         # the sequence through scatter_contiguous, so the local-sequence layout
         # the MTP path would have to slice with is not established.
-        with self.assertRaisesRegex(ValueError, r"cp_balance_mode"):
+        #
+        # Match the erndata-specific wording, not the bare flag name: a plain
+        # `cp_balance_mode` regex would also be satisfied by the generic
+        # cp_balance_mode validation later in __post_init__, so this test would
+        # keep passing even if the erndata guard were deleted.
+        with self.assertRaisesRegex(
+            ValueError, r"use_erndata=True with MTP \+ context_parallel_size>1"
+        ):
             TransformerConfig(
                 **self._base_kwargs(
                     use_erndata=True,
