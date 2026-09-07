@@ -241,6 +241,10 @@ class TestRRRecomputeUpdate(unittest.TestCase):
             "shared_expert_overlap", True
         )
         mock.use_rr_deepep_combine = False
+        # MagicMock auto-creates any attribute, so the production getattr
+        # default never applies and an unset one would read as a truthy MTP
+        # layer, shifting every logical layer id by num_hidden_layers.
+        mock.is_mtp_layer = overrides.get("is_mtp_layer", False)
         mock.config = MagicMock()
         mock.config.recompute_modules = overrides.get(
             "recompute_modules", ["moe_combine"]
@@ -251,6 +255,11 @@ class TestRRRecomputeUpdate(unittest.TestCase):
         mock.config.recompute_method = overrides.get(
             "recompute_method", "first_n"
         )
+        # Layer lists resolve through logical_layer_index, which reads these two
+        # off the config; a MagicMock stand-in would make the arithmetic return
+        # another mock.
+        mock.config.num_empty_layers_add_in_head = 0
+        mock.config.num_hidden_layers = overrides.get("num_hidden_layers", 8)
         if "layer_number" in overrides:
             mock.layer_number = overrides["layer_number"]
         return mock
@@ -393,7 +402,9 @@ class TestRRRecomputeUpdate(unittest.TestCase):
             mock, in_full_recompute=True, in_mlp_recompute=False
         )
         self.assertTrue(mock.use_rr_deepep_combine)
-        mock_needs_rr.assert_called_once_with("moe_combine", 5, mock.config)
+        mock_needs_rr.assert_called_once_with(
+            "moe_combine", 5, mock.config, is_mtp_layer=False
+        )
 
     def test_dict_mode_layer_list_needs_no_method(self):
         """A layer list selects the non-RR layers directly; method is unused."""

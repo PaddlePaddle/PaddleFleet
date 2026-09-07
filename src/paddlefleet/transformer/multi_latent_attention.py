@@ -643,14 +643,20 @@ class MultiLatentAttention(Attention):
         self.recompute_gated_attn = (
             self.config.recompute_granularity == "selective"
             and module_needs_recompute(
-                "gated_attn", self.layer_number, self.config
+                "gated_attn",
+                self.layer_number,
+                self.config,
+                is_mtp_layer=self.is_mtp_layer,
             )
         )
 
         self.recompute_qkv_up_porj_and_rope = (
             self.config.recompute_granularity == "selective"
             and module_needs_recompute(
-                "mla_qkv_recompute", self.layer_number, self.config
+                "mla_qkv_recompute",
+                self.layer_number,
+                self.config,
+                is_mtp_layer=self.is_mtp_layer,
             )
         )
 
@@ -695,7 +701,10 @@ class MultiLatentAttention(Attention):
         self.recompute_vha_postmix = (
             self.config.recompute_granularity == "selective"
             and module_needs_recompute(
-                "vha_postmix", self.layer_number, self.config
+                "vha_postmix",
+                self.layer_number,
+                self.config,
+                is_mtp_layer=self.is_mtp_layer,
             )
         )
 
