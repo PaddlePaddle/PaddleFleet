@@ -28,6 +28,11 @@ The CP>1 sublines (515/518/522/530/603/771) are covered single-card by
 monkeypatching ``get_context_parallel_world_size`` -> 2, faking the CP rank,
 and replacing ``extract_local_cp_chunks`` / the CP comm ops with
 identities (see TestLanguageLossMegatronCP).
+
+``_megatron_label_for_depth`` -- the separate Main/MTP head-loss entry point,
+which reaches its own CP slice without going through ``forward`` -- is covered
+by TestMegatronLabelForDepthCP, which runs the REAL extract helper so the
+slice is checked by value rather than by recorded kwarg.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ import unittest
 from unittest import mock
 from unittest.mock import MagicMock
 
+import numpy as np
 import paddle
 
 import paddlefleet.models.common.language_loss.language_loss as ll
@@ -320,6 +326,141 @@ class TestLanguageLossCpBalanceMode(unittest.TestCase):
             with self.subTest(mode=mode):
                 used = self._modes_used(distill=True, cp_balance_mode=mode)
                 self.assertEqual(set(used), {mode})
+
+
+@contextlib.contextmanager
+def _cp_ranks(cp_size, cp_rank):
+    """Fake a CP group without touching ``extract_local_cp_chunks``.
+
+    Unlike ``_fake_cp`` this leaves the real extract helper installed, so the
+    slice actually happens and can be asserted on by value. Only the two
+    lookups ``_megatron_label_for_depth`` performs are patched: the module-level
+    ``get_context_parallel_world_size`` and the locally imported
+    ``get_context_parallel_rank``.
+    """
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(
+            mock.patch.object(
+                ll, "get_context_parallel_world_size", lambda: cp_size
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(ps, "get_context_parallel_rank", lambda: cp_rank)
+        )
+        yield
+
+
+def _local_slice_ref(full_np, cp_rank, cp_size, mode):
+    """NumPy reference for the two supported CP layouts on the seq axis.
+
+    ``dualchunk_allgather`` mirrors ``scatter_balance``: rank r owns
+    ``[interval*r, interval*(r+1))`` plus the mirrored tail chunk.
+    ``contiguous_allgather`` mirrors ``scatter_contiguous``: one chunk per rank.
+    """
+    seq_len = full_np.shape[1]
+    if mode == "dualchunk_allgather":
+        interval = seq_len // cp_size // 2
+        head = full_np[:, interval * cp_rank : interval * (cp_rank + 1)]
+        tail = full_np[
+            :, seq_len - interval * (cp_rank + 1) : seq_len - interval * cp_rank
+        ]
+        return np.concatenate([head, tail], axis=1)
+    chunk = seq_len // cp_size
+    return full_np[:, chunk * cp_rank : chunk * (cp_rank + 1)]
+
+
+class TestMegatronLabelForDepthCP(unittest.TestCase):
+    """``_megatron_label_for_depth`` slices with the REAL extract helper.
+
+    The separate Main/MTP head-loss path (``GPTMainLMHead`` / ``GPTMTPLMHead``,
+    language_loss.py:1026 and 1128) reaches the CP slice through this method
+    rather than through ``forward``, so the identity mock used above never
+    exercises it. Here the real ``extract_local_cp_chunks`` runs and the
+    assertion is on values: the CP>1 label must equal the numpy slice of the
+    CP=1 label for the configured ``cp_balance_mode``, on every rank and at
+    every depth. A hard-coded layout would fail one of the two modes, and the
+    union over ranks would not reconstruct the full sequence.
+    """
+
+    L = 16
+    CU = (4, 6, 6)
+
+    def setUp(self) -> None:
+        LanguageLoss._cu_seqlens_q_stash = None
+
+    def tearDown(self) -> None:
+        LanguageLoss._cu_seqlens_q_stash = None
+
+    def _labels(self):
+        labels_np = np.arange(self.L, dtype="int64").reshape([1, self.L])
+        return labels_np, paddle.to_tensor(labels_np)
+
+    def test_slice_matches_cp1_label_for_both_modes(self) -> None:
+        cp_size = 2
+        for mode in ("dualchunk_allgather", "contiguous_allgather"):
+            for depth in (-1, 0, 1):
+                loss = _make_loss(2, distill=False, cp_balance_mode=mode)
+                LanguageLoss._cu_seqlens_q_stash = _make_cu(list(self.CU))
+                _labels_np, labels = self._labels()
+                # CP=1 gives the full-length label this depth should shard.
+                full = loss._megatron_label_for_depth(labels, depth).numpy()
+                for cp_rank in range(cp_size):
+                    with self.subTest(mode=mode, depth=depth, rank=cp_rank):
+                        with _cp_ranks(cp_size, cp_rank):
+                            got = loss._megatron_label_for_depth(
+                                labels, depth
+                            ).numpy()
+                        self.assertEqual(
+                            list(got.shape), [1, self.L // cp_size]
+                        )
+                        np.testing.assert_array_equal(
+                            got,
+                            _local_slice_ref(full, cp_rank, cp_size, mode),
+                        )
+
+    def test_ranks_together_cover_the_full_label(self) -> None:
+        # Whatever the layout, the ranks partition the sequence: no token is
+        # dropped or counted twice, so every label value appears exactly once.
+        cp_size = 2
+        for mode in ("dualchunk_allgather", "contiguous_allgather"):
+            with self.subTest(mode=mode):
+                loss = _make_loss(2, distill=False, cp_balance_mode=mode)
+                LanguageLoss._cu_seqlens_q_stash = _make_cu(list(self.CU))
+                _labels_np, labels = self._labels()
+                seen = []
+                for cp_rank in range(cp_size):
+                    with _cp_ranks(cp_size, cp_rank):
+                        seen.append(
+                            loss._megatron_label_for_depth(labels, -1).numpy()
+                        )
+                union = np.sort(np.concatenate(seen, axis=1), axis=1)
+                np.testing.assert_array_equal(
+                    union, np.arange(self.L, dtype="int64").reshape([1, self.L])
+                )
+
+    def test_unsupported_mode_is_rejected(self) -> None:
+        # contiguous_a2a shards contiguously but has a different mask contract
+        # and has never run on this path, so the helper refuses rather than
+        # silently returning a slice that would train against wrong labels.
+        loss = _make_loss(2, distill=False, cp_balance_mode="contiguous_a2a")
+        LanguageLoss._cu_seqlens_q_stash = _make_cu(list(self.CU))
+        _labels_np, labels = self._labels()
+        with (
+            _cp_ranks(2, 0),
+            self.assertRaisesRegex(ValueError, r"cp_balance_mode"),
+        ):
+            loss._megatron_label_for_depth(labels, 0)
+
+    def test_cp1_returns_full_length_unchanged(self) -> None:
+        # The CP block is skipped entirely at cp_size == 1, so depth -1 hands
+        # back the caller's own tensor untouched.
+        loss = _make_loss(2, distill=False)
+        LanguageLoss._cu_seqlens_q_stash = _make_cu(list(self.CU))
+        labels_np, labels = self._labels()
+        with _cp_ranks(1, 0):
+            out = loss._megatron_label_for_depth(labels, -1)
+        self.assertEqual(list(out.shape), [1, self.L])
+        np.testing.assert_array_equal(out.numpy(), labels_np)
 
 
 if __name__ == "__main__":
