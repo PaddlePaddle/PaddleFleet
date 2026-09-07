@@ -16,9 +16,10 @@
 
 Two tilelang forwards reproduce sglang's reduction order and FMA contraction so
 a training run can be bit-compared against inference; the backward stays cuTile
-for both. sglang is not importable here, so these tests do not assert
-train/infer bit equality -- they pin down what is checkable locally:
+for both. What the tests pin down:
 
+  - each aligned forward reproduces, bit for bit, what sglang's own kernels
+    wrote for one fixed input (``TestSglangGoldenBits``);
   - each aligned forward computes the same *function* as cuTile: bitwise equal
     under exact arithmetic, fp32-ULP apart otherwise;
   - the shared cuTile backward still works and is unaffected by which forward
@@ -30,8 +31,11 @@ train/infer bit equality -- they pin down what is checkable locally:
 Shapes match production: n=4, C=4096, so proj_rms reduces over K=16384.
 """
 
+import os
 import unittest
+from unittest import mock
 
+import numpy as np
 import paddle
 
 from paddlefleet.fusions.fused_mhc_kernels import (
@@ -236,6 +240,98 @@ class TestHPostBDAAlign(_AlignCase):
             self.assertIsNotNone(got[key], f"{key} was not produced")
 
 
+# One fixed input, and the numbers sglang's own kernels produced from it:
+# ernie_lite/sglang0901 @ dd94e2e63de6, kernels/ops/layernorm/mhc.py,
+# mhc_pre_gemm_sqrsum_tilelang(N=8, K=256) and mhc_post(n=2, C=8), run with its
+# eight non-arithmetic deps stubbed out. num_tokens is 32 because the pre kernel
+# stores a whole token_block=32 with no bounds guard; every token is fed the
+# same row, so one golden row covers all 32.
+_GT, _GK, _GN = 32, 256, 8
+_GPN, _GPC = 2, 8
+
+_GOLDEN_PROJ_ROW = [
+    146.08734130859375,
+    286.9250793457031,
+    146.54324340820312,
+    29.997783660888672,
+    -54.35427474975586,
+    -110.40202331542969,
+    -139.2927703857422,
+    -139.20892333984375,
+]
+_GOLDEN_SQRSUM = 287.0531005859375
+_GOLDEN_POST_OUT = [
+    0.000217437744140625, -2.25, 2.0, -0.66796875,
+    -1.296875, 1.3359375, -1.3359375, 3.34375,
+    0.88671875, -0.9296875, -1.109375, 1.5546875,
+    -3.515625, -0.4453125, 2.21875, -2.4375,
+]  # fmt: skip
+
+
+def _fixed(shape, salt):
+    """The fixed input, as a formula rather than a dump of numbers.
+
+    fp64 integer arithmetic and division are correctly rounded everywhere, so
+    torch (sglang's side) and paddle rebuild the same bits from this. The /3
+    tail keeps the values off any exact grid, which is what makes the
+    accumulation order visible in the first place.
+    """
+    k = np.arange(int(np.prod(shape)), dtype=np.float64)
+    v = (((k * 7 + salt) % 11) - 5 + 1 / 3) / 3
+    return paddle.to_tensor(v.reshape(shape).astype("float32")).cuda()
+
+
+@unittest.skipUnless(is_cutile_available(), "cuTile not available")
+class TestSglangGoldenBits(unittest.TestCase):
+    """The aligned forwards against bits sglang itself produced.
+
+    This is the contract the align path exists for; the tests above compare
+    against cuTile, which cannot show sglang's order was reproduced.
+    """
+
+    def _same_bits(self, tag, ref, got):
+        bitwise, diff, _, rel = _cmp(ref, got)
+        print(f"  [gold] {tag:<8} bitwise={bitwise!s:<5} max_abs={diff:.3e}")
+        self.assertTrue(bitwise, f"{tag} left the sglang golden: rel={rel:.3e}")
+
+    def test_proj_rms_forward(self):
+        from paddlefleet.fusions.fused_mhc_kernels import (
+            _tilelang_proj_rms_fwd_align,
+        )
+
+        x = paddle.tile(_fixed([1, _GK], 1), [_GT, 1]).astype("bfloat16")
+        proj, norm, _ = _tilelang_proj_rms_fwd_align(
+            x, _fixed([_GN, _GK], 2), 1e-6
+        )
+        self._same_bits(
+            "proj",
+            paddle.to_tensor([_GOLDEN_PROJ_ROW] * _GT, dtype="float32"),
+            proj,
+        )
+        # sglang hands back the raw sum of squares; this kernel keeps sqrt(sum)
+        # for the backward. fp32 sqrt is correctly rounded on both sides, so
+        # taking it here keeps this a bit comparison.
+        self._same_bits(
+            "norm",
+            paddle.sqrt(paddle.full([_GT, 1], _GOLDEN_SQRSUM, dtype="float32")),
+            norm,
+        )
+
+    def test_h_post_bda_forward(self):
+        from paddlefleet.fusions.fused_mhc_kernels import (
+            _tilelang_h_post_bda_fwd_align,
+        )
+
+        out = _tilelang_h_post_bda_fwd_align(
+            _fixed([1, 1, _GPN, _GPN], 6),
+            _fixed([1, 1, _GPN, _GPC], 4).astype("bfloat16"),
+            _fixed([1, 1, _GPN], 5),
+            _fixed([1, 1, _GPC], 3).astype("bfloat16"),
+        )
+        ref = paddle.to_tensor(_GOLDEN_POST_OUT, dtype="float32")
+        self._same_bits("post_out", ref.reshape([1, 1, _GPN, _GPC]), out)
+
+
 class TestAlignSupportPredicates(unittest.TestCase):
     """The support predicates, which decide fall back vs run (no GPU needed)."""
 
@@ -334,6 +430,13 @@ class TestAlignFallbackIsCutile(unittest.TestCase):
 @unittest.skipUnless(is_cutile_available(), "cuTile not available")
 class TestAlignOffIsUntouched(unittest.TestCase):
     """``align_sglang=False`` must be the pre-existing call, bit for bit."""
+
+    def setUp(self):
+        # Pin the env gate off: the default is now "ask the environment", so
+        # an exported ABLATION_INSPECT_TENSOR would otherwise skew ``run()``.
+        patcher = mock.patch.dict(os.environ, {"ABLATION_INSPECT_TENSOR": "0"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_proj_rms(self):
         from paddlefleet.fusions.fused_mhc_kernels import fused_proj_rms

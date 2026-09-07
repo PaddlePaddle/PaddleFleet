@@ -29,6 +29,7 @@ Four fused operations:
 
 import logging
 import math
+import os
 
 import paddle
 from paddle import Tensor
@@ -102,6 +103,10 @@ def align_h_post_bda_unsupported(
 
 
 _align_fallback_logged = False
+
+
+def _align_sglang_from_env() -> bool:
+    return os.environ.get("ABLATION_INSPECT_TENSOR", "0") == "1"
 
 
 def _log_align_fallback(site: str, reason: str) -> None:
@@ -1906,10 +1911,14 @@ else:
             x: Tensor,
             bias: Tensor | None,
             fuse_cast: bool = False,
-            align_sglang: bool = False,
+            align_sglang: bool | None = None,
         ):
             """cuTile/tilelang fused h_post_bda forward."""
-            use_align = align_sglang
+            use_align = (
+                _align_sglang_from_env()
+                if align_sglang is None
+                else align_sglang
+            )
             if use_align:
                 reason = align_h_post_bda_unsupported(
                     h_res, original_residual, h_post, x, bias, fuse_cast
@@ -1992,13 +2001,17 @@ else:
             weight: Tensor,
             eps: float = 1e-6,
             fuse_cast: bool = False,
-            align_sglang: bool = False,
+            align_sglang: bool | None = None,
         ):
             """cuTile/tilelang fused proj_rms forward."""
             original_shape = x.shape
             K = original_shape[-1]
             x_2d = x.reshape([-1, K])
-            use_align = align_sglang
+            use_align = (
+                _align_sglang_from_env()
+                if align_sglang is None
+                else align_sglang
+            )
             if use_align:
                 reason = align_proj_rms_unsupported(x_2d, weight)
                 if reason:
@@ -2174,7 +2187,7 @@ else:
         x: Tensor,
         bias: Tensor | None,
         fuse_cast: bool = False,
-        align_sglang: bool = False,
+        align_sglang: bool | None = None,
     ) -> Tensor:
         """Fused H_res @ residual + H_post * (x + bias).
 
@@ -2193,7 +2206,9 @@ else:
                 over ``g_x`` and would lose precision if ``g_x`` were narrow.
             align_sglang: when True, use the tilelang forward, which inherits
                 the sglang mhc_post FMA-contraction choice (bit-compare only).
-                Ignored unless ``bias is None and fuse_cast``.
+                Ignored unless ``bias is None and fuse_cast``. Defaults to
+                None, meaning read ``ABLATION_INSPECT_TENSOR`` in the kernel,
+                so callers need not plumb the bit-compare switch through.
 
         Returns:
             [s, b, n, C] fused output
@@ -2231,7 +2246,7 @@ else:
         weight: Tensor,
         eps: float = 1e-6,
         fuse_cast: bool = False,
-        align_sglang: bool = False,
+        align_sglang: bool | None = None,
     ) -> tuple[Tensor, Tensor]:
         """Fused projection + RMS normalization.
 
@@ -2244,6 +2259,8 @@ else:
                 the mappings built from them keep their precision.
             align_sglang: when True, use the tilelang forward, which inherits
                 the sglang mhc_pre accumulation order (bit-compare only).
+                Defaults to None, meaning read ``ABLATION_INSPECT_TENSOR`` in
+                the kernel, so callers need not plumb the switch through.
 
         Returns:
             proj: [..., N] = x @ weight^T

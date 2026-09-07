@@ -445,12 +445,6 @@ class HyperConnectionModule(nn.Layer):
             # reference keeps the arithmetic in the incoming dtype and so must
             # the kernel. The BDA site opts out again when a bias is present.
             self._widen_in_kernel = config.high_precision_mhc
-            # Under the bit-compare run (same env gate as inspect_tensor), run
-            # both mHC sites on the sglang tilelang kernels instead of cuTile.
-            # Normal training keeps the cuTile fused kernels.
-            self._align_sglang = (
-                os.environ.get("ABLATION_INSPECT_TENSOR", "0") == "1"
-            )
         else:
             self._sinkhorn_op = native_sinkhorn
             self._h_aggregate_op = native_h_aggregate
@@ -557,11 +551,7 @@ class HyperConnectionModule(nn.Layer):
                 # either; the kernel widens what it has to and returns proj/r
                 # in fp32.
                 proj, r = self._proj_rms_op(
-                    x,
-                    self.mapping_proj.weight,
-                    self.norm_eps,
-                    fuse_cast=True,
-                    align_sglang=self._align_sglang,
+                    x, self.mapping_proj.weight, self.norm_eps, fuse_cast=True
                 )
             else:
                 proj, r = self._proj_rms_op(
@@ -989,7 +979,6 @@ class HyperConnectionModule(nn.Layer):
                         x,
                         bias,
                         fuse_cast=True,
-                        align_sglang=self._align_sglang,
                     )
                 else:
                     output = self._h_post_bda_op(
