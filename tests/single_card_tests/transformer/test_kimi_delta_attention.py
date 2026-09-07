@@ -17,6 +17,9 @@
 from __future__ import annotations
 
 import inspect
+import subprocess
+import sys
+import textwrap
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -27,6 +30,11 @@ from paddle import nn
 
 from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.transformer import kimi_delta_attention as kda_mod
+from paddlefleet.transformer.kda_head_a2a import (
+    head_range,
+    slice_channels_by_head,
+    slice_per_head_param,
+)
 from paddlefleet.transformer.kimi_delta_attention import (
     HAVE_FLA,
     KimiDeltaAttention,
@@ -1433,6 +1441,336 @@ class TestGatedNormRecompute(unittest.TestCase):
         with patch.object(kda, "_gated_norm", wraps=kda._gated_norm) as spy:
             self._forward_backward(kda)
         self.assertEqual(spy.call_count, 1)
+
+
+class TestLinearAttnCpModeConfig(unittest.TestCase):
+    """``linear_attn_cp_mode`` validation in ``TransformerConfig.__post_init__``.
+
+    ``headwise`` is only correct under a contiguous token layout: the head swap
+    assumes rank ``r`` owns the contiguous block ``[r*s/P, (r+1)*s/P)``, while
+    ``ContextParallelScatterOp`` dispatches on ``mode.startswith("contiguous")``
+    and its *else* branch silently hands out the dualchunk layout instead of
+    raising.  A rejected config is the only place that combination can be caught.
+    """
+
+    def test_default_is_chunkwise(self):
+        """The existing sequence-split CP path must stay the default."""
+        self.assertEqual(TransformerConfig().linear_attn_cp_mode, "chunkwise")
+
+    def test_invalid_mode_raises(self):
+        with self.assertRaises(ValueError) as caught:
+            TransformerConfig(linear_attn_cp_mode="ulysses")
+        self.assertIn("linear_attn_cp_mode", str(caught.exception))
+
+    def test_headwise_rejects_dualchunk(self):
+        with self.assertRaises(ValueError) as caught:
+            TransformerConfig(
+                linear_attn_cp_mode="headwise",
+                cp_balance_mode="dualchunk_allgather",
+            )
+        self.assertIn("contiguous", str(caught.exception))
+
+    def test_headwise_accepts_contiguous_layouts(self):
+        for balance in ("contiguous_allgather", "contiguous_a2a"):
+            with self.subTest(cp_balance_mode=balance):
+                config = TransformerConfig(
+                    linear_attn_cp_mode="headwise", cp_balance_mode=balance
+                )
+                self.assertEqual(config.linear_attn_cp_mode, "headwise")
+                self.assertEqual(config.cp_balance_mode, balance)
+
+    def test_chunkwise_still_allows_dualchunk(self):
+        """The new check must not tighten the pre-existing default path."""
+        config = TransformerConfig(cp_balance_mode="dualchunk_allgather")
+        self.assertEqual(config.cp_balance_mode, "dualchunk_allgather")
+
+
+@unittest.skipUnless(HAVE_FLA, "paddlefleet_ops fla kernels are not available")
+class TestHeadwiseCpInit(unittest.TestCase):
+    """``__init__`` under ``linear_attn_cp_mode="headwise"``.
+
+    ``get_pg_size`` returns 1 whenever ``paddle.distributed`` is not initialized,
+    so the ``cp_size > 1`` branch is unreachable on one card without patching it.
+    Worth patching: the head-divisibility guard it protects should not need a
+    4-GPU job to fire.
+    """
+
+    def _kda(self, cp_size=4, tp_size=1, mode="headwise", **overrides):
+        pg_collection = _FakePGCollection()
+        sizes = {id(pg_collection.tp): tp_size, id(pg_collection.cp): cp_size}
+        with patch.object(
+            kda_mod,
+            "get_pg_size",
+            side_effect=lambda group=None: sizes.get(id(group), 1),
+        ):
+            return _build_kda(
+                pg_collection=pg_collection,
+                config_overrides={
+                    "linear_attn_cp_mode": mode,
+                    "context_parallel_size": cp_size,
+                    "cp_balance_mode": "contiguous_allgather",
+                },
+                **overrides,
+            )
+
+    def test_headwise_enables_the_swap(self):
+        kda = self._kda()
+        self.assertEqual(kda.cp_size, 4)
+        self.assertTrue(kda.cp_head_a2a)
+
+    def test_chunkwise_leaves_the_swap_off(self):
+        """Same topology, default mode: the sequence-split path must be untouched."""
+        kda = self._kda(mode="chunkwise")
+        self.assertEqual(kda.cp_size, 4)
+        self.assertFalse(kda.cp_head_a2a)
+
+    def test_no_swap_without_cp(self):
+        """cp_size == 1 must not take the a2a path even when the mode asks for it."""
+        kda = self._kda(cp_size=1)
+        self.assertFalse(kda.cp_head_a2a)
+
+    def test_rejects_head_count_not_divisible_by_cp(self):
+        with self.assertRaises(ValueError) as caught:
+            self._kda(cp_size=8)
+        message = str(caught.exception)
+        self.assertIn("num_key_heads", message)
+        self.assertIn("cp_size(8)", message)
+
+    def test_divisibility_is_checked_on_the_tp_local_count(self):
+        """TP splits the heads first, so the *global* count is the wrong one to check.
+
+        ``num_key_heads``(4) is divisible by ``cp_size``(4), but with
+        ``tp_size``(2) each rank only holds 2 of them and the swap would hand two
+        of the four CP ranks an empty head block.
+        """
+        with self.assertRaises(ValueError) as caught:
+            self._kda(cp_size=4, tp_size=2)
+        self.assertIn("tp_size(2)", str(caught.exception))
+
+
+class TestKdaHeadA2ALayout(unittest.TestCase):
+    """The pure-layout half of ``kda_head_a2a``: head blocks and parameter slices.
+
+    These are the pieces that fail *silently*.  ``UlyssesAlltoAll`` gives rank
+    ``r`` the contiguous head block ``[r*h/P, (r+1)*h/P)``; if a parameter slice
+    disagrees, the heads get paired with the wrong ``A_log``/conv filter and the
+    numbers are simply wrong.  Every expectation below is spelled out as explicit
+    indices rather than recomputed with the helper's own reshape, so the test
+    cannot agree with a buggy implementation by construction.
+    """
+
+    CP = 4
+    KEY_HEADS = 4
+    # GVA: HV = 2 * H, so the value block has a different head count from the two
+    # key blocks and a slice that reuses the key count is visible.
+    VALUE_HEADS = 8
+    KEY_DIM = 2
+    VALUE_DIM = 3
+    CONV_WIDTH = 2
+
+    def test_head_range_tiles_the_head_axis(self):
+        blocks = [head_range(8, r, 4) for r in range(4)]
+        self.assertEqual(blocks, [(0, 2), (2, 4), (4, 6), (6, 8)])
+
+    def test_head_range_rejects_indivisible(self):
+        with self.assertRaises(ValueError) as caught:
+            head_range(6, 0, 4)
+        self.assertIn("divisible", str(caught.exception))
+
+    def test_slice_per_head_param_scalar_per_head(self):
+        """``A_log [HV]``: the ``[HV, -1]`` view degenerates to ``[HV, 1]``."""
+        param = paddle.arange(self.VALUE_HEADS, dtype="float32")
+        for rank in range(self.CP):
+            with self.subTest(rank=rank):
+                got = slice_per_head_param(
+                    param, self.VALUE_HEADS, rank, self.CP
+                )
+                want = [2 * rank, 2 * rank + 1]
+                self.assertEqual(got.numpy().tolist(), want)
+
+    def test_slice_per_head_param_flat_multi_channel(self):
+        """``dt_bias [HV * K]``: heads are the *outer* axis of the flat tensor."""
+        total = self.VALUE_HEADS * self.KEY_DIM
+        param = paddle.arange(total, dtype="float32")
+        seen = []
+        for rank in range(self.CP):
+            got = slice_per_head_param(param, self.VALUE_HEADS, rank, self.CP)
+            per_rank = total // self.CP
+            want = list(range(rank * per_rank, (rank + 1) * per_rank))
+            self.assertEqual(got.numpy().tolist(), want, f"rank {rank}")
+            seen += want
+        # Nothing dropped, nothing counted twice: the four blocks are a partition.
+        self.assertEqual(seen, list(range(total)))
+
+    def test_slice_per_head_param_rejects_non_flat(self):
+        """A ``[HV, K]`` parameter would slice its channels, not its heads."""
+        with self.assertRaises(ValueError) as caught:
+            slice_per_head_param(
+                paddle.zeros([self.VALUE_HEADS, self.KEY_DIM]),
+                self.VALUE_HEADS,
+                0,
+                self.CP,
+            )
+        self.assertIn("flat", str(caught.exception))
+
+    def _qkv_layout(self):
+        qk = self.KEY_HEADS * self.KEY_DIM
+        v = self.VALUE_HEADS * self.VALUE_DIM
+        dims = [qk, qk, v]
+        heads = [self.KEY_HEADS, self.KEY_HEADS, self.VALUE_HEADS]
+        return dims, heads
+
+    def _expected_channels(self, rank):
+        """The channel indices rank ``rank`` owns, computed block by block."""
+        dims, heads = self._qkv_layout()
+        want, offset = [], 0
+        for dim, num_heads in zip(dims, heads):
+            head_dim = dim // num_heads
+            per_rank = num_heads // self.CP
+            first = rank * per_rank
+            for head in range(first, first + per_rank):
+                start = offset + head * head_dim
+                want += list(range(start, start + head_dim))
+            offset += dim
+        return want
+
+    def test_slice_channels_by_head_conv_weight(self):
+        """Depthwise conv weight ``[sum(dims), w]``, sliced per q/k/v block."""
+        dims, heads = self._qkv_layout()
+        total = sum(dims)
+        # Row i is filled with i, so a misplaced row is unambiguous.
+        weight = (
+            paddle.arange(total, dtype="float32")
+            .reshape([total, 1])
+            .tile([1, self.CONV_WIDTH])
+        )
+        for rank in range(self.CP):
+            with self.subTest(rank=rank):
+                got = slice_channels_by_head(weight, dims, heads, rank, self.CP)
+                self.assertEqual(got.shape, [total // self.CP, self.CONV_WIDTH])
+                self.assertEqual(
+                    got[:, 0].numpy().tolist(), self._expected_channels(rank)
+                )
+
+    def test_slice_channels_by_head_conv_bias(self):
+        """Same convention for the 1-D bias -- a separate ``if`` branch in the layer."""
+        dims, heads = self._qkv_layout()
+        total = sum(dims)
+        bias = paddle.arange(total, dtype="float32")
+        seen = []
+        for rank in range(self.CP):
+            got = slice_channels_by_head(bias, dims, heads, rank, self.CP)
+            want = self._expected_channels(rank)
+            self.assertEqual(got.numpy().tolist(), want, f"rank {rank}")
+            seen += want
+        self.assertEqual(sorted(seen), list(range(total)))
+
+    def test_value_block_uses_its_own_head_count(self):
+        """The GVA case: slicing the value block with the key-head count is a bug.
+
+        With ``HV = 2 * H`` a value block sliced at the key-head count would take
+        ``H/P`` heads instead of ``HV/P``, so the returned width would be short.
+        Asserting the width per block catches it independently of the values.
+        """
+        dims, heads = self._qkv_layout()
+        got = slice_channels_by_head(
+            paddle.arange(sum(dims), dtype="float32"), dims, heads, 0, self.CP
+        )
+        expected = sum(dim // self.CP for dim in dims)
+        self.assertEqual(got.shape, [expected])
+        self.assertEqual(
+            expected,
+            2 * (self.KEY_HEADS // self.CP) * self.KEY_DIM
+            + (self.VALUE_HEADS // self.CP) * self.VALUE_DIM,
+        )
+
+
+class TestImportWithoutFlaExtension(unittest.TestCase):
+    """The layer must still import when ``paddlefleet_ops`` has no ``fla``.
+
+    That is exactly what the ``try: from paddlefleet_ops import fla`` guard at
+    the top of the module is for: it sets ``HAVE_FLA = False`` and the paddle
+    native fallbacks take over.  The head-shard all-to-all helpers are imported
+    unconditionally, above that guard, so this pins the guard down.
+
+    Run in a subprocess on purpose.  Hiding ``fla`` means re-importing the layer
+    module, and a reload inside this process would leave every name the rest of
+    this file imported from it pointing at the pre-reload objects.
+
+    Note what this does *not* test: a build with no ``paddlefleet_ops`` at all.
+    ``paddlefleet.utils`` -> ``paddlefleet.context_parallel_utils`` imports
+    ``paddlefleet_ops.flash_mask_facade`` at module scope, so that case has never
+    been importable and is not specific to this layer.
+    """
+
+    _SKIP_EXIT_CODE = 77
+
+    _PROBE = textwrap.dedent(
+        """
+        import importlib
+        import sys
+
+        _HIDDEN = "paddlefleet_ops.fla"
+
+
+        def _is_hidden(name):
+            # Note the dot: a bare startswith() would also match
+            # paddlefleet_ops.flash_mask and evict a half-initialised module.
+            return name == _HIDDEN or name.startswith(_HIDDEN + ".")
+
+
+        class _Hide:
+            def find_spec(self, fullname, path=None, target=None):
+                if _is_hidden(fullname):
+                    raise ImportError(f"no {fullname} in this build (test)")
+                return None
+
+
+        try:
+            ops = importlib.import_module("paddlefleet_ops")
+        except ImportError:
+            sys.exit(77)
+
+        # paddlefleet_ops binds its ecosystem libraries as attributes of the
+        # package, so hiding the submodule from the import system alone is not
+        # enough -- `from paddlefleet_ops import fla` would find the attribute
+        # and never consult the meta path.
+        if hasattr(ops, "fla"):
+            del ops.fla
+        for name in [n for n in sys.modules if _is_hidden(n)]:
+            del sys.modules[name]
+        sys.meta_path.insert(0, _Hide())
+
+        mod = importlib.import_module(
+            "paddlefleet.transformer.kimi_delta_attention"
+        )
+        assert mod.HAVE_FLA is False, mod.HAVE_FLA
+        assert mod.chunk_kda is None, mod.chunk_kda
+        assert mod.causal_conv1d is None, mod.causal_conv1d
+        assert mod.build_cp_context is None, mod.build_cp_context
+        assert mod.KimiDeltaAttention is not None
+        # The all-to-all helpers came in with the layer, above the guard.
+        assert "paddlefleet.transformer.kda_head_a2a" in sys.modules
+        print(f"HAVE_FLA={mod.HAVE_FLA}")
+        """
+    )
+
+    def test_layer_imports_with_have_fla_false(self):
+        proc = subprocess.run(
+            [sys.executable, "-c", self._PROBE],
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+        if proc.returncode == self._SKIP_EXIT_CODE:
+            self.skipTest("paddlefleet_ops is not installed")
+        self.assertEqual(
+            proc.returncode,
+            0,
+            f"import failed without the fla extension\n"
+            f"--- stdout ---\n{proc.stdout}\n--- stderr ---\n{proc.stderr}",
+        )
+        self.assertIn("HAVE_FLA=False", proc.stdout)
 
 
 if __name__ == "__main__":

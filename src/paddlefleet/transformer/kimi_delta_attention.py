@@ -54,6 +54,14 @@ from paddlefleet.utils import (
 )
 
 from .gated_delta_net import _l2norm
+from .kda_head_a2a import (
+    head_to_seq,
+    seq_to_head,
+    seq_to_head_beta,
+    slice_channels_by_head,
+    slice_per_head_param,
+    split_qkv_seq_to_head,
+)
 from .paddle_norm import (
     get_norm_extra_args,
     mark_as_sequence_parallel_parameter,
@@ -315,6 +323,15 @@ class KimiDeltaAttention(FleetLayer):
         self.tp_size = get_pg_size(self.pg_collection.tp)
         self.sp_size = self.tp_size if config.sequence_parallel else 1
         self.cp_size = get_pg_size(getattr(self.pg_collection, "cp", None))
+        # ``linear_attn_cp_mode="headwise"``: the projections stay sequence-split,
+        # but everything between them (conv + recurrence) runs on the *full*
+        # sequence with a head shard, so there is no conv halo and no state relay.
+        # The default "chunkwise" keeps the sequence-split path below unchanged.
+        self.cp_head_a2a = (
+            self.cp_size > 1
+            and getattr(config, "linear_attn_cp_mode", "chunkwise")
+            == "headwise"
+        )
 
         # Attributes from config
         self.hidden_size = config.hidden_size
@@ -358,6 +375,17 @@ class KimiDeltaAttention(FleetLayer):
                 raise ValueError(
                     f"{name}({num_heads}) must be divisible by the tensor "
                     f"parallel size({self.tp_size})"
+                )
+            # Under headwise CP the *TP-local* head count is what gets split
+            # again across CP. Checked here rather than in forward(): cp_size is
+            # already known, and a forward-time raise would only surface after a
+            # whole embedding + prologue had run.
+            if self.cp_head_a2a and (num_heads // self.tp_size) % self.cp_size:
+                raise ValueError(
+                    f"linear_attn_cp_mode='headwise' splits heads across "
+                    f"the context-parallel group, so {name}({num_heads}) // "
+                    f"tp_size({self.tp_size}) = {num_heads // self.tp_size} must "
+                    f"be divisible by cp_size({self.cp_size})"
                 )
         if self.num_value_heads % self.num_key_heads != 0:
             raise ValueError(
@@ -653,10 +681,11 @@ class KimiDeltaAttention(FleetLayer):
             batch, seq_len, _ = hidden_states.shape
 
         if self.cp_size > 1:
-            # fla's CP assumes the sequence is split contiguously and evenly
+            # Both CP paths assume the sequence is split contiguously and evenly
             # (part_len = total // world_size, rank_start = part_len * rank),
             # which is exactly scatter_contiguous. Other balance modes reorder
-            # tokens, so the rank ranges would not match.
+            # tokens, so the rank ranges would not match -- and for the head-a2a
+            # path the all-to-all would stitch the shards back in the wrong order.
             if batch != 1:
                 raise NotImplementedError(
                     "KDA context parallel requires batch == 1 (the packed "
@@ -698,11 +727,16 @@ class KimiDeltaAttention(FleetLayer):
                 "support."
             )
         cp_context = None
-        if self.cp_size > 1:
+        if self.cp_size > 1 and not self.cp_head_a2a:
             # build_cp_context slices the global cu_seqlens down to this rank and
             # records how many conv tokens / recurrent states to pull from the
             # neighbours. Both kernels read cu_seqlens out of the context and
             # ignore the argument, so drop the global one here.
+            #
+            # The head-a2a path deliberately skips all of this: after the swap
+            # this rank holds the *whole* sequence, so the kernels run single-card
+            # semantics against the *global* cu_seqlens. Clearing cu_seqlens here
+            # would silently merge the documents.
             cp_context = build_cp_context(
                 cu_seqlens,
                 self.pg_collection.cp,
@@ -775,6 +809,67 @@ class KimiDeltaAttention(FleetLayer):
                     .astype(paddle.float32)
                 )
 
+        # Channel layout of qkv, as three per-tensor blocks: conv, the a2a split
+        # and the post-conv split all have to agree on it.
+        qkv_splits = [
+            self.qk_dim // self.tp_size,
+            self.qk_dim // self.tp_size,
+            self.v_dim // self.tp_size,
+        ]
+        conv_weight = self.conv1d.weight.squeeze(1)
+        conv_bias = self.conv1d.bias
+        A_log, dt_bias = self.A_log, self.dt_bias
+        # Shape the KDA core sees. Everything above this point is this rank's
+        # sequence shard with all heads; under head-a2a everything below is the
+        # full sequence with this rank's head shard.
+        core_batch, core_seq = eff_batch, eff_seq
+
+        if self.cp_head_a2a:
+            # ==== all-to-all: [b, s/P, h, d] -> [b, s, h/P, d] ====
+            # Before the conv on purpose (design decision D1): a depthwise conv is
+            # independent per channel, so moving the head axis across it changes
+            # nothing numerically -- and having the full sequence locally is what
+            # removes the halo exchange and the cross-rank state relay entirely.
+            cp_group = self.pg_collection.cp
+            cp_rank, cp_size = cp_group.rank, cp_group.nranks
+            heads_k = self.num_key_heads // self.tp_size
+            heads_v = self.num_v_heads_local_tp
+            qkv_heads = (heads_k, heads_k, heads_v)
+            # qkv is one contiguous channel block per q/k/v, so its last axis must
+            # not be split by cp directly -- the cut would run across the q/k/v
+            # boundaries. Split first, swap each part, concatenate back; for a
+            # depthwise conv that round trip is an identity. Under GVA the three
+            # blocks do not even share a head count, hence per-block heads.
+            query, key, value = split_qkv_seq_to_head(
+                qkv, qkv_splits, qkv_heads, cp_group
+            )
+            qkv = paddle.concat(
+                [t.flatten(2) for t in (query, key, value)], axis=-1
+            )
+            # alpha and beta are projected from hidden_states rather than from the
+            # conv output, so they each need their own swap. beta is 3-D and gets a
+            # length-1 head dim for the duration of it.
+            alpha = seq_to_head(alpha, cp_group)
+            beta = seq_to_head_beta(beta, cp_group)
+            # Per-head parameters keep their full shape and are sliced here, in the
+            # graph: the slice is differentiable, so the gradient comes back
+            # full-shape and exactly 0.0 outside this rank's heads. The trainer-side
+            # sharding reduction is then x + 0 == x (bitwise) and neither
+            # sharded_state_dict nor the reduction needs to know about CP at all.
+            # Do NOT reduce them here -- the sharding group already covers CP, so a
+            # layer-local all_reduce double-counts.
+            conv_weight = slice_channels_by_head(
+                conv_weight, qkv_splits, qkv_heads, cp_rank, cp_size
+            )
+            if conv_bias is not None:
+                conv_bias = slice_channels_by_head(
+                    conv_bias, qkv_splits, qkv_heads, cp_rank, cp_size
+                )
+            A_log = slice_per_head_param(A_log, heads_v, cp_rank, cp_size)
+            dt_bias = slice_per_head_param(dt_bias, heads_v, cp_rank, cp_size)
+            qkv_splits = [dim // cp_size for dim in qkv_splits]
+            core_seq = seq_len_full
+
         # Convolution on qkv
         nvtx_range_push(suffix="conv1d")
         if self.use_fused_kernels:
@@ -784,8 +879,8 @@ class KimiDeltaAttention(FleetLayer):
             # conv pulls kernel_size-1 tokens across every document boundary.
             qkv, _ = causal_conv1d(
                 qkv.contiguous(),
-                weight=self.conv1d.weight.squeeze(1),
-                bias=self.conv1d.bias,
+                weight=conv_weight,
+                bias=conv_bias,
                 activation="silu",
                 cu_seqlens=cu_seqlens,
                 cu_seqlens_cpu=cu_seqlens_cpu,
@@ -801,18 +896,10 @@ class KimiDeltaAttention(FleetLayer):
             qkv = qkv.transpose([0, 2, 1])  # b, d, s -> b, s, d
         nvtx_range_pop(suffix="conv1d")
 
-        query, key, value = paddle.split(
-            qkv,
-            [
-                self.qk_dim // self.tp_size,
-                self.qk_dim // self.tp_size,
-                self.v_dim // self.tp_size,
-            ],
-            axis=-1,
-        )
-        query = query.reshape([eff_batch, eff_seq, -1, self.key_head_dim])
-        key = key.reshape([eff_batch, eff_seq, -1, self.key_head_dim])
-        value = value.reshape([eff_batch, eff_seq, -1, self.value_head_dim])
+        query, key, value = paddle.split(qkv, qkv_splits, axis=-1)
+        query = query.reshape([core_batch, core_seq, -1, self.key_head_dim])
+        key = key.reshape([core_batch, core_seq, -1, self.key_head_dim])
+        value = value.reshape([core_batch, core_seq, -1, self.value_head_dim])
 
         nvtx_range_push(suffix="kimi_delta_rule")
         if self.use_fused_kernels and not cache_active:
@@ -824,8 +911,8 @@ class KimiDeltaAttention(FleetLayer):
                 v=value.contiguous(),
                 g=alpha.contiguous(),
                 beta=beta.contiguous(),
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
+                A_log=A_log,
+                dt_bias=dt_bias,
                 use_qk_l2norm_in_kernel=self.use_qk_l2norm,
                 use_gate_in_kernel=True,
                 use_beta_sigmoid_in_kernel=True,
@@ -845,8 +932,8 @@ class KimiDeltaAttention(FleetLayer):
                 value.contiguous(),
                 g=alpha.contiguous(),
                 beta=beta.contiguous(),
-                A_log=self.A_log,
-                dt_bias=self.dt_bias,
+                A_log=A_log,
+                dt_bias=dt_bias,
                 use_qk_l2norm_in_kernel=False,
                 use_gate_in_kernel=True,
                 use_beta_sigmoid_in_kernel=True,
@@ -855,6 +942,14 @@ class KimiDeltaAttention(FleetLayer):
                 output_final_state=cache_active,
             )
         nvtx_range_pop(suffix="kimi_delta_rule")
+
+        if self.cp_head_a2a:
+            # ==== all-to-all back: [b, s, hv/P, v] -> [b, s/P, hv, v] ====
+            # Swapping back here, rather than after the gated norm, is why
+            # _gated_norm / out_norm / g_proj / out_proj need no changes at all:
+            # they are per-token, and they see exactly the sequence shard they saw
+            # without CP.
+            core_attn_out = head_to_seq(core_attn_out, self.pg_collection.cp)
 
         if cache_active:
             # Seed the decode loop. paddle_chunk_kda's final state is already the
