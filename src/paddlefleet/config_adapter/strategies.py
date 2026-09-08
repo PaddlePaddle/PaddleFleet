@@ -14,13 +14,14 @@
 
 """How batch settings follow the data-parallel width, one per test profile.
 
-* ``--test-performance`` -> :func:`scale_batch`: shrink ``global_batch_size``
-  proportionally and keep ``gradient_accumulation_steps``, so per-step work
-  per card is unchanged and the measured step time stays comparable.
-* ``--test-accuracy`` -> :func:`scale_accumulation`: keep
-  ``global_batch_size`` and raise ``gradient_accumulation_steps`` by the same
-  factor, so the effective batch (and therefore the loss curve) matches the
-  full-scale run.
+* default / ``--test-performance`` -> :func:`scale_batch`: shrink
+  ``global_batch_size`` proportionally and keep
+  ``gradient_accumulation_steps``, so per-step work per card is unchanged
+  and the measured step time stays comparable.
+* ``--test-accuracy`` (alone) -> :func:`scale_accumulation`: keep
+  ``global_batch_size`` and raise ``gradient_accumulation_steps`` by the
+  same factor, so the effective batch (and therefore the loss curve)
+  matches the full-scale run.
 
 Scaling must follow ``dataset_world_size`` (= cards / (TP*SEP*PP*CP)), not
 the raw card count: the trainer asserts ``GBS == micro_bs * acc *
