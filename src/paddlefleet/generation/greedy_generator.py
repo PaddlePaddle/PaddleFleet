@@ -208,9 +208,13 @@ def _collect_prompt_log_probs(
     # 物化成 fp32（logsumexp 与逐元素相减各舍入一次）再 gather，于是两侧各自
     # 落在 fp64 真值的 1~3 个 ULP 内、互差最多 2 ULP。换成同一个 CE 算子后
     # 两侧是同一条归约路径，可做到逐位相同。
+    # ``cross_entropy`` already returns [B, prompt_len - start] when the label
+    # is passed without a trailing singleton axis, so do NOT squeeze here:
+    # a window of exactly one token would collapse to [B] and make the
+    # per-batch ``extend`` below fail on a scalar.
     gathered = -paddle.nn.functional.cross_entropy(
         sliced, targets, reduction="none", axis=-1
-    ).squeeze(-1)
+    )
 
     # gathered = paddle.take_along_axis(
     #     paddle.nn.functional.log_softmax(sliced, axis=-1),
