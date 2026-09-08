@@ -1895,10 +1895,12 @@ class MQALatentAttention(FleetLayer):
         process-global flags, so all three inputs go into the message -- the
         head-dim pair alone rarely explains the answer. In particular
         ``FLAGS_flash_attn_version`` must be 4, which production sets from the
-        compute capability (``TrainingArguments.__post_init__``, SM100 -> 4), and
-        ``FLAGS_cudnn_deterministic`` must be off, since FA4's big-head-dim
-        backward has no ordered-accumulation variant
-        (``flash_mask/cute/interface.py:1238,1249``).
+        compute capability (``TrainingArguments.__post_init__``, SM100 -> 4).
+        ``FLAGS_cudnn_deterministic`` is *not* a rejection condition: FA4's
+        big-head-dim backward gained an ordered (semaphore-serialised) reduction
+        in flash-attention ``5007a05``, so this pair stays on FA4 under
+        determinism. Its value is still reported, because it is one of the two
+        flags the answer is derived from.
 
         Checked every forward rather than in ``__init__``: the flags are
         settable at any point and the check is a whitelist lookup.
@@ -1918,10 +1920,9 @@ class MQALatentAttention(FleetLayer):
                 "FLAGS_cudnn_deterministic="
                 f"{flags['FLAGS_cudnn_deterministic']}. Run on a device whose "
                 "compute capability selects FA4 (SM100+, which is also what the "
-                "sparse phase-3 kernels require), leave "
-                "FLAGS_flash_attn_version at the value the trainer derives, and "
-                "keep FLAGS_cudnn_deterministic off -- FA4 has no deterministic "
-                "backward for this head-dim pair."
+                "sparse phase-3 kernels require) with the flash_mask (cute) "
+                "extension built into paddlefleet_ops, and leave "
+                "FLAGS_flash_attn_version at the value the trainer derives."
             )
 
     def _dense_attn(

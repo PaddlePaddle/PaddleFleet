@@ -84,6 +84,39 @@ def _reset_fa3_backend() -> None:
     FLASHMASK_FA3_USE_CUTEDSL = True
 
 
+def _cutedsl_hdim_ok(fa_version: int, head_dim: int, head_dim_v: int) -> bool:
+    """Whether the cutedsl kernels serve ``(head_dim, head_dim_v)``.
+
+    One whitelist for both callers in :func:`_dispatch_fa_version` -- the FA4
+    branch is reached with ``FLASHMASK_FA3_USE_CUTEDSL`` either way (FA4 is
+    cutedsl-only), so the two used to hold the same literal pairs twice.
+
+    ``deterministic`` is not a parameter: no pair in this whitelist is
+    deterministic-only. FA3 on cutedsl has an ordered-accumulation backward, and
+    FA4's big-head-dim backward gained an ordered (semaphore-serialised)
+    reduction in flash-attention ``5007a05``.
+
+    Args:
+        fa_version: 3 or 4. Only FA4 serves the big head dims.
+        head_dim: Query/Key head dim.
+        head_dim_v: Value head dim, already defaulted by the caller.
+
+    Returns:
+        ``True`` when the pair is served; ``False`` means degrade to FA2.
+    """
+    if (
+        (head_dim <= 128 and head_dim_v <= 128)
+        or (head_dim == 192 and head_dim_v == 128)
+        or (head_dim == 256 and head_dim_v == 256)
+    ):
+        return True
+    # FA4 additionally supports larger head dims, via its big-head-dim backward.
+    return fa_version == 4 and (
+        (head_dim == 512 and head_dim_v == 512)
+        or (head_dim == 576 and head_dim_v == 512)
+    )
+
+
 def _dispatch_fa_version(
     head_dim: int,
     head_dim_v: int | None = None,
@@ -102,29 +135,19 @@ def _dispatch_fa_version(
         the cutedsl backend FA3 needs no such degrade -- its backward has an
         ordered-accumulation variant, so deterministic holds for every head dim
         in the cutedsl whitelist below.
-      * FA4 is only used when both ``hdim_ok`` and ``mask_ok`` hold:
-
-        - ``hdim_ok``: one of
-          * ``head_dim <= 128`` and ``head_dim_v <= 128``
-          * ``head_dim == 192`` and ``head_dim_v == 128``
-          * ``head_dim == 256`` and ``head_dim_v == 256``
-          * ``head_dim == 512`` and ``head_dim_v == 512``, unless deterministic
-            is required
-          * ``head_dim == 576`` and ``head_dim_v == 512``, unless deterministic
-            is required -- both of these pairs take FA4's big-head-dim backward,
-            which has no ordered-accumulation variant.
-        - ``mask_ok``: ``startend_row_indices is None`` or
-          ``startend_row_indices.shape[-1] != 4``
-
-        When ``startend_row_indices`` is not provided (``None``), ``mask_ok``
-        is treated as ``True`` -- this covers the ``flash_attention`` path
-        which has no mask tensor. Aligned with flash-attention ``interface.py``.
+      * FA3 and FA4 on cutedsl are used only for the head-dim pairs in
+        :func:`_cutedsl_hdim_ok`; every other pair degrades to FA2. That
+        whitelist does not narrow under ``FLAGS_cudnn_deterministic`` -- see the
+        note there.
 
     Args:
         head_dim: Query/Key head dim (always equal).
         head_dim_v: Value head dim. Defaults to ``head_dim`` when not provided.
-        startend_row_indices: FlashMask indices tensor. Pass ``None`` (default)
-            for the plain ``flash_attention`` path where no mask check is needed.
+        startend_row_indices: Accepted and ignored, so the flashmask path can
+            hand over what it already has. FA4 used to refuse a 4-column
+            (global sliding window) mask and this function degraded to FA2 for
+            it; since flash-attention ``5007a05`` FA4 serves ``num_vec == 4``,
+            so the mask takes no part in dispatch.
 
     Returns:
         The FlashAttention version to use (2, 3 or 4).
@@ -144,60 +167,19 @@ def _dispatch_fa_version(
         if not is_flash_mask_available():
             return 2
 
+    _head_dim_v = head_dim_v if head_dim_v is not None else head_dim
+
     if FLASHMASK_FA3_USE_CUTEDSL:
         if fa_version in (3, 4):
-            _head_dim_v = head_dim_v if head_dim_v is not None else head_dim
-            cutedsl_hdim_ok = (
-                (head_dim <= 128 and _head_dim_v <= 128)
-                or (head_dim == 192 and _head_dim_v == 128)
-                or (head_dim == 256 and _head_dim_v == 256)
-            )
-            # FA4 additionally supports larger head dims (non-deterministic only)
-            if fa_version == 4 and not deterministic:
-                cutedsl_hdim_ok = cutedsl_hdim_ok or (
-                    (head_dim == 512 and _head_dim_v == 512)
-                    or (head_dim == 576 and _head_dim_v == 512)
-                )
-            if not cutedsl_hdim_ok:
+            if not _cutedsl_hdim_ok(fa_version, head_dim, _head_dim_v):
                 return 2
-            # Only FA4 is restricted here: the FA4 kernel does not serve a
-            # 4-column flashmask, while FA3 on cutedsl accepts it. Not a missing
-            # FA3 branch.
-            fa4_mask_ok = (
-                startend_row_indices is None
-                or startend_row_indices.shape[-1] != 4
-            )
-            if fa_version == 4:
-                if not fa4_mask_ok:
-                    return 2
     else:
         if fa_version == 3:
             if deterministic and head_dim > 128:
                 return 2
 
         if fa_version == 4:
-            _head_dim_v = head_dim_v if head_dim_v is not None else head_dim
-            fa4_hdim_ok = (
-                (head_dim <= 128 and _head_dim_v <= 128)
-                or (head_dim == 192 and _head_dim_v == 128)
-                or (head_dim == 256 and _head_dim_v == 256)
-                # Both of these exceed 256 and so take FA4's big-head-dim backward,
-                # which asserts ``not deterministic`` (``flash_mask/cute/
-                # interface.py``: ``is_bigd_bwd`` -> "deterministic reduction is not
-                # supported by big-headdim bwd"). Degrade instead of aborting, the
-                # same way FA3 degrades above.
-                or (
-                    head_dim == 512 and _head_dim_v == 512 and not deterministic
-                )
-                or (
-                    head_dim == 576 and _head_dim_v == 512 and not deterministic
-                )
-            )
-            fa4_mask_ok = (
-                startend_row_indices is None
-                or startend_row_indices.shape[-1] != 4
-            )
-            if not (fa4_hdim_ok and fa4_mask_ok):
+            if not _cutedsl_hdim_ok(4, head_dim, _head_dim_v):
                 return 2
 
     return fa_version
