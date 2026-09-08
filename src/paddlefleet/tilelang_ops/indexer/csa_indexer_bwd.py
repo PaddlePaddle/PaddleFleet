@@ -711,27 +711,28 @@ def csa_indexer_bwd_interface(
         # (nothing above rejects it, and the atomic path returns empty gradients
         # for it), and a stride of 0 would make ``range`` raise.
         rows_per_chunk = max(1, min(rows_per_chunk, seq_len))
-        dindexk_buf = paddle.empty(
-            [batch, rows_per_chunk, padded_topk, dim], dtype="float32"
-        )
         grad_k_comp = paddle.zeros([batch, seq_len_comp, dim], dtype="float32")
 
+        # Exactly one staging buffer is alive at a time. It is allocated lazily
+        # and only reallocated when the row count changes, i.e. once for all the
+        # full chunks and once more for a short tail -- and the tail's allocation
+        # is preceded by dropping the full-size one, so the peak stays at one
+        # chunk's worth rather than the sum of the two.
+        #
+        # The tail cannot be served by ``buf[:, :rows]``: that view keeps the
+        # full buffer's batch stride while ``tl_csa_indexer_bwd_det_impl``
+        # declares ``[batch, seq_len, topk, dim]`` and addresses it as dense, so
+        # with ``batch > 1`` every batch past the first would read and write at
+        # the wrong offset.
+        buf = None
         for start in range(0, seq_len, rows_per_chunk):
             end = min(start + rows_per_chunk, seq_len)
             rows = end - start
             # ``seq_len`` is ``T.dynamic`` in the kernel, so a short tail chunk
             # reuses the same compiled kernel; only ``dindexk_reduce`` (which
             # takes the row count as a static shape) recompiles for the tail.
-            #
-            # The tail gets its own allocation rather than ``dindexk_buf[:,
-            # :rows]``: that view keeps the full buffer's batch stride, while the
-            # kernel declares ``[batch, seq_len, topk, dim]`` and addresses it as
-            # dense, so with ``batch > 1`` every batch past the first would read
-            # and write at the wrong offset. One extra allocation on the last
-            # chunk only, still inside the row budget.
-            if rows == rows_per_chunk:
-                buf = dindexk_buf
-            else:
+            if buf is None or int(buf.shape[1]) != rows:
+                buf = None  # release before requesting the replacement
                 buf = paddle.empty(
                     [batch, rows, padded_topk, dim], dtype="float32"
                 )

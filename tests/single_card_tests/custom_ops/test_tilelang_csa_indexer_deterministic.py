@@ -232,6 +232,42 @@ class TestTilelangIndexerBackwardDeterministic(unittest.TestCase):
         self.assertEqual(list(out[2].shape), [self.b, self.sk, self.d])
         self.assertEqual(float(out[2].abs().sum().item()), 0.0)
 
+    def test_only_one_staging_buffer_is_alive_at_a_time(self):
+        # Review P1 (second round): giving the tail its own allocation must not
+        # leave the full-size buffer alive alongside it, or the peak becomes
+        # ~2x the advertised budget. Track liveness with weakrefs rather than
+        # counting allocations, since reuse across full chunks is also expected.
+        import weakref
+
+        live, peak = set(), 0
+        real_empty = paddle.empty
+
+        def spy(*args, **kwargs):
+            nonlocal peak
+            t = real_empty(*args, **kwargs)
+            if (
+                args
+                and isinstance(args[0], list | tuple)
+                and len(args[0]) == 4
+                and str(kwargs.get("dtype", ""))
+                in ("float32", "paddle.float32")
+            ):
+                key = id(t)
+                live.add(key)
+                weakref.finalize(t, live.discard, key)
+                peak = max(peak, len(live))
+            return t
+
+        paddle.empty = spy
+        try:
+            # 7 rows per chunk over 20 rows -> 2 full chunks + a 6-row tail.
+            self._bwd(True, chunk_elems=7 * self.topk * self.d, sq=20)
+        finally:
+            paddle.empty = real_empty
+        self.assertEqual(
+            peak, 1, f"{peak} staging buffers were alive at once, expected 1"
+        )
+
     def test_staging_buffer_respects_the_row_chunk_budget(self):
         # The point of the chunking is the bound, so assert it directly instead
         # of trusting that a large shape merely happened not to OOM.
