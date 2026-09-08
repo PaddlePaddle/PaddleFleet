@@ -48,6 +48,7 @@ from paddlefleet.context_parallel_utils import (
     ContextParallelGatherOp,
     ContextParallelScatterOp,
 )
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.parallel_state import (
     get_context_parallel_rank,
     get_context_parallel_world_size,
@@ -167,17 +168,44 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
     """
 
     @staticmethod
-    def forward(ctx, x, w, defer_dw=False, use_accuracy_compatible=False):
+    def forward(
+        ctx,
+        x,
+        w,
+        defer_dw=False,
+        use_accuracy_compatible=False,
+        sequence_shards=1,
+    ):
         """
         forward
         """
         ctx.defer_dw = defer_dw
         ctx.use_accuracy_compatible = use_accuracy_compatible
 
+        ctx.sequence_shards = (
+            int(sequence_shards or 1)
+            if ieee_kernel_enabled()
+            and use_accuracy_compatible
+            and w.dtype == paddle.float32
+            and x.ndim == 2
+            and not defer_dw
+            else 1
+        )
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
-        w = w.T
-        return F.linear(x.cast(ctx.dtype), w.cast(ctx.dtype))
+        x_cast = x.cast(ctx.dtype)
+        w_t = w.T.cast(ctx.dtype)
+        shards = ctx.sequence_shards
+        if shards > 1 and int(x.shape[0]) % shards == 0:
+            size = int(x.shape[0]) // shards
+            return paddle.concat(
+                [
+                    F.linear(x_cast[i * size : (i + 1) * size], w_t)
+                    for i in range(shards)
+                ],
+                axis=0,
+            )
+        return F.linear(x_cast, w_t)
 
     @staticmethod
     def backward(ctx, y_grad):
@@ -245,8 +273,37 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                 #   grad_weight = torch.mm(grad_output.t(), inp.to(router_dtype))
                 # i.e. two separate GEMMs (not a fused matmul_grad), then each
                 # gradient cast back to its own storage dtype.
-                x_g = paddle.matmul(y_grad, w.cast(ctx.dtype))
-                w_g = paddle.matmul(y_grad, x.cast(ctx.dtype), transpose_x=True)
+                shards = ctx.sequence_shards
+                if shards > 1 and int(x.shape[0]) % shards == 0:
+                    # Reference gating is SP-local. Round each local wgrad
+                    # before summing into the FP32 gradient buffer.
+                    size = int(x.shape[0]) // shards
+                    x_parts, w_parts = [], []
+                    for i in range(shards):
+                        sl = slice(i * size, (i + 1) * size)
+                        x_parts.append(
+                            paddle.matmul(y_grad[sl], w.cast(ctx.dtype))
+                        )
+                        local_wgrad = paddle.matmul(
+                            y_grad[sl], x[sl].cast(ctx.dtype), transpose_x=True
+                        )
+                        w_parts.append(
+                            local_wgrad.cast(paddle.bfloat16).cast(
+                                paddle.float32
+                            )
+                        )
+                    x_g = paddle.concat(x_parts, axis=0)
+                    w_g = w_parts[0]
+                    for local_wgrad in w_parts[1:]:
+                        w_g = w_g + local_wgrad
+                else:
+                    x_g = paddle.matmul(y_grad, w.cast(ctx.dtype))
+                    w_g = paddle.matmul(
+                        y_grad, x.cast(ctx.dtype), transpose_x=True
+                    )
+                    if ieee_kernel_enabled() and w.dtype == paddle.float32:
+                        # Reference local weight gradients round through BF16.
+                        w_g = w_g.cast(paddle.bfloat16).cast(paddle.float32)
                 x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
                 w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
                 return x_grad, w_grad
@@ -275,10 +332,11 @@ def gate_detach_matmul(
     moe_router_force_load_balancing=False,
     defer_dw=False,
     use_accuracy_compatible=False,
+    sequence_shards=1,
 ):
     if use_fuse:
         score = FusedGateDetachMatmul.apply(
-            x, weight, defer_dw, use_accuracy_compatible
+            x, weight, defer_dw, use_accuracy_compatible, sequence_shards
         )
     else:
         x = x.cast(paddle.float32)
@@ -1706,6 +1764,12 @@ class TopKRouter(StandardMoERouter):
                     self.config.moe_router_force_load_balancing,
                     dw_overlap_enabled(self.config, "moe_router_gate"),
                     self.use_accuracy_compatible,
+                    sequence_shards=(
+                        self.tensor_model_parallel_size
+                        if self.sequence_parallel
+                        and self.config.expert_model_parallel_size <= 1
+                        else 1
+                    ),
                 )
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)
