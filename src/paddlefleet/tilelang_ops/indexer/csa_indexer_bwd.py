@@ -707,7 +707,10 @@ def csa_indexer_bwd_interface(
         rows_per_chunk = max(
             1, _DET_ROW_CHUNK_ELEMS // (batch * padded_topk * dim)
         )
-        rows_per_chunk = min(rows_per_chunk, seq_len)
+        # ``max(1, ...)`` again on purpose: ``seq_len == 0`` is a legal input
+        # (nothing above rejects it, and the atomic path returns empty gradients
+        # for it), and a stride of 0 would make ``range`` raise.
+        rows_per_chunk = max(1, min(rows_per_chunk, seq_len))
         dindexk_buf = paddle.empty(
             [batch, rows_per_chunk, padded_topk, dim], dtype="float32"
         )
@@ -719,9 +722,19 @@ def csa_indexer_bwd_interface(
             # ``seq_len`` is ``T.dynamic`` in the kernel, so a short tail chunk
             # reuses the same compiled kernel; only ``dindexk_reduce`` (which
             # takes the row count as a static shape) recompiles for the tail.
-            buf = (
-                dindexk_buf if rows == rows_per_chunk else dindexk_buf[:, :rows]
-            )
+            #
+            # The tail gets its own allocation rather than ``dindexk_buf[:,
+            # :rows]``: that view keeps the full buffer's batch stride, while the
+            # kernel declares ``[batch, seq_len, topk, dim]`` and addresses it as
+            # dense, so with ``batch > 1`` every batch past the first would read
+            # and write at the wrong offset. One extra allocation on the last
+            # chunk only, still inside the row budget.
+            if rows == rows_per_chunk:
+                buf = dindexk_buf
+            else:
+                buf = paddle.empty(
+                    [batch, rows, padded_topk, dim], dtype="float32"
+                )
             idx_chunk = topk_indices[:, start:end].contiguous()
             grad_chunk = grad_scores[:, start:end].contiguous()
             grad_q_chunk = paddle.empty(

@@ -129,14 +129,19 @@ class TestTilelangIndexerBackwardDeterministic(unittest.TestCase):
         self.b, self.sq, self.sk, self.h, self.d = 1, 64, 32, 64, 128
         self.topk = 32
 
-    def _bwd(self, deterministic, chunk_elems=None):
+    def _bwd(self, deterministic, chunk_elems=None, b=None, sq=None):
         # ``import_module`` on purpose: ``indexer/__init__.py`` re-exports a
         # *function* named ``csa_indexer_bwd``, so ``from ... import
         # csa_indexer_bwd`` hands back the function, not the module.
         mod = import_module("paddlefleet.tilelang_ops.indexer.csa_indexer_bwd")
 
         q, k, w, idx, grad = _inputs(
-            self.b, self.sq, self.sk, self.h, self.d, self.topk
+            self.b if b is None else b,
+            self.sq if sq is None else sq,
+            self.sk,
+            self.h,
+            self.d,
+            self.topk,
         )
         saved = mod._DET_ROW_CHUNK_ELEMS
         if chunk_elems is not None:
@@ -199,6 +204,33 @@ class TestTilelangIndexerBackwardDeterministic(unittest.TestCase):
                 1e-3 * scale,
                 f"{name} disagrees between the deterministic and atomic paths",
             )
+
+    def test_batch_gt_one_with_tail_matches_unchunked(self):
+        # Review P1: the tail chunk used to be ``dindexk_buf[:, :rows]``, whose
+        # batch stride is that of the *full* buffer while the kernel addresses
+        # its argument as dense -- so every batch past the first read and wrote
+        # at the wrong offset. Only reproducible with batch > 1 *and* a tail.
+        b, sq = 2, 20
+        chunk = b * 7 * self.topk * self.d  # 7 rows -> 20 = 2*7 + tail 6
+        whole = self._bwd(
+            True, chunk_elems=b * sq * self.topk * self.d, b=b, sq=sq
+        )
+        chunked = self._bwd(True, chunk_elems=chunk, b=b, sq=sq)
+        self.assertTrue(_bit_equal(whole[0], chunked[0]), "grad_q")
+        self.assertTrue(_bit_equal(whole[1], chunked[1]), "grad_weights")
+        diff = (whole[2] - chunked[2]).abs().max().item()
+        scale = max(whole[2].abs().max().item(), 1.0)
+        self.assertLess(diff, 1e-4 * scale, "grad_k_comp")
+
+    def test_empty_sequence_returns_empty_grads(self):
+        # Review P1: ``rows_per_chunk = min(..., seq_len)`` was 0 for an empty
+        # sequence, and ``range(start, stop, 0)`` raises. The atomic path returns
+        # empty gradients for it, so the deterministic one must too.
+        out = self._bwd(True, sq=0)
+        self.assertEqual(list(out[0].shape), [self.b, 0, self.h, self.d])
+        self.assertEqual(list(out[1].shape), [self.b, 0, self.h])
+        self.assertEqual(list(out[2].shape), [self.b, self.sk, self.d])
+        self.assertEqual(float(out[2].abs().sum().item()), 0.0)
 
     def test_staging_buffer_respects_the_row_chunk_budget(self):
         # The point of the chunking is the bound, so assert it directly instead
