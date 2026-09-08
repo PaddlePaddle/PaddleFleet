@@ -268,7 +268,15 @@ class MoELayer(nn.Layer):
             "ringmoe",
         )
         self.moe_allgather_gate_overlap = config.moe_allgather_gate_overlap
-        if self.use_accuracy_compatible:
+        if self.use_accuracy_compatible and not (
+            ieee_kernel_enabled()
+            and config.moe_expert_fusion
+            and self.moe_token_dispatcher_type == "deepep"
+            and pg_collection.ep is not None
+            and utils.get_pg_size(pg_collection.ep) > 1
+        ):
+            # IEEE fused experts retain their explicitly selected EP backend.
+            # Ordinary compatibility mode keeps the existing all-to-all path.
             self.moe_token_dispatcher_type = "alltoall"
         self.use_hybrid_ep_backend = False
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
