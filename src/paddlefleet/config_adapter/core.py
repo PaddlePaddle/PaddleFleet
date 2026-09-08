@@ -19,7 +19,6 @@
     load YAML
       -> apply --set yaml: overrides (and pin them: nothing else may touch
          those keys afterwards)
-      -> drop fa_version (an environment-specific flash-attention pin)
       -> load model_config.json + apply --set json: overrides, when the
          profile or the user needs it
       -> profile.plan(): decide the final TP/PP/EP/CP/SEP
@@ -165,18 +164,6 @@ class ConfigAdapter:
                 "yaml",
                 self.yaml_writer.apply_config_map(config, self.yaml_overrides),
                 "用户通过 --set yaml: 指定，自动适配不会再覆盖该字段",
-            )
-
-        fa_pinned = "fa_version" in self.yaml_overrides or (
-            "fa_version" in self.auto_overrides
-        )
-        if "fa_version" in config and not fa_pinned:
-            log.record_removed(
-                "yaml",
-                "fa_version",
-                config.pop("fa_version"),
-                "fa_version 是与环境强绑定的 flash-attention 版本 pin，"
-                "适配后的配置不携带",
             )
 
         dims_before = extract_parallel_params(config)

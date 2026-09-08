@@ -1101,8 +1101,11 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         # (96 -> 2), keeping GBS == micro_bs * acc * dataset_world_size.
         self.assertEqual(config["global_batch_size"], 192)
         self.assertEqual(config["gradient_accumulation_steps"], 96)
-        # Environment-specific pin is always dropped.
-        self.assertNotIn("fa_version", config)
+        # fa_version is an ordinary field now: kept verbatim.  The adapter
+        # only shrinks scale on identical hardware, so dropping the kernel
+        # pin would silently change the attention code path and break the
+        # comparability that the test modes exist for.
+        self.assertEqual(config["fa_version"], 3)
 
     def test_stale_checkpoint_refs_are_dropped_when_structure_shrinks(self):
         # Shrinking EP/PP rescales n_routed_experts / num_hidden_layers, so a
@@ -1627,21 +1630,13 @@ class TestPinnedFieldRejection(ConfigAdapterTestBase):
         self.assertFalse(ok)
         self.assertIn("pipeline_model_parallel_size", message)
 
-    def test_prefix_less_fa_version_pin_is_kept(self):
-        ok, message = self.adapt(
-            target_nodes=1, test_accuracy=True, auto_overrides={"fa_version": 4}
-        )
+    def test_fa_version_is_kept_verbatim(self):
+        # fa_version used to be dropped as an "environment pin"; the adapter
+        # now targets same-hardware shrinks only, so the field is an ordinary
+        # passthrough (and --set can still rewrite it like any other key).
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
-        self.assertEqual(self.load_output_yaml(8)["fa_version"], 4)
-        self.assertNotIn("DELETE field=fa_version", message)
-
-    def test_pinned_fa_version_is_kept(self):
-        ok, message = self.adapt(
-            target_nodes=1, test_accuracy=True, yaml_overrides={"fa_version": 4}
-        )
-        self.assertTrue(ok, message)
-        # The pin wins: the field is neither deleted nor reported as deleted.
-        self.assertEqual(self.load_output_yaml(8)["fa_version"], 4)
+        self.assertEqual(self.load_output_yaml(8)["fa_version"], 3)
         self.assertNotIn("DELETE field=fa_version", message)
 
 
