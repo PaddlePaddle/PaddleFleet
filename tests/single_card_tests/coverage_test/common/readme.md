@@ -13,7 +13,7 @@ Unit tests for top-level paddlefleet package initialization and metadata.
 
 ```bash
 # Run all common tests
-python -m pytest tests/single_card_tests/ai_edited_test/common/ -v
+python -m pytest tests/single_card_tests/coverage_test/common/ -v
 ```
 
 ## Notes

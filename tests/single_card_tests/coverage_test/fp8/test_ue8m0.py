@@ -22,7 +22,7 @@ Tests cover the following use_ue8m0 code paths:
   3. MoELayer.fp8_quant_weight with use_ue8m0=True (stub-based, transpose True/False)
 
 Run with:
-  cd /path/to/PaddleFleet && python tests/single_card_tests/ai_edited_test/fp8/test_ue8m0.py
+  cd /path/to/PaddleFleet && python tests/single_card_tests/coverage_test/fp8/test_ue8m0.py
 """
 
 import os

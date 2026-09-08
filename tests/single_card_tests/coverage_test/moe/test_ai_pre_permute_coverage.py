@@ -31,7 +31,7 @@ Covers branches missed by the main test_moe_auto_subbatch_pre_permute.py:
   6. BF16 path + recompute backward combination
 
 Run with:
-  python tests/single_card_tests/ai_edited_test/moe/test_ai_pre_permute_coverage.py
+  python tests/single_card_tests/coverage_test/moe/test_ai_pre_permute_coverage.py
 """
 
 import logging
