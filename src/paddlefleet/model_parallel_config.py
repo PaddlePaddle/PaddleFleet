@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -380,14 +381,22 @@ class ModelParallelConfig:
         if self.tensor_model_parallel_size <= 1:
             self.sequence_parallel = False
 
+        # expert + tensor parallelism requires sequence_parallel.
+        if (
+            self.expert_model_parallel_size > 1
+            and self.tensor_model_parallel_size > 1
+            and not self.sequence_parallel
+        ):
+            warnings.warn(
+                "sequence_parallel is forced to True because expert_model_parallel_size > 1 "
+                "and tensor_model_parallel_size > 1 (expert parallelism requires "
+                "sequence parallelism).",
+                stacklevel=3,
+            )
+            self.sequence_parallel = True
+
         if getattr(self, "use_accuracy_compatible", False):
             self.deterministic_mode = True
-
-        if self.sequence_parallel:
-            if self.tensor_model_parallel_size <= 1:
-                raise ValueError(
-                    "Can not use sequence paralllelism without tensor parallelism"
-                )
 
         if self.expert_tensor_parallel_size is None:
             self.expert_tensor_parallel_size = self.tensor_model_parallel_size
@@ -415,16 +424,6 @@ class ModelParallelConfig:
             raise ValueError(
                 "Wgrad deferral limit should be greater than or equal to 0 when it is enabled!"
             )
-
-        if (
-            self.expert_model_parallel_size > 1
-            and self.tensor_model_parallel_size > 1
-        ):
-            if self.sequence_parallel is False:
-                raise ValueError(
-                    "When using expert parallelism and tensor parallelism, "
-                    "sequence parallelism must be used"
-                )
 
         if self.microbatch_group_size_per_vp_stage is None:
             self.microbatch_group_size_per_vp_stage = (

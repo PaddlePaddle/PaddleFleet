@@ -164,17 +164,38 @@ class TestModelParallelConfig(unittest.TestCase):
         self.assertTrue(config.defer_embedding_wgrad_compute)
         self.assertEqual(config.wgrad_deferral_limit, 5)
 
-    def test_expert_and_tensor_parallel_requires_sequence_parallel(self):
-        """Test that expert + tensor parallel requires sequence parallel."""
+    def test_sequence_parallel_stays_user_controllable(self):
+        """sequence_parallel remains user-configurable; tp>1 does NOT force it on by itself."""
         from paddlefleet.model_parallel_config import ModelParallelConfig
 
-        with self.assertRaises(ValueError) as ctx:
+        # tp>1 without expert parallelism: sp follows the user's explicit setting
+        self.assertFalse(
             ModelParallelConfig(
-                expert_model_parallel_size=2,
-                tensor_model_parallel_size=2,
-                sequence_parallel=False,
-            )
-        self.assertIn("sequence parallelism must be used", str(ctx.exception))
+                tensor_model_parallel_size=2, sequence_parallel=False
+            ).sequence_parallel
+        )
+        self.assertTrue(
+            ModelParallelConfig(
+                tensor_model_parallel_size=2, sequence_parallel=True
+            ).sequence_parallel
+        )
+        # tp<=1: sp is auto-corrected to False (SP requires tensor parallelism)
+        self.assertFalse(
+            ModelParallelConfig(
+                tensor_model_parallel_size=1, sequence_parallel=True
+            ).sequence_parallel
+        )
+
+    def test_expert_and_tensor_parallel_auto_enables_sequence_parallel(self):
+        """Expert + tensor parallel: missing sequence_parallel is auto-enabled (corrected), no error raised."""
+        from paddlefleet.model_parallel_config import ModelParallelConfig
+
+        config = ModelParallelConfig(
+            expert_model_parallel_size=2,
+            tensor_model_parallel_size=2,
+            sequence_parallel=False,  # auto-corrected to True
+        )
+        self.assertTrue(config.sequence_parallel)
 
     def test_expert_and_tensor_parallel_with_sequence_parallel_ok(self):
         """Test that expert + tensor + sequence parallel is valid."""
