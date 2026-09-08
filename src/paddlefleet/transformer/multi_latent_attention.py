@@ -1921,7 +1921,7 @@ class MLASelfAttention(MultiLatentAttention):
             and self.is_mtp_layer
             and self.training
             and not packed_seq
-            and get_context_parallel_world_size() == 1
+            and get_context_parallel_world_size() <= 1
             and self.config.rope_type == "rope"
             and not self.config.apply_rope_fusion
             and rotary_pos_emb is not None
