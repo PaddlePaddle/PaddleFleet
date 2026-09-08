@@ -104,6 +104,10 @@ class TestIEEEMTPRotaryTable(unittest.TestCase):
                 _, actual = self.transform(depth=depth)
                 self.assertEqual(actual.flatten().tolist(), expected)
 
+    def test_disabled_cp_group_sentinel_predicts_next_positions(self):
+        _, actual = self.transform(cp=-1)
+        self.assertEqual(actual.flatten().tolist(), [2, 3, 4, 5, 6, 7, 0, 1])
+
     def test_other_paths_preserve_original_table(self):
         for change in [
             {"ieee": False},
