@@ -255,21 +255,22 @@ class TestIEEEGroupedBF16(unittest.TestCase):
             else:
                 self.assertIs(result[0], raw)
         node = namespace["UnZipNode"](None, ieee_grouped_bf16=True)
-        with patch.object(
-            F,
-            "moe_permute",
-            Mock(
-                return_value=(
-                    paddle.empty([3, 2], dtype="bfloat16"),
-                    rowmap,
-                    probs,
-                    paddle.empty([0]),
-                )
+        with (
+            patch.object(
+                F,
+                "moe_permute",
+                Mock(
+                    return_value=(
+                        paddle.empty([3, 2], dtype="bfloat16"),
+                        rowmap,
+                        probs,
+                        paddle.empty([0]),
+                    )
+                ),
             ),
-        ), self.assertRaisesRegex(RuntimeError, "valid rows"):
-            node.forward(
-                hidden, None, None, 2, 2, [2, 2], padding_alignment=1
-            )
+            self.assertRaisesRegex(RuntimeError, "valid rows"),
+        ):
+            node.forward(hidden, None, None, 2, 2, [2, 2], padding_alignment=1)
 
     def test_empty_forward_and_input_gradient_keep_shapes(self):
         node = self.node([0, 0, 0])

@@ -3133,11 +3133,15 @@ class ExpertsGroupGemmContiguousNode:
                     for n in self.tokens_per_expert:
                         if n > 0:
                             end = start + n
-                            gradient = paddle.matmul(
-                                dy._slice(start, end).cast("float32"),
-                                x._slice(start, end).cast("float32"),
-                                transpose_x=True,
-                            ).transpose([1, 0]).contiguous()
+                            gradient = (
+                                paddle.matmul(
+                                    dy._slice(start, end).cast("float32"),
+                                    x._slice(start, end).cast("float32"),
+                                    transpose_x=True,
+                                )
+                                .transpose([1, 0])
+                                .contiguous()
+                            )
                             start = end
                         else:
                             gradient = paddle.zeros(
