@@ -1907,6 +1907,23 @@ class MLASelfAttention(MultiLatentAttention):
                     # mscale is already accounted for in self.softmax_scale; set to 1.0 to avoid double-applying
                     # mscale = 1.0
 
+        # Match the reference's depth-wise wrap of the MTP RoPE table.
+        # Paddle MTP layers are zero-indexed; the reference starts at one.
+        if (
+            ieee_kernel_enabled()
+            and self.config.use_accuracy_compatible
+            and self.is_mtp_layer
+            and self.training
+            and not packed_seq
+            and get_context_parallel_world_size() == 1
+            and self.config.rope_type == "rope"
+            and not self.config.apply_rope_fusion
+            and rotary_pos_emb is not None
+        ):
+            rotary_pos_emb = paddle.roll(
+                rotary_pos_emb, shifts=-(self.layer_number + 1), axis=1
+            )
+
         cp_size = get_context_parallel_world_size()
         if cp_size > 1 and not getattr(self.config, "mla_use_nope", False):
             # Keep RoPE inputs local to the current CP rank before the fused

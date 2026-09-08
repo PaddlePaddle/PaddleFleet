@@ -1078,6 +1078,10 @@ class LanguageLoss(FleetLayer):
                     # This matches Megatron's behavior where MTP contributes to training
                     # gradients without affecting the reported loss value.
                     if self.config.add_mtp_loss:
+                        if ieee_kernel_enabled():
+                            # Cancel the detached value before adding MAIN:
+                            # (MAIN + MTP) - MTP can round the reported loss.
+                            return main_loss + (loss - loss.detach())
                         return main_loss + loss - loss.detach()
                     else:
                         return main_loss
