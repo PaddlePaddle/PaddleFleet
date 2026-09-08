@@ -151,6 +151,43 @@ def dw_overlap_enabled(config, point: str) -> bool:
     )
 
 
+def w4a8_route_factor_post_w2_scale(config):
+    """Scale to apply after the W4A8 down projection, or ``None`` to keep folding.
+
+    ``routed_scaling_factor`` is normally folded into ``top_gate`` (and hence into
+    ``probs``) by the router, so the W4A8 activation quantizer sees
+    ``swiglu(o1) * prob * routed_scaling_factor``. Inference stacks such as SGLang's
+    MegaMoE instead apply the factor *after* the down projection.
+
+    That ordering is not free: the FP8 activation scale is ``ceil_to_ue8m0(amax/448)``,
+    i.e. restricted to powers of two. Pre-multiplying by ``s`` multiplies ``amax`` by
+    ``s`` and therefore bumps the exponent of about ``log2(s) mod 1`` of the 1x32
+    blocks into the next bucket, so the two sides quantize on different grids and
+    round independently. Measured on DeepSeek-V4 shapes with ``s = 1.5``: 58.6% of
+    blocks shift bucket, each path sits 2.65% from the unquantized reference, but the
+    two paths sit 3.74% from *each other*. Matching the order makes that divergence
+    exactly zero, which is what train/rollout consistency cares about -- agreement,
+    not accuracy.
+
+    Returns the scalar when the post-w2 ordering applies, else ``None``. Callers on
+    both sides (the router that skips folding and the fused expert node that applies
+    the factor) must key off this single helper so they cannot disagree.
+
+    Gated on ``use_w4a8_fused_quant`` so W4A8 keeps a single knob. Excluded cases:
+      - ``routed_scaling_factor_learnable``: the scale is a per-(token, expert) gather,
+        which is not a scalar that can be hoisted past the grouped GEMM.
+      - ``routed_scaling_factor == 1``: nothing to move.
+    """
+    if not getattr(config, "use_w4a8", False):
+        return None
+    if not getattr(config, "use_w4a8_fused_quant", False):
+        return None
+    if getattr(config, "routed_scaling_factor_learnable", False):
+        return None
+    scale = float(getattr(config, "routed_scaling_factor", 1.0))
+    return scale if abs(scale - 1.0) > 1e-6 else None
+
+
 @dataclass
 class TransformerConfig(ModelParallelConfig):
     """Configuration object for transformers."""

@@ -404,6 +404,7 @@ class MlpNode:
         use_accuracy_compatible=False,
         use_w4a8=False,
         use_w4a8_fused_quant=False,
+        w4a8_route_factor_post_w2=None,
     ):
         """
         Constructor
@@ -510,6 +511,7 @@ class MlpNode:
                     use_accuracy_compatible=use_accuracy_compatible,
                     use_w4a8=use_w4a8,
                     use_w4a8_fused_quant=use_w4a8_fused_quant,
+                    w4a8_route_factor_post_w2=w4a8_route_factor_post_w2,
                 )
                 for local_expert_id in range(self.num_experts_per_device)
             ]
@@ -531,6 +533,7 @@ class MlpNode:
                 use_accuracy_compatible=use_accuracy_compatible,
                 use_w4a8=use_w4a8,
                 use_w4a8_fused_quant=use_w4a8_fused_quant,
+                w4a8_route_factor_post_w2=w4a8_route_factor_post_w2,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
         self.zip_node = ZipNode(self.token_dispatcher)
@@ -3189,6 +3192,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         use_accuracy_compatible=False,
         use_w4a8=False,
         use_w4a8_fused_quant=False,
+        w4a8_route_factor_post_w2=None,
     ):
         """
         根据给定的参数执行前向传播操作。
@@ -3228,6 +3232,7 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             use_accuracy_compatible=use_accuracy_compatible,
             use_w4a8=use_w4a8,
             use_w4a8_fused_quant=use_w4a8_fused_quant,
+            w4a8_route_factor_post_w2=w4a8_route_factor_post_w2,
         )
 
         if fp8_dispatched_handle is not None:
