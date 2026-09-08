@@ -87,10 +87,19 @@ def _warn_fused_attnres_unavailable_once():
         return
     _fused_attnres_fallback_warned = True
     try:
-        if paddle.distributed.get_rank() != 0:
-            return
-    except Exception:
-        pass
+        rank = paddle.distributed.get_rank()
+    except Exception as exc:
+        # Only reads the launcher env vars, so this is a broken env, not a
+        # collective fault. Report it: the line below now prints on every card.
+        logger.warning(
+            "could not read the distributed rank (%s: %s), so the fused "
+            "attnres warning below is not filtered down to rank 0.",
+            type(exc).__name__,
+            exc,
+        )
+        rank = 0
+    if rank != 0:
+        return
     logger.warning(
         "attn_res_fusion is enabled but the FLA fused attnres kernel could "
         "not be imported (%s); BlockAttnRes falls back to the unfused path "
