@@ -50,6 +50,7 @@ from paddlefleet.recompute_utils import (
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.tensor_parallel.mappings import (
+    gather_from_sequence_parallel_region,
     gather_from_tensor_model_parallel_region,
     reduce_from_tensor_model_parallel_region,
     reduce_scatter_to_sequence_parallel_region,
@@ -1724,11 +1725,16 @@ class MLASelfAttention(MultiLatentAttention):
             and getattr(self.config, "use_accuracy_compatible", False)
             and self.config.sequence_parallel
             and self.kv_b_proj is not None
+            and getattr(
+                self.kv_a_proj_with_mqa,
+                "output_size_per_partition",
+                kv_lora_rank + self.qk_rope_head_dim,
+            )
+            != kv_lora_rank + self.qk_rope_head_dim
         ):
-            # KV up-projection consumes the already local compressed-KV sequence.
-            # Its SP linear path would all-gather that input once more, doubling the
-            # sequence length before it is concatenated with the positional branch.
-            # IEEE+UAC only; FLAG+UAC keeps structure's SP linear.
+            # A column-sharded down-projection already gathered the sequence.
+            # A replicated down-projection stays local and needs KV-up's SP
+            # gather, paired with the positional gather below.
             self.kv_b_proj.sequence_parallel = False
             self.kv_b_proj.allreduce_dgrad = (
                 self.kv_b_proj.world_size > 1
@@ -2059,6 +2065,18 @@ class MLASelfAttention(MultiLatentAttention):
                 [self.kv_lora_rank, self.qk_rope_head_dim],
                 axis=-1,
             )
+            if (
+                ieee_kernel_enabled()
+                and self.config.sequence_parallel
+                and not self.mqa_latent
+                and get_pg_size(self.pg_collection.tp) > 1
+            ):
+                # KV-up's SP linear gathers the local compressed sequence.
+                # Gather the positional branch too, before RoPE, so teacher
+                # keys retain this rank's head weights across every token.
+                k_pos_emb = gather_from_sequence_parallel_region(
+                    k_pos_emb, group=self.pg_collection.tp
+                )
 
         # Ablation boundary: kv_a_proj_with_mqa output (compressed part, after
         # TP-gather / split / SP-scatter). Input is hidden_states, already
