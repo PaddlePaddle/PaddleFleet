@@ -139,16 +139,65 @@ __all__ = [
 FP8_ALIGN = 128
 
 
+def ieee_grouped_bf16_enabled(
+    *,
+    use_accuracy_compatible,
+    moe_expert_fusion,
+    use_fp8_mlp,
+    moe_deep_gemm,
+    activation_type,
+    clamp_value,
+):
+    """Keep the sequential BF16 forward/backward contract under IEEE mode."""
+    return (
+        ieee_kernel_enabled()
+        and use_accuracy_compatible
+        and moe_expert_fusion
+        and not use_fp8_mlp
+        and not moe_deep_gemm
+        and activation_type == "swiglu"
+        and clamp_value is None
+    )
+
+
+def _ieee_expert_matmul(x, weight, tokens_per_expert, *, backward=False):
+    """Use expert-local GEMMs with the reference operand layout."""
+    outputs = []
+    start = 0
+    for i, count in enumerate(tokens_per_expert):
+        count = int(count)
+        if not count:
+            continue
+        end = start + count
+        outputs.append(
+            paddle.matmul(
+                x[start:end].contiguous(),
+                weight[i].T.contiguous(),
+                transpose_y=not backward,
+            )
+        )
+        start = end
+    if outputs:
+        return paddle.concat(outputs, axis=0)
+    return paddle.empty(
+        [x.shape[0], weight.shape[1 if backward else 2]], dtype=x.dtype
+    )
+
+
 def moe_token_padding_alignment(
-    *, use_fp8_mlp: bool, moe_grouped_gemm: bool, use_accuracy_compatible: bool
+    *,
+    use_fp8_mlp: bool,
+    moe_grouped_gemm: bool,
+    use_accuracy_compatible: bool,
+    ieee_grouped_bf16: bool = False,
 ) -> int:
-    # == [MG accuracy-alignment diff] per-expert token padding alignment ==
-    # Only when use_accuracy_compatible=True and on the pure-bf16 non-grouped_gemm
-    #   path do we skip padding (return 1), so each expert's GEMM M dim == the real
-    #   token count and cuBLAS picks the same algorithm as MG SequentialMLP. In all
-    #   other cases (including when accuracy compatible is off) align to FP8_ALIGN
-    #   to preserve the original behavior.
-    if use_accuracy_compatible and not use_fp8_mlp and not moe_grouped_gemm:
+    # Sequential expert GEMMs use real token counts. Grouped storage can skip
+    # padding only when its paired IEEE implementation is selected.
+    if (
+        use_accuracy_compatible
+        and not use_fp8_mlp
+        and (not moe_grouped_gemm or ieee_grouped_bf16)
+    ):
         return 1
     return FP8_ALIGN
 
@@ -1005,9 +1054,18 @@ class ExpertsGroupGemmContiguousNode:
         )
         self.situ_glu_fusion = getattr(config, "situ_glu_fusion", False)
         self.use_accuracy_compatible = use_accuracy_compatible
+        self.ieee_grouped_bf16 = ieee_grouped_bf16_enabled(
+            use_accuracy_compatible=use_accuracy_compatible,
+            moe_expert_fusion=moe_expert_fusion,
+            use_fp8_mlp=use_fp8_mlp,
+            moe_deep_gemm=moe_deep_gemm,
+            activation_type=activation_type,
+            clamp_value=clamp_value,
+        )
         self.token_padding_alignment = moe_token_padding_alignment(
             use_fp8_mlp=use_fp8_mlp,
             moe_grouped_gemm=not self.is_split_group_gemm,
+            ieee_grouped_bf16=self.ieee_grouped_bf16,
             use_accuracy_compatible=use_accuracy_compatible,
         )
         self.use_w4a8 = use_w4a8
@@ -1119,6 +1177,13 @@ class ExpertsGroupGemmContiguousNode:
                         expert_w1,
                         o1,
                         self.m_indices,
+                    )
+                elif self.ieee_grouped_bf16:
+                    o1 = _ieee_expert_matmul(
+                        x,
+                        expert_w1,
+                        self.tokens_per_expert,
+                        backward=False,
                     )
                 else:
                     o1 = paddle.incubate.nn.functional.batched_gemm(
@@ -1456,16 +1521,19 @@ class ExpertsGroupGemmContiguousNode:
         #   experts must NOT take it -- they use a dedicated gelu branch inside
         #   the accuracy-compatible block (kept consistent with the non-
         #   accuracy-compatible GeGLU branch below).
-        # NOTE: the SwiGLU fp32 path is additionally gated on is_split_group_gemm
-        #   to stay paired with the backward: bwd_down_input_bf16's fp32-autograd
-        #   branch also requires is_split_group_gemm, so grouped-gemm
-        #   (moe_expert_fusion=True) must keep the fused forward/backward pair
-        #   here -- otherwise forward would be fp32 round-once while backward
-        #   stays on the fused-kernel precision path. GeGLU is unaffected: its
-        #   forward is gelu on both paths and pairs with the analytic GeGLU
-        #   backward, which is not gated on is_split_group_gemm.
+        # The grouped IEEE branch rounds the BF16 activation before FP32
+        # router scaling; its backward rebuilds that expert-local graph.
+        # The split path retains its FP32 round-once expression.
         # ==================================================================
-        if (
+        if self.ieee_grouped_bf16:
+            gate, up = paddle.chunk(o1, chunks=2, axis=-1)
+            probs = unzipped_probs
+            if probs.ndim == 1:
+                probs = probs.unsqueeze(-1)
+            # Preserve the BF16 activation rounding before FP32 router scaling.
+            glu = (F.silu(gate) * up).cast(o1.dtype)
+            o2 = (glu.cast("float32") * probs.cast("float32")).cast(o1.dtype)
+        elif (
             self.use_accuracy_compatible
             and self.activation_type != "situ"
             and (self.activation_type == "geglu" or self.is_split_group_gemm)
@@ -1533,6 +1601,13 @@ class ExpertsGroupGemmContiguousNode:
                         expert_w2,
                         o3,
                         self.m_indices,
+                    )
+                elif self.ieee_grouped_bf16:
+                    o3 = _ieee_expert_matmul(
+                        o2,
+                        expert_w2,
+                        self.tokens_per_expert,
+                        backward=False,
                     )
                 else:
                     o3 = paddle.incubate.nn.functional.batched_gemm(
@@ -1730,6 +1805,13 @@ class ExpertsGroupGemmContiguousNode:
                         do2_s,
                         self.m_indices,
                     )
+                elif self.ieee_grouped_bf16:
+                    do2_s = _ieee_expert_matmul(
+                        unzipped_grad,
+                        expert_w2,
+                        self.tokens_per_expert,
+                        backward=True,
+                    )
                 else:
                     do2_s = paddle.incubate.nn.functional.batched_gemm(
                         unzipped_grad,
@@ -1764,6 +1846,44 @@ class ExpertsGroupGemmContiguousNode:
             else:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
+
+        if self.ieee_grouped_bf16 and numpy.prod(unzipped_grad.shape) != 0:
+            # Rebuild the grouped UAC forward's BF16 activation, then FP32
+            # probability scaling. Expert-local graphs preserve SequentialMLP's
+            # reduction geometry and its zero-offset operation on the up branch.
+            do1_parts, o2_parts, probs_grad_parts = [], [], []
+            start_idx = 0
+            for token_num in self.tokens_per_expert:
+                end_idx = start_idx + token_num
+                if token_num:
+                    with paddle.enable_grad():
+                        o1_g = o1[start_idx:end_idx].detach()
+                        scale_g = unzipped_probs[start_idx:end_idx].detach()
+                        o1_g.stop_gradient = False
+                        scale_g.stop_gradient = False
+                        gate_g, up_g = paddle.chunk(o1_g, chunks=2, axis=-1)
+                        glu = (
+                            F.silu(gate_g) * (up_g + paddle.zeros_like(up_g))
+                        ).astype(o1.dtype)
+                        scale_v = (
+                            scale_g
+                            if scale_g.ndim > 1
+                            else scale_g.unsqueeze(-1)
+                        )
+                        o2_g = (
+                            glu.astype("float32") * scale_v.astype("float32")
+                        ).astype(o1.dtype)
+                        paddle.autograd.backward(
+                            [o2_g], [do2_s[start_idx:end_idx].detach()]
+                        )
+                    do1_parts.append(o1_g.grad)
+                    o2_parts.append(o2_g.detach())
+                    probs_grad_parts.append(scale_g.grad)
+                start_idx = end_idx
+            do1 = paddle.concat(do1_parts, axis=0)
+            o2_s = paddle.concat(o2_parts, axis=0)
+            probs_grad = paddle.concat(probs_grad_parts, axis=0)
+            return do1, o2_s, probs_grad
 
         # == [MG accuracy-alignment diff · bwd SwiGLU×probs] ==
         # Original impl: `fused_swiglu_scale_forward` + `fused_swiglu_scale_backward`.
@@ -2082,6 +2202,13 @@ class ExpertsGroupGemmContiguousNode:
                         expert_w1,
                         dx,
                         self.m_indices,
+                    )
+                elif self.ieee_grouped_bf16:
+                    dx = _ieee_expert_matmul(
+                        do1,
+                        expert_w1,
+                        self.tokens_per_expert,
+                        backward=True,
                     )
                 else:
                     dx = paddle.incubate.nn.functional.batched_gemm(

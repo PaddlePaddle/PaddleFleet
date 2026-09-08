@@ -38,6 +38,7 @@ from paddlefleet.transformer.moe.fp8_utils import (
 from .fp8_utils import (
     FP8_ALIGN,
     USE_INPLACE_SWIGLU_BWD,
+    ieee_grouped_bf16_enabled,
     moe_token_padding_alignment,
     tilewise_quant,
 )
@@ -166,9 +167,12 @@ class UnZipNode:
     UnZipNode 类用于对输入的token 矩阵根据分发索引进行解压操作,得到专家需要处理的 token。
     """
 
-    def __init__(self, token_dispatcher, name="unzip"):
+    def __init__(
+        self, token_dispatcher, name="unzip", *, ieee_grouped_bf16=False
+    ):
         self.token_dispatcher = token_dispatcher
         self.name = name
+        self.ieee_grouped_bf16 = ieee_grouped_bf16
         self.unzipped_probs = None
         self.zipped_expertwise_rowmap = None
 
@@ -264,6 +268,44 @@ class UnZipNode:
 
         self.unzipped_probs = unzipped_probs
         self.zipped_expertwise_rowmap = zipped_expertwise_rowmap
+        if self.ieee_grouped_bf16:
+            if unzipped_tokens is not None:
+                unzipped_tokens = unzipped_tokens.contiguous()
+            if fill_output and unzipped_tokens is not None and scale is None:
+                rowmap = zipped_expertwise_rowmap
+                n_tokens = int(rowmap.shape[0])
+                n_experts = int(rowmap.shape[1])
+                n_src = (
+                    int(unzipped_tokens.shape[0])
+                    if len(unzipped_tokens.shape) > 0
+                    else 0
+                )
+                if n_src > 0 and n_tokens > 0:
+                    rowmap_t = paddle.transpose(
+                        rowmap, perm=[1, 0]
+                    ).contiguous()
+                    valid_t = rowmap_t >= 0
+                    token_ids_t = (
+                        paddle.arange(n_tokens, dtype="int64")
+                        .unsqueeze(0)
+                        .expand([n_experts, -1])
+                    )
+                    src_i = token_ids_t.masked_select(valid_t)
+                    n_valid = int(src_i.shape[0])
+                    gathered = paddle.index_select(hidden_states, src_i, axis=0)
+                    if n_valid == n_src:
+                        unzipped_tokens = gathered
+                    elif n_valid < n_src:
+                        pad = paddle.zeros(
+                            [n_src, int(hidden_states.shape[-1])],
+                            dtype=hidden_states.dtype,
+                        )
+                        pad[:n_valid] = gathered
+                        unzipped_tokens = pad
+                    else:
+                        raise RuntimeError(
+                            f"MoE permutation valid rows={n_valid} > unzipped rows={n_src}"
+                        )
         return (
             unzipped_tokens,
             zipped_expertwise_rowmap,
@@ -532,7 +574,17 @@ class MlpNode:
                 use_w4a8=use_w4a8,
                 use_w4a8_fused_quant=use_w4a8_fused_quant,
             )
-        self.unzip_node = UnZipNode(self.token_dispatcher)
+        ieee_grouped_bf16 = ieee_grouped_bf16_enabled(
+            use_accuracy_compatible=use_accuracy_compatible,
+            moe_expert_fusion=moe_expert_fusion,
+            use_fp8_mlp=use_fp8_mlp,
+            moe_deep_gemm=moe_deep_gemm,
+            activation_type=activation_type,
+            clamp_value=clamp_value,
+        )
+        self.unzip_node = UnZipNode(
+            self.token_dispatcher, ieee_grouped_bf16=ieee_grouped_bf16
+        )
         self.zip_node = ZipNode(self.token_dispatcher)
         self.hs_2d_dispatched_fp8 = None
         self.hs_2d_dispatched_scale = None
@@ -540,15 +592,11 @@ class MlpNode:
         self.dispatched_indices = None
         self.dispatched_probs = None
         self.unzipped_probs = None
-        # == [MG accuracy-alignment diff · ref PF PR#968] per-expert padding alignment ==
-        # When use_accuracy_compatible=True and non-fp8/non-grouped_gemm, use
-        #   alignment=1 (real token count) so the permute and per-expert GEMM M dim
-        #   equal the real tokens_per_expert and cuBLAS picks the same algorithm as
-        #   MG SequentialMLP; otherwise align to FP8_ALIGN (kernel requirement) to
-        #   preserve the original behavior.
+        # Match permutation padding to the selected expert GEMM contract.
         self.moe_permute_padding_alignment = moe_token_padding_alignment(
             use_fp8_mlp=use_fp8_mlp,
             moe_grouped_gemm=moe_expert_fusion,
+            ieee_grouped_bf16=ieee_grouped_bf16,
             use_accuracy_compatible=use_accuracy_compatible,
         )
         self.padding_token_per_experts = [
