@@ -24,6 +24,7 @@ from paddlefleet.fusions.fused_swiglu_scale import (
     fused_swiglu_scale_backward,
     fused_swiglu_scale_forward,
 )
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.train_infer_consistent_ops.ffn_act import (
     dequant_dispatched_hidden_bf16,
     requant_swiglu_output,
@@ -3119,6 +3120,35 @@ class ExpertsGroupGemmContiguousNode:
             not self.use_fp8_mlp or self.moe_deep_gemm
         ):
 
+            def _batched_weight_grad():
+                if (
+                    self.use_accuracy_compatible
+                    and ieee_kernel_enabled()
+                    and not self.use_fp8_mlp
+                ):
+                    # Match FP32 dy.T @ x before converting to the stacked
+                    # Paddle [expert, input, output] parameter orientation.
+                    gradients = []
+                    start = 0
+                    for n in self.tokens_per_expert:
+                        if n > 0:
+                            end = start + n
+                            gradient = paddle.matmul(
+                                dy._slice(start, end).cast("float32"),
+                                x._slice(start, end).cast("float32"),
+                                transpose_x=True,
+                            ).transpose([1, 0]).contiguous()
+                            start = end
+                        else:
+                            gradient = paddle.zeros(
+                                weights.shape[1:], dtype="float32"
+                            )
+                        gradients.append(gradient)
+                    return paddle.stack(gradients, axis=0)
+                return paddle.incubate.nn.functional.batched_gemm(
+                    x, dy, self.tokens_per_expert, trans_lhs=True
+                )
+
             def _compute_weight_grad(
                 x,
                 dy,
@@ -3192,12 +3222,7 @@ class ExpertsGroupGemmContiguousNode:
                     assert not self.use_fp8_mlp, (
                         "batched_gemm is not supported when use_fp8_mlp=True"
                     )
-                    weights_res = paddle.incubate.nn.functional.batched_gemm(
-                        x,
-                        dy,
-                        self.tokens_per_expert,
-                        trans_lhs=True,
-                    )
+                    weights_res = _batched_weight_grad()
                     weights.main_grad.add_(
                         weights_res.cast(weights.main_grad.dtype)
                     )
@@ -3244,12 +3269,7 @@ class ExpertsGroupGemmContiguousNode:
                     assert not self.use_fp8_mlp, (
                         "batched_gemm is not supported when use_fp8_mlp=True"
                     )
-                    weights_res = paddle.incubate.nn.functional.batched_gemm(
-                        x,
-                        dy,
-                        self.tokens_per_expert,
-                        trans_lhs=True,
-                    )
+                    weights_res = _batched_weight_grad()
                     weights.grad.add_(weights_res.cast(weights.grad.dtype))
 
                     if (

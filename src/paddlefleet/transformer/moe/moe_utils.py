@@ -359,7 +359,7 @@ class _PermuteAlignedPyLayer(PyLayer):
             return paddle.zeros(
                 [ctx.num_tokens, ctx.hidden], dtype=ctx.input_dtype
             )
-        # gather → [N*topk, H] in fp32 → reshape [N, topk, H] → sum(axis=1)
+        # Gather in expert-major order before accumulating each runtime top-k slot.
         gathered = grad_permuted.cast("float32").index_select(
             axis=0, index=gather_index_flat
         )
@@ -369,7 +369,12 @@ class _PermuteAlignedPyLayer(PyLayer):
             gathered = gathered * valid_rows.cast("float32").reshape(
                 [ctx.num_tokens, 1, 1]
             )
-        grad_tokens = gathered.sum(axis=1)
+        # Match deterministic scatter-add order, then round once to input dtype.
+        grad_tokens = paddle.zeros(
+            [ctx.num_tokens, ctx.hidden], dtype="float32"
+        )
+        for expert_slot in range(ctx.topk):
+            grad_tokens = grad_tokens + gathered[:, expert_slot, :]
         return grad_tokens.cast(ctx.input_dtype)
 
 
