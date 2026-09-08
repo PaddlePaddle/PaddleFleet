@@ -192,9 +192,20 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
             else 1
         )
         ctx.dtype = paddle.float32
-        ctx.save_for_backward(x, w)
+        # Keep the parameter as the optimizer's FP32 master. Reference routing
+        # consumes a BF16 weight, including in dgrad, after each master update.
+        effective_w = (
+            w.cast(paddle.bfloat16).cast(paddle.float32)
+            if ieee_kernel_enabled()
+            and use_accuracy_compatible
+            and w.dtype == paddle.float32
+            and x.dtype == paddle.bfloat16
+            and not defer_dw
+            else w
+        )
+        ctx.save_for_backward(x, w, effective_w)
         x_cast = x.cast(ctx.dtype)
-        w_t = w.T.cast(ctx.dtype)
+        w_t = effective_w.T.cast(ctx.dtype)
         shards = ctx.sequence_shards
         if shards > 1 and int(x.shape[0]) % shards == 0:
             size = int(x.shape[0]) // shards
@@ -212,7 +223,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
         """
         backward
         """
-        x, w = ctx.saved_tensor()
+        x, w, effective_w = ctx.saved_tensor()
         assert ctx.dtype == y_grad.dtype, "dtype not match"
 
         w_stop_grad = w.stop_gradient
@@ -282,7 +293,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                     for i in range(shards):
                         sl = slice(i * size, (i + 1) * size)
                         x_parts.append(
-                            paddle.matmul(y_grad[sl], w.cast(ctx.dtype))
+                            paddle.matmul(y_grad[sl], effective_w.cast(ctx.dtype))
                         )
                         local_wgrad = paddle.matmul(
                             y_grad[sl], x[sl].cast(ctx.dtype), transpose_x=True
@@ -297,7 +308,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                     for local_wgrad in w_parts[1:]:
                         w_g = w_g + local_wgrad
                 else:
-                    x_g = paddle.matmul(y_grad, w.cast(ctx.dtype))
+                    x_g = paddle.matmul(y_grad, effective_w.cast(ctx.dtype))
                     w_g = paddle.matmul(
                         y_grad, x.cast(ctx.dtype), transpose_x=True
                     )
