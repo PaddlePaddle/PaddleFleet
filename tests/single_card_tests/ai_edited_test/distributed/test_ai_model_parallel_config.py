@@ -158,17 +158,44 @@ class TestModelParallelConfig(unittest.TestCase):
         self.assertTrue(config.defer_embedding_wgrad_compute)
         self.assertEqual(config.wgrad_deferral_limit, 5)
 
-    def test_expert_and_tensor_parallel_requires_sequence_parallel(self):
-        """Test that expert + tensor parallel requires sequence parallel."""
+    def test_sequence_parallel_auto_derived_from_tp(self):
+        """sequence_parallel is auto-derived from tensor_model_parallel_size (tp>1 on / tp=1 off);
+        it is NOT user-configurable, so any user-specified value is ignored/overridden."""
         from paddlefleet.model_parallel_config import ModelParallelConfig
 
-        with self.assertRaises(ValueError) as ctx:
+        # tp>1: sp is always True, regardless of the user-provided value
+        self.assertTrue(
             ModelParallelConfig(
-                expert_model_parallel_size=2,
-                tensor_model_parallel_size=2,
-                sequence_parallel=False,
-            )
-        self.assertIn("sequence parallelism must be used", str(ctx.exception))
+                tensor_model_parallel_size=2, sequence_parallel=False
+            ).sequence_parallel
+        )
+        self.assertTrue(
+            ModelParallelConfig(
+                tensor_model_parallel_size=2, sequence_parallel=True
+            ).sequence_parallel
+        )
+        # tp<=1: sp is always False, regardless of the user-provided value
+        self.assertFalse(
+            ModelParallelConfig(
+                tensor_model_parallel_size=1, sequence_parallel=True
+            ).sequence_parallel
+        )
+        self.assertFalse(
+            ModelParallelConfig(
+                tensor_model_parallel_size=1, sequence_parallel=False
+            ).sequence_parallel
+        )
+
+    def test_expert_and_tensor_parallel_auto_enables_sequence_parallel(self):
+        """Expert + tensor parallel: missing sequence_parallel is auto-enabled (corrected), no error raised."""
+        from paddlefleet.model_parallel_config import ModelParallelConfig
+
+        config = ModelParallelConfig(
+            expert_model_parallel_size=2,
+            tensor_model_parallel_size=2,
+            sequence_parallel=False,  # auto-corrected to True
+        )
+        self.assertTrue(config.sequence_parallel)
 
     def test_expert_and_tensor_parallel_with_sequence_parallel_ok(self):
         """Test that expert + tensor + sequence parallel is valid."""
