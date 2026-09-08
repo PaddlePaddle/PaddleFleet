@@ -20,6 +20,7 @@ import sys
 import unittest
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import paddle
@@ -320,14 +321,64 @@ class TestTransformerConfig(unittest.TestCase):
                 variable_seq_lengths=False,
             )
 
-    def test_magic_send_rejects_shared_last_layer(self):
-        with self.assertRaises(AssertionError):
-            TransformerConfig(
-                enable_mtp_magic_send=True,
-                num_nextn_predict_layers=1,
-                pipeline_model_parallel_size=2,
-                mtp_shared_last_layer=True,
-            )
+    def test_magic_send_accepts_shared_last_layer(self):
+        """The two used to be rejected here; the rejection was wrong.
+
+        SharedLayerDesc(shared_submodule_weight_only=True) aliases only the
+        parameters under ``transformer_layer``, while magic send owns
+        ``mtp_embed`` (its own SharedLayerDesc key, synced through gpt_model's
+        dedicated sub-group). The parameter sets do not overlap. The rejection
+        also hid a latent bug: ``get_layer_desc_list`` tested
+        ``enable_mtp_magic_send`` before ``mtp_shared_last_layer`` and
+        short-circuited to a plain LayerDesc, so anyone running under
+        ``python -O`` -- where this very assert was stripped -- got a silently
+        untied MTP block. See test_magic_send_shared_last_layer_desc.py.
+
+        Caveat recorded in the co-location note in transformer_config.py: the
+        tie only *aliases* when the pivot and the MTP desc land on the same
+        rank. Across a PP boundary it degrades to broadcast + gradient
+        allreduce -- same numerics, none of the memory saving.
+        """
+        cfg = TransformerConfig(
+            enable_mtp_magic_send=True,
+            num_nextn_predict_layers=1,
+            pipeline_model_parallel_size=2,
+            mtp_shared_last_layer=True,
+        )
+        self.assertTrue(cfg.enable_mtp_magic_send)
+        self.assertTrue(cfg.mtp_shared_last_layer)
+
+    def test_magic_send_rejects_tie_word_embeddings(self):
+        """``tie_word_embeddings`` wins the desc branch and drops mtp_embed.
+
+        get_layer_desc_list tests the tie before enable_mtp_magic_send, so with
+        both on no ``mtp_embed`` desc is emitted, _mtp_embed_global_group
+        collapses to None and _synchronize_mtp_embed_weight broadcasts a zero
+        buffer into the MTP stage's real (perform_initialization=False) table:
+        training proceeds on an all-zero, never-synced vocab table. A ValueError
+        rather than an assert, for the reason spelled out in
+        test_multimodal_rejection_survives_optimized_mode.
+
+        Reached through ``from_config`` because ``tie_word_embeddings`` is not a
+        TransformerConfig field -- it arrives via register_attributes' setattr
+        fallback, which is exactly how a model_config.json delivers it.
+        """
+        cfg_in = SimpleNamespace(
+            num_hidden_layers=2,
+            hidden_size=64,
+            num_attention_heads=4,
+            enable_mtp_magic_send=True,
+            num_nextn_predict_layers=1,
+            pipeline_model_parallel_size=2,
+            tie_word_embeddings=True,
+        )
+        with self.assertRaisesRegex(ValueError, r"tie_word_embeddings"):
+            TransformerConfig.from_config(cfg_in)
+
+        # tie_word_embeddings=False must leave magic send alone.
+        cfg_in.tie_word_embeddings = False
+        cfg = TransformerConfig.from_config(cfg_in)
+        self.assertTrue(cfg.enable_mtp_magic_send)
 
     def test_magic_send_rejects_multimodal_embedding(self):
         """Magic send does not produce mtp_emb_res, which the multimodal

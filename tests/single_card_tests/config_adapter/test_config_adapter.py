@@ -179,20 +179,20 @@ class ConfigAdapterTestBase(unittest.TestCase):
 class TestOptions(unittest.TestCase):
     """The two switches are orthogonal and both optional."""
 
-    def test_default_shrinks_and_scales_batch(self):
+    def test_default_freezes_dims_and_scales_batch(self):
         options = AdaptOptions()
-        self.assertFalse(options.freeze_parallel)
+        self.assertTrue(options.freeze_parallel)
         self.assertFalse(options.inject_precision)
         self.assertEqual(options.batch_strategy, "scale_batch")
         self.assertEqual(options.label, "default")
 
-    def test_accuracy_keeps_effective_batch(self):
+    def test_accuracy_is_the_only_mode_that_may_shrink(self):
         options = AdaptOptions(test_accuracy=True)
         self.assertFalse(options.freeze_parallel)
         self.assertTrue(options.inject_precision)
         self.assertEqual(options.batch_strategy, "scale_accumulation")
 
-    def test_performance_freezes_acc_even_with_accuracy(self):
+    def test_performance_wins_the_freeze_over_accuracy(self):
         options = AdaptOptions(test_performance=True, test_accuracy=True)
         self.assertTrue(options.freeze_parallel)
         self.assertTrue(options.inject_precision)
@@ -216,6 +216,42 @@ class TestCandidates(unittest.TestCase):
         # C3 requires ep_new % (tp * sep) == 0.
         self.assertTrue(all(c % 4 == 0 for c in ep_candidates(64, tp=4)))
         self.assertTrue(all(c % 8 == 0 for c in ep_candidates(64, tp=2, sep=4)))
+
+
+class TestMinShrinkCards(unittest.TestCase):
+    """The reachable-scale floor must respect C3 for the EP axis."""
+
+    def test_ep_floor_stays_a_multiple_of_tp(self):
+        # TP=4: EP can floor to 4, not 2, so 16 cards is reachable.
+        self.assertEqual(min_shrink_cards(4, 1, 8, 4, 1, 8), 16)
+
+    def test_planner_advice_names_a_reachable_scale(self):
+        # TP=4 + CP=4 on 8 cards fails C4; the advice must point at a
+        # bigger scale instead of claiming the dims are illegal.
+        adapter = ConfigAdapter(options=AdaptOptions(), target_nodes=1)
+        yaml_map = {
+            "tensor_model_parallel_size": 4,
+            "expert_model_parallel_size": 8,
+            "context_parallel_size": 4,
+            "global_batch_size": 12,
+            "per_device_train_batch_size": 1,
+            "gradient_accumulation_steps": 6,
+        }
+        from paddlefleet.config_adapter.planner import ShrinkPlanner
+        from paddlefleet.config_adapter.utils import (
+            extract_parallel_params as _dims,
+        )
+
+        plan, err = ShrinkPlanner().plan(
+            yaml_map,
+            _dims(yaml_map),
+            8,
+            8,
+            context={"model_config": dict(MODEL_CONFIG)},
+        )
+        self.assertIsNone(plan)
+        self.assertIn("--target-nodes 2", err)
+        self.assertNotIn("任何卡数都无法适配", err)
 
 
 class TestPrecisionSwitches(unittest.TestCase):
@@ -1038,10 +1074,18 @@ class TestLayerFieldPlanning(unittest.TestCase):
 
 
 class TestDefaultAdaptation(ConfigAdapterTestBase):
-    """No switch: just make the config fit, shrinking EP/PP if needed."""
+    """No switch: dims frozen; shrinking EP/PP needs --test-accuracy."""
 
-    def test_shrinks_ep_and_pp_without_precision_switches(self):
+    def test_default_refuses_to_shrink(self):
+        # Shrinking rescales the expert / layer count -- a model-structure
+        # change -- so it may never happen silently.
         ok, message = self.adapt(target_nodes=1)
+        self.assertFalse(ok)
+        self.assertIn("默认不缩小 EP/PP", message)
+        self.assertIn("--test-accuracy", message)
+
+    def test_accuracy_shrinks_ep_and_pp(self):
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         config = self.load_output_yaml(8)
         model_config = self.load_output_json(8)
@@ -1053,15 +1097,10 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         self.assertEqual(config["sharding_parallel_size"], 2)
         self.assertEqual(model_config["n_routed_experts"], 8)
         self.assertEqual(model_config["num_hidden_layers"], 32)
-        # Default batch strategy shrinks GBS and leaves acc alone.  GBS
-        # follows the data-parallel width (96 -> 2), not the card count:
-        # the trainer asserts GBS == micro_bs * acc * dataset_world_size,
-        # so 8 cards / PP 4 give width 2 and GBS = 1 * 2 * 2 = 4.
-        self.assertEqual(config["global_batch_size"], 4)
-        self.assertEqual(config["gradient_accumulation_steps"], 2)
-        # No determinism switches unless --test-accuracy is given.
-        self.assertEqual(config["csa_sparse_attn_backend"], "cudnn")
-        self.assertEqual(model_config["multimax_modules"], ["lm_head"])
+        # A declared GBS is never rewritten: acc absorbs the width change
+        # (96 -> 2), keeping GBS == micro_bs * acc * dataset_world_size.
+        self.assertEqual(config["global_batch_size"], 192)
+        self.assertEqual(config["gradient_accumulation_steps"], 96)
         # Environment-specific pin is always dropped.
         self.assertNotIn("fa_version", config)
 
@@ -1074,7 +1113,7 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
             + "resume_from_checkpoint: /ckpt/full_scale_base\n"
             + "load_from_hf: true\n"
         )
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         config = self.load_output_yaml(8)
         self.assertNotIn("resume_from_checkpoint", config)
@@ -1086,7 +1125,7 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         # it off instead of shipping a config that dies on the assert.  The
         # quoted "True" also exercises the loose YAML bool parsing.
         self.write_yaml(SOURCE_YAML + 'sharding_comm_group_call_opt: "True"\n')
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         config = self.load_output_yaml(8)
         self.assertEqual(config["expert_model_parallel_size"], 2)
@@ -1095,16 +1134,16 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
     def test_comm_group_call_opt_requires_the_muon_optimizer(self):
         # PaddleFormers' TrainingArguments asserts optim == muon whenever the
         # switch is on, so satisfying the EP/moe_sharding/TP conditions is not
-        # enough: 128 nodes with the frozen source dims give EP 64 (a multiple
-        # of 8), moe_sharding 2 and TP 1, yet adamw must still drop the flag.
+        # enough: 192 nodes with the frozen source dims give EP 64 (a multiple
+        # of 8), moe_sharding 3 and TP 1, yet adamw must still drop the flag.
         self.write_yaml(
             SOURCE_YAML
             + "optim: adamw\n"
             + 'sharding_comm_group_call_opt: "True"\n'
         )
-        ok, message = self.adapt(target_nodes=128, test_performance=True)
+        ok, message = self.adapt(target_nodes=192, test_performance=True)
         self.assertTrue(ok, message)
-        config = self.load_output_yaml(1024)
+        config = self.load_output_yaml(1536)
         self.assertEqual(config["sharding_comm_group_call_opt"], False)
 
     def test_comm_group_call_opt_survives_when_all_conditions_hold(self):
@@ -1115,9 +1154,9 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
             + "optim: muon\n"
             + "sharding_comm_group_call_opt: true\n"
         )
-        ok, message = self.adapt(target_nodes=128, test_performance=True)
+        ok, message = self.adapt(target_nodes=192, test_performance=True)
         self.assertTrue(ok, message)
-        config = self.load_output_yaml(1024)
+        config = self.load_output_yaml(1536)
         self.assertEqual(config["sharding_comm_group_call_opt"], True)
 
     def test_checkpoint_refs_survive_when_structure_is_unchanged(self):
@@ -1140,7 +1179,7 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         # EP 64 -> 2 alone cannot reach 8 cards, but it lets PP stop at 4
         # instead of 2: shrinking PP also scales num_hidden_layers, VPP, the
         # empty tail and every per-layer list, so it goes last.
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         config = self.load_output_yaml(8)
         self.assertEqual(config["pipeline_model_parallel_size"], 4)
@@ -1152,7 +1191,9 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         # building any interleaved schedule, so PP 2 leaves VPP no choice.
         # 4 cards leave no room for PP 4: C2 wants 4 % (PP x EP) == 0 and EP
         # cannot go below 2, so the joint tier lands on EP 2 / PP 2.
-        ok, message = self.adapt(target_nodes=1, cards_per_node=4)
+        ok, message = self.adapt(
+            target_nodes=1, cards_per_node=4, test_accuracy=True
+        )
         self.assertTrue(ok, message)
         config = self.load_output_yaml(4)
         self.assertEqual(config["pipeline_model_parallel_size"], 2)
@@ -1160,14 +1201,14 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         self.assertIn("框架断言 VPP>1 需要 PP>2", message)
 
     def test_existing_output_dir_needs_force(self):
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
 
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertFalse(ok)
         self.assertIn("--force", message)
 
-        ok, message = self.adapt(target_nodes=1, force=True)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True, force=True)
         self.assertTrue(ok, message)
 
     def test_mtp_aware_layer_alignment(self):
@@ -1194,7 +1235,7 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
         )
         self.write_json(dict(MODEL_CONFIG, num_hidden_layers=43))
 
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         config = self.load_output_yaml(8)
         model_config = self.load_output_json(8)
@@ -1216,7 +1257,9 @@ class TestDefaultAdaptation(ConfigAdapterTestBase):
 
     def test_unchanged_keys_are_not_reported(self):
         ok, message = self.adapt(
-            target_nodes=1, auto_overrides={"max_steps": 1000000}
+            target_nodes=1,
+            test_accuracy=True,
+            auto_overrides={"max_steps": 1000000},
         )
         self.assertTrue(ok, message)
         # The value equals the source value, so nothing is logged for it.
@@ -1230,6 +1273,7 @@ class TestPerformanceSwitch(ConfigAdapterTestBase):
         ok, message = self.adapt(target_nodes=64, test_performance=True)
         self.assertTrue(ok, message)
         config = self.load_output_yaml(512)
+        # GBS follows the data-parallel width (96 -> 64); acc is frozen.
         self.assertEqual(config["global_batch_size"], 128)
         self.assertEqual(config["gradient_accumulation_steps"], 2)
         self.assertEqual(config["sharding_parallel_size"], 64)
@@ -1349,7 +1393,7 @@ class TestAutoOverrideRouting(ConfigAdapterTestBase):
 
     def test_key_only_in_yaml(self):
         ok, message = self.adapt(
-            target_nodes=1, auto_overrides={"max_steps": 10}
+            target_nodes=1, test_accuracy=True, auto_overrides={"max_steps": 10}
         )
         self.assertTrue(ok, message)
         self.assertEqual(self.load_output_yaml(8)["max_steps"], 10)
@@ -1357,7 +1401,9 @@ class TestAutoOverrideRouting(ConfigAdapterTestBase):
 
     def test_key_only_in_model_config_is_also_protected(self):
         ok, message = self.adapt(
-            target_nodes=1, auto_overrides={"n_routed_experts": 128}
+            target_nodes=1,
+            test_accuracy=True,
+            auto_overrides={"n_routed_experts": 128},
         )
         self.assertTrue(ok, message)
         # Routed to the JSON, and the EP shrink may not overwrite a --set.
@@ -1368,7 +1414,9 @@ class TestAutoOverrideRouting(ConfigAdapterTestBase):
         self.write_yaml(SOURCE_YAML + "shared_flag: 1\n")
         self.write_json({**MODEL_CONFIG, "shared_flag": 1})
         ok, message = self.adapt(
-            target_nodes=1, auto_overrides={"shared_flag": 2}
+            target_nodes=1,
+            test_accuracy=True,
+            auto_overrides={"shared_flag": 2},
         )
         self.assertTrue(ok, message)
         self.assertEqual(self.load_output_yaml(8)["shared_flag"], 2)
@@ -1376,7 +1424,9 @@ class TestAutoOverrideRouting(ConfigAdapterTestBase):
 
     def test_unknown_key_is_added_to_yaml(self):
         ok, message = self.adapt(
-            target_nodes=1, auto_overrides={"brand_new_field": 7}
+            target_nodes=1,
+            test_accuracy=True,
+            auto_overrides={"brand_new_field": 7},
         )
         self.assertTrue(ok, message)
         self.assertEqual(self.load_output_yaml(8)["brand_new_field"], 7)
@@ -1384,7 +1434,9 @@ class TestAutoOverrideRouting(ConfigAdapterTestBase):
 
     def test_new_model_config_field_needs_explicit_prefix(self):
         ok, message = self.adapt(
-            target_nodes=1, json_overrides={"brand_new_field": 7}
+            target_nodes=1,
+            test_accuracy=True,
+            json_overrides={"brand_new_field": 7},
         )
         self.assertTrue(ok, message)
         self.assertEqual(self.load_output_json(8)["brand_new_field"], 7)
@@ -1401,7 +1453,7 @@ flash_device_save_steps: 50
 """
 
     def test_both_switches_land_in_the_yaml(self):
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         output = self.load_output_yaml(8)
         # 768 source cards / (TP 1 * SEP 1 * PP 8 * CP 1) = 96 source ways.
@@ -1410,7 +1462,7 @@ flash_device_save_steps: 50
 
     def test_prerequisite_chain_is_disabled(self):
         self.write_yaml(SOURCE_YAML + self.PREREQUISITES)
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         output = self.load_output_yaml(8)
         self.assertIs(output["fuse_optimizer_states"], False)
@@ -1421,6 +1473,7 @@ flash_device_save_steps: 50
         self.write_yaml(SOURCE_YAML + self.PREREQUISITES)
         ok, message = self.adapt(
             target_nodes=1,
+            test_accuracy=True,
             auto_overrides={"tensorwise_offload_optimizer": False},
         )
         self.assertTrue(ok, message)
@@ -1433,7 +1486,7 @@ flash_device_save_steps: 50
 
     def test_no_switches_when_the_data_width_is_unchanged(self):
         # 96 target ways = the source's, so nothing is amplified.
-        ok, message = self.adapt(target_nodes=96)
+        ok, message = self.adapt(target_nodes=96, test_accuracy=True)
         self.assertTrue(ok, message)
         output = self.load_output_yaml(768)
         self.assertNotIn("debug_reeao_dataset_world_size", output)
@@ -1447,7 +1500,7 @@ flash_device_save_steps: 50
             if not line.startswith(("global_batch_size", "sharding_parallel"))
         )
         self.write_yaml(hidden)
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         output = self.load_output_yaml(8)
         # The base is the source's dense_sharding = EP 64 / (TP 1 * SEP 1).
@@ -1477,7 +1530,7 @@ class TestErrorPaths(ConfigAdapterTestBase):
 
     def test_shrink_without_a_model_config(self):
         self.write_yaml(SOURCE_YAML.replace("./model_dir", "./nope"))
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertFalse(ok)
         self.assertIn("model_config.json", message)
 
@@ -1488,7 +1541,7 @@ class TestErrorPaths(ConfigAdapterTestBase):
                 "gradient_accumulation_steps: 2", ""
             )
         )
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertFalse(ok)
         self.assertIn("无法推断源作业的卡数", message)
 
@@ -1521,7 +1574,9 @@ class TestErrorPaths(ConfigAdapterTestBase):
                 "expert_model_parallel_size: 1",
             )
         )
-        ok, message = self.adapt(target_nodes=1, cards_per_node=4)
+        ok, message = self.adapt(
+            target_nodes=1, cards_per_node=4, test_accuracy=True
+        )
         self.assertFalse(ok)
         self.assertIn("num_hidden_layers", message)
 
@@ -1574,7 +1629,7 @@ class TestPinnedFieldRejection(ConfigAdapterTestBase):
 
     def test_prefix_less_fa_version_pin_is_kept(self):
         ok, message = self.adapt(
-            target_nodes=1, auto_overrides={"fa_version": 4}
+            target_nodes=1, test_accuracy=True, auto_overrides={"fa_version": 4}
         )
         self.assertTrue(ok, message)
         self.assertEqual(self.load_output_yaml(8)["fa_version"], 4)
@@ -1582,7 +1637,7 @@ class TestPinnedFieldRejection(ConfigAdapterTestBase):
 
     def test_pinned_fa_version_is_kept(self):
         ok, message = self.adapt(
-            target_nodes=1, yaml_overrides={"fa_version": 4}
+            target_nodes=1, test_accuracy=True, yaml_overrides={"fa_version": 4}
         )
         self.assertTrue(ok, message)
         # The pin wins: the field is neither deleted nor reported as deleted.
@@ -1680,7 +1735,7 @@ class TestLayerFields(ConfigAdapterTestBase):
 
     def test_lists_are_truncated_with_the_layer_count(self):
         self._with_layer_fields([128, 128, 128, -2] * 16)
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         model_config = self.load_output_json(8)
         # 64 -> 32 layers, MTP entries kept at the tail.
@@ -1705,7 +1760,7 @@ class TestLayerFields(ConfigAdapterTestBase):
                 "compress_ratios": [128, 128, 128, -2] * 16 + [-2],
             }
         )
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         model_config = self.load_output_json(8)
         self.assertEqual(model_config["num_hidden_layers"], 32)
@@ -1730,7 +1785,7 @@ class TestLayerFields(ConfigAdapterTestBase):
                 "layer_types": ["full_attention"] * 64,
             }
         )
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         ratios = self.load_output_json(8)["csa_compress_ratios"]
         self.assertEqual(len(ratios), 33)
@@ -1741,19 +1796,19 @@ class TestLayerFields(ConfigAdapterTestBase):
     def test_refuses_when_an_attention_family_would_vanish(self):
         # Every -2 layer sits beyond the shrunk layer range.
         self._with_layer_fields([128] * 60 + [-2] * 4)
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertFalse(ok)
         self.assertIn("丢掉注意力类型", message)
 
     def test_refuses_when_the_source_lists_are_inconsistent(self):
         self.write_json({**MODEL_CONFIG, "csa_compress_ratios": [128] * 10})
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertFalse(ok)
         self.assertIn("不自洽", message)
 
     def test_scalar_forms_are_left_alone(self):
         self.write_json({**MODEL_CONFIG, "window_attn_skip_freq": 4})
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         self.assertEqual(self.load_output_json(8)["window_attn_skip_freq"], 4)
 
@@ -1768,7 +1823,7 @@ class TestLayerFields(ConfigAdapterTestBase):
                 "layer_types": ["full_attention"] * 64,
             }
         )
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         model_config = self.load_output_json(8)
         self.assertEqual(model_config["num_hidden_layers"], 32)
@@ -1784,7 +1839,7 @@ class TestLayerFields(ConfigAdapterTestBase):
         self.write_json(
             {**MODEL_CONFIG, "num_nextn_predict_layers": 0, "mtp_num_layers": 2}
         )
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertFalse(ok)
         self.assertIn("mtp_num_layers", message)
         self.assertIn("num_nextn_predict_layers", message)
@@ -1802,7 +1857,7 @@ class TestLayerFields(ConfigAdapterTestBase):
                 "layer_types": ["full_attention"] * 64,
             }
         )
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         model_config = self.load_output_json(8)
         self.assertEqual(model_config["num_hidden_layers"], 32)
@@ -1851,14 +1906,16 @@ class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):
     """Nothing is written until every check has passed."""
 
     def test_batch_failure_does_not_touch_either_source(self):
-        # 1537 * 8 / 768 is not an integer, so batch scaling fails *after*
-        # the model structure has been planned.
+        # 193 * 64 / 96 is not an integer, so GBS scaling fails *after* the
+        # (frozen) planning has passed -- nothing may have been written.
         self.write_yaml(
             SOURCE_YAML.replace(
                 "global_batch_size: 192", "global_batch_size: 193"
             )
         )
-        ok, message = self.adapt(target_nodes=1, in_place=True)
+        ok, message = self.adapt(
+            target_nodes=64, test_performance=True, in_place=True
+        )
         self.assertFalse(ok)
         self.assertIn("无法整除", message)
         # Source model_config.json keeps its original structure ...
@@ -1876,7 +1933,7 @@ class TestFailureLeavesSourcesUntouched(ConfigAdapterTestBase):
                 "global_batch_size: 192", "global_batch_size: 193"
             )
         )
-        ok, _message = self.adapt(target_nodes=1)
+        ok, _message = self.adapt(target_nodes=64, test_performance=True)
         self.assertFalse(ok)
         self.assertFalse((self.output_dir / "model_config_separated").exists())
 
@@ -1907,7 +1964,7 @@ muon_configs:
 
     def test_nested_block_is_not_reindented(self):
         self.write_yaml(SOURCE_YAML + self.NESTED)
-        ok, message = self.adapt(target_nodes=1)
+        ok, message = self.adapt(target_nodes=1, test_accuracy=True)
         self.assertTrue(ok, message)
         text = (self.output_dir / "source_adapted_8cards.yaml").read_text(
             encoding="utf-8"
@@ -1965,7 +2022,9 @@ class TestGeneratedPaths(ConfigAdapterTestBase):
     def test_absolute_when_output_escapes_the_yaml_dir(self):
         outside = Path(tempfile.mkdtemp())
         try:
-            ok, message = self.adapt(target_nodes=1, output_dir=outside)
+            ok, message = self.adapt(
+                target_nodes=1, test_accuracy=True, output_dir=outside
+            )
             self.assertTrue(ok, message)
             path = YamlWriter().load(outside / "source_adapted_8cards.yaml")[
                 "model_name_or_path"
@@ -2002,12 +2061,14 @@ class TestCli(ConfigAdapterTestBase):
         return code, buffer.getvalue()
 
     def test_target_without_any_switch_still_adapts(self):
+        # 64 nodes is the frozen-compatible scale of the source dims: the
+        # default may not shrink, so an incompatible target would be refused.
         code, out = self._run(
             [
                 "--input",
                 str(self.yaml_path),
                 "--target-nodes",
-                "1",
+                "64",
                 "--output-dir",
                 str(self.output_dir),
             ]
@@ -2054,6 +2115,161 @@ class TestCli(ConfigAdapterTestBase):
         text = patch.read_text(encoding="utf-8")
         self.assertIn("pipeline_model_parallel_size", text)
         self.assertIn("model_config.json", text)
+
+
+class TestScaleSeqLength(ConfigAdapterTestBase):
+    """--scale-seq-length rewrites max_seq_length and scales CP with it."""
+
+    #: 32 cards: sharding 32, CP 2 -> dataset_world_size 16, GBS 32.
+    SEQ_YAML = """\
+model_name_or_path: ./model_dir
+max_seq_length: 8192
+global_batch_size: 32
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 2
+sharding_parallel_size: 32
+data_parallel_size: 1
+tensor_model_parallel_size: 1
+pipeline_model_parallel_size: 1
+context_parallel_size: 2
+max_steps: 100
+"""
+
+    def setUp(self):
+        super().setUp()
+        self.write_yaml(self.SEQ_YAML)
+
+    def test_scale_up_scales_cp_by_the_same_ratio(self):
+        ok, message = self.adapt(2, scale_seq_length=16384)
+        self.assertTrue(ok, message)
+        out = self.load_output_yaml(16)
+        self.assertEqual(out["max_seq_length"], 16384)
+        self.assertEqual(out["context_parallel_size"], 4)
+        # sharding = 16 / (TP*SEP*PP) = 16; C4: 16 % CP(4) == 0.
+        self.assertEqual(out["sharding_parallel_size"], 16)
+        self.assertIn("CP 2 -> 4", message)
+
+    def test_scale_down_shrinks_cp_with_a_floor_of_one(self):
+        ok, message = self.adapt(2, scale_seq_length=2048)
+        self.assertTrue(ok, message)
+        out = self.load_output_yaml(16)
+        self.assertEqual(out["max_seq_length"], 2048)
+        self.assertEqual(out["context_parallel_size"], 1)
+
+    def test_non_divisible_cp_is_ceiled_so_the_slice_never_grows(self):
+        # Regression for the P1 review finding: with CP=3 and a 2x shorter
+        # sequence, flooring CP to 1 would grow the per-card slice from
+        # 8192/3 (~2731) to 4096 and could OOM.  The ceil (CP=2) keeps the
+        # slice at 4096/2 = 2048 <= 2731.
+        self.write_yaml(
+            self.SEQ_YAML.replace(
+                "sharding_parallel_size: 32", "sharding_parallel_size: 24"
+            )
+            .replace("context_parallel_size: 2", "context_parallel_size: 3")
+            .replace("global_batch_size: 32", "global_batch_size: 16")
+        )
+        ok, message = self.adapt(1, scale_seq_length=4096)
+        self.assertTrue(ok, message)
+        out = self.load_output_yaml(8)
+        self.assertEqual(out["max_seq_length"], 4096)
+        self.assertEqual(out["context_parallel_size"], 2)
+        self.assertIn("取上整", message)
+
+    def test_equal_length_keeps_cp_and_warns(self):
+        ok, message = self.adapt(2, scale_seq_length=8192)
+        self.assertTrue(ok, message)
+        out = self.load_output_yaml(16)
+        self.assertEqual(out["max_seq_length"], 8192)
+        self.assertEqual(out["context_parallel_size"], 2)
+        self.assertIn("保持不变", message)
+
+    def test_non_integer_ratio_is_rejected(self):
+        ok, message = self.adapt(2, scale_seq_length=12000)
+        self.assertFalse(ok)
+        self.assertIn("整数倍", message)
+
+    def test_missing_source_seq_field_is_rejected(self):
+        self.write_yaml(self.SEQ_YAML.replace("max_seq_length: 8192\n", ""))
+        ok, message = self.adapt(2, scale_seq_length=16384)
+        self.assertFalse(ok)
+        self.assertIn("max_seq_length", message)
+
+    def test_conflicts_with_a_set_override(self):
+        ok, message = self.adapt(
+            2,
+            scale_seq_length=16384,
+            auto_overrides={"max_seq_length": 999},
+        )
+        self.assertFalse(ok)
+        self.assertIn("冲突", message)
+
+    def test_sep_and_scaled_cp_cannot_coexist(self):
+        self.write_yaml(
+            self.SEQ_YAML.replace(
+                "context_parallel_size: 2", "sep_parallel_size: 2"
+            )
+        )
+        ok, message = self.adapt(2, scale_seq_length=16384)
+        self.assertFalse(ok)
+        self.assertIn("C5", message)
+
+    def test_warns_when_beyond_max_position_embeddings(self):
+        data = dict(MODEL_CONFIG)
+        data["max_position_embeddings"] = 8192
+        self.write_json(data)
+        ok, message = self.adapt(2, scale_seq_length=16384)
+        self.assertTrue(ok, message)
+        self.assertIn("max_position_embeddings", message)
+
+    def test_performance_freeze_still_applies_the_scaled_cp(self):
+        # --test-performance freezes the dims *after* the explicit seq
+        # scaling: CP 2 -> 4 must survive the frozen planner.
+        ok, message = self.adapt(
+            2, test_performance=True, scale_seq_length=16384
+        )
+        self.assertTrue(ok, message)
+        out = self.load_output_yaml(16)
+        self.assertEqual(out["context_parallel_size"], 4)
+
+    def test_cli_requires_target_nodes(self):
+        buffer, err = io.StringIO(), io.StringIO()
+        with (
+            contextlib.redirect_stdout(buffer),
+            contextlib.redirect_stderr(err),
+        ):
+            code = main(
+                [
+                    "--input",
+                    str(self.yaml_path),
+                    "--scale-seq-length",
+                    "16384",
+                ]
+            )
+        self.assertEqual(code, 1)
+        self.assertIn("--target-nodes", err.getvalue())
+
+    def test_cli_passes_the_value_through(self):
+        buffer = io.StringIO()
+        with (
+            contextlib.redirect_stdout(buffer),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            code = main(
+                [
+                    "--input",
+                    str(self.yaml_path),
+                    "--target-nodes",
+                    "2",
+                    "--scale-seq-length",
+                    "16384",
+                    "--output-dir",
+                    str(self.output_dir),
+                ]
+            )
+        self.assertEqual(code, 0, buffer.getvalue())
+        out = self.load_output_yaml(16)
+        self.assertEqual(out["max_seq_length"], 16384)
+        self.assertEqual(out["context_parallel_size"], 4)
 
 
 if __name__ == "__main__":
