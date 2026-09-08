@@ -43,6 +43,7 @@ from paddlefleet.fusions.fused_bias_swiglu import (
     weighted_bias_swiglu_impl,
 )
 from paddlefleet.ieee_kernel import ieee_kernel_enabled
+from paddlefleet.parallel_state import get_tensor_model_parallel_world_size
 from paddlefleet.train_infer_consistent_ops.inspect_util import (
     get_current_layer,
     inspect_tensor,
@@ -312,6 +313,7 @@ class MLP(FleetLayer):
             _ACCURACY_COMPATIBLE_KERNEL
             and self.config.tensor_model_parallel_size == 1
             and getattr(self.up_gate_proj, "world_size", None) == 1
+            and get_tensor_model_parallel_world_size() > 1
         ):
             intermediate_parallel, bias_parallel = (
                 _accuracy_compatible_projection(
@@ -508,6 +510,7 @@ class MLP(FleetLayer):
             _ACCURACY_COMPATIBLE_KERNEL
             and self.config.tensor_model_parallel_size == 1
             and getattr(self.down_proj, "world_size", None) == 1
+            and get_tensor_model_parallel_world_size() > 1
         ):
             output, output_bias = _accuracy_compatible_projection(
                 self.down_proj, intermediate_parallel

@@ -25,6 +25,7 @@ This module provides:
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -48,6 +49,7 @@ from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_sequence_parallel_region,
 )
+from paddlefleet.tensor_parallel.random import _fork_rng
 from paddlefleet.transformer.cp_utils import all_gather_cp
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
@@ -70,6 +72,14 @@ logger = logging.getLogger(__name__)
 _ACCURACY_COMPATIBLE_KERNEL = ieee_kernel_enabled()
 
 
+def _ieee_tp1():
+    """Use the live TP group, including for duplicated indexer projections."""
+    return (
+        ieee_kernel_enabled()
+        and parallel_state.get_tensor_model_parallel_world_size() <= 1
+    )
+
+
 def _absorb_q_nope_k_up(qn3, k_abs_weight):
     """K-absorb q_nope @ k_up. Torch-aligned UAC path uses bmm, not einsum."""
     uac = ieee_kernel_enabled()
@@ -81,7 +91,7 @@ def _absorb_q_nope_k_up(qn3, k_abs_weight):
 
 
 def _accuracy_compat_linear(projection, x):
-    """Torch-aligned F.linear for duplicated (TP1) DSA indexer projections.
+    """Torch-aligned F.linear for duplicated indexer projections in TP2.
 
     IEEE 1-5 (E-062 / e468): Indexer wq_b / wk / weights_proj must use
     paddle.nn.functional.linear rather than Linear's autograd Function.
@@ -315,7 +325,9 @@ def _unfused_dsa_attention(
         k = key.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, qk_hd])
     if uac_mqa:
         # V is the leading slice of absorbed key, matching torch key[..., :v].
-        value = paddle.slice(key, axes=[-1], starts=[0], ends=[v_hd]) * 1
+        value = paddle.slice(key, axes=[-1], starts=[0], ends=[v_hd])
+        if not _ieee_tp1():
+            value = value * 1
     if value.dim() == 4 and value.shape[2] == 1 and nhpp > 1:
         value_e = value.expand([b, s, nhpp, v_hd])
         v = value_e.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, v_hd])
@@ -855,7 +867,7 @@ class DSAIndexer(paddle.nn.Layer):
         # IEEE e468: Indexer GEMMs must use F.linear under UAC, not
         # Linear.forward / deferrable_linear. Gate on the import-time
         # module constant, not a per-call FLAG read.
-        if _ACCURACY_COMPATIBLE_KERNEL:
+        if _ACCURACY_COMPATIBLE_KERNEL and not _ieee_tp1():
             q, _ = _accuracy_compat_linear(self.wq_b, q_latent)
             k, _ = _accuracy_compat_linear(self.wk, hidden_states)
         else:
@@ -876,7 +888,7 @@ class DSAIndexer(paddle.nn.Layer):
         q = rotate_activation(q, use_fast_hadamard=self.use_fast_hadamard)
         k = rotate_activation(k, use_fast_hadamard=self.use_fast_hadamard)
 
-        if _ACCURACY_COMPATIBLE_KERNEL:
+        if _ACCURACY_COMPATIBLE_KERNEL and not _ieee_tp1():
             weights, _ = _accuracy_compat_linear(
                 self.weights_proj, hidden_states
             )
@@ -1877,7 +1889,16 @@ def resolve_dsa_indexer_layout(
         # Official GLM-5.2 checkpoints still ship a full MTP indexer.
         # Training honours share-for-MTP by skipping that indexer and
         # reusing the last decoder's producer top-k, matching the HF field.
-        indexer_type = "shared" if share_for_mtp_iteration else "full"
+        ieee_full_indexer = (
+            ieee_kernel_enabled()
+            and getattr(config, "use_accuracy_compatible", False)
+            and not _ieee_tp1()
+        )
+        indexer_type = (
+            "shared"
+            if share_for_mtp_iteration and not ieee_full_indexer
+            else "full"
+        )
         if indexer_type not in {"full", "shared"}:
             raise ValueError(
                 f"Unsupported DSA indexer type {indexer_type!r} for layer {layer_number}."
@@ -1988,18 +2009,29 @@ class DSAttention(FleetLayer):
         else:
             self.softmax_scale = softmax_scale
 
-        # Shared layers reuse top-k computed by a preceding full indexer.
+        # Shared MTP still owns the official checkpoint's dormant indexer.
+        # Its layout is fixed at construction; forward keeps reusing decoder
+        # top-k. Preserve RNG so these extra weights cannot perturb later
+        # initialization, and exclude them from gradient/optimizer updates.
         self.indexer = None
-        if not self.skip_topk:
-            self.indexer = build_spec_layer(
-                sublayers_spec.indexer,
-                config=config,
-                layer_number=layer_number,
-                pg_collection=pg_collection,
-            )
+        if not self.skip_topk or is_mtp_layer:
+            with _fork_rng() if self.skip_topk else nullcontext():
+                self.indexer = build_spec_layer(
+                    sublayers_spec.indexer,
+                    config=config,
+                    layer_number=layer_number,
+                    pg_collection=pg_collection,
+                )
+            if self.skip_topk:
+                for parameter in self.indexer.parameters():
+                    parameter.stop_gradient = True
 
-        # DSA loss config; None is normalized to 0.0 (disabled), so all
-        # downstream checks can key on ``> 0`` instead of ``is not None``.
+        # IEEE routing retains the explicitly configured zero-coefficient
+        # indexer graph; TP2 also attaches its zero loss to the trunk.
+        self.ieee_indexer_loss = (
+            ieee_kernel_enabled()
+            and getattr(config, "dsa_indexer_loss_coeff", None) is not None
+        )
         self.dsa_indexer_loss_coeff = float(
             getattr(config, "dsa_indexer_loss_coeff", 0.0) or 0.0
         )
@@ -2098,10 +2130,11 @@ class DSAttention(FleetLayer):
         # Use detach() + stop_gradient=False so that:
         # 1. Gradients don't flow back to the main model (detach breaks the graph)
         # 2. Linear layers can still compute grad_input in backward without PyLayer errors
-        x = x.detach()
-        x.stop_gradient = False
-        qr = qr.detach()
-        qr.stop_gradient = False
+        if not _ieee_tp1():
+            x = x.detach()
+            x.stop_gradient = False
+            qr = qr.detach()
+            qr.stop_gradient = False
 
         # rotate_activation requires bf16 input
         assert x.dtype == paddle.bfloat16, (
@@ -2168,9 +2201,9 @@ class DSAttention(FleetLayer):
         if self.skip_topk:
             topk_indices = self._lookup_index_share_topk(topk_holder)
             indexer_loss = None
-        # Training with indexer loss (coeff is normalized to 0.0 when
-        # unset/None, so ``> 0`` is the single "enabled" check)
-        elif self.training and self.dsa_indexer_loss_coeff > 0:
+        elif self.training and (
+            self.dsa_indexer_loss_coeff > 0 or self.ieee_indexer_loss
+        ):
             assert self.indexer is not None
             # Indexer forward_before_topk runs WITH gradient tracking
             # RoPE is computed internally by the indexer
@@ -2273,7 +2306,7 @@ class DSAttention(FleetLayer):
             # constants cannot miss it. FLAG+UAC alone is the Minimax /
             # GLM-4.5 Air CI graph and must stay on the structure path.
             uac = ieee_kernel_enabled()
-            if uac:
+            if uac and not _ieee_tp1():
                 # x + x*0 is an add, not a view. clone/contiguous were PIR-folded.
                 _kv_c = _kv_c + (_kv_c * 0)
             k_latent = _kv_c.unsqueeze(2)
@@ -2322,9 +2355,10 @@ class DSAttention(FleetLayer):
                         self.config
                     ),
                 )
-            core_attn_out = DSAIndexerLossAutoScaler.apply(
-                core_attn_out, indexer_loss
-            )
+            if not _ieee_tp1() or self.dsa_indexer_loss_coeff > 0:
+                core_attn_out = DSAIndexerLossAutoScaler.apply(
+                    core_attn_out, indexer_loss
+                )
 
         return core_attn_out
 

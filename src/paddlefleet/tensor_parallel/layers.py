@@ -469,6 +469,8 @@ class VocabParallelEmbedding(paddle.nn.Layer):
             output = reduce_scatter_to_sequence_parallel_region(
                 output_parallel, group=self.tp_group
             )
+        elif ieee_kernel_enabled() and get_pg_size(self.tp_group) <= 1:
+            output = output_parallel
         else:
             # Reduce across all the model parallel GPUs.
             output = reduce_from_tensor_model_parallel_region(
@@ -1328,6 +1330,24 @@ def linear_with_grad_accumulation_and_async_allreduce(
 
     tp_group = get_tensor_model_parallel_group_if_none(tp_group)
 
+    if (
+        ieee_kernel_enabled()
+        and use_accuracy_compatible
+        and get_pg_size(tp_group) <= 1
+        and not sequence_parallel
+        and not allreduce_dgrad
+        and not fp8
+        and not fp8_wgrad
+        and not gradient_accumulation_fusion
+        and grad_output_buffer is None
+    ):
+        # The TP1 reference uses native linear backward, without the
+        # communication PyLayer's reshaped dgrad and deferred wgrad graph.
+        output, _ = general_gemm(
+            input, weight, bias=bias, use_accuracy_compatible=True
+        )
+        return output
+
     args = [
         input,
         weight,
@@ -2133,6 +2153,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
             or self.disable_grad_reduce
             or (self.tp_group is not None and self.tp_group.world_size == -1)
             or self.tp_group is None
+            or (ieee_kernel_enabled() and get_pg_size(self.tp_group) <= 1)
         ):
             input_parallel = input_
         else:
@@ -2535,6 +2556,8 @@ class RowParallelLinear(paddle.nn.Layer):
             output_ = reduce_scatter_to_sequence_parallel_region(
                 output_parallel, group=self.tp_group
             )
+        elif ieee_kernel_enabled() and get_pg_size(self.tp_group) <= 1:
+            output_ = output_parallel
         else:
             output_ = reduce_from_tensor_model_parallel_region(
                 output_parallel, group=self.tp_group, is_expert=self.is_expert

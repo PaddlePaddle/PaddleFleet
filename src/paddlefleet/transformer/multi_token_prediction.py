@@ -1083,6 +1083,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                 )
         else:
             hidden_states = self.hnorm(hidden_states)
+            if ieee_kernel_enabled() and self.config.use_accuracy_compatible:
+                # Reference MTP masks the loss, not this hidden-state edge.
+                mtp_hidden_inputs_mask = None
             # Apply mtp_hidden_inputs_mask to mask out hidden state contributions
             # at specific positions (e.g. EOS boundaries) in MTP.
             # mask shape: [B, 1, S] -> [B, S, 1] to broadcast with hidden_states [B, S, H]

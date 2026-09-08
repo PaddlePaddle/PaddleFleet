@@ -44,6 +44,7 @@ from paddlefleet.tensor_parallel.mappings import (
 from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.kimi_delta_attention import build_cu_seqlens
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.utils import get_pg_size
 
 if TYPE_CHECKING:
     from paddle import Tensor
@@ -414,12 +415,38 @@ class GPTEmbedding(FleetLayer):
         # Shape: [B, num_mtp, max_seq] when MTP is enabled, None otherwise.
         mtp_input_ids_for_moe_mask = None
         if decoder_input is None:
+            mtp_depth = self.config.num_nextn_predict_layers
+            detach_mtp_tail = (
+                ieee_kernel_enabled()
+                and getattr(self.config, "use_accuracy_compatible", False)
+                and not getattr(self.config, "use_erndata", False)
+                and mtp_depth > 0
+                and not self.config.mtp_load_weight_only
+                and input_ids is not None
+                and input_ids.shape[-1] > mtp_depth
+                and get_pg_size(self.embedding.tp_group) <= 1
+            )
+            lookup_ids = (
+                input_ids[..., :-mtp_depth] if detach_mtp_tail else input_ids
+            )
+            lookup_positions = position_ids
+            if detach_mtp_tail and lookup_positions is not None:
+                lookup_positions = lookup_positions[..., : lookup_ids.shape[-1]]
             decoder_input = self.embedding(
-                input_ids=input_ids,
+                input_ids=lookup_ids,
                 position_ids=None
                 if self.multimodal_embedding
-                else position_ids,
+                else lookup_positions,
             )
+            if detach_mtp_tail:
+                # Keep the tail value for the MTP carrier, but give its weight
+                # gradient exclusively to the explicit second lookup below.
+                extra = self.embedding(
+                    input_ids=input_ids[..., -mtp_depth:], position_ids=None
+                )
+                decoder_input = paddle.concat(
+                    [decoder_input, extra.detach()], axis=1
+                )
             decoder_input = inspect_tensor(
                 "embedding_output", -1, decoder_input
             )
@@ -741,6 +768,21 @@ class GPTEmbedding(FleetLayer):
                                     :,
                                     (depth + 1) : (depth + 1 + seq_length_ids),
                                 ]
+                                if (
+                                    ieee_kernel_enabled()
+                                    and get_pg_size(self.embedding.tp_group)
+                                    <= 1
+                                ):
+                                    semantic_ids = input_ids[:, :seq_length_ids]
+                                    mtp_ids = paddle.concat(
+                                        [
+                                            semantic_ids[:, depth + 1 :],
+                                            paddle.zeros_like(
+                                                semantic_ids[:, : depth + 1]
+                                            ),
+                                        ],
+                                        axis=1,
+                                    )
                                 looked = self.embedding(
                                     input_ids=mtp_ids,
                                     position_ids=None,

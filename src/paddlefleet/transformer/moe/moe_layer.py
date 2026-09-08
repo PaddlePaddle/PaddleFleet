@@ -598,29 +598,27 @@ class MoELayer(nn.Layer):
         else:
             self.shared_experts = None
 
-        # when sp is enabled, mark shared_experts as sequence parallel, because:
-        # 1. shared_experts only process local tokens which shape is [s/tp,b,h]
-        # 2. shared_experts'weight and bias will not be splited across tp ranks
+        # In compatibility mode, only replicated shared parameters need the
+        # cross-TP SP gradient sum; TP-sharded matrices must keep local grads.
         if (
             not self.config.gpt_model_use_experimental_version
             and self.sequence_parallel
             and self.expert_model_parallel_size > 1
             and self.shared_experts is not None
         ):
-            mark_as_sequence_parallel_parameter(
-                self.shared_experts.up_gate_proj.weight
-            )
-            if shared_expert_config.use_bias:
-                mark_as_sequence_parallel_parameter(
-                    self.shared_experts.up_gate_proj.bias
-                )
-            mark_as_sequence_parallel_parameter(
-                self.shared_experts.down_proj.weight
-            )
-            if shared_expert_config.use_bias:
-                mark_as_sequence_parallel_parameter(
-                    self.shared_experts.down_proj.bias
-                )
+            for projection in (
+                self.shared_experts.up_gate_proj,
+                self.shared_experts.down_proj,
+            ):
+                parameters = [projection.weight]
+                if shared_expert_config.use_bias:
+                    parameters.append(projection.bias)
+                for parameter in parameters:
+                    if parameter is not None and (
+                        not self.use_accuracy_compatible
+                        or not getattr(parameter, "is_distributed", False)
+                    ):
+                        mark_as_sequence_parallel_parameter(parameter)
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type in (
@@ -1819,8 +1817,14 @@ class MoELayer(nn.Layer):
 
         orig_shape = hidden_states.shape
         residuals = hidden_states
+        _three_paths_enabled = (
+            getattr(self, "use_accuracy_compatible", False)
+            and hidden_states.stop_gradient is False
+            and self._supports_three_path_clone()
+        )
         if (
             ieee_kernel_enabled()
+            and not _three_paths_enabled
             and self.shared_experts is not None
             and self.expert_model_parallel_size <= 1
         ):
@@ -1834,11 +1838,6 @@ class MoELayer(nn.Layer):
 
         inspect_tensor_set_current_layer(layer_idx)
 
-        _three_paths_enabled = (
-            getattr(self, "use_accuracy_compatible", False)
-            and hidden_states.stop_gradient is False
-            and self._supports_three_path_clone()
-        )
         if _three_paths_enabled:
             _hs_router_path, _hs_dispatcher_path, _hs_shared_path = (
                 ThreePathCloneAlignMG.apply(hidden_states)

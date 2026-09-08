@@ -64,6 +64,58 @@ def _use_accuracy_compatible_kernel() -> bool:
 _PENDING_GRADIENT_DIVISOR: dict[str, float] = {}
 
 
+# Reporting owns its native MAIN numerator independently of gradient normalization.
+_LOCAL_MAIN_VALID_TOKENS: dict[str, float] = {}
+_MAIN_REPORTING_CONTEXT = None
+
+
+def begin_main_reporting_microbatch(step: int, microbatch: int) -> None:
+    global _MAIN_REPORTING_CONTEXT
+    if _MAIN_REPORTING_CONTEXT is not None:
+        raise RuntimeError("unconsumed MAIN reporting context")
+    _MAIN_REPORTING_CONTEXT = {
+        "step": int(step),
+        "microbatch": int(microbatch),
+        "pending": None,
+    }
+
+
+def _record_main_reporting_sum(loss_sum: Tensor, valid_tokens: float) -> None:
+    context = _MAIN_REPORTING_CONTEXT
+    if context is None:
+        return
+    if context["pending"] is not None:
+        raise RuntimeError(
+            "duplicate MAIN numerator in one reporting microbatch"
+        )
+    if loss_sum.dtype != paddle.float32 or list(loss_sum.shape) != []:
+        raise RuntimeError("MAIN numerator must be a native FP32 scalar")
+    context["pending"] = {
+        "sum": loss_sum.detach(),
+        "count": float(valid_tokens),
+        "step": context["step"],
+        "microbatch": context["microbatch"],
+    }
+
+
+def consume_main_reporting_microbatch(step: int, microbatch: int):
+    global _MAIN_REPORTING_CONTEXT
+    context = _MAIN_REPORTING_CONTEXT
+    if context is None or (context["step"], context["microbatch"]) != (
+        int(step),
+        int(microbatch),
+    ):
+        raise RuntimeError("missing or stale MAIN reporting context")
+    receipt = context["pending"]
+    _MAIN_REPORTING_CONTEXT = None
+    return receipt
+
+
+def get_local_main_valid_tokens() -> float | None:
+    """MAIN-loss valid tokens on this rank, set at LanguageLoss, not after resolve."""
+    return _LOCAL_MAIN_VALID_TOKENS.get("value")
+
+
 def get_pending_gradient_divisor() -> float | None:
     """Token count the current step's gradients still have to be divided by."""
     return _PENDING_GRADIENT_DIVISOR.get("value")
@@ -112,6 +164,8 @@ def _normalize_loss_by_tokens(
     if main_tokens is None or main_tokens <= 0:
         main_tokens = valid_tokens
         _PENDING_GRADIENT_DIVISOR["value"] = float(main_tokens)
+        _LOCAL_MAIN_VALID_TOKENS["value"] = float(valid_tokens)
+        _record_main_reporting_sum(loss_sum, valid_tokens)
 
     return DeferTokenNormalizationOp.apply(
         loss_sum, valid_tokens, main_tokens / valid_tokens
@@ -347,12 +401,10 @@ class LanguageLoss(FleetLayer):
             else:
                 self.loss_func = paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy()
         elif ieee_kernel_enabled():
-            # Keep TP=1 GLM-5.2 IEEE loss backward identical to Megatron's
-            # unfused vocab-parallel cross entropy. FLAG+UAC alone stays
-            # native CrossEntropyLoss for Minimax / GLM-4.5 Air CI.
-            self.loss_func = functools.partial(
-                _accuracy_compatible_cross_entropy,
-                ignored_index=self.ignored_index,
+            # TP1 reference uses native ignore-index cross entropy. The TP2
+            # vocabulary partition above retains its separate reduction graph.
+            self.loss_func = paddle.nn.CrossEntropyLoss(
+                reduction="none", ignore_index=self.ignored_index
             )
         else:
             self.loss_func = paddle.nn.CrossEntropyLoss(
@@ -890,7 +942,18 @@ class LanguageLoss(FleetLayer):
                             loss_matrix_cur_depth = loss_matrix_cur_depth.cast(
                                 paddle.float32
                             ).reshape([-1]) * lossmask_cur_depth.reshape([-1])
-                            if lossmask_cur_depth.sum().item() > 0:
+                            depth_tokens = float(
+                                lossmask_cur_depth.sum().item()
+                            )
+                            if ieee_kernel_enabled() and depth_tokens > 0:
+                                loss_cur_depth = _normalize_loss_by_tokens(
+                                    loss_matrix_cur_depth.sum(),
+                                    depth_tokens,
+                                    main_tokens=getattr(
+                                        self, "_deferred_main_tokens", None
+                                    ),
+                                )
+                            elif depth_tokens > 0:
                                 loss_cur_depth = (
                                     loss_matrix_cur_depth.sum()
                                     / lossmask_cur_depth.sum()

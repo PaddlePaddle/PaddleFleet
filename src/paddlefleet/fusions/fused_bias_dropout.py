@@ -14,6 +14,9 @@
 
 import paddle
 
+from paddlefleet.ieee_kernel import ieee_kernel_enabled
+from paddlefleet.parallel_state import get_tensor_model_parallel_world_size
+
 
 def _bias_dropout_add_func(x_with_bias, residual, prob, training):
     # type: (Tuple[Tensor, Optional[Tensor]], Tensor, float, bool) -> Tensor
@@ -60,7 +63,13 @@ def _bias_dropout_add_func(x_with_bias, residual, prob, training):
         if inplace:
             out.add_(residual)
         else:
-            out = out + residual
+            if (
+                ieee_kernel_enabled()
+                and get_tensor_model_parallel_world_size() <= 1
+            ):
+                out = residual + out
+            else:
+                out = out + residual
         return out
 
 

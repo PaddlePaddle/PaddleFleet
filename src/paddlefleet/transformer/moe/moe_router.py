@@ -293,7 +293,9 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                     for i in range(shards):
                         sl = slice(i * size, (i + 1) * size)
                         x_parts.append(
-                            paddle.matmul(y_grad[sl], effective_w.cast(ctx.dtype))
+                            paddle.matmul(
+                                y_grad[sl], effective_w.cast(ctx.dtype)
+                            )
                         )
                         local_wgrad = paddle.matmul(
                             y_grad[sl], x[sl].cast(ctx.dtype), transpose_x=True
@@ -433,14 +435,13 @@ class StandardMoERouter(nn.Layer):
                 f"but got {self.scoring_func!r}. "
             )
 
-        # IEEE e468 stores the gate in float32 so AOA `dtype='float32'`
-        # can load GLM-5.2. That is opt-in via MODEL_REPRO_FP32_UAC_GATE=1
-        # (formal/stack-top runners export it). Default matches structure:
-        # params_dtype under UAC, float32 otherwise. Always-fp32 under UAC
-        # rejected GLM-4.5 Air bf16 checkpoints (AOA src bfloat16 vs
-        # target float32) on Fleet #1961 accuracy alignment, which also
-        # sets FLAGS_use_accuracy_compatible_kernel=1.
-        if os.environ.get("MODEL_REPRO_FP32_UAC_GATE", "0") == "1":
+        # IEEE routing consumes BF16 views of an FP32 optimizer master.
+        # FLAG+UAC alone keeps params_dtype for other checkpoint layouts;
+        # the explicit override remains available to existing loaders.
+        if (
+            ieee_kernel_enabled()
+            or os.environ.get("MODEL_REPRO_FP32_UAC_GATE", "0") == "1"
+        ):
             _gate_dtype = "float32"
         elif self.use_accuracy_compatible:
             _gate_dtype = config.params_dtype
@@ -1185,7 +1186,9 @@ class StandardMoERouter(nn.Layer):
 
         # The bias term b is used only to adjust affinity scores for Top-K expert selection (routing); it does not affect gating.
         # The gate applied during dispatch and to weight the FFN output is computed from the original affinity score s_{i,t} (without the bias).
-        if self.use_accuracy_compatible:
+        if self.use_accuracy_compatible and (
+            not ieee_kernel_enabled() or self.tensor_model_parallel_size > 1
+        ):
             row_idx = paddle.arange(
                 bsz_seq_len, dtype=topk_idx.dtype
             ).unsqueeze(-1)
@@ -1845,7 +1848,13 @@ class TopKRouter(StandardMoERouter):
         )
 
         # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
-        if self.use_accuracy_compatible and not use_split:
+        if (
+            self.use_accuracy_compatible
+            and not use_split
+            and (
+                not ieee_kernel_enabled() or self.tensor_model_parallel_size > 1
+            )
+        ):
             gates_ori = self.gate_score_func(logits).cast(logits.dtype)
             if input_ids_none_zero_mask is not None:
                 gates_ori = gates_ori * valid_mask
