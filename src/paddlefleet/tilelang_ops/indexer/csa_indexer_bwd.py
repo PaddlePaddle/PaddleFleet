@@ -38,6 +38,22 @@ import paddle
 import tilelang
 from tilelang import language as T
 
+# Row-chunk budget, in fp32 elements, for the deterministic dIndexKComp path.
+#
+# That path trades the non-deterministic ``atomic_add`` scatter for a per-slot
+# staging buffer ``[batch, rows, padded_topk, dim]`` plus a CSR-ordered
+# reduction. Staging every row at once is ``S * padded_topk * dim`` elements,
+# which is unusable exactly where the deterministic path matters most: the
+# full-candidate warmup sets ``padded_topk = S_comp``, so a 64k sequence asks
+# for ``65536 * 65536 * 128 * 4 B = 2 TiB``. Chunking the rows caps the buffer
+# instead, at the cost of one kernel launch and one CSR build per chunk.
+#
+# 1 << 28 fp32 elements is 1 GiB. Chosen as a fixed constant rather than from
+# free device memory on purpose: the chunk boundaries decide how the fp32 adds
+# are grouped, so deriving them from runtime state would make results differ
+# between machines and defeat the reproducibility this path exists for.
+_DET_ROW_CHUNK_ELEMS = 1 << 28
+
 
 def _tilelang_dtype(tensor):
     if tensor.dtype == paddle.bfloat16:
@@ -668,7 +684,17 @@ def csa_indexer_bwd_interface(
             grad_k_comp,
         )
     else:
-        # === Deterministic path (per-token buffer + CSR reduction) ===
+        # === Deterministic path (per-slot staging buffer + CSR reduction) ===
+        #
+        # Rows are processed in fixed-size chunks so the staging buffer is
+        # ``[batch, rows, padded_topk, dim]`` rather than the whole sequence;
+        # see ``_DET_ROW_CHUNK_ELEMS`` for why the size is a constant.
+        #
+        # Reproducibility: within a chunk the CSR reduction fixes the summation
+        # order, and chunks are accumulated in ascending row order, so the whole
+        # reduction is a deterministic function of the inputs alone. Note the
+        # grouping *does* change the fp32 rounding, so a chunked run is not
+        # bit-identical to a hypothetical single-chunk one -- only to itself.
         kernel_det = tl_csa_indexer_bwd_det_impl(
             heads=heads,
             dim=dim,
@@ -678,27 +704,66 @@ def csa_indexer_bwd_interface(
             num_stages=num_stages,
             num_threads=num_threads,
         )
-        dindexk_buf = paddle.empty(
-            [batch, seq_len, padded_topk, dim], dtype="float32"
+        rows_per_chunk = max(
+            1, _DET_ROW_CHUNK_ELEMS // (batch * padded_topk * dim)
         )
-        kernel_det(
-            index_q,
-            index_k_comp,
-            weights,
-            topk_indices,
-            grad_scores,
-            grad_q,
-            grad_weights,
-            dindexk_buf,
-        )
+        # ``max(1, ...)`` again on purpose: ``seq_len == 0`` is a legal input
+        # (nothing above rejects it, and the atomic path returns empty gradients
+        # for it), and a stride of 0 would make ``range`` raise.
+        rows_per_chunk = max(1, min(rows_per_chunk, seq_len))
+        grad_k_comp = paddle.zeros([batch, seq_len_comp, dim], dtype="float32")
 
-        # CSR-ordered deterministic reduction
-        sort_perm, seg_offsets = _build_indexer_csr_index(
-            topk_indices, seq_len_comp
-        )
-        reduce_kernel = dindexk_reduce(
-            batch, seq_len, seq_len_comp, padded_topk, dim
-        )
-        grad_k_comp = reduce_kernel(dindexk_buf, sort_perm, seg_offsets)
+        # Exactly one staging buffer is alive at a time. It is allocated lazily
+        # and only reallocated when the row count changes, i.e. once for all the
+        # full chunks and once more for a short tail -- and the tail's allocation
+        # is preceded by dropping the full-size one, so the peak stays at one
+        # chunk's worth rather than the sum of the two.
+        #
+        # The tail cannot be served by ``buf[:, :rows]``: that view keeps the
+        # full buffer's batch stride while ``tl_csa_indexer_bwd_det_impl``
+        # declares ``[batch, seq_len, topk, dim]`` and addresses it as dense, so
+        # with ``batch > 1`` every batch past the first would read and write at
+        # the wrong offset.
+        buf = None
+        for start in range(0, seq_len, rows_per_chunk):
+            end = min(start + rows_per_chunk, seq_len)
+            rows = end - start
+            # ``seq_len`` is ``T.dynamic`` in the kernel, so a short tail chunk
+            # reuses the same compiled kernel; only ``dindexk_reduce`` (which
+            # takes the row count as a static shape) recompiles for the tail.
+            if buf is None or int(buf.shape[1]) != rows:
+                buf = None  # release before requesting the replacement
+                buf = paddle.empty(
+                    [batch, rows, padded_topk, dim], dtype="float32"
+                )
+            idx_chunk = topk_indices[:, start:end].contiguous()
+            grad_chunk = grad_scores[:, start:end].contiguous()
+            grad_q_chunk = paddle.empty(
+                [batch, rows, heads, dim], dtype=index_q.dtype
+            )
+            grad_weights_chunk = paddle.empty(
+                [batch, rows, heads], dtype="float32"
+            )
+            kernel_det(
+                index_q[:, start:end].contiguous(),
+                index_k_comp,
+                weights[:, start:end].contiguous(),
+                idx_chunk,
+                grad_chunk,
+                grad_q_chunk,
+                grad_weights_chunk,
+                buf,
+            )
+            grad_q[:, start:end] = grad_q_chunk
+            grad_weights[:, start:end] = grad_weights_chunk
+
+            # CSR-ordered deterministic reduction, per chunk.
+            sort_perm, seg_offsets = _build_indexer_csr_index(
+                idx_chunk, seq_len_comp
+            )
+            reduce_kernel = dindexk_reduce(
+                batch, rows, seq_len_comp, padded_topk, dim
+            )
+            grad_k_comp += reduce_kernel(buf, sort_perm, seg_offsets)
 
     return grad_q, grad_weights, grad_k_comp
