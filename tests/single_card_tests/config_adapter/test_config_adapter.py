@@ -1638,6 +1638,24 @@ class TestPinnedFieldRejection(ConfigAdapterTestBase):
         self.assertTrue(ok, message)
         self.assertEqual(self.load_output_yaml(8)["fa_version"], 3)
         self.assertNotIn("DELETE field=fa_version", message)
+        # A same-hardware assumption travels with the pin: say so.
+        self.assertIn("fa_version=3 按源配置原样保留", message)
+
+    def test_prefix_less_set_rewrites_fa_version(self):
+        ok, message = self.adapt(
+            target_nodes=1, test_accuracy=True, auto_overrides={"fa_version": 4}
+        )
+        self.assertTrue(ok, message)
+        self.assertEqual(self.load_output_yaml(8)["fa_version"], 4)
+        self.assertNotIn("DELETE field=fa_version", message)
+
+    def test_yaml_set_rewrites_fa_version(self):
+        ok, message = self.adapt(
+            target_nodes=1, test_accuracy=True, yaml_overrides={"fa_version": 4}
+        )
+        self.assertTrue(ok, message)
+        self.assertEqual(self.load_output_yaml(8)["fa_version"], 4)
+        self.assertNotIn("DELETE field=fa_version", message)
 
 
 class TestCliErrorPaths(ConfigAdapterTestBase):

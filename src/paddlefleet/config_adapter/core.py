@@ -227,6 +227,13 @@ class ConfigAdapter:
         if err:
             return False, f"{input_path.name}: {err}"
         plan.warnings.extend(seq_warnings)
+        if "fa_version" in config:
+            plan.warnings.append(
+                f"fa_version={config['fa_version']} 按源配置原样保留：适配的"
+                f"前提是目标机器与源作业同构（同 GPU 架构 / 同镜像）。若目标"
+                f"环境缺少对应的 flash-attention kernel，请用 "
+                f"--set fa_version=<版本> 改写或手动删除该字段"
+            )
 
         for key, value, reason in plan.json_changes:
             log.record(
