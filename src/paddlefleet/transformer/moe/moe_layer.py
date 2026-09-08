@@ -1317,7 +1317,14 @@ class MoELayer(nn.Layer):
         topk_weights: paddle.Tensor | None = None,
         topk_indices: paddle.Tensor | None = None,
     ):
-        if self.use_accuracy_compatible:
+        ieee_deepep_fusion = (
+            self.use_accuracy_compatible
+            and ieee_kernel_enabled()
+            and self.moe_expert_fusion
+            and self.moe_token_dispatcher_type == "deepep"
+            and self.expert_model_parallel_size > 1
+        )
+        if self.use_accuracy_compatible and not ieee_deepep_fusion:
             if (
                 combine_overlap_handle is not None
                 and "fn_out" not in combine_overlap_handle
@@ -1335,6 +1342,15 @@ class MoELayer(nn.Layer):
                 topk_indices=topk_indices,
             )
         hidden_states = self._project_to_latent(hidden_states)
+        if ieee_deepep_fusion:
+            # Rebuild the dispatch operands from sparse routing, preserving
+            # the expert ordering used by the accuracy-compatible fused path.
+            topk_weights = None
+            topk_indices = None
+            if self.is_mtp_layer:
+                hidden_states = hidden_states.cast("float32").cast(
+                    hidden_states.dtype
+                )
         layer_idx = getattr(self, "layer_number", None)
         hidden_states = inspect_tensor(
             "moe_latent_input", layer_idx, hidden_states
@@ -1436,6 +1452,10 @@ class MoELayer(nn.Layer):
                     use_w4a8=self.use_w4a8,
                     use_w4a8_fused_quant=self.use_w4a8_fused_quant,
                 )
+                if ieee_deepep_fusion:
+                    # Keep the fused output's autograd edge before DeepEP
+                    # combine, as in the verified accuracy-compatible path.
+                    hidden_states = hidden_states.clone()
 
         hidden_states = inspect_tensor(
             "moe_zipped_output", layer_idx, hidden_states
