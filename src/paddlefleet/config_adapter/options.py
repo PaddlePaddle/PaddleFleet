@@ -17,19 +17,22 @@
 ``--test-performance`` and ``--test-accuracy`` are independent switches, not
 alternatives, and neither is required::
 
-    (none)                              缩到目标规模即可：允许缩小 EP/PP
-    --test-performance                  冻结 TP/PP/EP/CP/SEP 与 acc
-    --test-accuracy                     注入避免 aadiff 的开关，保持等效 batch
+    (none)                              并行度冻结：目标规模必须与源兼容
+    --test-performance                  冻结 TP/PP/EP/CP/SEP（同默认）
+    --test-accuracy                     允许缩小 EP/PP + 注入避免 aadiff 的开关
     --test-performance --test-accuracy  冻结并行策略 + 注入精度开关
 
 Each switch owns one concern:
 
-* ``--test-performance`` freezes the parallelism and
-  ``gradient_accumulation_steps`` so a step time stays comparable with the
-  full-scale job -- only ``sharding`` and ``global_batch_size`` move.
+* ``--test-performance`` freezes the parallelism and keeps
+  ``gradient_accumulation_steps``, so a step time stays comparable with the
+  full-scale job -- only ``sharding`` and ``global_batch_size`` move.  The
+  default freezes the dims too and shares the same batch strategy.
 * ``--test-accuracy`` pins the determinism switches in
-  :mod:`paddlefleet.config_adapter.precision`, and (unless the performance
-  switch already froze ``acc``) keeps the effective batch by raising ``acc``.
+  :mod:`paddlefleet.config_adapter.precision`.  It is also the ONLY mode
+  allowed to shrink EP/PP: shrinking rescales the expert count / layer
+  count, i.e. it changes the model structure, so it must be an explicit
+  opt-in rather than a silent default.
 """
 
 from __future__ import annotations
@@ -44,8 +47,15 @@ class AdaptOptions:
 
     @property
     def freeze_parallel(self):
-        """True when no parallel dimension (nor ``acc``) may be rewritten."""
-        return self.test_performance
+        """True when no parallel dimension may be rewritten.
+
+        Shrinking EP/PP rescales the routed-expert count or the layer count
+        -- a model-structure change -- so it is an explicit opt-in reserved
+        for ``--test-accuracy``.  The default and ``--test-performance`` both
+        freeze the dims; the performance switch additionally freezes ``acc``
+        (see :attr:`batch_strategy`).
+        """
+        return self.test_performance or not self.test_accuracy
 
     @property
     def inject_precision(self):
@@ -56,8 +66,10 @@ class AdaptOptions:
     def batch_strategy(self):
         """Batch strategy name from ``strategies.BATCH_STRATEGIES``.
 
-        The performance switch wins: it freezes ``acc``, so the only way to
-        follow the card count is to scale ``global_batch_size``.
+        Only the pure accuracy profile keeps the effective batch by raising
+        ``acc``; every other combination keeps ``acc`` and scales
+        ``global_batch_size`` with the data-parallel width (the performance
+        switch wins when both are given).
         """
         if self.test_accuracy and not self.test_performance:
             return "scale_accumulation"

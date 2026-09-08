@@ -700,7 +700,8 @@ class LanguageLoss(FleetLayer):
         rolls labels_ori left ``depth + 1`` times, filling ``ignored_index`` at
         every packed-document boundary (via the stashed cu_seqlens_q) so the
         boundary token is excluded from the loss. Under CP>1 this rank's local
-        zigzag chunk is extracted so the label shape matches the local logits.
+        CP slice is extracted (per config.cp_balance_mode) so the label shape
+        matches the local logits.
 
         Mirrors the megatron branch of ``LanguageLoss.forward`` so the separate
         Main/MTP head-loss path stays consistent with the fused path.
@@ -733,14 +734,15 @@ class LanguageLoss(FleetLayer):
         if get_context_parallel_world_size() > 1:
             from paddlefleet.parallel_state import get_context_parallel_rank
             from paddlefleet.transformer.multi_token_prediction import (
-                extract_local_zigzag_chunks,
+                extract_local_cp_chunks,
             )
 
-            _lbl = extract_local_zigzag_chunks(
+            _lbl = extract_local_cp_chunks(
                 _lbl,
                 get_context_parallel_rank(),
                 get_context_parallel_world_size(),
                 axis=1,
+                mode=self.config.cp_balance_mode,
             )
         return _lbl
 
@@ -761,19 +763,26 @@ class LanguageLoss(FleetLayer):
             # left by (depth+1) positions with -100 fill at the tail.
             _mtp_is_megatron = getattr(self.config, "use_erndata", False)
             # Under CP>1 the megatron path keeps labels_ori full-length on
-            # every rank. Local zigzag chunks must be extracted here so that
-            # shape matches the local logits produced by the embedding branch.
+            # every rank. The rank-local slice must be extracted here so that
+            # shape matches the local logits produced by the embedding branch,
+            # using the model's own CP layout (config.cp_balance_mode).
             _cp_size_for_extract = (
                 get_context_parallel_world_size() if _mtp_is_megatron else 1
             )
             if _cp_size_for_extract > 1:
+                from functools import partial
+
                 from paddlefleet.parallel_state import (
                     get_context_parallel_rank as _get_cp_rank,
                 )
                 from paddlefleet.transformer.multi_token_prediction import (
-                    extract_local_zigzag_chunks as _extract_cp,
+                    extract_local_cp_chunks,
                 )
 
+                _extract_cp = partial(
+                    extract_local_cp_chunks,
+                    mode=self.config.cp_balance_mode,
+                )
                 _cp_rank_for_extract = _get_cp_rank()
             else:
                 _extract_cp = None
@@ -781,7 +790,7 @@ class LanguageLoss(FleetLayer):
             if _mtp_is_megatron:
                 lm_labels = labels_ori
                 if _cp_size_for_extract > 1:
-                    # Extract this rank's local zigzag chunks from full-length labels.
+                    # Extract this rank's local CP slice from full-length labels.
                     lm_labels = _extract_cp(
                         lm_labels,
                         _cp_rank_for_extract,

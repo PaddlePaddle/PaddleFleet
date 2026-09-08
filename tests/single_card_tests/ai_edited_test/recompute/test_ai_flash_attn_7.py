@@ -196,6 +196,87 @@ class TestGetFAVersionDeterministic(unittest.TestCase):
         result = get_fa_version(64)
         self.assertEqual(result, 3)
 
+    @patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", True)
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.is_flash_mask_available",
+        lambda: True,
+    )
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_device",
+        return_value="gpu:0",
+    )
+    @patch("paddlefleet_ops.flash_mask_facade.paddle.base.framework.get_flags")
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_flags",
+        return_value={"FLAGS_cudnn_deterministic": True},
+    )
+    def test_deterministic_keeps_4_for_the_big_head_dims(
+        self, mock_get_flags, mock_base_flags, mock_device
+    ):
+        """The big-head-dim pairs are no longer deterministic-only degrades.
+
+        FA4's big-head-dim backward used to accumulate dQ / dK / dV with
+        unordered ``red.global.add`` and asserted ``not deterministic``; since
+        flash-attention ``5007a05`` a global semaphore pins the reduction order,
+        so both pairs stay on FA4 under ``FLAGS_cudnn_deterministic``.
+        """
+        mock_base_flags.return_value = {"FLAGS_flash_attn_version": 4}
+        self.assertEqual(get_fa_version(512, 512), 4)
+        self.assertEqual(get_fa_version(576, 512), 4)
+
+    @patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", True)
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.is_flash_mask_available",
+        lambda: True,
+    )
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_device",
+        return_value="gpu:0",
+    )
+    @patch("paddlefleet_ops.flash_mask_facade.paddle.base.framework.get_flags")
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_flags",
+        return_value={"FLAGS_cudnn_deterministic": True},
+    )
+    def test_head_dim_pair_outside_the_whitelist_still_degrades(
+        self, mock_get_flags, mock_base_flags, mock_device
+    ):
+        """The whitelist widened for two pairs, it did not become open-ended."""
+        mock_base_flags.return_value = {"FLAGS_flash_attn_version": 4}
+        self.assertEqual(get_fa_version(384, 384), 2)
+
+
+class TestGetFAVersionFourColumnMask(unittest.TestCase):
+    """A 4-column FlashMask no longer decides the version.
+
+    The FA4 kernel used to serve only ``num_vec <= 2``, so a 4-column mask (the
+    global sliding window layout) degraded to FA2 even for a whitelisted
+    head-dim pair. flash-attention ``5007a05`` added ``num_vec == 4``, and the
+    mask argument is now accepted and ignored -- worth pinning, because the
+    argument is still in the signature and reads as if it mattered.
+    """
+
+    @patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", True)
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.is_flash_mask_available",
+        lambda: True,
+    )
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_device",
+        return_value="gpu:0",
+    )
+    @patch("paddlefleet_ops.flash_mask_facade.paddle.base.framework.get_flags")
+    @patch(
+        "paddlefleet_ops.flash_mask_facade.paddle.get_flags",
+        return_value={"FLAGS_cudnn_deterministic": False},
+    )
+    def test_four_column_mask_keeps_4(
+        self, mock_get_flags, mock_base_flags, mock_device
+    ):
+        mock_base_flags.return_value = {"FLAGS_flash_attn_version": 4}
+        mask = paddle.zeros([1, 2, 8, 4], dtype="int32")
+        self.assertEqual(get_fa_version(128, 128, mask), 4)
+
 
 class TestGetFAVersionNonDeterministic(unittest.TestCase):
     """Tests for get_fa_version with non-deterministic mode."""
@@ -357,7 +438,6 @@ class TestFacadeEntryRouting(unittest.TestCase):
         self.k = paddle.zeros(self.shape, dtype="float32")
         self.v = paddle.zeros(self.shape, dtype="float32")
         self.out = paddle.zeros(self.shape, dtype="float32")
-        # 1 column, so the FA4 4-column mask restriction never applies here.
         self.mask = paddle.zeros([1, 2, 4, 1], dtype="int32")
 
     def test_flash_attention_routes_to_cpp_backend(self):
