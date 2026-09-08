@@ -37,7 +37,7 @@ Run with:
   NVSHMEM_LIB="$SITE_PACKAGES/nvidia/nvshmem/lib"
   export LD_LIBRARY_PATH="$NVSHMEM_LIB:$LD_LIBRARY_PATH"
   export PYTHONPATH=./ernie5:./utils:./third_party/ernie-core/src:./third_party/ernie-core/PaddleFormers:./third_party/ernie-core/PaddleFleet/src/:./third_party/data_processor:$PYTHONPATH
-  python third_party/ernie-core/PaddleFleet/tests/single_card_tests/coverage_test/pipeline_parallel/test_ai_moe_router.py
+  python third_party/ernie-core/PaddleFleet/tests/single_card_tests/coverage_test/pipeline_parallel/test_coverage_moe_router.py
 """
 
 import os

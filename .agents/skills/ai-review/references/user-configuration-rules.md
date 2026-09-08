@@ -106,6 +106,6 @@
 - 开关之间的依赖与互斥必须在 `__post_init__` 中校验并抛出 `ValueError`，不使用 `assert`（与基础规则一致）。错误信息要包含冲突的开关名、当前值和期望值。
 - 新增或修改开关必须补充测试，覆盖默认取值路径和至少一个非默认取值路径。仅当该开关定义了非法取值、与其他开关的依赖或互斥关系时，才要求用 `pytest.raises` 覆盖对应校验；开关只有默认/非默认两条合法路径、不存在需要拒绝的组合时，不要求构造异常测试。
   - `transformer_config.py` 的通用校验放在 `tests/single_card_tests/test_transformer_config.py`；特定功能的开关放在 `tests/single_card_tests/transformer/` 下对应功能的测试文件。
-  - `model_parallel_config.py` 的校验放在 `tests/single_card_tests/coverage_test/distributed/test_ai_model_parallel_config.py`。
+  - `model_parallel_config.py` 的校验放在 `tests/single_card_tests/coverage_test/distributed/test_coverage_model_parallel_config.py`。
   - 开关影响并行行为时需要 `tests/multi_card_tests/` 下的代表性多卡覆盖。
 - `TransformerConfig.from_config` 走 `object.__new__` 并手动调用 `__post_init__`，不经过 dataclass 构造函数。新增字段需确认在配置字典缺少该键时仍能取到声明的默认值，且 `__post_init__` 中对该字段的校验不会因缺键而异常。

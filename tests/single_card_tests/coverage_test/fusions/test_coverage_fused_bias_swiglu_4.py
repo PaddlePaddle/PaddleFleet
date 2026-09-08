@@ -33,7 +33,7 @@ sys.path.insert(
 # Focus: numeric equivalence of *_back wrappers against native
 # paddle._C_ops.swiglu_grad, plus the cpu_offload_input branch of the
 # PyLayer forward methods. PyLayer / Impl shape + apply paths are already
-# covered via real .apply() calls in test_ai_fused_bias_swiglu.py
+# covered via real .apply() calls in test_coverage_fused_bias_swiglu.py
 # (TestPyLayerBackwardReturnCount / TestImplShapes), so they are not
 # duplicated here.
 

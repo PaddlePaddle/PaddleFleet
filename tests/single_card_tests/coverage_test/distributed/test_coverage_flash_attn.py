@@ -194,7 +194,7 @@ class TestFlashMaskAttnFunctorBackwardDispatch(unittest.TestCase):
 class TestRefinedRecomputeFirstFwdDispatch(unittest.TestCase):
     """Cover the "group" branch in RefinedRcomputeFlashMaskAttention._first_fwd
     (fa_version==3). The "block_mask" and "else" branches are already covered
-    by test_ai_flash_attn.py."""
+    by test_coverage_flash_attn.py."""
 
     @patch.object(flash_mask_facade, "FLASHMASK_FA3_USE_CUTEDSL", False)
     @patch("paddlefleet.refined_recompute.flash_attn.framework._dygraph_tracer")

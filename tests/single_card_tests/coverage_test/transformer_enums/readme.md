@@ -7,4 +7,4 @@ PaddleFleet Transformer 枚举类型的单元测试。
 
 | File | Description / 描述 |
 |------|-------------------|
-| `test_ai_enums.py` | Tests for ModelType enum / 测试模型类型枚举 |
+| `test_coverage_enums.py` | Tests for ModelType enum / 测试模型类型枚举 |

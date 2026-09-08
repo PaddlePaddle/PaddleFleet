@@ -18,7 +18,7 @@ test flips the environment, calls `refresh_env_cache()`, and restores both in
 
 | File | Description / 描述 |
 |------|-------------------|
-| `test_ai_train_infer_consistent_ops.py` | Unit tests for the whole train_infer_consistent_ops package / 覆盖整个 train_infer_consistent_ops 包 |
+| `test_coverage_train_infer_consistent_ops.py` | Unit tests for the whole train_infer_consistent_ops package / 覆盖整个 train_infer_consistent_ops 包 |
 
 ## Covered Areas / 覆盖范围
 

@@ -7,7 +7,7 @@ Unit tests for top-level paddlefleet package initialization and metadata.
 
 | File | Description / 描述 |
 |------|-------------------|
-| `test_ai_paddlefleet_init.py` | Tests for paddlefleet top-level package imports and exports / 测试 paddlefleet 顶层包的导入与导出 |
+| `test_coverage_paddlefleet_init.py` | Tests for paddlefleet top-level package imports and exports / 测试 paddlefleet 顶层包的导入与导出 |
 
 ## Running Tests
 
