@@ -2156,6 +2156,25 @@ max_steps: 100
         self.assertEqual(out["max_seq_length"], 2048)
         self.assertEqual(out["context_parallel_size"], 1)
 
+    def test_non_divisible_cp_is_ceiled_so_the_slice_never_grows(self):
+        # Regression for the P1 review finding: with CP=3 and a 2x shorter
+        # sequence, flooring CP to 1 would grow the per-card slice from
+        # 8192/3 (~2731) to 4096 and could OOM.  The ceil (CP=2) keeps the
+        # slice at 4096/2 = 2048 <= 2731.
+        self.write_yaml(
+            self.SEQ_YAML.replace(
+                "sharding_parallel_size: 32", "sharding_parallel_size: 24"
+            )
+            .replace("context_parallel_size: 2", "context_parallel_size: 3")
+            .replace("global_batch_size: 32", "global_batch_size: 16")
+        )
+        ok, message = self.adapt(1, scale_seq_length=4096)
+        self.assertTrue(ok, message)
+        out = self.load_output_yaml(8)
+        self.assertEqual(out["max_seq_length"], 4096)
+        self.assertEqual(out["context_parallel_size"], 2)
+        self.assertIn("取上整", message)
+
     def test_equal_length_keeps_cp_and_warns(self):
         ok, message = self.adapt(2, scale_seq_length=8192)
         self.assertTrue(ok, message)

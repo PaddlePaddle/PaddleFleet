@@ -427,14 +427,19 @@ class ConfigAdapter:
                     ),
                 )
             factor = old_seq // new_seq
+            # Ceil, not floor: the guarantee is "the per-card slice never
+            # exceeds the source slice" (new_seq / cp_new <= old_seq / cp),
+            # i.e. cp_new >= cp / factor.  Flooring CP=3 at factor=2 to 1
+            # would grow the slice from old_seq/3 to old_seq/2 and can OOM.
             cp_new, remainder = divmod(cp, factor)
-            cp_new = max(cp_new, 1)
             if remainder:
+                cp_new += 1
                 warnings.append(
                     f"序列长度缩小 {factor} 倍但源 CP={cp} 不能被整除，"
-                    f"CP 取下整为 {cp_new}（每卡序列片段比按比例缩短的值"
-                    f"更长一点，显存只会更省，不影响正确性）"
+                    f"CP 取上整为 {cp_new}，保证每卡序列片段不超过源配置"
+                    f"（片段比按比例缩短的值更短一点，显存只会更省）"
                 )
+            cp_new = max(cp_new, 1)
 
         if sep > 1 and cp_new > 1:
             return (
