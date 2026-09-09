@@ -450,12 +450,16 @@ class GPTEmbedding(FleetLayer):
             decoder_input = inspect_tensor(
                 "embedding_output", -1, decoder_input
             )
-            # Padding-Token is 0，avoiding Grad updating (ernie_core fill_feature func）
+            # IEEE alignment keeps shifted MTP embeddings and routing the
+            # same across EP/TP layouts, including the embedding of token 0.
             if (
                 self.config.expert_model_parallel_size > 1
                 and self.config.tensor_model_parallel_size < 2
-                or self.config.gpt_model_use_experimental_version
-            ):
+                and not (
+                    ieee_kernel_enabled()
+                    and getattr(self.config, "use_accuracy_compatible", False)
+                )
+            ) or self.config.gpt_model_use_experimental_version:
                 pad_token_id = getattr(self.config, "pad_token_id", 0)
                 if pad_token_id is None:
                     pad_token_id = 0

@@ -211,5 +211,105 @@ class TestGPTEmbeddingMTPCarrierTail(unittest.TestCase):
         )
 
 
+class TestGPTEmbeddingEPPaddingPolicy(unittest.TestCase):
+    """EP>1&&TP<2 pad-zero/mask is skipped only under IEEE+UAC."""
+
+    def _nonzero_embed(self, emb):
+        def _embed(input_ids=None, position_ids=None):
+            ids_f = input_ids.astype("float32").unsqueeze(-1)
+            return paddle.concat(
+                [ids_f, ids_f + 1.0, ids_f + 2.0, ids_f + 3.0], axis=-1
+            )
+
+        emb.embedding = _embed
+        emb.config.use_erndata = False
+        emb.config.separate_mtp_input = False
+        emb.config.layer_types = ()
+        return emb
+
+    def _ids(self):
+        return paddle.to_tensor(
+            [[11, PAD_TOKEN_ID, 13, PAD_TOKEN_ID]], dtype="int64"
+        ).cuda()
+
+    def _run(
+        self,
+        *,
+        ep,
+        tp,
+        ieee,
+        uac,
+        experimental=False,
+        num_nextn=0,
+    ):
+        emb, _ = _make_embedding(
+            use_accuracy_compatible=uac,
+            num_nextn_predict_layers=num_nextn,
+        )
+        emb = self._nonzero_embed(emb)
+        emb.config.expert_model_parallel_size = ep
+        emb.config.tensor_model_parallel_size = tp
+        emb.config.gpt_model_use_experimental_version = experimental
+        ids = self._ids()
+        env = {"MODEL_REPRO_IEEE_KERNEL": "1" if ieee else "0"}
+        with (
+            patch.dict(os.environ, env),
+            patch(
+                "paddlefleet.models.gpt.gpt_embedding.get_context_parallel_world_size",
+                return_value=1,
+            ),
+        ):
+            out = emb.forward(dict_args={"input_ids": ids})
+        hidden = out["hidden_states"]
+        pad = ids == PAD_TOKEN_ID
+        pad_h = hidden[pad]
+        kept_h = hidden[~pad]
+        has_mask = "input_ids" in out
+        return hidden, pad_h, kept_h, has_mask, out.get("input_ids"), ids
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_ep2_tp1_ieee_uac_retains_padding_and_skips_mask(self):
+        hidden, pad_h, kept_h, has_mask, mask, ids = self._run(
+            ep=2, tp=1, ieee=True, uac=True
+        )
+        self.assertFalse(has_mask)
+        self.assertIsNone(mask)
+        self.assertTrue(bool((pad_h.abs().sum(axis=-1) > 0).all()))
+        self.assertTrue(bool((kept_h.abs().sum(axis=-1) > 0).all()))
+
+    def test_ep2_tp1_ieee_off_or_uac_off_zeros_and_masks(self):
+        for ieee, uac in ((False, True), (True, False)):
+            with self.subTest(ieee=ieee, uac=uac):
+                hidden, pad_h, kept_h, has_mask, mask, ids = self._run(
+                    ep=2, tp=1, ieee=ieee, uac=uac
+                )
+                self.assertTrue(has_mask)
+                self.assertTrue((mask == ids).all())
+                self.assertEqual(float(pad_h.abs().sum()), 0.0)
+                self.assertTrue(bool((kept_h.abs().sum(axis=-1) > 0).all()))
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_experimental_still_zeros_and_masks_under_ieee_uac(self):
+        hidden, pad_h, kept_h, has_mask, mask, ids = self._run(
+            ep=2, tp=1, ieee=True, uac=True, experimental=True
+        )
+        self.assertTrue(has_mask)
+        self.assertTrue((mask == ids).all())
+        self.assertEqual(float(pad_h.abs().sum()), 0.0)
+        self.assertTrue(bool((kept_h.abs().sum(axis=-1) > 0).all()))
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_adjacent_topologies_unaffected(self):
+        for ep, tp in ((1, 1), (1, 2), (2, 2)):
+            with self.subTest(ep=ep, tp=tp):
+                hidden, pad_h, kept_h, has_mask, mask, ids = self._run(
+                    ep=ep, tp=tp, ieee=True, uac=True
+                )
+                self.assertFalse(has_mask)
+                self.assertIsNone(mask)
+                self.assertTrue(bool((pad_h.abs().sum(axis=-1) > 0).all()))
+                self.assertTrue(bool((kept_h.abs().sum(axis=-1) > 0).all()))
+
+
 if __name__ == "__main__":
     unittest.main()

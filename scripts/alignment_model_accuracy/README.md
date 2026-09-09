@@ -45,3 +45,20 @@ bash setup_venvs.sh
    `WORKSPACE_DIR` 的写法，指向本目录）。
 2. 在 `run_alignment_test.sh` 的 `CASES` 数组里加一行
    `"<CaseName> ./<CaseName>/run_paddle_xxx.sh ./<CaseName>/run_torch_xxx.sh"`。
+
+## GLM-5.2 的 IEEE EP2/TP1 对齐配置
+
+GLM-5.2 在 `use_accuracy_compatible: true` 且
+`MODEL_REPRO_IEEE_KERNEL=1` 时，保留 padding token 的 embedding 与 MoE routing，
+使 MTP 的移位输入在 EP/TP 布局之间一致；实验版模型仍沿用其 padding 策略。
+
+使用 PaddleFormers 的 deferred token normalization 路径验证 EP2/TP1/PP2 时，
+显式设置以下现有训练参数：
+
+```yaml
+hybrid_parallel_expert_grad_scale: 1.0
+```
+
+该布局下自动值 `TP * CP / EP` 为 `0.5`，会在 token normalization 之前额外
+缩放 routed expert 梯度。这里的显式配置保留已经对齐的原始专家梯度，之后由
+有效 token 数完成归一化。
