@@ -43,6 +43,14 @@ export FLAGS_cudnn_deterministic=1
 # single GPU, so the concurrent files share it.
 workers="${PYTEST_WORKERS:-4}"
 
+# Validated before it reaches xargs. A non-numeric value makes xargs fail
+# immediately without running anything, and 0 means "no concurrency limit" in
+# GNU xargs -- 600 pytest processes at once on one GPU.
+if ! [[ "$workers" =~ ^[1-9][0-9]*$ ]]; then
+    echo -e "::error:: \033[31mPYTEST_WORKERS must be a positive integer, got '$workers'\033[0m"
+    exit 1
+fi
+
 test_files=()
 for test_file in $(find $test_dir -type f -name "test_*.py"); do
     filename=$(basename "$test_file")
@@ -69,12 +77,24 @@ fi
 # because $workers concurrent processes would interleave into something
 # unreadable. Logs of failing files are dumped at the end; passing files just
 # print one status line, and their log is left on disk.
-status_dir=$(mktemp -d)
+status_dir=$(mktemp -d) || exit 1
 trap 'rm -rf "$status_dir"' EXIT
+
+# Per-file log and marker names are derived from the whole path, not the
+# basename: 22 basenames occur in more than one directory under
+# $test_dir, and two of those running at once would write the same file.
+slug_for() {
+    local p="${1#./}"
+    p="${p#"$test_dir/"}"
+    p="${p%.py}"
+    printf '%s' "${p//\//_}"
+}
 
 run_one_test() {
     local test_file="$1"
-    local log="./$(basename "${test_file%.*}")_single_card.log"
+    local slug
+    slug=$(slug_for "$test_file")
+    local log="./${slug}_single_card.log"
     echo "Running single card test: $test_file"
     # --parallel-mode: several `coverage run` processes are alive at once, so
     # each needs its own data file. Workflows that consume the data already run
@@ -85,17 +105,23 @@ run_one_test() {
         pytest -s "$test_file" >"$log" 2>&1
     fi
     local exit_code=$?
+    # Written for every file, pass or fail, so the parent can tell "all green"
+    # apart from "xargs never got round to this file".
+    echo "$test_file" >"$status_dir/$slug.done"
     if [ $exit_code -ne 0 ]; then
-        echo "$test_file" >"$status_dir/$(basename "$test_file").failed"
+        echo "$test_file" >"$status_dir/$slug.failed"
         echo "Test FAILED: $test_file, see log for details..."
     fi
     return $exit_code
 }
-export -f run_one_test
-export status_dir WITH_COVERAGE
+export -f run_one_test slug_for
+export status_dir WITH_COVERAGE test_dir
 
 printf '%s\n' "${test_files[@]}" |
     xargs -P "$workers" -n 1 bash -c 'run_one_test "$0"'
+xargs_code=$?
+
+ran_count=$(find "$status_dir" -name '*.done' | wc -l | tr -d '[:space:]')
 
 failed_tests=()
 for marker in "$status_dir"/*.failed; do
@@ -107,11 +133,28 @@ for test_file in "${failed_tests[@]}"; do
     echo "--------------------------------------"
     echo -e "\033[31mLog of failed test: $test_file\033[0m"
     echo "--------------------------------------"
-    cat "./$(basename "${test_file%.*}")_single_card.log"
+    cat "./$(slug_for "$test_file")_single_card.log"
 done
 
 echo "======================================"
-echo -e "\033[34mTest files executed: $run_count\033[0m"
+echo -e "\033[34mTest files executed: $ran_count / $run_count\033[0m"
+
+# The completion markers, not xargs' exit code, are the primary invariant: the
+# code for "an invocation failed" is 123 on GNU xargs but 1 on BSD, and 1 is
+# also GNU's code for "xargs itself failed" (an invalid -P, for one). A short
+# count covers every one of those cases -- nothing launched, launched and gave
+# up part way -- and cannot be confused with a green run.
+if [ "$ran_count" -ne "$run_count" ]; then
+    echo -e "::error:: \033[31mOnly $ran_count of $run_count test files ran (xargs exited $xargs_code)\033[0m"
+    echo "======================================"
+    exit 1
+fi
+if [ "$xargs_code" -ne 0 ] && [ ${#failed_tests[@]} -eq 0 ]; then
+    echo -e "::error:: \033[31mxargs exited $xargs_code but no test file reported a failure\033[0m"
+    echo "======================================"
+    exit 1
+fi
+
 if [ ${#failed_tests[@]} -eq 0 ]; then
     echo -e "\033[32mAll single card tests passed!\033[0m"
     echo "======================================"
