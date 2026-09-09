@@ -1018,6 +1018,26 @@ class TestContextParallelGuards(unittest.TestCase):
         with self.assertRaises(NotImplementedError):
             kda(hidden_states=paddle.randn([1, SEQ_LENGTH, HIDDEN_SIZE]))
 
+    def test_tf32x3_affine_chain_reaches_cp_context(self):
+        """The switch is only read here, so it must land on build_cp_context."""
+
+        class _Stop(Exception):
+            pass
+
+        for flag in (False, True):
+            kda = self._kda()
+            kda.config.linear_cp_use_tf32x3_affine_chain = flag
+            with (
+                patch.object(
+                    kda_mod, "build_cp_context", side_effect=_Stop
+                ) as spy,
+                self.assertRaises(_Stop),
+            ):
+                kda(hidden_states=paddle.randn([1, SEQ_LENGTH, HIDDEN_SIZE]))
+            self.assertIs(
+                spy.call_args.kwargs["use_tf32x3_affine_chain"], flag
+            )
+
 
 def _build_gpt_embedding(config):
     """GPTEmbedding with a plain nn.Embedding and no rope (no fleet init needed)."""
