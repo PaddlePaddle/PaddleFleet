@@ -1451,6 +1451,10 @@ class TestLinearAttnCpModeConfig(unittest.TestCase):
     ``ContextParallelScatterOp`` dispatches on ``mode.startswith("contiguous")``
     and its *else* branch silently hands out the dualchunk layout instead of
     raising.  A rejected config is the only place that combination can be caught.
+
+    The layout check only fires for ``context_parallel_size > 1``: at cp=1 there
+    is no head swap to protect (``cp_head_a2a`` needs ``cp_size > 1``), so the
+    tests that exercise it have to ask for a CP group.
     """
 
     def test_default_is_chunkwise(self):
@@ -1467,21 +1471,33 @@ class TestLinearAttnCpModeConfig(unittest.TestCase):
             TransformerConfig(
                 linear_cp_mode="headwise",
                 cp_balance_mode="dualchunk_allgather",
+                context_parallel_size=2,
             )
         self.assertIn("contiguous", str(caught.exception))
+
+    def test_headwise_without_cp_is_unconstrained(self):
+        """cp=1 disables the swap, so it must not constrain the token layout."""
+        config = TransformerConfig(
+            linear_cp_mode="headwise", cp_balance_mode="dualchunk_allgather"
+        )
+        self.assertEqual(config.linear_cp_mode, "headwise")
 
     def test_headwise_accepts_contiguous_layouts(self):
         for balance in ("contiguous_allgather", "contiguous_a2a"):
             with self.subTest(cp_balance_mode=balance):
                 config = TransformerConfig(
-                    linear_cp_mode="headwise", cp_balance_mode=balance
+                    linear_cp_mode="headwise",
+                    cp_balance_mode=balance,
+                    context_parallel_size=2,
                 )
                 self.assertEqual(config.linear_cp_mode, "headwise")
                 self.assertEqual(config.cp_balance_mode, balance)
 
     def test_chunkwise_still_allows_dualchunk(self):
         """The new check must not tighten the pre-existing default path."""
-        config = TransformerConfig(cp_balance_mode="dualchunk_allgather")
+        config = TransformerConfig(
+            cp_balance_mode="dualchunk_allgather", context_parallel_size=2
+        )
         self.assertEqual(config.cp_balance_mode, "dualchunk_allgather")
 
 
