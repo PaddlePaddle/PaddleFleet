@@ -1,0 +1,86 @@
+### data
+train_dataset_type: erniekit
+eval_dataset_type: erniekit
+train_dataset_path: /home/.cache/PaddleFormers/GLM-5-bf16_1Card/alignment_paddle.jsonl
+train_dataset_prob: "1.0"
+eval_dataset_path: /home/.cache/PaddleFormers/GLM-5-bf16_1Card/alignment_paddle.jsonl
+eval_dataset_prob: "1.0"
+max_seq_len: 8192
+dataset_type: map
+packing: false
+truncate_packing: false
+mix_strategy: concat
+random_shuffle: false
+dataloader_shuffle: false
+use_template: false
+dataloader_num_workers: 4
+
+### model
+model_name_or_path: /home/.cache/PaddleFormers/GLM-5-bf16_1Card
+# GLM-5 结构开关：DSA(MLA + indexer) + QK norm，与 MG 侧同源实现对齐
+multi_latent_attention: true
+use_qk_norm: true
+# 对齐用的 tiny ckpt 只取前 3 层
+num_hidden_layers: 3
+num_empty_layers_add_in_head: 0
+num_empty_layers_add_in_tail: 0
+
+### finetuning
+stage: PT
+fine_tuning: full
+seed: 42
+do_train: true
+do_eval: false
+per_device_eval_batch_size: 1
+per_device_train_batch_size: 1
+num_train_epochs: 1
+# 单 step md5 对齐：只校验首个 step 的前向 loss md5。
+# 多 step 后 kv_b_proj in_grad / k_pos_emb 反向的实现差异会累积进 loss，
+# 会被严格 md5 判为不一致（详见 README「判定口径」）。
+max_steps: 1
+eval_iters: 10000
+eval_steps: 10000
+evaluation_strategy: steps
+save_steps: 100000
+save_strategy: steps
+logging_steps: 1
+gradient_accumulation_steps: 1
+logging_dir: ./logs/paddle/default/vdl
+output_dir: ./logs/paddle/default/trainer
+disable_tqdm: true
+eval_accumulation_steps: 16
+
+# train - 与 MG 对齐
+learning_rate: 5.0e-5
+min_lr: 1.0e-5
+lr_scheduler_type: cosine
+warmup_steps: 0
+weight_decay: 0
+adam_beta2: 0.95
+# 单卡单 step 不做裁剪，避免两侧 clip 实现差异污染 loss
+max_grad_norm: 0.0
+
+# performance - 单卡 TP=1 / EP=1 / PP=1 与 MG 对齐
+tensor_model_parallel_size: 1
+pipeline_model_parallel_size: 1
+sequence_parallel: false
+use_expert_parallel: false
+expert_model_parallel_size: 1
+# 关重计算，避免重算路径引入非确定性
+recompute_granularity: none
+fp32_residual_connection: false
+bf16: true
+amp_master_grad: true
+fp16_opt_level: O2
+save_checkpoint_format: flex_checkpoint
+load_checkpoint_format: flex_checkpoint
+continue_training: true
+
+# MoE - 与 MG 对齐
+moe_router_load_balancing_type: seq_aux_loss
+router_aux_loss_coef: 1.0e-4
+moe_router_force_load_balancing: false
+moe_deep_gemm: false
+
+# 精度对齐锚点：打印 per_token_loss / final_loss 的 md5，供 compare_loss.py 逐 step 比对
+use_accuracy_compatible: true
