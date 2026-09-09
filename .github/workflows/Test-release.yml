@@ -608,7 +608,7 @@ jobs:
           python -m pip install --upgrade pip
           cd PaddleFleet
           git config --global --add safe.directory /workspace/PaddleFleet
-          git log -1
+          # git log -1
           sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
           sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           pip install librosa==0.11.0
@@ -809,7 +809,7 @@ jobs:
           cd PaddleFleet
           cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
           git config --global --add safe.directory /workspace/PaddleFleet
-          git log -1
+          # git log -1
           pip install librosa==0.11.0
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -1253,7 +1253,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          git log -1
+          # git log -1
           pip install librosa==0.11.0
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
