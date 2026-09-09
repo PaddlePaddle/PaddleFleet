@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+from bisect import bisect_right
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -249,6 +250,76 @@ class GPTModel(PipelineLayer):
 
         # Tie GPTMTPLMHead weight to GPTMainLMHead weight on the same stage.
         self._tie_mtp_lm_head_weight()
+
+    def _validate_dsa_pipeline_sharing(self):
+        """Reject shared indexers whose producer lives in another PP segment.
+
+        Segmentation is already resolved here, but no local layers have been
+        constructed. Inspect the global descriptors so every rank rejects the
+        same unsupported layout before allocating model parameters or running
+        pipeline collectives. A process-local holder cannot carry top-k across
+        ranks, or safely retain it across interleaved micro-batch segments.
+        """
+        from paddlefleet.transformer.dsa_attention import (
+            DSAttention,
+            decoder_dsa_logical_layer,
+            resolve_dsa_indexer_layout,
+        )
+
+        producers = {}
+        consumers = []
+        for index, descriptor in enumerate(self._layers_desc):
+            spec = getattr(descriptor, "layer_spec", None)
+            sublayers = getattr(spec, "sublayers_spec", None)
+            mtp_transformer = getattr(sublayers, "transformer_layer", None)
+            if mtp_transformer is not None:
+                if self.config.mtp_load_weight_only:
+                    continue
+                spec = mtp_transformer
+                sublayers = spec.sublayers_spec
+            attention = getattr(sublayers, "self_attn", None)
+            core = getattr(
+                getattr(attention, "sublayers_spec", None),
+                "core_attention",
+                None,
+            )
+            if getattr(core, "layer", None) is not DSAttention:
+                continue
+
+            kwargs = spec.extra_kwargs
+            layer_number = kwargs["layer_number"]
+            is_mtp = kwargs.get("is_mtp_layer", False)
+            _, skip_topk, _, source = resolve_dsa_indexer_layout(
+                self.config, layer_number, is_mtp
+            )
+            segment = bisect_right(self.segment_parts, index) - 1
+            if skip_topk:
+                consumers.append((layer_number, is_mtp, source, segment))
+            elif not is_mtp:
+                logical_layer = decoder_dsa_logical_layer(
+                    self.config, layer_number
+                )
+                producers[logical_layer] = segment
+
+        for layer_number, is_mtp, source, segment in consumers:
+            producer_segment = producers.get(source)
+            if producer_segment != segment:
+                kind = "MTP" if is_mtp else "decoder"
+                raise ValueError(
+                    f"DSA shared {kind} layer {layer_number} is in pipeline "
+                    f"segment {segment}, but decoder top-k producer {source} "
+                    f"is in segment {producer_segment}. Cross-segment DSA "
+                    "top-k sharing is not supported. Co-locate the producer "
+                    "and consumer in one segment or configure full indexers."
+                )
+
+    def _build_layer(self):
+        self._validate_dsa_pipeline_sharing()
+        return super()._build_layer()
+
+    def _build_chunked_layer(self):
+        self._validate_dsa_pipeline_sharing()
+        return super()._build_chunked_layer()
 
     def _get_weight_only_params(self):
         """Get all parameters marked with is_weight_only_mtp flag."""
