@@ -1035,9 +1035,7 @@ class TestContextParallelGuards(unittest.TestCase):
                 self.assertRaises(_Stop),
             ):
                 kda(hidden_states=paddle.randn([1, SEQ_LENGTH, HIDDEN_SIZE]))
-            self.assertIs(
-                spy.call_args.kwargs["use_tf32x3_affine_chain"], flag
-            )
+            self.assertIs(spy.call_args.kwargs["use_tf32x3_affine_chain"], flag)
 
 
 class TestCpTf32x3ConfigDefault(unittest.TestCase):
