@@ -1506,7 +1506,7 @@ jobs:
 
   coverage_check:
     name: Coverage Upload And Check
-    needs: [multi-card_test, single_card_test, integration-test-H20-multi-card, integration-test-a100, integration-test-H20-single-card, unittest-gpu-ci, check-bypass, coverage_approval]
+    needs: [multi-card_test, single_card_test, integration-test-H20-multi-card, integration-test-a100, integration-test-H20-single-card, check-bypass, coverage_approval]
     if: ${{ always() && needs.check-bypass.outputs.can-skip != 'true' && needs.coverage_approval.outputs.can-skip != 'true' && needs.single_card_test.result != 'skipped' }}
     runs-on:
       group: APPROVAL
@@ -1537,7 +1537,6 @@ jobs:
           h20_multi_coverage.xml:h20-multi/coverage.xml
           h20_single_coverage.xml:h20-single/coverage.xml
           a100_coverage.xml:a100/coverage.xml
-          unittest_coverage.xml:unittest-gpu/coverage.xml
           "
           base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}"
 
@@ -1582,7 +1581,6 @@ jobs:
             "h20_multi_coverage.xml"
             "h20_single_coverage.xml"
             "a100_coverage.xml"
-            "unittest_coverage.xml"
           )
 
           # 检查哪些文件存在
@@ -1601,14 +1599,12 @@ jobs:
       - name: filter coverage files and remove backup files
         if: always()
         run: |
-
           COVERAGE_FILES=(
             "multi_coverage.xml"
             "single_coverage.xml"
             "h20_multi_coverage.xml"
             "h20_single_coverage.xml"
             "a100_coverage.xml"
-            "unittest_coverage.xml"
           )
 
           for COVERAGE_FILE in "${COVERAGE_FILES[@]}"; do
@@ -1630,8 +1626,7 @@ jobs:
             ./h20_multi_coverage.xml,
             ./h20_single_coverage.xml,
             ./h20_qwen_coverage.xml,
-            ./a100_coverage.xml,
-            ./unittest_coverage.xml
+            ./a100_coverage.xml
           flags: coverage_combine
           name: "${{ env.TASK }}-${{ github.run_id }}"
           fail_ci_if_error: true
@@ -1818,8 +1813,6 @@ jobs:
         env:
           home_path: ${{ github.workspace }}/../../..
           bos_file: ${{ github.workspace }}/../../../bos/BosClient.py
-          java_file: ${{ github.workspace }}/../../../jdk1.8.0_351
-          allure_file: ${{ github.workspace }}/../../../allure-2.19.0/bin/allure
         run: |
           docker exec -t "$container_name" /bin/bash -c '
           source ${work_dir}/../../../proxy_huggingface
@@ -1829,37 +1822,13 @@ jobs:
             mkdir -p ${{ env.home_path }}/bos
             tar xf ${{ env.home_path }}/bos_new.tar.gz -C ${{ env.home_path }}/bos
           fi
-          if [ ! -f "${{ env.java_file }}" ]; then
-            wget -q --no-proxy -O ${{ env.home_path }}/java_linux.tar.gz https://paddle-qa.bj.bcebos.com/java/java_linux.tar.gz --no-check-certificate
-            tar xf ${{ env.home_path }}/java_linux.tar.gz -C ${{ env.home_path }}
-          fi
-          if [ ! -f "${{ env.allure_file }}" ]; then
-            wget -q --no-proxy -O ${{ env.home_path }}/allure-2.19.0.zip https://xly-devops.bj.bcebos.com/tools/allure-2.19.0.zip --no-check-certificate
-            unzip -q ${{ env.home_path }}/allure-2.19.0.zip -d ${{ env.home_path }}
-          fi
           bos_prefix="${PR_ID}/${COMMIT_ID}"
-          cd /workspace/PaddleFleet
-          if [ -f "${PYTEST_EXECUTE_FLAG_FILE}" ] && [ -f coverage.xml ]; then
-            python ${{ env.bos_file }} coverage.xml paddle-github-action/${{ github.repository }}/pull/${PR_ID}/${COMMIT_ID}/unittest-gpu
-            echo "coverage: https://paddle-github-action.bj.bcebos.com/${{ github.repository }}/pull/${PR_ID}/${COMMIT_ID}/unittest-gpu/coverage.xml"
-          fi
           cd /workspace/PaddleFleet/unittest_logs
           for FILE in *; do
             [ -f "$FILE" ] || continue
             python ${{ env.bos_file }} "$FILE" paddle-github-action/PR/PaddleFleet/ci-unittest-gpu/${bos_prefix}/logs
             echo "$FILE: https://paddle-github-action.bj.bcebos.com/PR/PaddleFleet/ci-unittest-gpu/${bos_prefix}/logs/$FILE"
           done
-          cd /workspace/PaddleFleet
-          export JAVA_HOME="${{ env.java_file }}"
-          export JRE_HOME="${JAVA_HOME}/jre"
-          export CLASSPATH="${JAVA_HOME}/lib"
-          export PATH="${JAVA_HOME}/bin:${PATH}"
-          if [ -d result ]; then
-            ${{ env.allure_file }} generate result -o report
-            tar -czf report.tar.gz report
-            python ${{ env.bos_file }} report.tar.gz paddle-github-action/PR/PaddleFleet/ci-unittest-gpu/${bos_prefix}/logs
-            echo "report: https://paddle-github-action.bj.bcebos.com/PR/PaddleFleet/ci-unittest-gpu/${bos_prefix}/logs/report.tar.gz"
-          fi
           '
       - name: Set pytest execute flag output
         if: always()
