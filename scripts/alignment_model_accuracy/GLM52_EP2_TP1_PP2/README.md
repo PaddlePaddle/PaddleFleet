@@ -13,15 +13,20 @@ standard wheels, prepare matching environments explicitly and set
 does not change the shared dependency installer or other models' environments.
 
 The default model cache is
-`/home/.cache/PaddleFormers/GLM-5.2-minimum-complete-bf16`.
-Provide config.json, model.safetensors, model.safetensors.index.json, tokenizer
-files, generation_config.json, LICENSE and extraction_manifest.json from the
-official subset. Its source revision is
-`zai-org/GLM-5.2@b4734de4facf877f85769a911abafc5283eab3d9`.
-The extracted weight file SHA256 is
-`53ad1565fe8173420db4b3ef53db3bddef0afda4b43f859aacf16826700916c2`.
-AI Studio repository creation, upload and CI cache provisioning remain external
-prerequisites; adding this case does not complete them.
+`/home/.cache/PaddleFormers/GLM-5.2-BF16-minimal`.
+Use the uploaded [PaddleFormers/GLM-5.2-BF16-minimal model](https://git.aistudio.baidu.com/PaddleFormers/GLM-5.2-BF16-minimal.git),
+revision `685a4b891d004a64bd2f1fef320deeffe162af02`. Populate the cache using
+AI Studio's Git LFS download procedure, including config, both safetensors
+shards, their index, tokenizer files, generation config, license and manifests.
+A single `model.safetensors` is also supported; the native loaders validate the
+selected checkpoint and its indexed shards.
+
+The source is `zai-org/GLM-5.2@b4734de4facf877f85769a911abafc5283eab3d9`.
+Both uploaded shards preserve all 187 tensors from the original extracted
+checkpoint (`53ad1565fe8173420db4b3ef53db3bddef0afda4b43f859aacf16826700916c2`)
+without changing names, shapes, dtypes or bytes. `upload_manifest.json` records
+the individual file checksums. CI cache provisioning and matching companion
+builds are still required; adding this case does not provision them.
 
 Data reuses the existing MinimaxV2.5_EP2 cache:
 `/home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP/alignment_paddle.jsonl` and

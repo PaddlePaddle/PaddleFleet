@@ -19,17 +19,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 VENV_ROOT="${GLM52_VENV_ROOT:-${WORKSPACE_DIR}/venv}"
-MODEL_DIR="${GLM52_MODEL_DIR:-/home/.cache/PaddleFormers/GLM-5.2-minimum-complete-bf16}"
+MODEL_DIR="${GLM52_MODEL_DIR:-/home/.cache/PaddleFormers/GLM-5.2-BF16-minimal}"
 TOKENIZER_DIR="${GLM52_TOKENIZER_DIR:-${MODEL_DIR}}"
 DATA_DIR="${GLM52_DATA_DIR:-/home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP}"
 RUN_TAG="${ALIGNMENT_RUN_TAG:-$(date -u +%Y%m%d-%H%M%S)-$$}"
 RUN_DIR="${SCRIPT_DIR}/results/${RUN_TAG}/paddle"
 
-for required in "${MODEL_DIR}/config.json" "${MODEL_DIR}/model.safetensors" \
+for required in "${MODEL_DIR}/config.json" \
     "${TOKENIZER_DIR}/tokenizer.json" "${DATA_DIR}/alignment_paddle.jsonl" \
     "${VENV_ROOT}/paddle/bin/activate"; do
     [[ -f "${required}" ]] || { echo "missing GLM52 prerequisite: ${required}" >&2; exit 1; }
 done
+if [[ ! -f "${MODEL_DIR}/model.safetensors" && ! -f "${MODEL_DIR}/model.safetensors.index.json" ]]; then
+    echo "missing GLM52 weights: expected model.safetensors or model.safetensors.index.json in ${MODEL_DIR}" >&2
+    exit 1
+fi
 [[ ! -e "${RUN_DIR}" ]] || { echo "run directory already exists: ${RUN_DIR}" >&2; exit 1; }
 mkdir -p "${RUN_DIR}"
 # shellcheck disable=SC1091

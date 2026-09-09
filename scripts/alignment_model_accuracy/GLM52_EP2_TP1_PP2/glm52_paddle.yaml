@@ -2,8 +2,8 @@
 # TP1 PP2 EP2, four GPUs. Native loss comparison requires all 100 steps.
 stage: SFT
 fine_tuning: full
-model_name_or_path: /home/.cache/PaddleFormers/GLM-5.2-minimum-complete-bf16
-tokenizer_name_or_path: /home/.cache/PaddleFormers/GLM-5.2-minimum-complete-bf16
+model_name_or_path: /home/.cache/PaddleFormers/GLM-5.2-BF16-minimal
+tokenizer_name_or_path: /home/.cache/PaddleFormers/GLM-5.2-BF16-minimal
 continue_training: true
 load_via_cpu: false
 num_nextn_predict_layers: 1
