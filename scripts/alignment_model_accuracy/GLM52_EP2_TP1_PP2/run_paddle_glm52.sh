@@ -23,7 +23,7 @@ MODEL_DIR="${GLM52_MODEL_DIR:-/home/.cache/PaddleFormers/GLM-5.2-minimum-complet
 TOKENIZER_DIR="${GLM52_TOKENIZER_DIR:-${MODEL_DIR}}"
 DATA_DIR="${GLM52_DATA_DIR:-/home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP}"
 RUN_TAG="${ALIGNMENT_RUN_TAG:-$(date -u +%Y%m%d-%H%M%S)-$$}"
-RUN_DIR="${WORKSPACE_DIR}/logs/paddle/${RUN_TAG}"
+RUN_DIR="${SCRIPT_DIR}/results/${RUN_TAG}/paddle"
 
 for required in "${MODEL_DIR}/config.json" "${MODEL_DIR}/model.safetensors" \
     "${TOKENIZER_DIR}/tokenizer.json" "${DATA_DIR}/alignment_paddle.jsonl" \
@@ -42,7 +42,7 @@ unset LOCAL_RANK LOCAL_WORLD_SIZE WORLD_SIZE
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 export NPROC_PER_NODE=4 NNODES=1 NODE_RANK=0 RANK=0 MASTER_ADDR=127.0.0.1
 # shellcheck disable=SC1091
-source "${WORKSPACE_DIR}/_pick_master_port.sh"
+source "${SCRIPT_DIR}/_pick_master_port.sh"
 export CUBLAS_WORKSPACE_CONFIG=:4096:8
 export FLAGS_use_accuracy_compatible_kernel=1
 export FLAGS_embedding_deterministic=1 FLAGS_cudnn_deterministic=1

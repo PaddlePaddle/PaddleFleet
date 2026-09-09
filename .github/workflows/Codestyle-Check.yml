@@ -4,7 +4,6 @@ on:
   pull_request:
     branches:
       - develop
-      - glm52-structure
       - release/**
 
 jobs:

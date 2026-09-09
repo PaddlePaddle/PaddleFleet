@@ -32,8 +32,7 @@ export NPROC_PER_NODE=2
 export NNODES="${NNODES:-1}"
 export NODE_RANK="${NODE_RANK:-0}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
-# shellcheck disable=SC1091
-source "${WORKSPACE_DIR}/_pick_master_port.sh"
+export MASTER_PORT="${MASTER_PORT:-29502}"
 
 export CUBLAS_WORKSPACE_CONFIG=":4096:8"
 # 本机 NVLS multicast 内存注册失败（CUDA error 401），NCCL init 会直接崩：
@@ -64,8 +63,6 @@ mkdir -p "${TORCH_LOG_DIR}" "${MG_TENSOR_DEBUG_DIR}"
 ARGS=(
     ### model
     --model /home/.cache/PaddleFormers/GLM-4.5-Air-tiny-2L
-    # Match Paddle MTP=0; the HF config otherwise enables a random MTP layer.
-    --mtp_num_layers 0
 
     ### data
     --dataset /home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP/alignment_torch.jsonl

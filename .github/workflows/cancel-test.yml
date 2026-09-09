@@ -3,7 +3,7 @@ name: Test
 on:
   pull_request:
     types: [closed]
-    branches: [develop, glm52-structure, release/**]
+    branches: [develop, release/**]
 
 permissions: read-all
 
