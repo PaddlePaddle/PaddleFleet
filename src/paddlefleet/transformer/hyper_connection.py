@@ -885,7 +885,9 @@ class HyperConnectionModule(nn.Layer):
 
     # ==================== Fused kernel placeholder ====================
 
-    def bda_span_pays_off(self, dropout_prob: float, training: bool) -> bool:
+    def bda_span_pays_off(
+        self, dropout_prob: float, training: bool, bias=None
+    ) -> bool:
         """Whether wrapping ``fused_h_res_h_post_bda`` in a recompute span saves.
 
         Two things are worth hiding from the live set:
@@ -907,6 +909,10 @@ class HyperConnectionModule(nn.Layer):
         if dropout_prob > 0.0 and training:
             return True
         if not self.config.high_precision_mhc:
+            return False
+        # Mirrors the ``fuse_cast`` predicate in fused_h_res_h_post_bda; keep the
+        # two in step, they decide the same thing from opposite ends.
+        if self._widen_in_kernel and bias is None:
             return False
         return not _use_accuracy_compatible_kernel()
 

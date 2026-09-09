@@ -1717,11 +1717,14 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             "training": self.training,
             "fused": self.config.bias_dropout_fusion,
         }
+        x, bias = layer_output_with_bias
         # Only wrap when the call actually retains something the span can hide;
         # ``bda_span_pays_off`` owns that predicate because it depends on which
-        # path ``fused_h_res_h_post_bda`` takes.
+        # path ``fused_h_res_h_post_bda`` takes. ``bias`` is part of that: it is
+        # half of the ``fuse_cast`` condition, and with the up-casts fused into
+        # the kernel the span has nothing left to hide.
         if not hyper_connection.bda_span_pays_off(
-            self.hidden_dropout_prob, self.training
+            self.hidden_dropout_prob, self.training, bias
         ):
             enable_recompute = False
         if not enable_recompute:
@@ -1733,8 +1736,6 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 **bda_kwargs,
             )
             return output, None
-
-        x, bias = layer_output_with_bias
 
         def _fused(h_res, original_residual, h_post, x, bias):
             return hyper_connection.fused_h_res_h_post_bda(
