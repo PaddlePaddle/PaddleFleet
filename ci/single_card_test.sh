@@ -38,11 +38,10 @@ is_disabled() {
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 
-# pytest-xdist worker count. The job holds a single GPU, so the workers share
-# it -- 4 is the value this change measures against the previous serial run.
+# How many test files run at the same time. Each one still gets its own pytest
+# process, exactly as before -- only the loop is parallel. The job holds a
+# single GPU, so the concurrent files share it.
 workers="${PYTEST_WORKERS:-4}"
-
-python -c "import xdist" 2>/dev/null || pip install pytest-xdist
 
 test_files=()
 for test_file in $(find $test_dir -type f -name "test_*.py"); do
@@ -55,42 +54,72 @@ for test_file in $(find $test_dir -type f -name "test_*.py"); do
 done
 
 run_count=${#test_files[@]}
-echo -e "\033[34mRunning $run_count single card test files on $workers workers\033[0m"
+echo -e "\033[34mRunning $run_count single card test files, $workers at a time\033[0m"
 
 if [ "$run_count" -eq 0 ]; then
     echo -e "\033[32mNo single card test to run.\033[0m"
     exit 0
 fi
 
-# One pytest invocation over every file, instead of one invocation per file:
-# the files are what parallelises. ``--dist loadfile`` keeps all tests of a file
-# inside one worker, because these suites set process-global paddle/fleet state
-# at import time and cannot be split mid-file.
+# One pytest process per test file, unchanged -- these suites set
+# process-global paddle/fleet state at import time and cannot share a process.
+# Only the loop is parallel now: `xargs -P` keeps $workers files in flight.
 #
-# ``-s`` is dropped -- xdist workers do not stream stdout back live -- and
-# ``-rA`` takes its place so the captured output of passing tests stays in the
-# report, which is where the printed MD5 baselines are read from.
-pytest_args=(
-    -n "$workers"
-    --dist loadfile
-    -rA
-    --junitxml=single_card.xml
-    "${test_files[@]}"
-)
-if [[ "${WITH_COVERAGE:-OFF}" == "ON" ]]; then
-    coverage run -m pytest "${pytest_args[@]}"
-else
-    pytest "${pytest_args[@]}"
-fi
-exit_code=$?
+# Output of each file goes to its own log instead of straight to stdout,
+# because $workers concurrent processes would interleave into something
+# unreadable. Logs of failing files are dumped at the end; passing files just
+# print one status line, and their log is left on disk.
+status_dir=$(mktemp -d)
+trap 'rm -rf "$status_dir"' EXIT
+
+run_one_test() {
+    local test_file="$1"
+    local log="./$(basename "${test_file%.*}")_single_card.log"
+    echo "Running single card test: $test_file"
+    # --parallel-mode: several `coverage run` processes are alive at once, so
+    # each needs its own data file. Workflows that consume the data already run
+    # `coverage combine`.
+    if [[ "${WITH_COVERAGE:-OFF}" == "ON" ]]; then
+        coverage run --parallel-mode -m pytest -s "$test_file" >"$log" 2>&1
+    else
+        pytest -s "$test_file" >"$log" 2>&1
+    fi
+    local exit_code=$?
+    if [ $exit_code -ne 0 ]; then
+        echo "$test_file" >"$status_dir/$(basename "$test_file").failed"
+        echo "Test FAILED: $test_file, see log for details..."
+    fi
+    return $exit_code
+}
+export -f run_one_test
+export status_dir WITH_COVERAGE
+
+printf '%s\n' "${test_files[@]}" |
+    xargs -P "$workers" -n 1 bash -c 'run_one_test "$0"'
+
+failed_tests=()
+for marker in "$status_dir"/*.failed; do
+    [ -e "$marker" ] || continue
+    failed_tests+=("$(cat "$marker")")
+done
+
+for test_file in "${failed_tests[@]}"; do
+    echo "--------------------------------------"
+    echo -e "\033[31mLog of failed test: $test_file\033[0m"
+    echo "--------------------------------------"
+    cat "./$(basename "${test_file%.*}")_single_card.log"
+done
 
 echo "======================================"
 echo -e "\033[34mTest files executed: $run_count\033[0m"
-if [ $exit_code -eq 0 ]; then
+if [ ${#failed_tests[@]} -eq 0 ]; then
     echo -e "\033[32mAll single card tests passed!\033[0m"
     echo "======================================"
 else
-    echo -e "::error:: \033[31mSome single card tests failed, see the pytest summary above.\033[0m"
+    echo -e "::error:: \033[31m${#failed_tests[@]} single card test files failed:\033[0m"
+    for test_file in "${failed_tests[@]}"; do
+        echo -e "::error:: \033[31m  $test_file\033[0m"
+    done
     echo "======================================"
     exit 1
 fi
