@@ -257,16 +257,39 @@ class TestBdaSpanPaysOff(unittest.TestCase):
     pays for a replay that saves nothing. Only the ``high_precision_mhc=True``
     branches are reachable now that the config rejects the low-precision mHC
     combination.
+
+    Without dropout the answer tracks what the BDA site actually pins: the span
+    is worth it only when the fp32 up-casts are materialized in Python, which is
+    exactly when ``fuse_cast`` in ``fused_h_res_h_post_bda`` is off.
     """
 
-    def test_high_precision_pays(self):
-        m = _module(use_fused_mhc=True, high_precision_mhc=True)
+    def test_python_upcasts_pay(self):
+        """No kernel widening -- the fp32 copies are live and worth hiding."""
+        m = _module(use_fused_mhc=False, high_precision_mhc=True)
+        self.assertFalse(m._widen_in_kernel)
         self.assertTrue(m.bda_span_pays_off(0.0, training=True))
+
+    def test_kernel_widening_without_bias_does_not_pay(self):
+        """``fuse_cast`` is on, so there is no fp32 copy left to hide."""
+        m = _module(use_fused_mhc=True, high_precision_mhc=True)
+        self.assertFalse(m.bda_span_pays_off(0.0, training=True))
+        self.assertFalse(m.bda_span_pays_off(0.0, training=True, bias=None))
+
+    def test_bias_opts_back_in(self):
+        """A bias makes the kernel decline ``fuse_cast``; the copies are back."""
+        m = _module(use_fused_mhc=True, high_precision_mhc=True)
+        bias = paddle.zeros([_C], dtype="float32")
+        self.assertTrue(m.bda_span_pays_off(0.0, training=True, bias=bias))
 
     def test_dropout_pays_too(self):
         """The mask is one byte per element of the [..., n*C] output."""
         m = _module(use_fused_mhc=True, high_precision_mhc=True)
         self.assertTrue(m.bda_span_pays_off(0.1, training=True))
+        self.assertTrue(
+            m.bda_span_pays_off(
+                0.1, training=True, bias=paddle.zeros([_C], dtype="float32")
+            )
+        )
 
 
 class TestSingleStreamInit(unittest.TestCase):
