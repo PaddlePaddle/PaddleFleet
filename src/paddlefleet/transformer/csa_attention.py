@@ -3486,7 +3486,7 @@ class CompressedSparseAttention(FleetLayer):
         *,
         position_offset: int = 0,
         q_positions: Tensor | None = None,
-    ) -> Tensor:
+    ) -> Tensor | tuple[Tensor, bool]:
         """Extension point for training-side Indexer Replay.
 
         PaddleFleet owns IndexCache's producer/served state machine, while
@@ -3495,6 +3495,12 @@ class CompressedSparseAttention(FleetLayer):
         hook is deliberately after IndexCache state materialization so Replay
         changes only the indices consumed by attention; it does not corrupt
         the producer state or multi-layer distillation tensors.
+
+        Overrides may return either the historical bare ``Tensor`` or
+        ``(Tensor, replay_applied)``.  The explicit boolean is what drives
+        ``lse_indexer_matches_topk``, so a Replay implementation that changes the
+        selected set must report it; see ``_apply_indexer_replay`` for how both
+        return shapes are normalized.
         """
         return compress_topk_idxs
 
