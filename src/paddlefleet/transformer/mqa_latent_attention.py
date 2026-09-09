@@ -777,11 +777,18 @@ class MQALatentAttention(FleetLayer):
         # ``test_block_sparse_dsa_gradcheck.py::TestDeterminism``); "tilelang"
         # (mqa_latent_sparse_bwd) is bitwise stable for identical inputs -- by
         # construction, not via ``FLAGS_cudnn_deterministic`` -- but ~14x slower
-        # on SM100. The forward is always FlashMLA regardless of this switch
-        # (the tilelang forward cannot accept d_qk=576, which is not a power of
-        # two). Default "cudnn" preserves the previous behaviour.
+        # on SM100. This switch only picks the *backward*; the tilelang forward
+        # cannot accept d_qk=576, which is not a power of two. Default "cudnn"
+        # preserves the previous behaviour.
         self.sparse_attn_backward_backend = str(
             getattr(config, "mqa_sparse_attn_backward_backend", "cudnn")
+        )
+        # Forward kernel: FlashMLA (default, every shape) or cuDNN Frontend's
+        # own DSA sparse prefill (cudnn-frontend PR #569). Unsupported shapes
+        # fall back to FlashMLA with a one-time warning, so this is safe to flip
+        # on for measurement.
+        self.sparse_attn_forward_backend = str(
+            getattr(config, "sparse_attn_forward_backend", "flash_mla")
         )
         # Learnable per-head attention-sink logit, from the model-wide
         # ``add_full_attention_sink_bias`` / ``softmax_type``. Built by the same
@@ -1855,8 +1862,8 @@ class MQALatentAttention(FleetLayer):
         off, which the backend turns into a sinkless softmax. Query-head padding
         to the DSA-fixed ``h_q == 64`` is the backend's job.
 
-        The forward is always FlashMLA sparse; the backward kernel is selected
-        by ``mqa_sparse_attn_backward_backend`` (see ``__init__``).
+        The forward kernel is selected by ``sparse_attn_forward_backend`` and the
+        backward kernel by ``mqa_sparse_attn_backward_backend`` (see ``__init__``).
 
         ``indexer_topk > 0`` additionally returns the LSE over the first
         ``indexer_topk`` columns, which is the indexer-loss target's normalizer.
@@ -1873,6 +1880,7 @@ class MQALatentAttention(FleetLayer):
             indexer_topk=indexer_topk,
             sink_grad_fusion=self.sink_grad_fusion,
             global_kv_idx_remap_fusion=self.global_kv_idx_remap_fusion,
+            forward_backend=self.sparse_attn_forward_backend,
             backward_backend=self.sparse_attn_backward_backend,
         )
 
