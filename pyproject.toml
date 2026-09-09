@@ -75,6 +75,7 @@ test = [
     "wrapt",
     "matplotlib",
     "pytest",
+    "pytest-xdist",
     "pyyaml",
     "parameterized",
 ]

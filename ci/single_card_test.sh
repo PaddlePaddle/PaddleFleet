@@ -38,50 +38,59 @@ is_disabled() {
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 
-run_count=0
-failed_tests=()
+# pytest-xdist worker count. The job holds a single GPU, so the workers share
+# it -- 4 is the value this change measures against the previous serial run.
+workers="${PYTEST_WORKERS:-4}"
+
+python -c "import xdist" 2>/dev/null || pip install pytest-xdist
+
+test_files=()
 for test_file in $(find $test_dir -type f -name "test_*.py"); do
     filename=$(basename "$test_file")
     if is_disabled "$filename"; then
         echo "Skipping disabled test: $filename"
         continue
     fi
-
-    echo "Running single card test: $test_file"
-    run_count=$((run_count + 1))
-    if [[ "${WITH_COVERAGE:-OFF}" == "ON" ]];then
-        # uv run -m coverage run -m pytest -s "$test_file"
-        coverage run -m pytest -s "$test_file"
-    else
-        # uv run pytest -s "$test_file"
-        pytest -s "$test_file"
-    fi
-    exit_code=$?
-    if [ $exit_code -ne 0 ]; then
-        echo "Test FAILED: $test_file, see log for details..."
-        python $work_dir/ci/check_log_for_exitcode.py "./$(basename ${test_file%.*})_single_card.log" "OK"
-        check_exit_code=${PIPESTATUS[0]}
-        if [ $check_exit_code -ne 0 ]; then
-            failed_tests+=("$test_file")
-            echo "Log check failed for $test_file."
-        else
-            echo "Log check passed for $test_file."
-        fi
-    else
-        echo "Test PASSED: $test_file"
-    fi
+    test_files+=("$test_file")
 done
 
+run_count=${#test_files[@]}
+echo -e "\033[34mRunning $run_count single card test files on $workers workers\033[0m"
+
+if [ "$run_count" -eq 0 ]; then
+    echo -e "\033[32mNo single card test to run.\033[0m"
+    exit 0
+fi
+
+# One pytest invocation over every file, instead of one invocation per file:
+# the files are what parallelises. ``--dist loadfile`` keeps all tests of a file
+# inside one worker, because these suites set process-global paddle/fleet state
+# at import time and cannot be split mid-file.
+#
+# ``-s`` is dropped -- xdist workers do not stream stdout back live -- and
+# ``-rA`` takes its place so the captured output of passing tests stays in the
+# report, which is where the printed MD5 baselines are read from.
+pytest_args=(
+    -n "$workers"
+    --dist loadfile
+    -rA
+    --junitxml=single_card.xml
+    "${test_files[@]}"
+)
+if [[ "${WITH_COVERAGE:-OFF}" == "ON" ]]; then
+    coverage run -m pytest "${pytest_args[@]}"
+else
+    pytest "${pytest_args[@]}"
+fi
+exit_code=$?
+
 echo "======================================"
-echo -e "\033[34mTests executed: $run_count\033[0m"
-if [ ${#failed_tests[@]} -eq 0 ]; then
+echo -e "\033[34mTest files executed: $run_count\033[0m"
+if [ $exit_code -eq 0 ]; then
     echo -e "\033[32mAll single card tests passed!\033[0m"
     echo "======================================"
 else
-    echo -e "::error:: Some single card tests failed:"
-    for fail in "${failed_tests[@]}"; do
-        echo -e "::error:: \033[31m- $fail\033[0m"
-    done
+    echo -e "::error:: \033[31mSome single card tests failed, see the pytest summary above.\033[0m"
     echo "======================================"
     exit 1
 fi
