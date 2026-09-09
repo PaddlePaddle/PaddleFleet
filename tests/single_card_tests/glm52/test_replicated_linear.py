@@ -35,17 +35,6 @@ created, so nothing here depends on a distributed launch.
 """
 
 import os
-import sys
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
-
 import unittest
 from unittest.mock import patch
 
@@ -122,16 +111,6 @@ class TestLinearMarksReplicatedGradForTPReduction(unittest.TestCase):
             use_accuracy_compatible=True,
         )
         self.assertTrue(_is_marked(layer.bias))
-
-    def test_not_marked_under_flag_uac_without_ieee(self):
-        layer = _build(
-            bias=True,
-            sequence_parallel=True,
-            tensor_model_parallel_size=2,
-            use_accuracy_compatible=True,
-        )
-        self.assertFalse(_is_marked(layer.weight))
-        self.assertFalse(_is_marked(layer.bias))
 
     def test_not_marked_without_accuracy_compatible(self):
         layer = _build(
@@ -276,20 +255,6 @@ class TestMLADownProjectionsAreReplicated(unittest.TestCase):
         backend = LocalSpecProvider()
         self.assertIs(spec.sublayers_spec.q_a_proj, backend.linear())
         self.assertIs(spec.sublayers_spec.kv_a_proj_with_mqa, backend.linear())
-
-    def test_spec_stays_column_parallel_under_flag_uac_without_ieee(self):
-        from paddlefleet.models.backends import LocalSpecProvider
-
-        with patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "0"}):
-            spec = self._mla_spec(use_accuracy_compatible=True)
-        backend = LocalSpecProvider()
-        self.assertIs(
-            spec.sublayers_spec.q_a_proj, backend.column_parallel_linear()
-        )
-        self.assertIs(
-            spec.sublayers_spec.kv_a_proj_with_mqa,
-            backend.column_parallel_linear(),
-        )
 
     def test_spec_stays_column_parallel_by_default(self):
         from paddlefleet.models.backends import LocalSpecProvider

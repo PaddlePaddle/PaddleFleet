@@ -19,23 +19,12 @@ makes the positions vacated by the shift carry the REAL trailing carrier tokens 
 pad token). The reference implementation instead rolls by -1 and zero-fills, so at
 depth ``d`` its last ``d + 1`` MTP positions embed token id 0.
 
-Under IEEE+UAC the carrier tail is zeroed so both conventions agree. FLAG+UAC
-alone leaves the structure carrier. These tests pin that behaviour, its gate, and
-the fact that the main path is untouched.
+With accuracy compatibility enabled, the carrier tail is zeroed so both
+conventions agree. Tests cover enabled/disabled model configuration and keep
+the main path independent of legacy environment settings.
 """
 
 import os
-import sys
-
-sys.path.insert(
-    0,
-    os.path.dirname(
-        os.path.dirname(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        )
-    ),
-)
-
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -171,20 +160,6 @@ class TestGPTEmbeddingMTPCarrierTail(unittest.TestCase):
             "downstream MTP consumers read input_ids back out of dict_args",
         )
 
-    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "0"})
-    def test_flag_uac_without_ieee_leaves_carrier(self):
-        emb, seen = _make_embedding(
-            use_accuracy_compatible=True, num_nextn_predict_layers=1
-        )
-        input_ids = _carrier(seq_len=8, tail=3)
-        emb.forward(dict_args={"input_ids": input_ids})
-
-        self.assertEqual(
-            seen["input_ids"].numpy().tolist(),
-            input_ids.numpy().tolist(),
-            "FLAG+UAC without IEEE must keep the structure carrier",
-        )
-
     @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_shorter_than_depth_is_left_alone(self):
         emb, seen = _make_embedding(
@@ -277,8 +252,8 @@ class TestGPTEmbeddingEPPaddingPolicy(unittest.TestCase):
         self.assertTrue(bool((pad_h.abs().sum(axis=-1) > 0).all()))
         self.assertTrue(bool((kept_h.abs().sum(axis=-1) > 0).all()))
 
-    def test_ep2_tp1_ieee_off_or_uac_off_zeros_and_masks(self):
-        for ieee, uac in ((False, True), (True, False)):
+    def test_ep2_tp1_disabled_alignment_zeros_and_masks(self):
+        for ieee, uac in ((False, False), (True, False)):
             with self.subTest(ieee=ieee, uac=uac):
                 hidden, pad_h, kept_h, has_mask, mask, ids = self._run(
                     ep=2, tp=1, ieee=ieee, uac=uac
