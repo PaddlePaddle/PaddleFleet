@@ -675,3 +675,82 @@ class TestGlm52OfficialDsaHfFields(TestCase):
         holder = attn._get_index_share_topk_holder(None)
         self.assertEqual(holder, {})
         self.assertNotIn(attn.source_layer, holder)
+
+
+class TestDsaPipelineSharing(TestCase):
+    def model(
+        self, *, parts, offset=0, mtp=True, weight_only=False, full=False
+    ):
+        from paddle.distributed.fleet.meta_parallel import LayerDesc
+
+        from paddlefleet.models.gpt.gpt_layer_specs import (
+            get_gpt_decoder_layers_spec,
+            get_gpt_mtp_layers_spec,
+        )
+        from paddlefleet.models.gpt.gpt_model import GPTModel
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_empty_layers_add_in_head=offset,
+            num_nextn_predict_layers=int(mtp),
+            multi_latent_attention=True,
+            dsa_index_n_heads=2,
+            dsa_indexer_types=["full"] * 4
+            if full
+            else ["full", "full", "full", "shared"],
+            dsa_index_share_for_mtp_iteration=mtp and not full,
+            mtp_load_weight_only=weight_only,
+        )
+        decoder = get_gpt_decoder_layers_spec(config)
+        specs = decoder + (
+            get_gpt_mtp_layers_spec(config, decoder) if mtp else []
+        )
+        model = object.__new__(GPTModel)
+        object.__setattr__(model, "config", config)
+        object.__setattr__(
+            model, "_layers_desc", [LayerDesc(spec) for spec in specs]
+        )
+        object.__setattr__(model, "segment_parts", parts)
+        return model
+
+    def test_producer_decoder_and_mtp_can_share_one_segment(self):
+        for offset in (0, 2):
+            self.model(
+                parts=[0, 2, 5], offset=offset
+            )._validate_dsa_pipeline_sharing()
+
+    def test_decoder_cross_segment_is_rejected_before_build(self):
+        from unittest.mock import patch
+
+        from paddlefleet.models.gpt.gpt_model import PipelineLayer
+
+        model = self.model(parts=[0, 3, 5])
+        with patch.object(PipelineLayer, "_build_layer") as build:
+            with self.assertRaisesRegex(ValueError, "Cross-segment DSA"):
+                model._build_layer()
+            build.assert_not_called()
+
+    def test_mtp_cross_segment_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "shared MTP"):
+            self.model(parts=[0, 4, 5])._validate_dsa_pipeline_sharing()
+
+    def test_interleaved_segments_are_rejected_before_chunk_build(self):
+        from unittest.mock import patch
+
+        from paddlefleet.models.gpt.gpt_model import PipelineLayer
+
+        model = self.model(parts=[0, 1, 3, 4, 5])
+        with patch.object(PipelineLayer, "_build_chunked_layer") as build:
+            with self.assertRaisesRegex(ValueError, "Cross-segment DSA"):
+                model._build_chunked_layer()
+            build.assert_not_called()
+
+    def test_full_indexers_allow_arbitrary_segments(self):
+        self.model(parts=[0, 3, 5], full=True)._validate_dsa_pipeline_sharing()
+
+    def test_weight_only_mtp_does_not_require_a_topk_transport(self):
+        self.model(
+            parts=[0, 4, 5], weight_only=True
+        )._validate_dsa_pipeline_sharing()
