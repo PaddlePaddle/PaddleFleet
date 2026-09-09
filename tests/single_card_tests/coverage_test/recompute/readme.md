@@ -7,14 +7,15 @@ Unit tests for PaddleFleet refined recompute module including flash attention, q
 | File | Description / 描述 |
 |------|-------------------|
 | `test_coverage_flash_attn.py` | Tests for flashattn_auto_cast function / 测试 FlashAttention 自动类型转换 |
-| `test_coverage_flash_attn_extra.py` | Tests for _get_fa_version function / 测试 FA 版本获取函数 |
-| `test_coverage_flash_attn_extra2.py` | Tests for _get_fa_version function / FA 版本获取函数额外测试 |
-| `test_coverage_flash_attn_extra3.py` | Tests for FlashMaskCpAttention query sequence length validation / 测试 FlashMask CP 注意力序列长度校验 |
-| `test_coverage_flash_attn_extra4.py` | Tests for flashattn_auto_cast function / FlashAttention 自动类型转换额外测试 |
-| `test_coverage_flash_attn_extra5.py` | Tests for RefinedRcomputeFlashAttention initialization / 测试精细化重计算 FlashAttention 初始化 |
-| `test_coverage_flashattn_auto_cast.py` | Tests for _get_fa_version with XPU device / XPU 设备下 FA 版本获取测试 |
+| `test_coverage_flash_attn_2.py` |  |
+| `test_coverage_flash_attn_3.py` |  |
+| `test_coverage_flash_attn_4.py` |  |
+| `test_coverage_flash_attn_5.py` |  |
+| `test_coverage_flash_attn_6.py` |  |
+| `test_coverage_flash_attn_7.py` |  |
+| `test_coverage_flash_attn_8.py` |  |
+| `test_coverage_flash_attn_9.py` |  |
+| `test_coverage_flash_attn_cp_rr_modes.py` |  |
 | `test_coverage_queue_check.py` | Tests for RefinedRcomputeQueue class / 测试精细化重计算队列类 |
-| `test_coverage_queue_check_extra.py` | Tests for RefinedRcomputeQueue initialization / 重计算队列初始化额外测试 |
-| `test_coverage_queue_check_extra2.py` | Tests for RefinedRcomputeQueue in queue_check module / queue_check 模块中的重计算队列测试 |
-| `test_coverage_refined_recompute_flash_mask.py` | Tests for RefinedRcomputeFlashMaskAttention initialization / 测试精细化重计算 FlashMask 注意力初始化 |
-| `test_coverage_refined_recompute_flash_mask_cp.py` | Tests for RefinedRcomputeFlashMaskCpAttention initialization / 测试精细化重计算 FlashMask CP 注意力初始化 |
+| `test_coverage_queue_check_2.py` |  |
+| `test_coverage_queue_check_3.py` |  |

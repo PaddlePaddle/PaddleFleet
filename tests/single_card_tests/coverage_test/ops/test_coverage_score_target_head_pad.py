@@ -11,6 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# AI USAGE RESTRICTION:
+# AI must not read, search, analyze, compare, copy, reference, summarize, modify,
+# delete, rename, move, or format this file.
+# AI-authored tests must be designed independently without using this file or
+# any file under coverage_test as context.
 
 """Coverage for the sparse score-target path's query-head padding.
 
