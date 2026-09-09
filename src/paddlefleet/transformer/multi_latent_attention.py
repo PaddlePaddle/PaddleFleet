@@ -29,7 +29,6 @@ from paddlefleet.context_parallel_utils import (
     preprocess_index,
     preprocess_index_dual_chunks,
 )
-from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.models.common.embeddings import (
     apply_rotary_pos_emb,
 )
@@ -68,21 +67,6 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_rank, get_pg_size
 
 logger = logging.getLogger(__name__)
-
-_ACCURACY_COMPATIBLE_KERNEL: bool = ieee_kernel_enabled()
-
-
-def _dsa_absorbed_enabled() -> bool:
-    """Torch-aligned absorbed-MLA core (E-063 / IEEE 1-5).
-
-    Read MODEL_REPRO_IEEE_KERNEL at call time: import-time evaluation can
-    see the env before run_paddle.sh exports it. FLAG+UAC alone is not
-    enough; Minimax / GLM-4.5 Air CI also export FLAG=1.
-    """
-    return (
-        os.environ.get("MODEL_REPRO_DSA_ABSORBED", "0") == "1"
-        or ieee_kernel_enabled()
-    )
 
 
 class _AccuracyCompatibleLinearInputGrad(paddle.autograd.PyLayer):
@@ -1098,7 +1082,7 @@ class MultiLatentAttention(Attention):
                         -1,
                     ]
                 )[:, :, self.qk_nope_head_dim :]
-        elif _dsa_absorbed_enabled():
+        elif self.config.use_accuracy_compatible:
             # IEEE 1-5: torch-aligned absorbed core. DSA builds q_absorbed
             # from its own query (pre-rope nope + roped rope) with these
             # K/V de-absorption weights. Mirrors AbsorbedMLASelfAttention.
@@ -1333,7 +1317,7 @@ class MultiLatentAttention(Attention):
             "mla_gate_output", layer_num, core_attn_out
         )
 
-        if _ACCURACY_COMPATIBLE_KERNEL:
+        if self.config.use_accuracy_compatible:
             output, bias = _accuracy_compatible_projection(
                 self.o_proj, core_attn_out
             )
@@ -1721,8 +1705,7 @@ class MLASelfAttention(MultiLatentAttention):
             )
             self.config.init_method(self.v_b_proj)
         elif (
-            ieee_kernel_enabled()
-            and getattr(self.config, "use_accuracy_compatible", False)
+            self.config.use_accuracy_compatible
             and self.config.sequence_parallel
             and self.kv_b_proj is not None
             and getattr(
@@ -1916,8 +1899,7 @@ class MLASelfAttention(MultiLatentAttention):
         # Match the reference's depth-wise wrap of the MTP RoPE table.
         # Paddle MTP layers are zero-indexed; the reference starts at one.
         if (
-            ieee_kernel_enabled()
-            and self.config.use_accuracy_compatible
+            self.config.use_accuracy_compatible
             and self.is_mtp_layer
             and self.training
             and not packed_seq
@@ -2013,7 +1995,7 @@ class MLASelfAttention(MultiLatentAttention):
         if self.q_lora_rank is not None:
             # if q_a_proj is ColumnParallelLinear:
             #     q_compressed: [b, s, q_lora_rank / TP]
-            if _ACCURACY_COMPATIBLE_KERNEL:
+            if self.config.use_accuracy_compatible:
                 q_compressed, _ = _accuracy_compatible_q_down_projection(
                     self.q_a_proj, hidden_states
                 )
@@ -2027,7 +2009,8 @@ class MLASelfAttention(MultiLatentAttention):
             # Scatter sequence back to s / TP if sequence-parallel
             if q_compressed.size(-1) != self.q_lora_rank:
                 q_compressed = gather_from_tensor_model_parallel_region(
-                    q_compressed
+                    q_compressed,
+                    use_accuracy_compatible=self.config.use_accuracy_compatible,
                 )
                 if self.config.sequence_parallel:
                     q_compressed = scatter_to_sequence_parallel_region(
@@ -2050,7 +2033,10 @@ class MLASelfAttention(MultiLatentAttention):
         )
         if kv_combined.size(-1) != self.kv_lora_rank + self.qk_rope_head_dim:
             # kv_combined: [b, s, (kv_lora_rank + qk_rope_head_dim)]
-            kv_combined = gather_from_tensor_model_parallel_region(kv_combined)
+            kv_combined = gather_from_tensor_model_parallel_region(
+                kv_combined,
+                use_accuracy_compatible=self.config.use_accuracy_compatible,
+            )
             # kv_compressed:[b, s, kv_lora_rank], k_pos_emb: [b, s, qk_rope_head_dim]
             kv_compressed, k_pos_emb = paddle.split(
                 kv_combined,
@@ -2066,7 +2052,7 @@ class MLASelfAttention(MultiLatentAttention):
                 axis=-1,
             )
             if (
-                ieee_kernel_enabled()
+                self.config.use_accuracy_compatible
                 and self.config.sequence_parallel
                 and not self.mqa_latent
                 and get_pg_size(self.pg_collection.tp) > 1
@@ -2142,7 +2128,7 @@ class MLASelfAttention(MultiLatentAttention):
             if self.q_lora_rank is not None:
                 # q_compressed: [num_tokens, q_lora_rank]
                 # q: [num_tokens, n * (qk_nope_head_dim + qk_rope_head_dim)]
-                if _ACCURACY_COMPATIBLE_KERNEL:
+                if self.config.use_accuracy_compatible:
                     q, _ = _accuracy_compatible_q_up_projection(
                         self.q_b_proj, q_compressed
                     )

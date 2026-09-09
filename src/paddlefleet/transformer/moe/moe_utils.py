@@ -15,7 +15,6 @@
 # limitations under the License.
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING, Any
 
 import paddle
@@ -43,21 +42,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from paddle.distributed.communication.group import Group
-
-
-_USE_ACCURACY_COMPATIBLE_KERNEL = (
-    os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
-)
-
-
-def use_accuracy_compatible_kernel() -> bool:
-    """Unified switch for accuracy-compatible (Megatron-aligned) numeric paths.
-
-    Controlled via the ``FLAGS_use_accuracy_compatible_kernel`` environment
-    variable. When enabled, modules switch to fp32-accumulating / Torch-aligned
-    kernels at the cost of throughput.
-    """
-    return _USE_ACCURACY_COMPATIBLE_KERNEL
 
 
 class AutoSBHistoryTracker:
@@ -469,7 +453,7 @@ def unpermute(
         permuted_probs = probs.T.contiguous().masked_select(
             routing_map.T.contiguous().cast(paddle.bool)
         )
-        if use_accuracy_compatible_kernel():
+        if use_accuracy_compatible:
             permuted_tokens = ApplyPermutedProbs.apply(
                 permuted_tokens, permuted_probs
             )
@@ -481,7 +465,7 @@ def unpermute(
             permuted_tokens, sorted_indices, restore_shape, routing_map
         )
 
-    if use_accuracy_compatible_kernel():
+    if use_accuracy_compatible:
         output_tokens = _unpermute_fp32_accum(
             permuted_tokens, sorted_indices, restore_shape
         )

@@ -35,7 +35,6 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
 
 from paddlefleet import tensor_parallel
 from paddlefleet.context_parallel_utils import ContextParallelScatterOp
-from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
 )
@@ -61,11 +60,15 @@ SUPPORTED_ATTN_MASK = [
     AttnMaskType.padding_causal,
 ]
 
-_ACCURACY_COMPATIBLE_KERNEL = ieee_kernel_enabled()
 
-
-def _mtp_eh_projection(projection, hidden_states, tensor_parallel_size):
-    if _ACCURACY_COMPATIBLE_KERNEL and tensor_parallel_size == 1:
+def _mtp_eh_projection(
+    projection,
+    hidden_states,
+    tensor_parallel_size,
+    *,
+    use_accuracy_compatible: bool = False,
+):
+    if use_accuracy_compatible and tensor_parallel_size == 1:
         output_bias = projection.bias if projection.skip_bias_add else None
         bias = None if projection.skip_bias_add else projection.bias
         return F.linear(hidden_states, projection.weight, bias), output_bias
@@ -98,34 +101,6 @@ def _apply_mtp_layer_masks(dict_args, depth, config):
         dict_args["mtp_hidden_inputs_mask"] = mtp_hidden_inputs_mask_all[
             :, depth : depth + 1, :
         ]
-
-
-def _mtp_shift_position_ids(
-    position_ids, hidden_states, layer_number, sequence_parallel
-):
-    """Match Megatron MTP's depth-wise rotary-position roll in accuracy mode."""
-    if not _ACCURACY_COMPATIBLE_KERNEL:
-        return position_ids
-    if position_ids is None:
-        if sequence_parallel:
-            return None
-        position_ids = paddle.arange(
-            hidden_states.shape[1], dtype="int64"
-        ).unsqueeze(0)
-    elif not sequence_parallel:
-        main_seq_len = hidden_states.shape[1]
-        if position_ids.shape[-1] < main_seq_len:
-            raise ValueError(
-                f"MTP position_ids length {position_ids.shape[-1]} is shorter than "
-                f"the main hidden-state length {main_seq_len}."
-            )
-        if position_ids.shape[-1] > main_seq_len:
-            position_ids = position_ids[..., :main_seq_len]
-
-    shifted = paddle.roll(position_ids, shifts=-(layer_number + 1), axis=-1)
-    if shifted.ndim == 2 and shifted.shape[0] == 1:
-        shifted = shifted.squeeze(0)
-    return shifted
 
 
 # ============================================================================
@@ -1157,7 +1132,8 @@ class MultiTokenPredictionLayer(FleetLayer):
             hidden_states = e_out.unsqueeze(-2) + h_out
             if self.tensor_parallel > 1:
                 hidden_states = gather_from_tensor_model_parallel_region(
-                    hidden_states
+                    hidden_states,
+                    use_accuracy_compatible=self.config.use_accuracy_compatible,
                 )
             # Flatten back to [.., n*h]
             *leading, n, h = hidden_states.shape
@@ -1170,7 +1146,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 )
         else:
             hidden_states = self.hnorm(hidden_states)
-            if ieee_kernel_enabled() and self.config.use_accuracy_compatible:
+            if self.config.use_accuracy_compatible:
                 # Reference MTP masks the loss, not this hidden-state edge.
                 mtp_hidden_inputs_mask = None
             # Apply mtp_hidden_inputs_mask to mask out hidden state contributions
@@ -1222,7 +1198,10 @@ class MultiTokenPredictionLayer(FleetLayer):
             # Keep the accuracy-compatible eh_proj entry point, and keep
             # upstream's tuple tolerance for projections that return a bias.
             hidden_states = _mtp_eh_projection(
-                self.eh_proj, hidden_states, self.tensor_parallel
+                self.eh_proj,
+                hidden_states,
+                self.tensor_parallel,
+                use_accuracy_compatible=self.config.use_accuracy_compatible,
             )
             if isinstance(hidden_states, tuple):
                 hidden_states, _ = hidden_states
@@ -1234,7 +1213,8 @@ class MultiTokenPredictionLayer(FleetLayer):
             if not self.config.gpt_model_use_experimental_version:
                 if self.tensor_parallel > 1:
                     hidden_states = gather_from_tensor_model_parallel_region(
-                        hidden_states
+                        hidden_states,
+                        use_accuracy_compatible=self.config.use_accuracy_compatible,
                     )
                 # For sequence parallel, scatter after linear_fc and before transformer layer.
                 if self.sequence_parallel:

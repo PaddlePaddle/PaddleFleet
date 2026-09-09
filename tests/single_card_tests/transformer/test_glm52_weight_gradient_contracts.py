@@ -92,10 +92,9 @@ class TestGLM52WeightGradientContracts(unittest.TestCase):
             float32="float32", bfloat16="bfloat16", matmul=matmul
         ), calls
 
-    def test_gate_roundtrip_only_for_ieee_fp32_gate(self):
+    def test_aligned_gate_roundtrip_matches_weight_storage_dtype(self):
         for enabled, dtype, expected in (
             (True, "float32", ("bfloat16", "float32", "float32")),
-            (False, "float32", ("float32",)),
             (True, "bfloat16", ("bfloat16",)),
         ):
             with self.subTest(enabled=enabled, dtype=dtype):
@@ -110,7 +109,7 @@ class TestGLM52WeightGradientContracts(unittest.TestCase):
                     sequence_shards=1,
                     dtype="float32",
                     defer_dw=False,
-                    use_accuracy_compatible=True,
+                    use_accuracy_compatible=enabled,
                 )
                 backward = production_function(
                     "src/paddlefleet/transformer/moe/moe_router.py",
@@ -154,7 +153,7 @@ class TestGLM52WeightGradientContracts(unittest.TestCase):
         self.assertEqual(calls, [("float32", "float32", True)] * 2)
 
     def test_expert_non_ieee_or_non_uac_keeps_native_batched_gemm(self):
-        for compatible, enabled in ((False, True), (True, False)):
+        for compatible, enabled in ((False, True), (False, False)):
             with self.subTest(compatible=compatible, enabled=enabled):
                 calls = []
                 fallback = lambda *args, **kwargs: (

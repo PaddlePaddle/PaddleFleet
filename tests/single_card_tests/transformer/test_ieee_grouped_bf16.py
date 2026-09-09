@@ -56,8 +56,8 @@ class TestIEEEGroupedBF16(unittest.TestCase):
             if isinstance(n, ast.FunctionDef)
             and n.name
             in {
-                "ieee_grouped_bf16_enabled",
-                "_ieee_expert_matmul",
+                "use_sequential_bf16_experts",
+                "_sequential_expert_matmul",
                 "moe_token_padding_alignment",
             }
         ]
@@ -79,7 +79,7 @@ class TestIEEEGroupedBF16(unittest.TestCase):
 
     def node(self, counts):
         return SimpleNamespace(
-            ieee_grouped_bf16=True,
+            sequential_bf16_experts=True,
             tokens_per_expert=counts,
             use_fp8_mlp=False,
             moe_expert_fusion=True,
@@ -107,7 +107,7 @@ class TestIEEEGroupedBF16(unittest.TestCase):
             "activation_type": "swiglu",
             "clamp_value": None,
         }
-        gate = self.ns["ieee_grouped_bf16_enabled"]
+        gate = self.ns["use_sequential_bf16_experts"]
         self.assertTrue(gate(**options))
         for key, value in [
             ("use_accuracy_compatible", False),
@@ -122,7 +122,7 @@ class TestIEEEGroupedBF16(unittest.TestCase):
             with self.subTest(key=key, value=value):
                 self.assertFalse(gate(**(options | {key: value})))
         with patch.dict(self.ns, ieee_kernel_enabled=lambda: False):
-            self.assertFalse(gate(**options))
+            self.assertTrue(gate(**options))
         alignment = self.ns["moe_token_padding_alignment"]
         base = {
             "use_accuracy_compatible": True,
@@ -130,9 +130,11 @@ class TestIEEEGroupedBF16(unittest.TestCase):
             "moe_grouped_gemm": True,
         }
         self.assertEqual(alignment(**base), 128)
-        self.assertEqual(alignment(**base, ieee_grouped_bf16=True), 1)
+        self.assertEqual(alignment(**base, sequential_bf16_experts=True), 1)
         self.assertEqual(
-            alignment(**(base | {"use_fp8_mlp": True}), ieee_grouped_bf16=True),
+            alignment(
+                **(base | {"use_fp8_mlp": True}), sequential_bf16_experts=True
+            ),
             128,
         )
 
@@ -187,7 +189,7 @@ class TestIEEEGroupedBF16(unittest.TestCase):
 
     def test_disabled_path_calls_existing_batched_gemm(self):
         node = self.node([2, 0, 3])
-        node.ieee_grouped_bf16 = False
+        node.sequential_bf16_experts = False
         x = paddle.ones([5, 32], dtype="bfloat16")
         w1 = paddle.ones([3, 32, 64], dtype="bfloat16")
         sentinel = paddle.zeros([5, 64], dtype="bfloat16")
@@ -225,7 +227,7 @@ class TestIEEEGroupedBF16(unittest.TestCase):
             (False, True, 4),
             (True, False, 4),
         ]:
-            node = namespace["UnZipNode"](None, ieee_grouped_bf16=enabled)
+            node = namespace["UnZipNode"](None, sequential_bf16_experts=enabled)
             raw = paddle.full([rows, 2], -1, dtype="bfloat16")
             probs = paddle.ones([rows], dtype="float32")
             with patch.object(
@@ -254,7 +256,7 @@ class TestIEEEGroupedBF16(unittest.TestCase):
                 )
             else:
                 self.assertIs(result[0], raw)
-        node = namespace["UnZipNode"](None, ieee_grouped_bf16=True)
+        node = namespace["UnZipNode"](None, sequential_bf16_experts=True)
         with (
             patch.object(
                 F,

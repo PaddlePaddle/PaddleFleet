@@ -63,7 +63,7 @@ class TestIEEEExpertDispatchSelection(unittest.TestCase):
         cases = [
             # compatible, IEEE, fused, actual EP, requested, expected
             (True, True, True, 2, "deepep", "deepep"),
-            (True, False, True, 2, "deepep", "alltoall"),
+            (True, False, True, 2, "deepep", "deepep"),
             (True, True, False, 2, "deepep", "alltoall"),
             (True, True, True, 1, "deepep", "alltoall"),
             (True, True, True, None, "deepep", "alltoall"),
@@ -81,7 +81,9 @@ class TestIEEEExpertDispatchSelection(unittest.TestCase):
                     "self": instance,
                     # A declared EP2 must not override an actual local/absent group.
                     "config": SimpleNamespace(
-                        moe_expert_fusion=fused, expert_model_parallel_size=2
+                        moe_expert_fusion=fused,
+                        expert_model_parallel_size=2,
+                        use_accuracy_compatible=compatible,
                     ),
                     "pg_collection": SimpleNamespace(
                         ep=None if ep is None else SimpleNamespace(nranks=ep)
@@ -91,6 +93,7 @@ class TestIEEEExpertDispatchSelection(unittest.TestCase):
                     ),
                     "ieee_kernel_enabled": lambda: ieee,
                 }
+                instance.config = namespace["config"]
                 exec(self.code, namespace)
                 self.assertEqual(instance.moe_token_dispatcher_type, expected)
 
@@ -122,7 +125,7 @@ class TestIEEEFusionForwardSelection(unittest.TestCase):
             # compatibility, IEEE, fusion, backend, EP, MTP, selected path
             (True, True, True, "deepep", 2, False, "fused"),
             (True, True, True, "deepep", 2, True, "fused"),
-            (True, False, True, "deepep", 2, True, "custom"),
+            (True, False, True, "deepep", 2, True, "fused"),
             (True, True, False, "deepep", 2, True, "custom"),
             (True, True, True, "alltoall", 2, True, "custom"),
             (True, True, True, "deepep", 1, True, "custom"),

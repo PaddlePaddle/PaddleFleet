@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""IEEE-gated branches. FLAG+UAC without IEEE stays the structure graph.
+"""Configuration-selected accuracy-compatible arithmetic.
 
 Isolation (not a docstring-only claim):
 ``ci/single_card_test.sh`` loops ``pytest -s "$test_file"`` / ``coverage run
@@ -25,7 +25,6 @@ command, not here. These tests do not claim the 90% diff-cover gate.
 
 from __future__ import annotations
 
-import functools
 import os
 import sys
 import unittest
@@ -48,7 +47,6 @@ from paddle.distributed.fleet.meta_parallel import LayerSpec
 
 from paddlefleet.models.common.language_loss.language_loss import (
     LanguageLoss,
-    _accuracy_compatible_cross_entropy,
 )
 from paddlefleet.tensor_parallel.layers import Linear
 from paddlefleet.transformer.dsa_attention import (
@@ -182,7 +180,7 @@ class TestAbsorbQNopeKUpIeee(_DeviceRestoreCase):
         paddle.seed(0)
         qn3 = paddle.randn([2, 3, 4], dtype="float32")
         weight = paddle.randn([2, 4, 5], dtype="float32")
-        out = _absorb_q_nope_k_up(qn3, weight)
+        out = _absorb_q_nope_k_up(qn3, weight, use_accuracy_compatible=True)
         expected = paddle.bmm(qn3, weight)
         self.assertTrue(bool(paddle.equal_all(out, expected)))
 
@@ -191,7 +189,7 @@ class TestAbsorbQNopeKUpIeee(_DeviceRestoreCase):
         paddle.seed(1)
         qn3 = paddle.randn([2, 3, 4], dtype="float32")
         weight = paddle.randn([2, 4, 5], dtype="float32")
-        out = _absorb_q_nope_k_up(qn3, weight)
+        out = _absorb_q_nope_k_up(qn3, weight, use_accuracy_compatible=False)
         expected = paddle.einsum(
             "hsk,hkd->hsd", qn3.cast("float32"), weight.cast("float32")
         ).cast(qn3.dtype)
@@ -210,7 +208,9 @@ class TestUnfusedDsaIeeeOracle(_DeviceRestoreCase):
     def test_ieee_matches_independent_oracle_bits(self):
         query, key, value = self._qkv(2)
         scale = 0.5
-        out = _unfused_dsa_attention(query, key, value, None, scale)
+        out = _unfused_dsa_attention(
+            query, key, value, None, scale, use_accuracy_compatible=True
+        )
         oracle = _independent_unfused_attn(query, key, value, None, scale)
         self.assertEqual(tuple(out.shape), (1, 2, 8))
         self.assertFalse(bool(paddle.equal_all(out, paddle.zeros_like(out))))
@@ -223,7 +223,9 @@ class TestUnfusedDsaIeeeOracle(_DeviceRestoreCase):
     def test_flag_off_matches_independent_oracle_bits(self):
         query, key, value = self._qkv(2)
         scale = 0.5
-        out = _unfused_dsa_attention(query, key, value, None, scale)
+        out = _unfused_dsa_attention(
+            query, key, value, None, scale, use_accuracy_compatible=False
+        )
         oracle = _independent_unfused_attn(query, key, value, None, scale)
         self.assertFalse(bool(paddle.equal_all(out, paddle.zeros_like(out))))
         self.assertTrue(bool(paddle.equal_all(out, oracle)))
@@ -240,7 +242,9 @@ class TestUnfusedDsaIeeeOracle(_DeviceRestoreCase):
         ).reshape([1, seq, 1, 2])
         self.assertEqual(tuple(value.shape), (1, seq, 1, 2))
         mask = _causal_mask(seq)
-        out = _unfused_dsa_attention(query, key, value, mask, 1.0)
+        out = _unfused_dsa_attention(
+            query, key, value, mask, 1.0, use_accuracy_compatible=True
+        )
         oracle = _independent_unfused_attn(query, key, value, mask, 1.0)
         self.assertTrue(bool(paddle.equal_all(out, oracle)))
         self.assertTrue(
@@ -251,7 +255,7 @@ class TestUnfusedDsaIeeeOracle(_DeviceRestoreCase):
         value_perturbed = value.clone()
         value_perturbed[:, 1, :, :] = 0.0
         out_perturbed = _unfused_dsa_attention(
-            query, key, value_perturbed, mask, 1.0
+            query, key, value_perturbed, mask, 1.0, use_accuracy_compatible=True
         )
         self.assertTrue(
             bool(paddle.equal_all(out[:, 0, :], out_perturbed[:, 0, :])),
@@ -284,7 +288,9 @@ class TestUnfusedDsaIeeeOracle(_DeviceRestoreCase):
         v_ref.stop_gradient = False
         mask = _causal_mask(seq)
 
-        out = _unfused_dsa_attention(query, key, value, mask, 1.0)
+        out = _unfused_dsa_attention(
+            query, key, value, mask, 1.0, use_accuracy_compatible=True
+        )
         out_ref = _independent_unfused_attn(q_ref, k_ref, v_ref, mask, 1.0)
         self.assertTrue(bool(paddle.equal_all(out, out_ref)))
         out[:, 1, :].sum().backward()
@@ -354,7 +360,9 @@ class TestUnfusedDsaIeeeOracle(_DeviceRestoreCase):
             [1, seq, 1, 2]
         )
         dummy_v = paddle.full([1, seq, 1, 2], 99.0, dtype="float32")
-        out = _unfused_dsa_attention(query, key, dummy_v, None, 1.0)
+        out = _unfused_dsa_attention(
+            query, key, dummy_v, None, 1.0, use_accuracy_compatible=True
+        )
         v_from_key = key[:, :, :, :2]
         oracle = _independent_unfused_attn(
             query,
@@ -476,9 +484,6 @@ class TestUnfusedDsaIeeeOracle(_DeviceRestoreCase):
 
     @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_unfused_absorbed_ieee_projects_v_up(self):
-        # Import-time _ACCURACY_COMPATIBLE_KERNEL is frozen False unless
-        # MODEL_REPRO_IEEE_KERNEL=1 at import. Patch the live flag so the
-        # IEEE QK/softmax path is the one under test.
         query = paddle.to_tensor(
             [1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0], dtype="float32"
         ).reshape([1, 2, 2, 2])
@@ -493,10 +498,9 @@ class TestUnfusedDsaIeeeOracle(_DeviceRestoreCase):
         ).reshape([2, 2, 2])
         import paddlefleet.transformer.dsa_attention as dsa_mod
 
-        with patch.object(dsa_mod, "_ACCURACY_COMPATIBLE_KERNEL", True):
-            out = dsa_mod._unfused_absorbed_dsa_attention(
-                query, key, value, v_up, None, 1.0
-            )
+        out = dsa_mod._unfused_absorbed_dsa_attention(
+            query, key, value, v_up, None, 1.0, use_accuracy_compatible=True
+        )
         q4 = query.transpose([0, 2, 1, 3]).cast("float32")
         k4 = key.transpose([0, 2, 3, 1]).cast("float32")
         scores = paddle.matmul(q4, k4)
@@ -528,10 +532,8 @@ class TestLanguageLossIeeeCe(_DeviceRestoreCase):
     @patch("paddle.distributed.is_initialized", return_value=False)
     def test_ieee_tp1_selects_accuracy_compatible_ce(self, _dist, _tp):
         loss_fn = LanguageLoss(config=self._config())
-        self.assertIsInstance(loss_fn.loss_func, functools.partial)
-        self.assertIs(
-            loss_fn.loss_func.func, _accuracy_compatible_cross_entropy
-        )
+        self.assertIsInstance(loss_fn.loss_func, paddle.nn.CrossEntropyLoss)
+        self.assertEqual(loss_fn.loss_func.ignore_index, -100)
         logits = paddle.randn([2, 4, 8], dtype="float32")
         labels = paddle.randint(0, 8, [2, 4])
         out = loss_fn.forward_impl(logits, labels)
@@ -550,8 +552,10 @@ class TestLanguageLossIeeeCe(_DeviceRestoreCase):
         return_value=1,
     )
     @patch("paddle.distributed.is_initialized", return_value=False)
-    def test_flag_uac_without_ieee_keeps_native_ce(self, _dist, _tp):
-        loss_fn = LanguageLoss(config=self._config())
+    def test_disabled_alignment_keeps_native_ce(self, _dist, _tp):
+        config = self._config()
+        config.use_accuracy_compatible = False
+        loss_fn = LanguageLoss(config=config)
         self.assertIsInstance(loss_fn.loss_func, paddle.nn.CrossEntropyLoss)
         logits = paddle.randn([2, 4, 8], dtype="float32")
         labels = paddle.randint(0, 8, [2, 4])
@@ -574,10 +578,10 @@ class TestGroupedMlpIeeeMainGrad(_DeviceRestoreCase):
         self.assertIsNone(expert.weight2.main_grad)
 
     @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "0"})
-    def test_flag_uac_without_ieee_does_not_claim_main_grad(self):
+    def test_disabled_alignment_does_not_claim_main_grad(self):
         expert = GroupedMLPExpert(
             num_local_experts=2,
-            config=_expert_config(use_accuracy_compatible=True),
+            config=_expert_config(use_accuracy_compatible=False),
             moe_deep_gemm=False,
         )
         claimed = getattr(expert.weight1, "main_grad", "missing")
@@ -821,7 +825,9 @@ class TestIndexerIeeeLinear(_DeviceRestoreCase):
         import paddlefleet.transformer.dsa_attention as dsa_mod
 
         indexer = Indexer(
-            _indexer_config(), sublayers_spec=_indexer_spec(), layer_number=1
+            _indexer_config(use_accuracy_compatible=True),
+            sublayers_spec=_indexer_spec(),
+            layer_number=1,
         )
         hidden = paddle.randn([2, 4, 64], dtype="float32")
         q_latent = paddle.randn([2, 4, 16], dtype="float32")
@@ -850,7 +856,6 @@ class TestIndexerIeeeLinear(_DeviceRestoreCase):
             )
         )
         with (
-            patch.object(dsa_mod, "_ACCURACY_COMPATIBLE_KERNEL", True),
             patch.object(
                 indexer,
                 "_apply_rope",
@@ -924,7 +929,9 @@ class TestDsAttentionAbsorbedCore(_DeviceRestoreCase):
         q_nope = query[..., :nope_hd]
         q_pe = query[..., nope_hd:]
         qn3 = q_nope.reshape([b * s, h, nope_hd]).transpose([1, 0, 2])
-        q_abs_nope = _absorb_q_nope_k_up(qn3, k_abs)
+        q_abs_nope = _absorb_q_nope_k_up(
+            qn3, k_abs, use_accuracy_compatible=uac
+        )
         q_abs_nope = q_abs_nope.transpose([1, 0, 2]).reshape(
             [b, s, h, k_abs.shape[-1]]
         )
@@ -942,7 +949,12 @@ class TestDsAttentionAbsorbedCore(_DeviceRestoreCase):
         index_mask = paddle.put_along_axis(index_mask, topk, zeros, axis=-1)
         combined = (index_mask + causal.unsqueeze(0)).unsqueeze(1)
         latent_flat = _unfused_dsa_attention(
-            q_absorbed, key_abs, dummy, combined, softmax_scale
+            q_absorbed,
+            key_abs,
+            dummy,
+            combined,
+            softmax_scale,
+            use_accuracy_compatible=uac,
         )
         kv_rank = kv.shape[-1]
         latent_out = latent_flat.reshape([b, s, h, kv_rank])
@@ -962,7 +974,8 @@ class TestDsAttentionAbsorbedCore(_DeviceRestoreCase):
     def _run(self, model, inputs, uac):
         query, key, value, x, qr, kv_c, k_pe, k_abs, v_b, topk = inputs
         scores = paddle.zeros([1, 4, 4], dtype="float32")
-        env = {"MODEL_REPRO_IEEE_KERNEL": "1" if uac else "0"}
+        model.config.use_accuracy_compatible = uac
+        env = {"MODEL_REPRO_IEEE_KERNEL": "0" if uac else "1"}
         with (
             patch.dict(os.environ, env),
             patch.object(model.indexer, "forward", return_value=(scores, topk)),

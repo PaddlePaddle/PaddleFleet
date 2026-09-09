@@ -1100,10 +1100,14 @@ class SelfAttention(Attention):
             enable_tp = get_pg_size(self.pg_collection.tp) > 1
             if enable_tp:
                 query = gather_from_tensor_model_parallel_region(
-                    query, group=self.pg_collection.tp
+                    query,
+                    group=self.pg_collection.tp,
+                    use_accuracy_compatible=self.config.use_accuracy_compatible,
                 )
                 key = gather_from_tensor_model_parallel_region(
-                    key, group=self.pg_collection.tp
+                    key,
+                    group=self.pg_collection.tp,
+                    use_accuracy_compatible=self.config.use_accuracy_compatible,
                 )
 
             if self.q_norm is not None:

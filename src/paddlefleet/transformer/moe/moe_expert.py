@@ -29,7 +29,6 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
 )
 
 from paddlefleet import utils
-from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import module_needs_recompute
 from paddlefleet.tensor_parallel.random import (
@@ -352,7 +351,7 @@ class GroupedMLPExpert(FleetLayer):
         self.weight2.is_distributed = self.expert_parallel
         # Claim main_grad so MixPrecision skips these Parameters. The
         # identity output capture writes fp32 X.T@dY into this buffer.
-        if ieee_kernel_enabled() and getattr(
+        if self.config.use_accuracy_compatible and getattr(
             self.config, "use_accuracy_compatible", False
         ):
             self.weight1.main_grad = None
@@ -477,11 +476,7 @@ class GroupedMLPExpert(FleetLayer):
         else:
             weight1, weight2 = self.weight1, self.weight2
 
-        gemm_tn = (
-            ieee_kernel_enabled()
-            and getattr(self.config, "use_accuracy_compatible", False)
-            and expert_weights is None
-        )
+        gemm_tn = self.config.use_accuracy_compatible and expert_weights is None
         if permuted_local_hidden_states.numel() != 0:
             tokens_per_expert = tokens_per_expert.cpu().tolist()
             tokens_per_expert = [int(x) for x in tokens_per_expert]

@@ -20,7 +20,6 @@ import paddle
 import paddle.distributed as dist
 from paddle.distributed.communication.reduce_scatter import _reduce_scatter_base
 
-from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.parallel_state import get_global_memory_buffer
 from paddlefleet.tensor_parallel.utils import split_tensor_along_last_dim
 from paddlefleet.utils import (
@@ -537,10 +536,12 @@ def scatter_to_tensor_model_parallel_region(input_, group=None):
     return _ScatterToModelParallelRegion.apply(input_, group)
 
 
-def gather_from_tensor_model_parallel_region(input_, group=None):
+def gather_from_tensor_model_parallel_region(
+    input_, group=None, *, use_accuracy_compatible: bool = False
+):
     """Wrapper for autograd function: forward: AG, backward: split <last dim>"""
     group = get_tensor_model_parallel_group_if_none(group)
-    if ieee_kernel_enabled() and (group is None or group.nranks <= 1):
+    if use_accuracy_compatible and (group is None or group.nranks <= 1):
         return input_
     return _GatherFromModelParallelRegion.apply(input_, group)
 

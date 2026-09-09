@@ -169,7 +169,7 @@ class TestGroupedMLPExpertForward(unittest.TestCase):
         """Python binds the last def forward; the live method must be E-163."""
         src = inspect.getsource(GroupedMLPExpert.forward)
         self.assertEqual(src.count("def forward"), 1)
-        self.assertIn("ieee_kernel_enabled()", src)
+        self.assertIn("self.config.use_accuracy_compatible", src)
         self.assertIn("use_accuracy_compatible", src)
         self.assertIn("transpose_y=True", src)
         self.assertIn("permuted_probs", src)
@@ -200,7 +200,7 @@ class TestGroupedMLPExpertForward(unittest.TestCase):
         self.assertIn("permuted_probs=", layer_src)
         self.assertIn("row_owner=", layer_src)
         self.assertIn("probs=None", layer_src)
-        self.assertIn("ieee_kernel_enabled()", layer_src)
+        self.assertIn("self.config.use_accuracy_compatible", layer_src)
         self.assertIn("use_accuracy_compatible=True", layer_src)
 
     @unittest.skipIf(not paddle.is_compiled_with_cuda(), "Requires CUDA")

@@ -1085,11 +1085,7 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         input_tensor = paddle.randn([3, 8], dtype=paddle.float32)
         weight = paddle.randn([8, 5], dtype=paddle.float32)
 
-        with patch(
-            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
-            return_value=True,
-        ):
-            out_compat = self._run(True, input_tensor, weight)
+        out_compat = self._run(True, input_tensor, weight)
         ref = paddle.nn.functional.linear(input_tensor, weight)
         np.testing.assert_allclose(
             out_compat.numpy(), ref.numpy(), rtol=1e-6, atol=1e-6
@@ -1103,16 +1099,12 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         weight = paddle.randn([8, 5], dtype=paddle.float32)
         bias = paddle.randn([5], dtype=paddle.float32)
 
-        with patch(
-            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
-            return_value=True,
-        ):
-            output, quant_cache = general_gemm(
-                input_tensor,
-                weight,
-                bias=bias,
-                use_accuracy_compatible=True,
-            )
+        output, quant_cache = general_gemm(
+            input_tensor,
+            weight,
+            bias=bias,
+            use_accuracy_compatible=True,
+        )
         reference = paddle.nn.functional.linear(input_tensor, weight, bias)
 
         self.assertIsNone(quant_cache)
@@ -1158,20 +1150,16 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         input_tensor = paddle.randn([4, 8], dtype=paddle.float32)
         weight = paddle.randn([8, 16], dtype=paddle.float32)
 
-        with patch(
-            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
-            return_value=True,
-        ):
-            out = linear_with_grad_accumulation_and_async_allreduce(
-                input_tensor,
-                weight,
-                None,
-                gradient_accumulation_fusion=False,
-                allreduce_dgrad=False,
-                sequence_parallel=False,
-                tp_group=None,
-                use_accuracy_compatible=True,
-            )
+        out = linear_with_grad_accumulation_and_async_allreduce(
+            input_tensor,
+            weight,
+            None,
+            gradient_accumulation_fusion=False,
+            allreduce_dgrad=False,
+            sequence_parallel=False,
+            tp_group=None,
+            use_accuracy_compatible=True,
+        )
         ref = paddle.nn.functional.linear(input_tensor, weight)
         self.assertEqual(out.shape, [4, 16])
         np.testing.assert_allclose(
@@ -1185,16 +1173,12 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         paddle.seed(3)
         input_tensor = paddle.randn([3, 8], dtype=paddle.float32)
         weight = paddle.randn([8, 5], dtype=paddle.float32)
-        with patch(
-            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
-            return_value=False,
-        ):
-            output, quant_cache = general_gemm(
-                input_tensor,
-                weight,
-                bias=None,
-                use_accuracy_compatible=True,
-            )
+        output, quant_cache = general_gemm(
+            input_tensor,
+            weight,
+            bias=None,
+            use_accuracy_compatible=True,
+        )
         weight_t = weight.T.contiguous()
         reference = paddle.matmul(input_tensor, weight_t, transpose_y=True)
         self.assertIsNone(quant_cache)
@@ -1210,12 +1194,8 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         weight = paddle.randn([8, 16], dtype=paddle.float32)
         weight.stop_gradient = False
 
-        with patch(
-            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
-            return_value=True,
-        ):
-            out = self._run(True, input_tensor, weight)
-            out.sum().backward()
+        out = self._run(True, input_tensor, weight)
+        out.sum().backward()
 
         self.assertIsNotNone(input_tensor.grad)
         self.assertIsNotNone(weight.grad)
@@ -1239,12 +1219,8 @@ class TestLinearWithGradAccumUseAccuracyCompatible(unittest.TestCase):
         x.stop_gradient = False
         w.stop_gradient = False
 
-        with patch(
-            "paddlefleet.tensor_parallel.layers.ieee_kernel_enabled",
-            return_value=True,
-        ):
-            out = self._run(True, x, w)
-            out.backward(go)
+        out = self._run(True, x, w)
+        out.backward(go)
 
         expected = paddle.matmul(
             go.reshape([-1, go.shape[-1]]), w.t().contiguous()

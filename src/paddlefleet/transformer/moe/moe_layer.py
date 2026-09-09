@@ -40,7 +40,6 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 from paddlefleet import utils
-from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.recompute_utils import (
     module_needs_recompute,
     module_needs_refined_recompute,
@@ -69,7 +68,6 @@ from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import (
     AddAuxiliaryLoss,
-    use_accuracy_compatible_kernel,
 )
 from .token_dispatcher import (
     AllGatherTokenDispatcher,
@@ -269,7 +267,7 @@ class MoELayer(nn.Layer):
         )
         self.moe_allgather_gate_overlap = config.moe_allgather_gate_overlap
         if self.use_accuracy_compatible and not (
-            ieee_kernel_enabled()
+            self.config.use_accuracy_compatible
             and config.moe_expert_fusion
             and self.moe_token_dispatcher_type == "deepep"
             and pg_collection.ep is not None
@@ -927,13 +925,13 @@ class MoELayer(nn.Layer):
             dispatched_input, num_or_sections=tokens_per_expert, axis=0
         )
         scale_chunks = None
-        if use_accuracy_compatible_kernel():
+        if self.config.use_accuracy_compatible:
             per_token_scale = getattr(
                 self.token_dispatcher, "global_input_probs", None
             )
             if per_token_scale is None:
                 raise RuntimeError(
-                    "FLAGS_use_accuracy_compatible_kernel requires dispatched "
+                    "use_accuracy_compatible requires dispatched "
                     "router probabilities from the token dispatcher."
                 )
             else:
@@ -1317,7 +1315,7 @@ class MoELayer(nn.Layer):
     ):
         ieee_deepep_fusion = (
             self.use_accuracy_compatible
-            and ieee_kernel_enabled()
+            and self.config.use_accuracy_compatible
             and self.moe_expert_fusion
             and self.moe_token_dispatcher_type == "deepep"
             and self.expert_model_parallel_size > 1
@@ -1823,7 +1821,7 @@ class MoELayer(nn.Layer):
             and self._supports_three_path_clone()
         )
         if (
-            ieee_kernel_enabled()
+            self.config.use_accuracy_compatible
             and not _three_paths_enabled
             and self.shared_experts is not None
             and self.expert_model_parallel_size <= 1
@@ -2019,7 +2017,7 @@ class MoELayer(nn.Layer):
         tokens_per_expert = expert_mask.reshape([expert_mask.shape[0], -1]).sum(
             axis=-1
         )
-        accuracy_compatible = ieee_kernel_enabled()
+        accuracy_compatible = self.config.use_accuracy_compatible
         gathered_state_chunks = None
         token_counts = [int(count) for count in tokens_per_expert.tolist()]
         if accuracy_compatible:
@@ -2118,9 +2116,7 @@ class MoELayer(nn.Layer):
             # gather/sum PyLayers; fold routing probs into post-GLU before
             # fc2; batch each expert GEMM per SP shard so bf16 M matches
             # mcore. Dump / LOCAL_SHARD env knobs stay on the Explore tree.
-            ac_expert_path = ieee_kernel_enabled() and getattr(
-                self.config, "use_accuracy_compatible", False
-            )
+            ac_expert_path = self.config.use_accuracy_compatible
             tokens_per_expert = routing_map.sum(axis=0)
             permuted_local_hidden_states, sorted_indices = permute(
                 hidden_states,

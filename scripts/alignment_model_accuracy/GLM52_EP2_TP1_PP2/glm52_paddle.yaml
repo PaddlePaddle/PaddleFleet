@@ -51,6 +51,7 @@ fp16_opt_level: O2
 fp32_residual_connection: false
 persist_layer_norm: false
 use_accuracy_compatible: true
+bias_activation_fusion: false
 moe_expert_fusion: true
 deterministic_mode: true
 dsa_indexer_loss_coeff: 0.0

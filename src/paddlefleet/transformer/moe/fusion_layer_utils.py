@@ -38,9 +38,9 @@ from paddlefleet.transformer.moe.fp8_utils import (
 from .fp8_utils import (
     FP8_ALIGN,
     USE_INPLACE_SWIGLU_BWD,
-    ieee_grouped_bf16_enabled,
     moe_token_padding_alignment,
     tilewise_quant,
+    use_sequential_bf16_experts,
 )
 from .moe_utils import get_auto_sb_history
 from .vmm_utils import (
@@ -168,11 +168,11 @@ class UnZipNode:
     """
 
     def __init__(
-        self, token_dispatcher, name="unzip", *, ieee_grouped_bf16=False
+        self, token_dispatcher, name="unzip", *, sequential_bf16_experts=False
     ):
         self.token_dispatcher = token_dispatcher
         self.name = name
-        self.ieee_grouped_bf16 = ieee_grouped_bf16
+        self.sequential_bf16_experts = sequential_bf16_experts
         self.unzipped_probs = None
         self.zipped_expertwise_rowmap = None
 
@@ -268,7 +268,7 @@ class UnZipNode:
 
         self.unzipped_probs = unzipped_probs
         self.zipped_expertwise_rowmap = zipped_expertwise_rowmap
-        if self.ieee_grouped_bf16:
+        if self.sequential_bf16_experts:
             if unzipped_tokens is not None:
                 unzipped_tokens = unzipped_tokens.contiguous()
             if fill_output and unzipped_tokens is not None and scale is None:
@@ -574,7 +574,7 @@ class MlpNode:
                 use_w4a8=use_w4a8,
                 use_w4a8_fused_quant=use_w4a8_fused_quant,
             )
-        ieee_grouped_bf16 = ieee_grouped_bf16_enabled(
+        sequential_bf16_experts = use_sequential_bf16_experts(
             use_accuracy_compatible=use_accuracy_compatible,
             moe_expert_fusion=moe_expert_fusion,
             use_fp8_mlp=use_fp8_mlp,
@@ -583,7 +583,8 @@ class MlpNode:
             clamp_value=clamp_value,
         )
         self.unzip_node = UnZipNode(
-            self.token_dispatcher, ieee_grouped_bf16=ieee_grouped_bf16
+            self.token_dispatcher,
+            sequential_bf16_experts=sequential_bf16_experts,
         )
         self.zip_node = ZipNode(self.token_dispatcher)
         self.hs_2d_dispatched_fp8 = None
@@ -596,7 +597,7 @@ class MlpNode:
         self.moe_permute_padding_alignment = moe_token_padding_alignment(
             use_fp8_mlp=use_fp8_mlp,
             moe_grouped_gemm=moe_expert_fusion,
-            ieee_grouped_bf16=ieee_grouped_bf16,
+            sequential_bf16_experts=sequential_bf16_experts,
             use_accuracy_compatible=use_accuracy_compatible,
         )
         self.padding_token_per_experts = [

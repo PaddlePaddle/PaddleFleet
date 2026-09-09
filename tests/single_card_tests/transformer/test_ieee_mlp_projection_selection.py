@@ -78,7 +78,8 @@ class TestIEEEProjectionSelection(unittest.TestCase):
                 up, down = projection(up_size), projection(down_size)
                 instance = SimpleNamespace(
                     config=SimpleNamespace(
-                        tensor_model_parallel_size=configured
+                        tensor_model_parallel_size=configured,
+                        use_accuracy_compatible=ieee,
                     ),
                     up_gate_proj=up,
                     down_proj=down,
@@ -92,7 +93,7 @@ class TestIEEEProjectionSelection(unittest.TestCase):
                     native = Mock(return_value=("result", None))
                     namespace = {
                         "self": instance,
-                        "_ACCURACY_COMPATIBLE_KERNEL": ieee,
+                        "get_tensor_model_parallel_world_size": lambda: 2,
                         "_accuracy_compatible_projection": direct,
                         "deferrable_linear": native,
                         "hidden_states": "input",

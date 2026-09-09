@@ -431,10 +431,7 @@ class TestKvBProjSequenceParallelGate(unittest.TestCase):
 
         src = inspect.getsource(MLASelfAttention.__init__)
         self.assertIn("kv_b_proj.sequence_parallel = False", src)
-        self.assertIn("ieee_kernel_enabled()", src)
-        self.assertIn(
-            'getattr(self.config, "use_accuracy_compatible", False)', src
-        )
+        self.assertIn("self.config.use_accuracy_compatible", src)
 
 
 if __name__ == "__main__":

@@ -80,7 +80,7 @@ class TestIEEEMLAKVLayout(unittest.TestCase):
         calls = []
         group = SimpleNamespace(nranks=tp)
 
-        def gather_features(x):
+        def gather_features(x, **kwargs):
             calls.append("gather_features")
             return paddle.concat([x, full[:, :, 6:]], axis=-1)
 
@@ -98,7 +98,9 @@ class TestIEEEMLAKVLayout(unittest.TestCase):
             "self": SimpleNamespace(
                 kv_lora_rank=8,
                 qk_rope_head_dim=4,
-                config=SimpleNamespace(sequence_parallel=sp),
+                config=SimpleNamespace(
+                    sequence_parallel=sp, use_accuracy_compatible=ieee
+                ),
                 pg_collection=SimpleNamespace(tp=group),
                 mqa_latent=mqa,
             ),
@@ -129,7 +131,7 @@ class TestIEEEMLAKVLayout(unittest.TestCase):
             )
             layer = SimpleNamespace(
                 config=SimpleNamespace(
-                    use_accuracy_compatible=True, sequence_parallel=True
+                    use_accuracy_compatible=ieee, sequence_parallel=True
                 ),
                 kv_a_proj_with_mqa=down,
                 kv_b_proj=up,

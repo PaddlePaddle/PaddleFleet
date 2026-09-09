@@ -35,7 +35,6 @@ from paddle import Tensor
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 
 from paddlefleet import parallel_state
-from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
@@ -54,6 +53,7 @@ from paddlefleet.transformer.cp_utils import all_gather_cp
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.utils import get_pg_size
 
 try:
     from paddlefleet_ops.fast_hadamard_transform import (
@@ -69,20 +69,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_ACCURACY_COMPATIBLE_KERNEL = ieee_kernel_enabled()
 
-
-def _ieee_tp1():
-    """Use the live TP group, including for duplicated indexer projections."""
-    return (
-        ieee_kernel_enabled()
-        and parallel_state.get_tensor_model_parallel_world_size() <= 1
-    )
-
-
-def _absorb_q_nope_k_up(qn3, k_abs_weight):
+def _absorb_q_nope_k_up(
+    qn3, k_abs_weight, *, use_accuracy_compatible: bool = False
+):
     """K-absorb q_nope @ k_up. Torch-aligned UAC path uses bmm, not einsum."""
-    uac = ieee_kernel_enabled()
+    uac = use_accuracy_compatible
     if uac:
         return paddle.bmm(qn3, k_abs_weight)
     return paddle.einsum(
@@ -285,6 +277,9 @@ def _unfused_dsa_attention(
     value: Tensor,
     combined_mask: Tensor | None,
     softmax_scale: float,
+    *,
+    use_accuracy_compatible: bool = False,
+    tensor_parallel_size: int = 1,
 ) -> Tensor:
     """Unfused DSA sparse attention
 
@@ -305,7 +300,7 @@ def _unfused_dsa_attention(
     b, s, nhpp, qk_hd = query.shape
     v_hd = value.shape[-1]
     uac_mqa = (
-        ieee_kernel_enabled()
+        use_accuracy_compatible
         and key.dim() == 4
         and key.shape[2] == 1
         and nhpp > 1
@@ -326,7 +321,7 @@ def _unfused_dsa_attention(
     if uac_mqa:
         # V is the leading slice of absorbed key, matching torch key[..., :v].
         value = paddle.slice(key, axes=[-1], starts=[0], ends=[v_hd])
-        if not _ieee_tp1():
+        if not (use_accuracy_compatible and tensor_parallel_size <= 1):
             value = value * 1
     if value.dim() == 4 and value.shape[2] == 1 and nhpp > 1:
         value_e = value.expand([b, s, nhpp, v_hd])
@@ -356,7 +351,7 @@ def _unfused_dsa_attention(
         )
         attn_scores = attn_scores + mask.cast("float32")
 
-    if ieee_kernel_enabled():
+    if use_accuracy_compatible:
         attn_weights = _AccuracyCompatibleSoftmax.apply(
             attn_scores, paddle.isfinite(attn_scores)
         )
@@ -383,12 +378,14 @@ def _unfused_absorbed_dsa_attention(
     v_up_weight: Tensor,
     combined_mask: Tensor | None,
     softmax_scale: float,
+    *,
+    use_accuracy_compatible: bool = False,
 ) -> Tensor:
     """Unfused absorbed-MLA sparse attention for accuracy alignment."""
     b, s, num_heads, _ = query.shape
     q = query.transpose([0, 2, 1, 3])
     k = key.transpose([0, 2, 3, 1])
-    if _ACCURACY_COMPATIBLE_KERNEL:
+    if use_accuracy_compatible:
         scores = _AccuracyCompatibleQKMatmul.apply(
             q.cast("float32"), k.cast("float32")
         )
@@ -399,7 +396,7 @@ def _unfused_absorbed_dsa_attention(
         scores = scores + combined_mask.cast("float32")
     probabilities = (
         _AccuracyCompatibleSoftmax.apply(scores, paddle.isfinite(scores))
-        if _ACCURACY_COMPATIBLE_KERNEL
+        if use_accuracy_compatible
         else F.softmax(scores, axis=-1)
     )
     latent_value = value.transpose([0, 2, 1, 3])
@@ -867,7 +864,10 @@ class DSAIndexer(paddle.nn.Layer):
         # IEEE e468: Indexer GEMMs must use F.linear under UAC, not
         # Linear.forward / deferrable_linear. Gate on the import-time
         # module constant, not a per-call FLAG read.
-        if _ACCURACY_COMPATIBLE_KERNEL and not _ieee_tp1():
+        if self.config.use_accuracy_compatible and not (
+            self.config.use_accuracy_compatible
+            and get_pg_size(self.pg_collection.tp) <= 1
+        ):
             q, _ = _accuracy_compat_linear(self.wq_b, q_latent)
             k, _ = _accuracy_compat_linear(self.wk, hidden_states)
         else:
@@ -888,7 +888,10 @@ class DSAIndexer(paddle.nn.Layer):
         q = rotate_activation(q, use_fast_hadamard=self.use_fast_hadamard)
         k = rotate_activation(k, use_fast_hadamard=self.use_fast_hadamard)
 
-        if _ACCURACY_COMPATIBLE_KERNEL and not _ieee_tp1():
+        if self.config.use_accuracy_compatible and not (
+            self.config.use_accuracy_compatible
+            and get_pg_size(self.pg_collection.tp) <= 1
+        ):
             weights, _ = _accuracy_compat_linear(
                 self.weights_proj, hidden_states
             )
@@ -1864,6 +1867,8 @@ def resolve_dsa_indexer_layout(
     config,
     layer_number: int,
     is_mtp_layer: bool = False,
+    *,
+    tensor_parallel_size: int | None = None,
 ) -> tuple[str, bool, bool, int]:
     """Resolve DSA indexer type / skip / share / source for one layer.
 
@@ -1889,14 +1894,14 @@ def resolve_dsa_indexer_layout(
         # Official GLM-5.2 checkpoints still ship a full MTP indexer.
         # Training honours share-for-MTP by skipping that indexer and
         # reusing the last decoder's producer top-k, matching the HF field.
-        ieee_full_indexer = (
-            ieee_kernel_enabled()
-            and getattr(config, "use_accuracy_compatible", False)
-            and not _ieee_tp1()
+        if tensor_parallel_size is None:
+            tensor_parallel_size = config.tensor_model_parallel_size
+        full_indexer_for_alignment = (
+            config.use_accuracy_compatible and tensor_parallel_size > 1
         )
         indexer_type = (
             "shared"
-            if share_for_mtp_iteration and not ieee_full_indexer
+            if share_for_mtp_iteration and not full_indexer_for_alignment
             else "full"
         )
         if indexer_type not in {"full", "shared"}:
@@ -1988,6 +1993,10 @@ class DSAttention(FleetLayer):
     ):
         super().__init__(config=config)
 
+        if pg_collection is None:
+            pg_collection = ProcessGroupCollection.use_mpu_process_groups()
+        self.pg_collection = pg_collection
+
         DSAIndexerLossLoggingHelper.register_total_num_layers(config)
         self.layer_number = layer_number
         self.attn_mask_type = attn_mask_type
@@ -1996,11 +2005,12 @@ class DSAttention(FleetLayer):
             self.skip_topk,
             self.index_share,
             self.source_layer,
-        ) = resolve_dsa_indexer_layout(config, layer_number, is_mtp_layer)
-
-        if pg_collection is None:
-            pg_collection = ProcessGroupCollection.use_mpu_process_groups()
-        self.pg_collection = pg_collection
+        ) = resolve_dsa_indexer_layout(
+            config,
+            layer_number,
+            is_mtp_layer,
+            tensor_parallel_size=get_pg_size(pg_collection.tp),
+        )
 
         if softmax_scale is None:
             # Default to 1/sqrt(k_channels) consistent with DotProductAttention
@@ -2026,10 +2036,10 @@ class DSAttention(FleetLayer):
                 for parameter in self.indexer.parameters():
                     parameter.stop_gradient = True
 
-        # IEEE routing retains the explicitly configured zero-coefficient
+        # Accuracy-compatible routing retains the explicitly configured zero-coefficient
         # indexer graph; TP2 also attaches its zero loss to the trunk.
-        self.ieee_indexer_loss = (
-            ieee_kernel_enabled()
+        self.retain_indexer_loss_graph = (
+            self.config.use_accuracy_compatible
             and getattr(config, "dsa_indexer_loss_coeff", None) is not None
         )
         self.dsa_indexer_loss_coeff = float(
@@ -2130,7 +2140,10 @@ class DSAttention(FleetLayer):
         # Use detach() + stop_gradient=False so that:
         # 1. Gradients don't flow back to the main model (detach breaks the graph)
         # 2. Linear layers can still compute grad_input in backward without PyLayer errors
-        if not _ieee_tp1():
+        if not (
+            self.config.use_accuracy_compatible
+            and get_pg_size(self.pg_collection.tp) <= 1
+        ):
             x = x.detach()
             x.stop_gradient = False
             qr = qr.detach()
@@ -2202,7 +2215,7 @@ class DSAttention(FleetLayer):
             topk_indices = self._lookup_index_share_topk(topk_holder)
             indexer_loss = None
         elif self.training and (
-            self.dsa_indexer_loss_coeff > 0 or self.ieee_indexer_loss
+            self.dsa_indexer_loss_coeff > 0 or self.retain_indexer_loss_graph
         ):
             assert self.indexer is not None
             # Indexer forward_before_topk runs WITH gradient tracking
@@ -2290,7 +2303,11 @@ class DSAttention(FleetLayer):
                 qn3 = q_nope.reshape(
                     [bs_abs, query.shape[2], nope_hd]
                 ).transpose([1, 0, 2])
-                q_abs_nope = _absorb_q_nope_k_up(qn3, k_abs_weight)
+                q_abs_nope = _absorb_q_nope_k_up(
+                    qn3,
+                    k_abs_weight,
+                    use_accuracy_compatible=self.config.use_accuracy_compatible,
+                )
                 q_abs_nope = q_abs_nope.transpose([1, 0, 2]).reshape(
                     [
                         query.shape[0],
@@ -2301,12 +2318,12 @@ class DSAttention(FleetLayer):
                 )
                 q_absorbed = paddle.concat([q_abs_nope, q_pe], axis=-1)
             _kv_c = _align_sp_aux_to_query(kv_compressed, query)
-            # Live GLM-5.2 IEEE TP2 always takes this absorbed unfused path.
-            # Read MODEL_REPRO_IEEE_KERNEL at these sites so import-time
-            # constants cannot miss it. FLAG+UAC alone is the Minimax /
-            # GLM-4.5 Air CI graph and must stay on the structure path.
-            uac = ieee_kernel_enabled()
-            if uac and not _ieee_tp1():
+            # Keep the compressed-KV gradient accumulation order under TP.
+            uac = self.config.use_accuracy_compatible
+            if uac and not (
+                self.config.use_accuracy_compatible
+                and get_pg_size(self.pg_collection.tp) <= 1
+            ):
                 # x + x*0 is an add, not a view. clone/contiguous were PIR-folded.
                 _kv_c = _kv_c + (_kv_c * 0)
             k_latent = _kv_c.unsqueeze(2)
@@ -2317,7 +2334,13 @@ class DSAttention(FleetLayer):
             # Dummy, not k_latent: live PIR CSE'd key[..., :v] to k_latent.
             value = paddle.zeros(k_latent.shape, dtype=k_latent.dtype)
             latent_flat = _unfused_dsa_attention(
-                q_absorbed, key_abs, value, combined_mask, self.softmax_scale
+                q_absorbed,
+                key_abs,
+                value,
+                combined_mask,
+                self.softmax_scale,
+                use_accuracy_compatible=self.config.use_accuracy_compatible,
+                tensor_parallel_size=get_pg_size(self.pg_collection.tp),
             )
             nh = q_absorbed.shape[2]
             kv_rank = _kv_c.shape[-1]
@@ -2342,7 +2365,13 @@ class DSAttention(FleetLayer):
             )
         else:
             core_attn_out = _unfused_dsa_attention(
-                query, key, value, combined_mask, self.softmax_scale
+                query,
+                key,
+                value,
+                combined_mask,
+                self.softmax_scale,
+                use_accuracy_compatible=self.config.use_accuracy_compatible,
+                tensor_parallel_size=get_pg_size(self.pg_collection.tp),
             )
 
         # Attach indexer loss if training
@@ -2355,7 +2384,13 @@ class DSAttention(FleetLayer):
                         self.config
                     ),
                 )
-            if not _ieee_tp1() or self.dsa_indexer_loss_coeff > 0:
+            if (
+                not (
+                    self.config.use_accuracy_compatible
+                    and get_pg_size(self.pg_collection.tp) <= 1
+                )
+                or self.dsa_indexer_loss_coeff > 0
+            ):
                 core_attn_out = DSAIndexerLossAutoScaler.apply(
                     core_attn_out, indexer_loss
                 )

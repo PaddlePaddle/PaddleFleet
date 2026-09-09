@@ -74,12 +74,8 @@ class TestLanguageLossInit(unittest.TestCase):
     )
     @patch("paddle.distributed.is_initialized", return_value=True)
     @patch("paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy")
-    @patch(
-        "paddlefleet.models.common.language_loss.language_loss.ieee_kernel_enabled",
-        return_value=True,
-    )
     def test_init_with_parallel_uac_uses_vocab_parallel_ce(
-        self, mock_uac, mock_pce, mock_dist, mock_tp
+        self, mock_pce, mock_dist, mock_tp
     ):
         from paddlefleet.models.common.language_loss.language_loss import (
             LanguageLoss,
@@ -227,9 +223,7 @@ class TestLanguageLossForwardImpl(unittest.TestCase):
 
         src = inspect.getsource(LanguageLoss.forward_impl)
         self.assertIn("_normalize_loss_by_tokens", src)
-        self.assertIn("cast(paddle.float64)", src)
-        self.assertIn("if ieee_kernel_enabled():", src)
-        self.assertIn("elif self.use_accuracy_compatible:", src)
+        self.assertIn("if self.use_accuracy_compatible:", src)
         self.assertIn("DeferTokenNormalizationOp", inspect.getsource(ll))
 
         ll.clear_pending_gradient_divisor()

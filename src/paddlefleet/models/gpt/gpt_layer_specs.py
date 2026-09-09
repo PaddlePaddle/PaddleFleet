@@ -22,7 +22,6 @@ from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_parallel import LayerSpec
 
 from paddlefleet.fusions.fused_bias_dropout import get_bias_dropout_add
-from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.models.backends import BackendSpecProvider, LocalSpecProvider
 from paddlefleet.models.common.embeddings.language_model_embedding import (
     LanguageModelEmbedding,
@@ -428,15 +427,13 @@ def get_attention_spec(
                 # stays column-sharded for Minimax / GLM-4.5 Air CI.
                 q_a_proj=(
                     backend.linear()
-                    if ieee_kernel_enabled()
-                    and getattr(config, "use_accuracy_compatible", False)
+                    if getattr(config, "use_accuracy_compatible", False)
                     else backend.column_parallel_linear()
                 ),
                 q_b_proj=backend.column_parallel_linear(),
                 kv_a_proj_with_mqa=(
                     backend.linear()
-                    if ieee_kernel_enabled()
-                    and getattr(config, "use_accuracy_compatible", False)
+                    if getattr(config, "use_accuracy_compatible", False)
                     else backend.column_parallel_linear()
                 ),
                 kv_b_proj=backend.column_parallel_linear(),

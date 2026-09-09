@@ -42,7 +42,6 @@ from paddlefleet.fusions.fused_bias_swiglu import (
     bias_swiglu_impl,
     weighted_bias_swiglu_impl,
 )
-from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.parallel_state import get_tensor_model_parallel_world_size
 from paddlefleet.train_infer_consistent_ops.inspect_util import (
     get_current_layer,
@@ -61,8 +60,6 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 logger = logging.getLogger(__name__)
-
-_ACCURACY_COMPATIBLE_KERNEL = ieee_kernel_enabled()
 
 
 def _accuracy_compatible_swiglu(hidden_states):
@@ -310,7 +307,7 @@ class MLP(FleetLayer):
         # Shared experts can inherit an expert-local config while their
         # projections use a larger TP group. Preserve those layers' collectives.
         if (
-            _ACCURACY_COMPATIBLE_KERNEL
+            self.config.use_accuracy_compatible
             and self.config.tensor_model_parallel_size == 1
             and getattr(self.up_gate_proj, "world_size", None) == 1
             and get_tensor_model_parallel_world_size() > 1
@@ -342,7 +339,7 @@ class MLP(FleetLayer):
             self.config, "gpt_model_use_experimental_version", False
         )
         if (
-            _ACCURACY_COMPATIBLE_KERNEL
+            self.config.use_accuracy_compatible
             and bias_parallel is None
             and self.hidden_act == F.silu
             and self.config.gated_linear_unit
@@ -507,7 +504,7 @@ class MLP(FleetLayer):
         # [s, b, h]
         nvtx_range_push(suffix="down_proj")
         if (
-            _ACCURACY_COMPATIBLE_KERNEL
+            self.config.use_accuracy_compatible
             and self.config.tensor_model_parallel_size == 1
             and getattr(self.down_proj, "world_size", None) == 1
             and get_tensor_model_parallel_world_size() > 1

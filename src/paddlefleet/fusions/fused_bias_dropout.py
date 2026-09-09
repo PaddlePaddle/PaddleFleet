@@ -14,11 +14,16 @@
 
 import paddle
 
-from paddlefleet.ieee_kernel import ieee_kernel_enabled
-from paddlefleet.parallel_state import get_tensor_model_parallel_world_size
 
-
-def _bias_dropout_add_func(x_with_bias, residual, prob, training):
+def _bias_dropout_add_func(
+    x_with_bias,
+    residual,
+    prob,
+    training,
+    *,
+    use_accuracy_compatible: bool = False,
+    tensor_parallel_size: int = 1,
+):
     # type: (Tuple[Tensor, Optional[Tensor]], Tensor, float, bool) -> Tensor
     # NOTE: Previously, the argument `bias` used to be passed as
     # `bias.expand_as(residual)` when the `bias_dropout_func` is called from the
@@ -63,22 +68,41 @@ def _bias_dropout_add_func(x_with_bias, residual, prob, training):
         if inplace:
             out.add_(residual)
         else:
-            if (
-                ieee_kernel_enabled()
-                and get_tensor_model_parallel_world_size() <= 1
-            ):
+            if use_accuracy_compatible and tensor_parallel_size <= 1:
                 out = residual + out
             else:
                 out = out + residual
         return out
 
 
-def bias_dropout_add_unfused(training):
+def bias_dropout_add_unfused(
+    training,
+    *,
+    use_accuracy_compatible: bool = False,
+    tensor_parallel_size: int = 1,
+):
     def _bias_dropout_add(x_with_bias, residual, prob):
-        return _bias_dropout_add_func(x_with_bias, residual, prob, training)
+        return _bias_dropout_add_func(
+            x_with_bias,
+            residual,
+            prob,
+            training,
+            use_accuracy_compatible=use_accuracy_compatible,
+            tensor_parallel_size=tensor_parallel_size,
+        )
 
     return _bias_dropout_add
 
 
-def get_bias_dropout_add(training, fused):
-    return bias_dropout_add_unfused(training)
+def get_bias_dropout_add(
+    training,
+    fused,
+    *,
+    use_accuracy_compatible: bool = False,
+    tensor_parallel_size: int = 1,
+):
+    return bias_dropout_add_unfused(
+        training,
+        use_accuracy_compatible=use_accuracy_compatible,
+        tensor_parallel_size=tensor_parallel_size,
+    )

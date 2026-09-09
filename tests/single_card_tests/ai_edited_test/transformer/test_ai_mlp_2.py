@@ -113,16 +113,15 @@ class TestMLPWithSwigluPath(unittest.TestCase):
 
     def _run_with_accuracy_gate(self, enabled):
         config = _make_config(
-            gated_linear_unit=True, bias_activation_fusion=True
+            gated_linear_unit=True,
+            bias_activation_fusion=True,
+            use_accuracy_compatible=enabled,
         )
         spec = _make_mlp_spec(config)
         mlp = MLP(config=config, sublayers_spec=spec)
         hidden_states = paddle.randn([2, 4, 64])
 
         with (
-            mock.patch.object(
-                mlp_module, "_ACCURACY_COMPATIBLE_KERNEL", enabled
-            ),
             mock.patch.object(
                 mlp_module,
                 "_accuracy_compatible_swiglu",
@@ -178,13 +177,19 @@ class TestMLPWithSwigluPath(unittest.TestCase):
         )
 
     def test_accuracy_gate_selects_both_projections(self):
-        config = _make_config(gated_linear_unit=True)
+        config = _make_config(
+            gated_linear_unit=True, use_accuracy_compatible=True
+        )
         spec = _make_mlp_spec(config)
         mlp = MLP(config=config, sublayers_spec=spec)
         hidden_states = paddle.randn([2, 4, 64])
 
         with (
-            mock.patch.object(mlp_module, "_ACCURACY_COMPATIBLE_KERNEL", True),
+            mock.patch.object(
+                mlp_module,
+                "get_tensor_model_parallel_world_size",
+                return_value=2,
+            ),
             mock.patch.object(
                 mlp_module,
                 "_accuracy_compatible_projection",

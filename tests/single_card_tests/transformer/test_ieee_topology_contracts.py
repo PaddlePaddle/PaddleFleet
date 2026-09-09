@@ -64,7 +64,6 @@ class TestIEEETopologyContracts(unittest.TestCase):
         ns = load(
             "transformer/dsa_attention.py",
             [
-                "_ieee_tp1",
                 "is_dsa_skip_topk_layer",
                 "source_dsa_compute_layer",
                 "decoder_dsa_logical_layer",
@@ -73,7 +72,9 @@ class TestIEEETopologyContracts(unittest.TestCase):
                 "resolve_dsa_indexer_layout",
             ],
             {
-                "ieee_kernel_enabled": lambda: state.ieee,
+                "get_pg_size": lambda group: 1
+                if group is None
+                else group.nranks,
                 "parallel_state": SimpleNamespace(
                     get_tensor_model_parallel_world_size=lambda: state.tp
                 ),
@@ -91,15 +92,20 @@ class TestIEEETopologyContracts(unittest.TestCase):
             (False, 1, ("shared", True, True, 2)),
             (False, 2, ("shared", True, True, 2)),
         ]:
-            state.ieee, state.tp = ieee, tp
+            config.use_accuracy_compatible = ieee
             with self.subTest(ieee=ieee, tp=tp):
                 self.assertEqual(
-                    ns["resolve_dsa_indexer_layout"](config, 4, True), expected
+                    ns["resolve_dsa_indexer_layout"](
+                        config, 4, True, tensor_parallel_size=tp
+                    ),
+                    expected,
                 )
         state.ieee, state.tp = True, 2
         config.use_accuracy_compatible = False
         self.assertEqual(
-            ns["resolve_dsa_indexer_layout"](config, 4, True),
+            ns["resolve_dsa_indexer_layout"](
+                config, 4, True, tensor_parallel_size=2
+            ),
             ("shared", True, True, 2),
         )
 
@@ -110,7 +116,10 @@ class TestIEEETopologyContracts(unittest.TestCase):
             ["StandardMoERouter._topk_noaux_tc"],
             {
                 "paddle": paddle,
-                "ieee_kernel_enabled": lambda: state.ieee,
+                "F": paddle.nn.functional,
+                "get_pg_size": lambda group: 1
+                if group is None
+                else group.nranks,
             },
         )
         router = SimpleNamespace(
@@ -121,8 +130,8 @@ class TestIEEETopologyContracts(unittest.TestCase):
         )
         paddle.seed(514)
         original = paddle.randn([4, 16])
-        for ieee, tp, calls in [(True, 1, 0), (True, 2, 1), (False, 1, 1)]:
-            state.ieee = ieee
+        for ieee, tp, calls in [(True, 1, 0), (True, 2, 1), (False, 1, 0)]:
+            router.use_accuracy_compatible = ieee
             router.tensor_model_parallel_size = tp
             scores = original.detach().clone()
             scores.stop_gradient = False
@@ -154,16 +163,24 @@ class TestIEEETopologyContracts(unittest.TestCase):
         scaler = SimpleNamespace(apply=Mock(side_effect=lambda out, loss: out))
         ns = load(
             "transformer/dsa_attention.py",
-            ["_ieee_tp1", "DSAttention.forward"],
+            ["DSAttention.forward"],
             {
                 "paddle": paddle,
-                "ieee_kernel_enabled": lambda: state.ieee,
+                "F": paddle.nn.functional,
+                "get_pg_size": lambda group: 1
+                if group is None
+                else group.nranks,
                 "parallel_state": SimpleNamespace(
                     get_tensor_model_parallel_world_size=lambda: state.tp
                 ),
                 "FusedDSAIndexerLoss": loss,
                 "DSAIndexerLossAutoScaler": scaler,
-                "_unfused_dsa_attention": lambda q, k, v, mask, scale: v,
+                "_unfused_dsa_attention": lambda q,
+                k,
+                v,
+                mask,
+                scale,
+                **kwargs: v,
             },
         )
         x = paddle.ones([1, 4, 8], dtype="bfloat16")
@@ -182,13 +199,15 @@ class TestIEEETopologyContracts(unittest.TestCase):
                 index_topk=1,
             )
             layer = SimpleNamespace(
-                config=SimpleNamespace(sequence_parallel=False),
-                pg_collection=SimpleNamespace(tp=None),
+                config=SimpleNamespace(
+                    sequence_parallel=False, use_accuracy_compatible=ieee
+                ),
+                pg_collection=SimpleNamespace(tp=SimpleNamespace(nranks=tp)),
                 index_share=False,
                 skip_topk=False,
                 training=True,
                 dsa_indexer_loss_coeff=0.0,
-                ieee_indexer_loss=ieee,
+                retain_indexer_loss_graph=ieee,
                 dsa_indexer_use_sparse_loss=False,
                 indexer=indexer,
                 softmax_scale=0.5,
@@ -216,7 +235,9 @@ class TestIEEETopologyContracts(unittest.TestCase):
             "tensor_parallel/mappings.py",
             ["gather_from_tensor_model_parallel_region"],
             {
-                "ieee_kernel_enabled": lambda: state.ieee,
+                "get_pg_size": lambda group: 1
+                if group is None
+                else group.nranks,
                 "get_tensor_model_parallel_group_if_none": lambda group: group,
                 "_GatherFromModelParallelRegion": SimpleNamespace(apply=gather),
             },
@@ -224,9 +245,9 @@ class TestIEEETopologyContracts(unittest.TestCase):
         x = paddle.ones([2, 4])
         fn = ns["gather_from_tensor_model_parallel_region"]
         for group in (None, SimpleNamespace(nranks=1)):
-            self.assertIs(fn(x, group), x)
+            self.assertIs(fn(x, group, use_accuracy_compatible=True), x)
         gather.assert_not_called()
-        fn(x, SimpleNamespace(nranks=2))
+        fn(x, SimpleNamespace(nranks=2), use_accuracy_compatible=True)
         self.assertEqual(gather.call_count, 1)
         state.ieee = False
         fn(x, SimpleNamespace(nranks=1))
@@ -243,11 +264,11 @@ class TestIEEETopologyContracts(unittest.TestCase):
             ],
             {
                 "paddle": paddle,
-                "ieee_kernel_enabled": lambda: state.ieee,
+                "F": paddle.nn.functional,
+                "get_pg_size": lambda group: 1
+                if group is None
+                else group.nranks,
                 "get_tensor_model_parallel_group_if_none": lambda group: group,
-                "get_pg_size": lambda group: (
-                    1 if group is None else group.nranks
-                ),
                 "LinearWithGradAccumulationAndAsyncCommunication": SimpleNamespace(
                     apply=communication
                 ),
@@ -307,8 +328,7 @@ class TestIEEETopologyContracts(unittest.TestCase):
             args.update(overrides)
             fn(x, w, None, **args)
         self.assertEqual(communication.call_count, 5)
-        state.ieee = False
-        fn(x, w, None, False, False, False, use_accuracy_compatible=True)
+        fn(x, w, None, False, False, False, use_accuracy_compatible=False)
         self.assertEqual(communication.call_count, 6)
 
     def test_moe_does_not_stack_input_fanouts(self):
@@ -326,7 +346,7 @@ class TestIEEETopologyContracts(unittest.TestCase):
             ["MoELayer.forward"],
             {
                 "paddle": paddle,
-                "ieee_kernel_enabled": lambda: True,
+                "F": paddle.nn.functional,
                 "ThreePathCloneAlignMG": primary,
                 "_AccuracyCompatibleMoEInputBranches": fallback,
                 "inspect_tensor_set_current_layer": lambda *args: None,
@@ -334,6 +354,7 @@ class TestIEEETopologyContracts(unittest.TestCase):
             },
         )
         layer = SimpleNamespace(
+            config=SimpleNamespace(use_accuracy_compatible=True),
             expert_model_parallel_size=1,
             sequence_parallel=False,
             shared_experts=object(),
@@ -348,6 +369,12 @@ class TestIEEETopologyContracts(unittest.TestCase):
         primary.apply.assert_called_once()
         fallback.apply.assert_not_called()
         layer.use_accuracy_compatible = False
+        layer.config.use_accuracy_compatible = False
+        with self.assertRaises(ReachedExperts):
+            ns["forward"](layer, x)
+        fallback.apply.assert_not_called()
+        layer.config.use_accuracy_compatible = True
+        layer._supports_three_path_clone = lambda: False
         with self.assertRaises(ReachedExperts):
             ns["forward"](layer, x)
         fallback.apply.assert_called_once()

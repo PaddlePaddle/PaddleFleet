@@ -110,11 +110,8 @@ class TestMLAKposEmbSequenceParallelGather(unittest.TestCase):
 
         source = inspect.getsource(mla.MLASelfAttention.forward)
         self.assertIn("k_abs_weight", source)
-        self.assertIn("_dsa_absorbed_enabled()", source)
+        self.assertIn("self.config.use_accuracy_compatible", source)
         self.assertNotIn("core_kv_compressed", source)
-        helper = inspect.getsource(mla._dsa_absorbed_enabled)
-        self.assertIn("ieee_kernel_enabled()", helper)
-        self.assertIn("MODEL_REPRO_DSA_ABSORBED", helper)
 
     def test_uac_mla_rope_helper_uses_k_seq_offset_for_sharded_key(self):
         from paddlefleet.transformer.multi_latent_attention import (

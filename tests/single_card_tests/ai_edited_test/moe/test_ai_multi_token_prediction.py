@@ -290,91 +290,19 @@ class TestMultiTokenPrediction(unittest.TestCase):
         projection = Projection()
         expected = paddle.nn.functional.linear(hidden_states, projection.weight)
 
-        with patch.object(mtp, "_ACCURACY_COMPATIBLE_KERNEL", True):
-            actual, bias = mtp._mtp_eh_projection(projection, hidden_states, 1)
-            paddle.testing.assert_close(actual, expected)
-            self.assertIsNone(bias)
-            self.assertFalse(projection.called)
+        actual, bias = mtp._mtp_eh_projection(
+            projection, hidden_states, 1, use_accuracy_compatible=True
+        )
+        paddle.testing.assert_close(actual, expected)
+        self.assertIsNone(bias)
+        self.assertFalse(projection.called)
 
-            native, bias = mtp._mtp_eh_projection(projection, hidden_states, 2)
-            paddle.testing.assert_close(native, paddle.full([2, 3], -1.0))
-            self.assertIsNone(bias)
-            self.assertTrue(projection.called)
-
-    def test_mtp_shift_position_ids_accuracy_gate(self):
-        """Accuracy mode rolls MTP positions by one plus prediction depth."""
-        from paddlefleet.transformer import multi_token_prediction as mtp
-
-        position_ids = paddle.to_tensor([[0, 1, 2, 3]], dtype="int64")
-        with patch.object(mtp, "_ACCURACY_COMPATIBLE_KERNEL", True):
-            actual = mtp._mtp_shift_position_ids(
-                position_ids,
-                paddle.zeros([1, 4, 2]),
-                layer_number=0,
-                sequence_parallel=False,
-            )
-            self.assertTrue(
-                paddle.equal_all(
-                    actual, paddle.to_tensor([1, 2, 3, 0], dtype="int64")
-                ).item()
-            )
-
-            raw_carrier = paddle.to_tensor(
-                [[0, 1, 2, 3, 4, 5, 6, 0]], dtype="int64"
-            )
-            normalized = mtp._mtp_shift_position_ids(
-                raw_carrier,
-                paddle.zeros([1, 7, 2]),
-                layer_number=0,
-                sequence_parallel=False,
-            )
-            self.assertTrue(
-                paddle.equal_all(
-                    normalized,
-                    paddle.to_tensor([1, 2, 3, 4, 5, 6, 0], dtype="int64"),
-                ).item()
-            )
-            with self.assertRaisesRegex(ValueError, "shorter than"):
-                mtp._mtp_shift_position_ids(
-                    paddle.to_tensor([[0, 1, 2]], dtype="int64"),
-                    paddle.zeros([1, 4, 2]),
-                    layer_number=0,
-                    sequence_parallel=False,
-                )
-
-            actual = mtp._mtp_shift_position_ids(
-                position_ids,
-                paddle.zeros([1, 4, 2]),
-                layer_number=1,
-                sequence_parallel=False,
-            )
-            self.assertTrue(
-                paddle.equal_all(
-                    actual, paddle.to_tensor([2, 3, 0, 1], dtype="int64")
-                ).item()
-            )
-            inferred = mtp._mtp_shift_position_ids(
-                None,
-                paddle.zeros([1, 4, 2]),
-                layer_number=0,
-                sequence_parallel=False,
-            )
-            self.assertTrue(
-                paddle.equal_all(
-                    inferred, paddle.to_tensor([1, 2, 3, 0], dtype="int64")
-                ).item()
-            )
-
-        with patch.object(mtp, "_ACCURACY_COMPATIBLE_KERNEL", False):
-            self.assertIs(
-                mtp._mtp_shift_position_ids(
-                    position_ids,
-                    paddle.zeros([1, 4, 2]),
-                    layer_number=0,
-                    sequence_parallel=False,
-                ),
-                position_ids,
-            )
+        native, bias = mtp._mtp_eh_projection(
+            projection, hidden_states, 2, use_accuracy_compatible=True
+        )
+        paddle.testing.assert_close(native, paddle.full([2, 3], -1.0))
+        self.assertIsNone(bias)
+        self.assertTrue(projection.called)
 
     def test_proj_and_transformer_layer_passes_unshifted_position_ids(self):
         """IEEE e468 keeps the unshifted MTP carrier on the live path."""

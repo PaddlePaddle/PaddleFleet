@@ -47,7 +47,8 @@ class TestIEEEMTPLossAttachment(unittest.TestCase):
         self.assertEqual(len(helpers), 1)
         namespace = {
             "self": SimpleNamespace(
-                config=SimpleNamespace(add_mtp_loss=add_mtp)
+                config=SimpleNamespace(add_mtp_loss=add_mtp),
+                use_accuracy_compatible=compatible,
             ),
             "_use_accuracy_compatible_kernel": lambda: compatible,
             "ieee_kernel_enabled": lambda: ieee,
@@ -77,10 +78,10 @@ class TestIEEEMTPLossAttachment(unittest.TestCase):
         self.assertEqual(main.grad.item(), 1.0)
         self.assertEqual(auxiliary.grad.item(), 1.0)
 
-    def test_default_off_preserves_existing_rounding(self):
+    def test_environment_gate_is_not_required_for_alignment(self):
         main, auxiliary = self.inputs()
         output = self.attachment(ieee=False)(main, auxiliary)
-        self.assertEqual(output.item(), 0.0)
+        self.assertEqual(output.item(), 1.0)
         output.backward()
         self.assertEqual(main.grad.item(), 1.0)
         self.assertEqual(auxiliary.grad.item(), 1.0)

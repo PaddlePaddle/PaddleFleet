@@ -172,10 +172,10 @@ class TestIEEEGateSequence(unittest.TestCase):
                             master.numpy().tobytes(), live.numpy().tobytes()
                         )
 
-    def test_existing_union_path_when_ieee_or_uac_is_off(self):
+    def test_existing_union_path_when_accuracy_compatible_is_off(self):
         x = paddle.ones([6, 8], dtype="bfloat16")
         w = paddle.ones([3, 8], dtype="float32")
-        for ieee, uac in [(False, True), (True, False)]:
+        for ieee, uac in [(False, False), (True, False)]:
             with (
                 patch.dict(self.ns, ieee_kernel_enabled=lambda: ieee),
                 patch.object(F, "linear", wraps=F.linear) as linear,

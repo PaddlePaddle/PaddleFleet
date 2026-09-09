@@ -46,9 +46,8 @@ class TestIEEEMTPRotaryTable(unittest.TestCase):
             for n in method.body
             if isinstance(n, ast.If)
             and any(
-                isinstance(c, ast.Call)
-                and isinstance(c.func, ast.Name)
-                and c.func.id == "ieee_kernel_enabled"
+                isinstance(c, ast.Attribute)
+                and c.attr == "use_accuracy_compatible"
                 for c in ast.walk(n.test)
             )
             and any(
@@ -110,7 +109,6 @@ class TestIEEEMTPRotaryTable(unittest.TestCase):
 
     def test_other_paths_preserve_original_table(self):
         for change in [
-            {"ieee": False},
             {"uac": False},
             {"mtp": False},
             {"training": False},

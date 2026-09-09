@@ -33,10 +33,8 @@ from paddlefleet.context_parallel_utils import (
     ContextParallelScatterOp,
     MTPDistillationLossShift,
 )
-from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
-    get_expert_model_parallel_group,
     get_tensor_model_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -48,14 +46,6 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 
 def _loss_md5_enabled() -> bool:
     return os.environ.get("LOG_LOSS_MD5", "0") == "1"
-
-
-def _use_accuracy_compatible_kernel() -> bool:
-    """Switch for Megatron-aligned (accuracy-compatible) numeric paths.
-
-    Controlled by the ``FLAGS_use_accuracy_compatible_kernel`` env variable.
-    """
-    return os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
 
 
 # E-233/E-234: deferred token normalization. Divide the reported loss in
@@ -156,9 +146,11 @@ def _normalize_loss_by_tokens(
     loss_sum: Tensor,
     valid_tokens: float,
     main_tokens: float | None = None,
+    *,
+    use_accuracy_compatible: bool = False,
 ) -> Tensor:
     """Token-normalize ``loss_sum``, deferring the gradient share under UAC."""
-    if not _use_accuracy_compatible_kernel() or valid_tokens <= 0:
+    if not use_accuracy_compatible or valid_tokens <= 0:
         return loss_sum / valid_tokens
 
     if main_tokens is None or main_tokens <= 0:
@@ -387,10 +379,8 @@ class LanguageLoss(FleetLayer):
         )
 
         if self.enable_parallel_cross_entropy:
-            if ieee_kernel_enabled():
-                # E-608: Megatron-aligned vocab-parallel CE. Default path
-                # stays fleet ParallelCrossEntropy. FLAG+UAC alone is the
-                # Minimax / GLM-4.5 Air CI graph.
+            if self.use_accuracy_compatible:
+                # Match the reference vocabulary-parallel CE reduction.
                 self.loss_func = _uac_vocab_parallel_ce
                 print(
                     "[UAC-CE] LanguageLoss.loss_func="
@@ -400,7 +390,7 @@ class LanguageLoss(FleetLayer):
                 )
             else:
                 self.loss_func = paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy()
-        elif ieee_kernel_enabled():
+        elif self.use_accuracy_compatible:
             # TP1 reference uses native ignore-index cross entropy. The TP2
             # vocabulary partition above retains its separate reduction graph.
             self.loss_func = paddle.nn.CrossEntropyLoss(
@@ -538,7 +528,7 @@ class LanguageLoss(FleetLayer):
                 labels, axis=1, mode=self.config.cp_balance_mode
             )
 
-        if _use_accuracy_compatible_kernel():
+        if self.use_accuracy_compatible:
             # 定位锚点 1：CP gather 后、mask/归一化前的 per-token CE，
             # 两侧语义唯一，未掺入归一化差异。
             print(
@@ -625,7 +615,7 @@ class LanguageLoss(FleetLayer):
                     (1 - is_invalid_line_float).sum() + 1e-6
                 )
             else:
-                if ieee_kernel_enabled():
+                if self.use_accuracy_compatible:
                     # leftover / IEEE E-654: fp32 sum then DeferToken.
                     loss = paddle.sum(
                         loss.cast(paddle.float32).reshape([-1]) * lossmask
@@ -634,33 +624,8 @@ class LanguageLoss(FleetLayer):
                         loss,
                         _valid_tokens,
                         main_tokens=self._deferred_main_tokens,
+                        use_accuracy_compatible=self.use_accuracy_compatible,
                     )
-                elif self.use_accuracy_compatible:
-                    # Structure FLAG+UAC (Minimax / GLM-4.5 Air CI).
-                    # `loss / lossmask.sum()` after an fp32 sum is 1 ULP
-                    # off Megatron final_loss.
-                    _flat = loss.cast(paddle.float32).reshape([-1]) * lossmask
-                    loss_sum = (
-                        _flat.cast(paddle.float64).sum().cast(paddle.float32)
-                    )
-                    _count = lossmask.sum()
-                    import paddle.distributed as _pdist
-
-                    _pg_collection = getattr(self, "pg_collection", None)
-                    _ep_group = getattr(_pg_collection, "ep", None)
-                    if _ep_group is None:
-                        _ep_group = get_expert_model_parallel_group(
-                            check_initialized=False
-                        )
-                    _ep_size = (
-                        _pdist.get_world_size(group=_ep_group)
-                        if _ep_group is not None
-                        else 1
-                    )
-                    _acc_sum = paddle.zeros([1], dtype=paddle.float32)
-                    for _ in range(_ep_size):
-                        _acc_sum = _acc_sum + loss_sum
-                    loss = _acc_sum[0] / (_count * _ep_size)
                 else:
                     # Default path must keep structure's tensor divisor.
                     loss = paddle.sum(
@@ -668,7 +633,7 @@ class LanguageLoss(FleetLayer):
                     )
                     loss = loss / lossmask.sum()
 
-        if _use_accuracy_compatible_kernel():
+        if self.use_accuracy_compatible:
             # 定位锚点 2：mask + 归一化后的标量 loss，与锚点 1 配合可切开
             # 「CE 上游差异」和「lossmask / valid_token / 除法差异」。
             print(
@@ -954,13 +919,17 @@ class LanguageLoss(FleetLayer):
                             depth_tokens = float(
                                 lossmask_cur_depth.sum().item()
                             )
-                            if ieee_kernel_enabled() and depth_tokens > 0:
+                            if (
+                                self.use_accuracy_compatible
+                                and depth_tokens > 0
+                            ):
                                 loss_cur_depth = _normalize_loss_by_tokens(
                                     loss_matrix_cur_depth.sum(),
                                     depth_tokens,
                                     main_tokens=getattr(
                                         self, "_deferred_main_tokens", None
                                     ),
+                                    use_accuracy_compatible=self.use_accuracy_compatible,
                                 )
                             elif depth_tokens > 0:
                                 loss_cur_depth = (
@@ -1145,16 +1114,13 @@ class LanguageLoss(FleetLayer):
                     logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
 
             def add_loss(main_loss, loss):
-                if _use_accuracy_compatible_kernel():
+                if self.use_accuracy_compatible:
                     # Megatron-aligned: MTP loss gradient flows but loss scalar unchanged.
                     # This matches Megatron's behavior where MTP contributes to training
                     # gradients without affecting the reported loss value.
                     if self.config.add_mtp_loss:
-                        if ieee_kernel_enabled():
-                            # Cancel the detached value before adding MAIN:
-                            # (MAIN + MTP) - MTP can round the reported loss.
-                            return main_loss + (loss - loss.detach())
-                        return main_loss + loss - loss.detach()
+                        # Cancel the detached value before adding MAIN.
+                        return main_loss + (loss - loss.detach())
                     else:
                         return main_loss
                 else:
@@ -1168,7 +1134,7 @@ class LanguageLoss(FleetLayer):
                 # Align with EB: accumulate inside loop to match float32
                 # arithmetic order: loss += scaling * loss_i / N
                 loss = lm_loss
-                if _use_accuracy_compatible_kernel():
+                if self.use_accuracy_compatible:
                     # Megatron-aligned: only add MTP loss when add_mtp_loss=True.
                     # Use add_loss() to keep single maintenance point for compat
                     # behavior (loss + val - val.detach() for gradient-only flow).
@@ -1265,7 +1231,7 @@ class MainLanguageLoss(LanguageLoss):
                 logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
 
         def add_loss(main_loss, loss):
-            if _use_accuracy_compatible_kernel():
+            if self.use_accuracy_compatible:
                 # Megatron-aligned: MTP loss gradient flows but loss scalar unchanged.
                 # This matches Megatron's behavior
                 if self.config.add_mtp_loss:

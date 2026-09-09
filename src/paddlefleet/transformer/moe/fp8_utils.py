@@ -24,7 +24,6 @@ from paddlefleet.fusions.fused_swiglu_scale import (
     fused_swiglu_scale_backward,
     fused_swiglu_scale_forward,
 )
-from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.train_infer_consistent_ops.ffn_act import (
     dequant_dispatched_hidden_bf16,
     requant_swiglu_output,
@@ -140,7 +139,7 @@ __all__ = [
 FP8_ALIGN = 128
 
 
-def ieee_grouped_bf16_enabled(
+def use_sequential_bf16_experts(
     *,
     use_accuracy_compatible,
     moe_expert_fusion,
@@ -151,8 +150,7 @@ def ieee_grouped_bf16_enabled(
 ):
     """Keep the sequential BF16 forward/backward contract under IEEE mode."""
     return (
-        ieee_kernel_enabled()
-        and use_accuracy_compatible
+        use_accuracy_compatible
         and moe_expert_fusion
         and not use_fp8_mlp
         and not moe_deep_gemm
@@ -161,7 +159,7 @@ def ieee_grouped_bf16_enabled(
     )
 
 
-def _ieee_expert_matmul(x, weight, tokens_per_expert, *, backward=False):
+def _sequential_expert_matmul(x, weight, tokens_per_expert, *, backward=False):
     """Use expert-local GEMMs with the reference operand layout."""
     outputs = []
     start = 0
@@ -190,14 +188,14 @@ def moe_token_padding_alignment(
     use_fp8_mlp: bool,
     moe_grouped_gemm: bool,
     use_accuracy_compatible: bool,
-    ieee_grouped_bf16: bool = False,
+    sequential_bf16_experts: bool = False,
 ) -> int:
     # Sequential expert GEMMs use real token counts. Grouped storage can skip
     # padding only when its paired IEEE implementation is selected.
     if (
         use_accuracy_compatible
         and not use_fp8_mlp
-        and (not moe_grouped_gemm or ieee_grouped_bf16)
+        and (not moe_grouped_gemm or sequential_bf16_experts)
     ):
         return 1
     return FP8_ALIGN
@@ -1055,7 +1053,7 @@ class ExpertsGroupGemmContiguousNode:
         )
         self.situ_glu_fusion = getattr(config, "situ_glu_fusion", False)
         self.use_accuracy_compatible = use_accuracy_compatible
-        self.ieee_grouped_bf16 = ieee_grouped_bf16_enabled(
+        self.sequential_bf16_experts = use_sequential_bf16_experts(
             use_accuracy_compatible=use_accuracy_compatible,
             moe_expert_fusion=moe_expert_fusion,
             use_fp8_mlp=use_fp8_mlp,
@@ -1066,7 +1064,7 @@ class ExpertsGroupGemmContiguousNode:
         self.token_padding_alignment = moe_token_padding_alignment(
             use_fp8_mlp=use_fp8_mlp,
             moe_grouped_gemm=not self.is_split_group_gemm,
-            ieee_grouped_bf16=self.ieee_grouped_bf16,
+            sequential_bf16_experts=self.sequential_bf16_experts,
             use_accuracy_compatible=use_accuracy_compatible,
         )
         self.use_w4a8 = use_w4a8
@@ -1179,8 +1177,8 @@ class ExpertsGroupGemmContiguousNode:
                         o1,
                         self.m_indices,
                     )
-                elif self.ieee_grouped_bf16:
-                    o1 = _ieee_expert_matmul(
+                elif self.sequential_bf16_experts:
+                    o1 = _sequential_expert_matmul(
                         x,
                         expert_w1,
                         self.tokens_per_expert,
@@ -1526,7 +1524,7 @@ class ExpertsGroupGemmContiguousNode:
         # router scaling; its backward rebuilds that expert-local graph.
         # The split path retains its FP32 round-once expression.
         # ==================================================================
-        if self.ieee_grouped_bf16:
+        if self.sequential_bf16_experts:
             gate, up = paddle.chunk(o1, chunks=2, axis=-1)
             probs = unzipped_probs
             if probs.ndim == 1:
@@ -1603,8 +1601,8 @@ class ExpertsGroupGemmContiguousNode:
                         o3,
                         self.m_indices,
                     )
-                elif self.ieee_grouped_bf16:
-                    o3 = _ieee_expert_matmul(
+                elif self.sequential_bf16_experts:
+                    o3 = _sequential_expert_matmul(
                         o2,
                         expert_w2,
                         self.tokens_per_expert,
@@ -1806,8 +1804,8 @@ class ExpertsGroupGemmContiguousNode:
                         do2_s,
                         self.m_indices,
                     )
-                elif self.ieee_grouped_bf16:
-                    do2_s = _ieee_expert_matmul(
+                elif self.sequential_bf16_experts:
+                    do2_s = _sequential_expert_matmul(
                         unzipped_grad,
                         expert_w2,
                         self.tokens_per_expert,
@@ -1848,7 +1846,10 @@ class ExpertsGroupGemmContiguousNode:
                 do2_s_shape = [unzipped_grad.shape[0], expert_w2[0].shape[1]]
             do2_s = paddle.empty(do2_s_shape, dtype=unzipped_grad.dtype)
 
-        if self.ieee_grouped_bf16 and numpy.prod(unzipped_grad.shape) != 0:
+        if (
+            self.sequential_bf16_experts
+            and numpy.prod(unzipped_grad.shape) != 0
+        ):
             # Rebuild the grouped UAC forward's BF16 activation, then FP32
             # probability scaling. Expert-local graphs preserve SequentialMLP's
             # reduction geometry and its zero-offset operation on the up branch.
@@ -2204,8 +2205,8 @@ class ExpertsGroupGemmContiguousNode:
                         dx,
                         self.m_indices,
                     )
-                elif self.ieee_grouped_bf16:
-                    dx = _ieee_expert_matmul(
+                elif self.sequential_bf16_experts:
+                    dx = _sequential_expert_matmul(
                         do1,
                         expert_w1,
                         self.tokens_per_expert,
@@ -3121,11 +3122,7 @@ class ExpertsGroupGemmContiguousNode:
         ):
 
             def _batched_weight_grad():
-                if (
-                    self.use_accuracy_compatible
-                    and ieee_kernel_enabled()
-                    and not self.use_fp8_mlp
-                ):
+                if self.use_accuracy_compatible and not self.use_fp8_mlp:
                     # Match FP32 dy.T @ x before converting to the stacked
                     # Paddle [expert, input, output] parameter orientation.
                     gradients = []

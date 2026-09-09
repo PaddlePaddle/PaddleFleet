@@ -129,13 +129,9 @@ class TestAbsorbedDSAAttention(unittest.TestCase):
         weight = paddle.randn([2, 4, 8], dtype="bfloat16")
         mask = paddle.zeros([1, 1, 3, 3], dtype="float32")
 
-        with patch(
-            "paddlefleet.transformer.dsa_attention._ACCURACY_COMPATIBLE_KERNEL",
-            True,
-        ):
-            output = _unfused_absorbed_dsa_attention(
-                query, key, value, weight, mask, 1.0
-            )
+        output = _unfused_absorbed_dsa_attention(
+            query, key, value, weight, mask, 1.0, use_accuracy_compatible=True
+        )
 
         expected_scores = paddle.bmm(
             query.transpose([0, 2, 1, 3]).cast("float32").reshape([2, 3, 8]),
@@ -493,7 +489,7 @@ class TestIndexer(unittest.TestCase):
         self.assertIn("self.wq_b, q_latent", source)
         self.assertIn("self.wk, hidden_states", source)
         self.assertIn("self.weights_proj, hidden_states", source)
-        self.assertIn("if _ACCURACY_COMPATIBLE_KERNEL:", source)
+        self.assertIn("self.config.use_accuracy_compatible", source)
         helper = inspect.getsource(dsa._accuracy_compat_linear)
         self.assertIn("F.linear(x, projection.weight, bias)", helper)
 
@@ -513,7 +509,7 @@ class TestIndexer(unittest.TestCase):
         absorbed = source[
             source.index("_kv_c = _align_sp_aux_to_query") : bmm_idx
         ]
-        self.assertIn("ieee_kernel_enabled()", absorbed)
+        self.assertIn("self.config.use_accuracy_compatible", absorbed)
         self.assertNotIn("if _ACCURACY_COMPATIBLE_KERNEL:", absorbed)
 
     def test_unfused_dsa_expands_mqa_key_to_query_heads(self):

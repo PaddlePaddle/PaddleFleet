@@ -48,7 +48,6 @@ from paddlefleet.context_parallel_utils import (
     ContextParallelGatherOp,
     ContextParallelScatterOp,
 )
-from paddlefleet.ieee_kernel import ieee_kernel_enabled
 from paddlefleet.parallel_state import (
     get_context_parallel_rank,
     get_context_parallel_world_size,
@@ -184,8 +183,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
 
         ctx.sequence_shards = (
             int(sequence_shards or 1)
-            if ieee_kernel_enabled()
-            and use_accuracy_compatible
+            if use_accuracy_compatible
             and w.dtype == paddle.float32
             and x.ndim == 2
             and not defer_dw
@@ -196,8 +194,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
         # consumes a BF16 weight, including in dgrad, after each master update.
         effective_w = (
             w.cast(paddle.bfloat16).cast(paddle.float32)
-            if ieee_kernel_enabled()
-            and use_accuracy_compatible
+            if use_accuracy_compatible
             and w.dtype == paddle.float32
             and x.dtype == paddle.bfloat16
             and not defer_dw
@@ -314,7 +311,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                     w_g = paddle.matmul(
                         y_grad, x.cast(ctx.dtype), transpose_x=True
                     )
-                    if ieee_kernel_enabled() and w.dtype == paddle.float32:
+                    if w.dtype == paddle.float32:
                         # Reference local weight gradients round through BF16.
                         w_g = w_g.cast(paddle.bfloat16).cast(paddle.float32)
                 x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
@@ -435,29 +432,10 @@ class StandardMoERouter(nn.Layer):
                 f"but got {self.scoring_func!r}. "
             )
 
-        # IEEE routing consumes BF16 views of an FP32 optimizer master.
-        # FLAG+UAC alone keeps params_dtype for other checkpoint layouts;
-        # the explicit override remains available to existing loaders.
-        if (
-            ieee_kernel_enabled()
-            or os.environ.get("MODEL_REPRO_FP32_UAC_GATE", "0") == "1"
-        ):
-            _gate_dtype = "float32"
-        elif self.use_accuracy_compatible:
-            _gate_dtype = config.params_dtype
-        else:
-            _gate_dtype = "float32"
-        if not getattr(StandardMoERouter, "_fp32_uac_gate_logged", False):
-            StandardMoERouter._fp32_uac_gate_logged = True
-            print(
-                f"[FP32-UAC-GATE] dtype={_gate_dtype} "
-                f"env={os.environ.get('MODEL_REPRO_FP32_UAC_GATE', '')!r} "
-                f"uac={self.use_accuracy_compatible}",
-                flush=True,
-            )
+        # Keep an FP32 optimizer master; alignment forward uses its BF16 view.
         self.weight = paddle.create_parameter(
             shape=[self.num_experts, self.hidden_size],
-            dtype=_gate_dtype,
+            dtype="float32",
             default_initializer=paddle.nn.initializer.Constant(0.0),
         )
         config.init_method(self.weight)
@@ -1187,7 +1165,8 @@ class StandardMoERouter(nn.Layer):
         # The bias term b is used only to adjust affinity scores for Top-K expert selection (routing); it does not affect gating.
         # The gate applied during dispatch and to weight the FFN output is computed from the original affinity score s_{i,t} (without the bias).
         if self.use_accuracy_compatible and (
-            not ieee_kernel_enabled() or self.tensor_model_parallel_size > 1
+            not self.use_accuracy_compatible
+            or self.tensor_model_parallel_size > 1
         ):
             row_idx = paddle.arange(
                 bsz_seq_len, dtype=topk_idx.dtype
@@ -1857,7 +1836,8 @@ class TopKRouter(StandardMoERouter):
             self.use_accuracy_compatible
             and not use_split
             and (
-                not ieee_kernel_enabled() or self.tensor_model_parallel_size > 1
+                not self.use_accuracy_compatible
+                or self.tensor_model_parallel_size > 1
             )
         ):
             gates_ori = self.gate_score_func(logits).cast(logits.dtype)
