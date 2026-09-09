@@ -38,14 +38,10 @@ is_disabled() {
 export FLAGS_embedding_deterministic=1
 export FLAGS_cudnn_deterministic=1
 
-# How many test files run at the same time. Each one still gets its own pytest
-# process, exactly as before -- only the loop is parallel. The job holds a
-# single GPU, so the concurrent files share it.
+# How many test files run at the same time, each still in its own pytest process.
 workers="${PYTEST_WORKERS:-4}"
 
-# Validated before it reaches xargs. A non-numeric value makes xargs fail
-# immediately without running anything, and 0 means "no concurrency limit" in
-# GNU xargs -- 600 pytest processes at once on one GPU.
+# xargs -P runs nothing on a non-numeric value and drops the limit entirely on 0.
 if ! [[ "$workers" =~ ^[1-9][0-9]*$ ]]; then
     echo -e "::error:: \033[31mPYTEST_WORKERS must be a positive integer, got '$workers'\033[0m"
     exit 1
@@ -69,20 +65,11 @@ if [ "$run_count" -eq 0 ]; then
     exit 0
 fi
 
-# One pytest process per test file, unchanged -- these suites set
-# process-global paddle/fleet state at import time and cannot share a process.
-# Only the loop is parallel now: `xargs -P` keeps $workers files in flight.
-#
-# Output of each file goes to its own log instead of straight to stdout,
-# because $workers concurrent processes would interleave into something
-# unreadable. Logs of failing files are dumped at the end; passing files just
-# print one status line, and their log is left on disk.
+# Still one process per file; only the loop is parallel, so logs must not interleave.
 status_dir=$(mktemp -d) || exit 1
 trap 'rm -rf "$status_dir"' EXIT
 
-# Per-file log and marker names are derived from the whole path, not the
-# basename: 22 basenames occur in more than one directory under
-# $test_dir, and two of those running at once would write the same file.
+# From the full path, not the basename: 22 basenames repeat across directories.
 slug_for() {
     local p="${1#./}"
     p="${p#"$test_dir/"}"
@@ -96,17 +83,14 @@ run_one_test() {
     slug=$(slug_for "$test_file")
     local log="./${slug}_single_card.log"
     echo "Running single card test: $test_file"
-    # --parallel-mode: several `coverage run` processes are alive at once, so
-    # each needs its own data file. Workflows that consume the data already run
-    # `coverage combine`.
+    # --parallel-mode: concurrent coverage processes each need their own data file.
     if [[ "${WITH_COVERAGE:-OFF}" == "ON" ]]; then
         coverage run --parallel-mode -m pytest -s "$test_file" >"$log" 2>&1
     else
         pytest -s "$test_file" >"$log" 2>&1
     fi
     local exit_code=$?
-    # Written for every file, pass or fail, so the parent can tell "all green"
-    # apart from "xargs never got round to this file".
+    # Written pass or fail, so a short count means xargs skipped files.
     echo "$test_file" >"$status_dir/$slug.done"
     if [ $exit_code -ne 0 ]; then
         echo "$test_file" >"$status_dir/$slug.failed"
@@ -139,11 +123,7 @@ done
 echo "======================================"
 echo -e "\033[34mTest files executed: $ran_count / $run_count\033[0m"
 
-# The completion markers, not xargs' exit code, are the primary invariant: the
-# code for "an invocation failed" is 123 on GNU xargs but 1 on BSD, and 1 is
-# also GNU's code for "xargs itself failed" (an invalid -P, for one). A short
-# count covers every one of those cases -- nothing launched, launched and gave
-# up part way -- and cannot be confused with a green run.
+# Markers, not xargs' exit code, decide: that code is 123 on GNU but 1 on BSD.
 if [ "$ran_count" -ne "$run_count" ]; then
     echo -e "::error:: \033[31mOnly $ran_count of $run_count test files ran (xargs exited $xargs_code)\033[0m"
     echo "======================================"
