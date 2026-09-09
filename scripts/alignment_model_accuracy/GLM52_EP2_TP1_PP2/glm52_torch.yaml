@@ -1,0 +1,89 @@
+# GLM-5.2 official minimum_complete: 3 dense + 1 MoE + 1 MTP, 16 experts.
+# TP1 PP2 EP2, four GPUs. Native loss comparison requires all 100 steps.
+ENV:
+  PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+
+model: /home/.cache/PaddleFormers/GLM-5.2-minimum-complete-bf16
+tokenizer_name_or_path: /home/.cache/PaddleFormers/GLM-5.2-minimum-complete-bf16
+template: glm5_2
+template_backend: swift
+enable_thinking: false
+tuner_type: full
+torch_dtype: bfloat16
+
+dataset:
+  - /home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP/alignment_torch.jsonl
+dataset_shuffle: false
+train_dataloader_shuffle: false
+drop_empty_assistant_response: true
+data_seed: 2026
+split_dataset_ratio: 0.0
+max_length: 512
+packing: false
+padding_free: false
+
+micro_batch_size: 1
+global_batch_size: 2
+train_iters: 100
+finetune: true
+mtp_num_layers: 1
+mtp_loss_scaling_factor: 0.1
+seed: 2026
+lr: 0.000001
+min_lr: 0.000001
+lr_decay_style: constant
+weight_decay: 0.0
+clip_grad: 0.0
+calculate_per_token_loss: true
+optimizer: adam
+native_unfused_adamw: true
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_eps: 0.00000001
+use_distributed_optimizer: false
+accumulate_allreduce_grads_in_fp32: false
+
+
+attention_backend: unfused
+masked_softmax_fusion: false
+bias_dropout_fusion: false
+bias_activation_fusion: false
+apply_rope_fusion: false
+gradient_accumulation_fusion: false
+cross_entropy_loss_fusion: false
+moe_grouped_gemm: true
+moe_permute_fusion: false
+moe_token_dispatcher_type: flex
+moe_shared_expert_overlap: false
+
+perform_initialization: false
+tensor_model_parallel_size: 1
+pipeline_model_parallel_size: 2
+context_parallel_size: 1
+expert_model_parallel_size: 2
+expert_tensor_parallel_size: 1
+sequence_parallel: false
+deterministic_mode: true
+use_accuracy_compatible: true
+recompute_granularity: none
+
+megatron_extra_kwargs:
+  moe_router_bias_update_rate: 0.0
+  norm_accuracy_compatible: true
+  dsa_accuracy_compatible: true
+  dsa_kernel_backend: none
+  router_accuracy_compatible: true
+  persist_layer_norm: false
+  transformer_impl: local
+
+output_dir: logs/torch/glm52/trainer
+add_version: false
+logging_steps: 1
+save_strategy: steps
+save_steps: 100
+save_safetensors: true
+no_save_optim: true
+no_save_rng: true
+save_total_limit: 2
+
+moe_enable_deepep: true
