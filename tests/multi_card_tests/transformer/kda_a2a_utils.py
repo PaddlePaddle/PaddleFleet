@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Shared helpers for the two ``linear_attn_cp_mode="headwise"`` tests.
+"""Shared helpers for the two ``linear_cp_mode="headwise"`` tests.
 
 ``test_kda_a2a_core_bitwise.py`` (bitwise, KDA core only) and
 ``test_kda_head_a2a_layer.py`` (whole layer, rel-L2) need the same two things,

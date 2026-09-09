@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Head-shard all-to-all helpers for linear-attention CP (``linear_attn_cp_mode="headwise"``).
+"""Head-shard all-to-all helpers for linear-attention CP (``linear_cp_mode="headwise"``).
 
 Everything in here is pure layout: a2a axis swaps and per-head slicing.  It is a
 separate module from ``kimi_delta_attention.py`` for one reason -- the bitwise

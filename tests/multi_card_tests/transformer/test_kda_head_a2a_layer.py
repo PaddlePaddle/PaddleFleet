@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Layer-level coverage of ``linear_attn_cp_mode="headwise"`` on 4 ranks.
+"""Layer-level coverage of ``linear_cp_mode="headwise"`` on 4 ranks.
 
 The second half of a pair.  ``test_kda_a2a_core_bitwise.py`` proves the KDA core
 is **bitwise** under the head swap; this file proves the whole
@@ -29,7 +29,7 @@ it.  So: rel-L2 here, bitwise there.
 
 What this file catches that the core test cannot:
 
-  * ``linear_attn_cp_mode="headwise"`` actually reaching the KDA layer instead of
+  * ``linear_cp_mode="headwise"`` actually reaching the KDA layer instead of
     being rejected by config validation, with the *global* token layout staying
     contiguous rather than flipping to dualchunk
   * ``build_cp_context`` being skipped, so ``cu_seqlens`` stays **global**.  The
@@ -121,7 +121,7 @@ def _config(cp_size, mode):
         normalization="RMSNorm",
         context_parallel_size=cp_size,
         cp_balance_mode=CP_BALANCE_MODE,
-        linear_attn_cp_mode=mode,
+        linear_cp_mode=mode,
         deterministic_mode=False,
     )
 
@@ -175,7 +175,7 @@ def _indices():
 
 @unittest.skipUnless(HAVE_FLA, "paddlefleet_ops fla kernels not available")
 class KdaHeadA2ALayerTest(unittest.TestCase):
-    """``linear_attn_cp_mode="headwise"`` at the layer level: correct, and really sharded."""
+    """``linear_cp_mode="headwise"`` at the layer level: correct, and really sharded."""
 
     @classmethod
     def setUpClass(cls):
@@ -241,7 +241,7 @@ class KdaHeadA2ALayerTest(unittest.TestCase):
             ProcessGroupCollection(tp=None, cp=cp_group),
         )
         self.assertEqual(layer.cp_size, CONTEXT_PARALLEL)
-        self.assertEqual(layer.config.linear_attn_cp_mode, MODE)
+        self.assertEqual(layer.config.linear_cp_mode, MODE)
         self.assertEqual(layer.config.cp_balance_mode, CP_BALANCE_MODE)
         self.assertTrue(layer.cp_head_a2a)
         with paddle.no_grad():
@@ -258,7 +258,7 @@ class KdaHeadA2ALayerTest(unittest.TestCase):
             kda_mod,
             "build_cp_context",
             side_effect=AssertionError(
-                "build_cp_context must not run under linear_attn_cp_mode="
+                "build_cp_context must not run under linear_cp_mode="
                 f"{MODE!r}: cu_seqlens has to stay global after the head swap"
             ),
         ):
@@ -399,7 +399,7 @@ class KdaHeadA2ALayerTest(unittest.TestCase):
         if cp_rank == 0:
             worst = max(err for _, _, err in checked)
             print(
-                f"  [PASS] linear_attn_cp_mode={MODE} cp={CONTEXT_PARALLEL} "
+                f"  [PASS] linear_cp_mode={MODE} cp={CONTEXT_PARALLEL} "
                 f"out={out_err:.3e} "
                 f"gx={dx_err:.3e} worst weight-grad={worst:.3e} "
                 f"({len(checked)} params)"

@@ -1444,7 +1444,7 @@ class TestGatedNormRecompute(unittest.TestCase):
 
 
 class TestLinearAttnCpModeConfig(unittest.TestCase):
-    """``linear_attn_cp_mode`` validation in ``TransformerConfig.__post_init__``.
+    """``linear_cp_mode`` validation in ``TransformerConfig.__post_init__``.
 
     ``headwise`` is only correct under a contiguous token layout: the head swap
     assumes rank ``r`` owns the contiguous block ``[r*s/P, (r+1)*s/P)``, while
@@ -1455,17 +1455,17 @@ class TestLinearAttnCpModeConfig(unittest.TestCase):
 
     def test_default_is_chunkwise(self):
         """The existing sequence-split CP path must stay the default."""
-        self.assertEqual(TransformerConfig().linear_attn_cp_mode, "chunkwise")
+        self.assertEqual(TransformerConfig().linear_cp_mode, "chunkwise")
 
     def test_invalid_mode_raises(self):
         with self.assertRaises(ValueError) as caught:
-            TransformerConfig(linear_attn_cp_mode="ulysses")
-        self.assertIn("linear_attn_cp_mode", str(caught.exception))
+            TransformerConfig(linear_cp_mode="ulysses")
+        self.assertIn("linear_cp_mode", str(caught.exception))
 
     def test_headwise_rejects_dualchunk(self):
         with self.assertRaises(ValueError) as caught:
             TransformerConfig(
-                linear_attn_cp_mode="headwise",
+                linear_cp_mode="headwise",
                 cp_balance_mode="dualchunk_allgather",
             )
         self.assertIn("contiguous", str(caught.exception))
@@ -1474,9 +1474,9 @@ class TestLinearAttnCpModeConfig(unittest.TestCase):
         for balance in ("contiguous_allgather", "contiguous_a2a"):
             with self.subTest(cp_balance_mode=balance):
                 config = TransformerConfig(
-                    linear_attn_cp_mode="headwise", cp_balance_mode=balance
+                    linear_cp_mode="headwise", cp_balance_mode=balance
                 )
-                self.assertEqual(config.linear_attn_cp_mode, "headwise")
+                self.assertEqual(config.linear_cp_mode, "headwise")
                 self.assertEqual(config.cp_balance_mode, balance)
 
     def test_chunkwise_still_allows_dualchunk(self):
@@ -1487,7 +1487,7 @@ class TestLinearAttnCpModeConfig(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_FLA, "paddlefleet_ops fla kernels are not available")
 class TestHeadwiseCpInit(unittest.TestCase):
-    """``__init__`` under ``linear_attn_cp_mode="headwise"``.
+    """``__init__`` under ``linear_cp_mode="headwise"``.
 
     ``get_pg_size`` returns 1 whenever ``paddle.distributed`` is not initialized,
     so the ``cp_size > 1`` branch is unreachable on one card without patching it.
@@ -1506,7 +1506,7 @@ class TestHeadwiseCpInit(unittest.TestCase):
             return _build_kda(
                 pg_collection=pg_collection,
                 config_overrides={
-                    "linear_attn_cp_mode": mode,
+                    "linear_cp_mode": mode,
                     "context_parallel_size": cp_size,
                     "cp_balance_mode": "contiguous_allgather",
                 },

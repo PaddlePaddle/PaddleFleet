@@ -199,11 +199,11 @@ tests:
   - test_case: [tests/multi_card_tests/transformer/test_kimi_delta_attention_cp.py]
     products:
       - num_gpus: 4
-  # transformer: KDA linear_attn_cp_mode="headwise", bitwise core (CP=4)
+  # transformer: KDA linear_cp_mode="headwise", bitwise core (CP=4)
   - test_case: [tests/multi_card_tests/transformer/test_kda_a2a_core_bitwise.py]
     products:
       - num_gpus: 4
-  # transformer: KDA linear_attn_cp_mode="headwise", whole layer (CP=4)
+  # transformer: KDA linear_cp_mode="headwise", whole layer (CP=4)
   - test_case: [tests/multi_card_tests/transformer/test_kda_head_a2a_layer.py]
     products:
       - num_gpus: 4

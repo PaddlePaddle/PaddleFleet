@@ -323,14 +323,13 @@ class KimiDeltaAttention(FleetLayer):
         self.tp_size = get_pg_size(self.pg_collection.tp)
         self.sp_size = self.tp_size if config.sequence_parallel else 1
         self.cp_size = get_pg_size(getattr(self.pg_collection, "cp", None))
-        # ``linear_attn_cp_mode="headwise"``: the projections stay sequence-split,
+        # ``linear_cp_mode="headwise"``: the projections stay sequence-split,
         # but everything between them (conv + recurrence) runs on the *full*
         # sequence with a head shard, so there is no conv halo and no state relay.
         # The default "chunkwise" keeps the sequence-split path below unchanged.
         self.cp_head_a2a = (
             self.cp_size > 1
-            and getattr(config, "linear_attn_cp_mode", "chunkwise")
-            == "headwise"
+            and getattr(config, "linear_cp_mode", "chunkwise") == "headwise"
         )
 
         # Attributes from config
@@ -382,7 +381,7 @@ class KimiDeltaAttention(FleetLayer):
             # whole embedding + prologue had run.
             if self.cp_head_a2a and (num_heads // self.tp_size) % self.cp_size:
                 raise ValueError(
-                    f"linear_attn_cp_mode='headwise' splits heads across "
+                    f"linear_cp_mode='headwise' splits heads across "
                     f"the context-parallel group, so {name}({num_heads}) // "
                     f"tp_size({self.tp_size}) = {num_heads // self.tp_size} must "
                     f"be divisible by cp_size({self.cp_size})"

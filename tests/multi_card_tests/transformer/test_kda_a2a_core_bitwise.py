@@ -14,7 +14,7 @@
 
 """Bitwise coverage of the head-sharded all-to-all KDA core, on real ranks.
 
-``linear_attn_cp_mode="headwise"`` exists to make context parallelism *exact*
+``linear_cp_mode="headwise"`` exists to make context parallelism *exact*
 for the linear-attention layers, and this file is what pins that claim down.
 The KDA core -- ``causal_conv1d`` + ``chunk_kda`` -- must be **bitwise**
 identical between

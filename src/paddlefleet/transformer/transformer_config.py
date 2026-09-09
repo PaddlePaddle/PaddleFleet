@@ -982,7 +982,7 @@ class TransformerConfig(ModelParallelConfig):
     "contiguous_a2a".
     """
 
-    linear_attn_cp_mode: str = "chunkwise"
+    linear_cp_mode: str = "chunkwise"
     """How the linear-attention layers (KDA, ...) parallelise over the CP group.
 
     This is *not* a kernel selector -- the kernel is chunkwise either way. It
@@ -3152,14 +3152,14 @@ class TransformerConfig(ModelParallelConfig):
                 f"Must be one of {sorted(valid_cp_balance_modes)}."
             )
 
-        # only support linear_attn_cp_mode in {chunkwise, headwise}
-        valid_linear_attn_cp_modes = {"chunkwise", "headwise"}
-        if self.linear_attn_cp_mode not in valid_linear_attn_cp_modes:
+        # only support linear_cp_mode in {chunkwise, headwise}
+        valid_linear_cp_modes = {"chunkwise", "headwise"}
+        if self.linear_cp_mode not in valid_linear_cp_modes:
             raise ValueError(
-                f"linear_attn_cp_mode={self.linear_attn_cp_mode!r} is invalid. "
-                f"Must be one of {sorted(valid_linear_attn_cp_modes)}."
+                f"linear_cp_mode={self.linear_cp_mode!r} is invalid. "
+                f"Must be one of {sorted(valid_linear_cp_modes)}."
             )
-        if self.linear_attn_cp_mode == "headwise":
+        if self.linear_cp_mode == "headwise" and self.context_parallel_size > 1:
             # The head swap is layer-local: heads are exchanged by all-to-all
             # inside the layer and swapped back before ``out_norm``, which is only
             # sound while the *global* token layout is the contiguous one the swap
@@ -3171,7 +3171,7 @@ class TransformerConfig(ModelParallelConfig):
             # care which *contiguous* mode the non-linear-attention layers use.
             if not self.cp_balance_mode.startswith("contiguous"):
                 raise ValueError(
-                    "linear_attn_cp_mode='headwise' needs a contiguous "
+                    "linear_cp_mode='headwise' needs a contiguous "
                     "cp_balance_mode (the head swap assumes rank r owns the "
                     f"contiguous token block), got {self.cp_balance_mode!r}."
                 )
