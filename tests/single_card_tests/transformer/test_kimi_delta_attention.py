@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import inspect
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import numpy as np
@@ -1037,6 +1038,37 @@ class TestContextParallelGuards(unittest.TestCase):
             self.assertIs(
                 spy.call_args.kwargs["use_tf32x3_affine_chain"], flag
             )
+
+
+class TestCpTf32x3ConfigDefault(unittest.TestCase):
+    """A config predating linear_cp_use_tf32x3_affine_chain must still read False.
+
+    The CP path reads the switch straight off ``self.config``, and
+    ``TransformerConfig.from_config`` builds via ``object.__new__`` +
+    ``register_attributes``, so it only copies keys the incoming config already
+    has -- the field never lands in the instance ``__dict__``. The read is safe
+    because the dataclass default lives on the class; turning the field into a
+    ``field(default_factory=...)`` would delete that class attribute and break
+    every pre-existing config under CP. Pin the invariant here.
+    """
+
+    def _legacy_config(self):
+        return TransformerConfig.from_config(
+            SimpleNamespace(
+                num_hidden_layers=2,
+                hidden_size=HIDDEN_SIZE,
+                num_attention_heads=NUM_KEY_HEADS,
+                normalization="RMSNorm",
+            )
+        )
+
+    def test_field_is_absent_from_instance_dict(self):
+        cfg = self._legacy_config()
+        self.assertNotIn("linear_cp_use_tf32x3_affine_chain", vars(cfg))
+
+    def test_read_still_resolves_to_false(self):
+        cfg = self._legacy_config()
+        self.assertFalse(cfg.linear_cp_use_tf32x3_affine_chain)
 
 
 def _build_gpt_embedding(config):
