@@ -54,12 +54,7 @@ from paddlefleet.transformer.attention import (
     SelfAttentionVHA,
     SelfAttentionVHASublayersSpec,
 )
-from paddlefleet.transformer.block_attn_res import (
-    BlockAttnRes,
-    BlockAttnResSublayersSpec,
-    OutputBlockAttnResPipe,
-)
-from paddlefleet.transformer.csa_attention import (
+from paddlefleet.transformer.attention.csa_attention import (
     CompressedSparseAttention,
     CompressedSparseAttentionSublayersSpec,
     Compressor,
@@ -67,15 +62,33 @@ from paddlefleet.transformer.csa_attention import (
     CSAIndexer,
     CSAIndexerSublayersSpec,
 )
-from paddlefleet.transformer.dsa_attention import (
+from paddlefleet.transformer.attention.dsa_attention import (
     DSAIndexer,
     DSAIndexerSublayersSpec,
     DSAttention,
     DSAttentionSublayersSpec,
 )
-from paddlefleet.transformer.dsv4_hybrid_attention import (
+from paddlefleet.transformer.attention.dsv4_hybrid_attention import (
     DSv4HybridSelfAttention,
     DSv4HybridSelfAttentionSublayersSpec,
+)
+from paddlefleet.transformer.attention.kimi_delta_attention import (
+    KimiDeltaAttention,
+    KimiDeltaAttentionSublayersSpec,
+)
+from paddlefleet.transformer.attention.mqa_latent_attention import (
+    MQALatentAttention,
+    MQALatentAttentionSublayersSpec,
+)
+from paddlefleet.transformer.attention.multi_latent_attention import (
+    MLASelfAttention,
+    MLASelfAttentionSublayersSpec,
+    MQASelfAttention,
+)
+from paddlefleet.transformer.block_attn_res import (
+    BlockAttnRes,
+    BlockAttnResSublayersSpec,
+    OutputBlockAttnResPipe,
 )
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.gated_delta_net import (
@@ -83,20 +96,7 @@ from paddlefleet.transformer.gated_delta_net import (
     GatedDeltaNetSublayersSpec,
 )
 from paddlefleet.transformer.identity_op import IdentityOp
-from paddlefleet.transformer.kimi_delta_attention import (
-    KimiDeltaAttention,
-    KimiDeltaAttentionSublayersSpec,
-)
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
-from paddlefleet.transformer.mqa_latent_attention import (
-    MQALatentAttention,
-    MQALatentAttentionSublayersSpec,
-)
-from paddlefleet.transformer.multi_latent_attention import (
-    MLASelfAttention,
-    MLASelfAttentionSublayersSpec,
-    MQASelfAttention,
-)
 from paddlefleet.transformer.multi_token_prediction import (
     get_mtp_layer_spec_for_backend,
 )
@@ -492,7 +492,9 @@ def get_attention_spec(
             ),
         )
     elif attention_layer_type == "gemma4":
-        from paddlefleet.transformer.gemma4_attention import Gemma4SelfAttention
+        from paddlefleet.transformer.attention.gemma4_attention import (
+            Gemma4SelfAttention,
+        )
 
         return LayerSpec(
             layer=Gemma4SelfAttention,

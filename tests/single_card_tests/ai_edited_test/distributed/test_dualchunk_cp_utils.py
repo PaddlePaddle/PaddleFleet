@@ -196,7 +196,7 @@ class TestDualChunkValidRange(unittest.TestCase):
         ``seq_offset`` values the kernel calls get; asking with the local offset,
         or in the wrong order, is silently wrong rather than a crash.
         """
-        from paddlefleet.transformer.mqa_latent_attention import (
+        from paddlefleet.transformer.attention.mqa_latent_attention import (
             MQALatentAttention,
         )
 
@@ -235,7 +235,7 @@ class TestIndexerTopkDualChunk(unittest.TestCase):
     CP_RANK, CP_SIZE, S, TOPK = 1, 4, 8, 4
 
     def _run(self, need_loss):
-        from paddlefleet.transformer.mqa_latent_attention import (
+        from paddlefleet.transformer.attention.mqa_latent_attention import (
             MQALatentAttention,
         )
 
@@ -261,7 +261,7 @@ class TestIndexerTopkDualChunk(unittest.TestCase):
 
         with (
             mock.patch(
-                "paddlefleet.transformer.mqa_latent_attention.dualchunk_swap",
+                "paddlefleet.transformer.attention.mqa_latent_attention.dualchunk_swap",
                 side_effect=_half_flip,
             ) as swap,
             mock.patch(
@@ -338,7 +338,7 @@ class TestChunkValidRange(unittest.TestCase):
 
     @staticmethod
     def _call(fake_self, meta, offset, length):
-        from paddlefleet.transformer.mqa_latent_attention import (
+        from paddlefleet.transformer.attention.mqa_latent_attention import (
             MQALatentAttention,
         )
 

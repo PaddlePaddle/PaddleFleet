@@ -44,19 +44,21 @@ from types import SimpleNamespace
 import numpy as np
 import paddle
 
-from paddlefleet.transformer.doc_mask_meta_registry import (
-    doc_mask_meta_registry,
-)
-from paddlefleet.transformer.dsv4_hybrid_attention import (
+from paddlefleet.transformer.attention.dsv4_hybrid_attention import (
     DSv4HybridAttention,
     pack_dsv4_docmask,
 )
-from paddlefleet.transformer.enums import AttnMaskType
-from paddlefleet.transformer.mqa_latent_attention import (
+from paddlefleet.transformer.attention.mqa_latent_attention import (
     MQADocMeta,
     MQALatentAttention,
 )
-from paddlefleet.transformer.multi_latent_attention import MultiLatentAttention
+from paddlefleet.transformer.attention.multi_latent_attention import (
+    MultiLatentAttention,
+)
+from paddlefleet.transformer.doc_mask_meta_registry import (
+    doc_mask_meta_registry,
+)
+from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.transformer.transformer_layer import (
     HyperConnectionTransformerLayer,
@@ -928,7 +930,7 @@ class TestDSv4SharedDocSlot(unittest.TestCase):
                 return_value=paddle.zeros([1, _SEQ, 8]),
             ) as full,
             unittest.mock.patch(
-                "paddlefleet.transformer.dsv4_hybrid_attention."
+                "paddlefleet.transformer.attention.dsv4_hybrid_attention."
                 "_pack_dsv4_logical_batch",
                 side_effect=lambda hidden, row_end, **kw: (
                     hidden,
@@ -963,7 +965,7 @@ def _meta_index_inputs(seqlen=4):
 
 
 def _doc_fields(row_end, seqlen):
-    from paddlefleet.transformer.csa_attention import (
+    from paddlefleet.transformer.attention.csa_attention import (
         _derive_csa_doc_boundaries,
     )
 
@@ -993,7 +995,7 @@ def _stub_indexer_loss_leaves(module):
 
 
 _AUTOSCALER_PATCH = unittest.mock.patch(
-    "paddlefleet.transformer.mqa_latent_attention."
+    "paddlefleet.transformer.attention.mqa_latent_attention."
     "TileLangCSAIndexerLossAutoScaler",
     autospec=True,
 )

@@ -42,13 +42,12 @@ from paddle import nn
 from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_parallel import LayerSpec
 
-import paddlefleet.transformer.csa_attention as csa_mod
+import paddlefleet.transformer.attention.csa_attention as csa_mod
 from paddlefleet.context_parallel_utils import all_gather_contiguous
 from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
     RotaryEmbedding,
 )
-from paddlefleet.transformer.cp_utils import all_gather_cp, prepend_prev_window
-from paddlefleet.transformer.csa_attention import (
+from paddlefleet.transformer.attention.csa_attention import (
     CSA_MQA_RATIO,
     CompressedSparseAttention,
     CompressedSparseAttentionSublayersSpec,
@@ -58,6 +57,7 @@ from paddlefleet.transformer.csa_attention import (
     CSAIndexer,
     CSAIndexerSublayersSpec,
 )
+from paddlefleet.transformer.cp_utils import all_gather_cp, prepend_prev_window
 
 CP_SIZE = None
 CP_RANK = None

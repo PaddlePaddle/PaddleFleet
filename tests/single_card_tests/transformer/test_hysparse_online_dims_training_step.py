@@ -66,12 +66,14 @@ from paddlefleet.tensor_parallel.layers import (
     RowParallelLinear,
 )
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
-from paddlefleet.transformer.dot_product_attention import DotProductAttention
-from paddlefleet.transformer.enums import AttnMaskType
-from paddlefleet.transformer.multi_latent_attention import (
+from paddlefleet.transformer.attention.dot_product_attention import (
+    DotProductAttention,
+)
+from paddlefleet.transformer.attention.multi_latent_attention import (
     MLASelfAttentionSublayersSpec,
     MQASelfAttention,
 )
+from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.transformer.transformer_layer import (

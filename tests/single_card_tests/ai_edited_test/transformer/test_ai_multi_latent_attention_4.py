@@ -26,7 +26,7 @@ sys.path.insert(
 import unittest
 from unittest.mock import MagicMock, patch
 
-from paddlefleet.transformer.multi_latent_attention import (
+from paddlefleet.transformer.attention.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSublayersSpec,
 )

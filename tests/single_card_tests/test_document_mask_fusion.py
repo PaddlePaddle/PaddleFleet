@@ -25,13 +25,15 @@ import unittest
 import numpy as np
 import paddle
 
-from paddlefleet.transformer.csa_attention import (
+from paddlefleet.transformer.attention.csa_attention import (
     CSADocMaskMetadata,
     _build_compress_topk_idxs_from_valid_range,
     _build_window_topk_idxs_from_doc_bounds,
     compact_kv_score_cutoff,
 )
-from paddlefleet.transformer.kimi_delta_attention import build_cu_seqlens
+from paddlefleet.transformer.attention.kimi_delta_attention import (
+    build_cu_seqlens,
+)
 from paddlefleet.triton_ops.document_mask_fusion import (
     compressed_doc_start_triton,
     compressed_topk_idxs_triton,

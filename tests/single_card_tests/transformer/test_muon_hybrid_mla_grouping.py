@@ -61,8 +61,8 @@ from paddle.optimizer.muon import (
     _default_should_use_muon,
 )
 
-from paddlefleet.transformer.csa_attention import CSAIndexer
-from paddlefleet.transformer.dsa_attention import DSAIndexer
+from paddlefleet.transformer.attention.csa_attention import CSAIndexer
+from paddlefleet.transformer.attention.dsa_attention import DSAIndexer
 from paddlefleet.transformer.muon_utils import ortho_per_head
 
 from .hybrid_mla_utils import (

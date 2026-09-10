@@ -54,20 +54,22 @@ from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_parallel import LayerSpec
 
 import paddlefleet.parallel_state as ps
-from paddlefleet.transformer.dot_product_attention import DotProductAttention
-from paddlefleet.transformer.dsa_attention import (
+from paddlefleet.transformer.attention.dot_product_attention import (
+    DotProductAttention,
+)
+from paddlefleet.transformer.attention.dsa_attention import (
     DSAIndexer,
     DSAIndexerSublayersSpec,
 )
-from paddlefleet.transformer.enums import AttnMaskType
-from paddlefleet.transformer.mqa_latent_attention import (
+from paddlefleet.transformer.attention.mqa_latent_attention import (
     MQALatentAttention,
     MQALatentAttentionSublayersSpec,
 )
-from paddlefleet.transformer.multi_latent_attention import (
+from paddlefleet.transformer.attention.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSublayersSpec,
 )
+from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import init_method_normal, scaled_init_method_normal
 

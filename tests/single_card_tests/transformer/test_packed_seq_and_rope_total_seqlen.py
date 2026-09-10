@@ -30,7 +30,9 @@ import paddle
 from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_thd,
 )
-from paddlefleet.transformer.dot_product_attention import DotProductAttention
+from paddlefleet.transformer.attention.dot_product_attention import (
+    DotProductAttention,
+)
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 

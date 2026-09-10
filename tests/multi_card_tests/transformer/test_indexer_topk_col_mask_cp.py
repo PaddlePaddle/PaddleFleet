@@ -70,7 +70,7 @@ import test_csa_attention_cp as C
 import test_mqa_dsa_cp as H
 
 import paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn as M
-from paddlefleet.transformer.csa_attention import CSADocMaskMetadata
+from paddlefleet.transformer.attention.csa_attention import CSADocMaskMetadata
 
 # Captured before any patching so the spy can call the production helper.
 _PRODUCTION_TOP_K = M._indexer_top_k_unfused

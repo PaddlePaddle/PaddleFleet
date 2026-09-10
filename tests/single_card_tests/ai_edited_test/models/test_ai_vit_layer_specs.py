@@ -132,7 +132,7 @@ class TestGetViTLayerWithLocalSpec(unittest.TestCase):
         from paddlefleet.models.vision.vit_layer_specs import (
             get_vit_layer_with_local_spec,
         )
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             DotProductAttention,
         )
 

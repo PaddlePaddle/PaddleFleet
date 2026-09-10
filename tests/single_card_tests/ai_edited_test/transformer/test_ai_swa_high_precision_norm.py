@@ -39,7 +39,7 @@ import unittest
 
 import paddle
 
-from paddlefleet.transformer.dsv4_hybrid_attention import _q_rms_norm
+from paddlefleet.transformer.attention.dsv4_hybrid_attention import _q_rms_norm
 from paddlefleet.transformer.paddle_norm import RMSNorm
 from paddlefleet.transformer.transformer_config import TransformerConfig
 

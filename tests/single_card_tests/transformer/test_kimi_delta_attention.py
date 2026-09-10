@@ -27,7 +27,7 @@ from paddle import nn
 
 from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.transformer import kimi_delta_attention as kda_mod
-from paddlefleet.transformer.kimi_delta_attention import (
+from paddlefleet.transformer.attention.kimi_delta_attention import (
     HAVE_FLA,
     KimiDeltaAttention,
     KimiDeltaAttentionSublayersSpec,

@@ -29,7 +29,7 @@ from unittest.mock import MagicMock, patch
 
 import paddle
 
-from paddlefleet.transformer.dot_product_attention import (
+from paddlefleet.transformer.attention.dot_product_attention import (
     DotProductAttention,
 )
 from paddlefleet.transformer.enums import AttnMaskType
@@ -357,7 +357,7 @@ class TestDotProductAttentionContextParallel(unittest.TestCase):
     """Tests for DotProductAttention with context parallelism (formerly CPDotProductAttention)."""
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size"
+        "paddlefleet.transformer.attention.dot_product_attention.get_context_parallel_world_size"
     )
     def test_cp_packed_seq_raises(self, mock_get_cp_world_size):
         mock_get_cp_world_size.return_value = 2

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for :mod:`paddlefleet.transformer.mqa_latent_attention`.
+"""Unit tests for :mod:`paddlefleet.transformer.attention.mqa_latent_attention`.
 
 ``hybrid_mla_attention`` set to ``"mqa_dsa"`` or ``"mqa_full_causal"`` turns the
 hybrid MLA (``csa_compress_ratios == -2``) layers of a ``dsv4_hybrid`` model into
@@ -70,12 +70,14 @@ from unittest import mock
 import numpy as np
 import paddle
 
-from paddlefleet.transformer.csa_attention import (
+from paddlefleet.transformer.attention.csa_attention import (
     _build_window_topk_idxs_from_doc_bounds,
     _derive_csa_doc_boundaries,
 )
-from paddlefleet.transformer.dsa_attention import DSAIndexerLossLoggingHelper
-from paddlefleet.transformer.mqa_latent_attention import (
+from paddlefleet.transformer.attention.dsa_attention import (
+    DSAIndexerLossLoggingHelper,
+)
+from paddlefleet.transformer.attention.mqa_latent_attention import (
     _LSE_INDEXER_TOPKS,
     MQALatentAttention,
     _HashableTensor,
@@ -266,7 +268,7 @@ if sys.flags.optimize < 1:
     sys.exit(3)
 
 from paddlefleet.fusions.mqa_sparse_attn import mqa_sparse_attn
-from paddlefleet.transformer.mqa_latent_attention import MQALatentAttention
+from paddlefleet.transformer.attention.mqa_latent_attention import MQALatentAttention
 
 try:
     mqa_sparse_attn(

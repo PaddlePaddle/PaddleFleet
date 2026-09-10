@@ -32,7 +32,7 @@ import paddle.nn.functional as F
 from paddle import nn
 
 from paddlefleet.generation.greedy_generator import DynamicKVCache
-from paddlefleet.transformer.kimi_delta_attention import (
+from paddlefleet.transformer.attention.kimi_delta_attention import (
     KimiDeltaAttention,
     KimiDeltaAttentionSublayersSpec,
 )

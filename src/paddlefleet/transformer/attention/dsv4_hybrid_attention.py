@@ -51,7 +51,7 @@ from paddlefleet.recompute_utils import (
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.transformer.attention import Attention
-from paddlefleet.transformer.csa_attention import (
+from paddlefleet.transformer.attention.csa_attention import (
     CSADocMaskMetadata,
 )
 from paddlefleet.transformer.dw_overlap import (

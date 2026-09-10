@@ -18,8 +18,10 @@ from unittest.mock import MagicMock
 import paddle
 import paddle.nn.functional as F
 
-from paddlefleet.transformer.dot_product_attention import DotProductAttention
-from paddlefleet.transformer.multi_latent_attention import (
+from paddlefleet.transformer.attention.dot_product_attention import (
+    DotProductAttention,
+)
+from paddlefleet.transformer.attention.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSublayersSpec,
 )

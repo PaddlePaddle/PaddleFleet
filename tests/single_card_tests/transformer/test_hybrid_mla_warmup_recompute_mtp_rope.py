@@ -66,9 +66,13 @@ from unittest import mock
 import numpy as np
 import paddle
 
-from paddlefleet.transformer.dot_product_attention import DotProductAttention
-from paddlefleet.transformer.dsa_attention import DSAIndexerLossLoggingHelper
-from paddlefleet.transformer.multi_latent_attention import (
+from paddlefleet.transformer.attention.dot_product_attention import (
+    DotProductAttention,
+)
+from paddlefleet.transformer.attention.dsa_attention import (
+    DSAIndexerLossLoggingHelper,
+)
+from paddlefleet.transformer.attention.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSublayersSpec,
 )
@@ -733,7 +737,7 @@ class TestWarmupRope(unittest.TestCase):
             latent layer constructs without the downgrade warning because it takes
             the fused rotate_half branch instead.
         """
-        import paddlefleet.transformer.multi_latent_attention as _mla
+        import paddlefleet.transformer.attention.multi_latent_attention as _mla
 
         def _effective(module, config):
             # Mirrors the per-use-site decision in get_query_key_value_tensors.

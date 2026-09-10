@@ -35,7 +35,7 @@ import unittest
 
 import paddle
 
-from paddlefleet.transformer.multi_latent_attention import (
+from paddlefleet.transformer.attention.multi_latent_attention import (
     build_hysparse_valid_range,
 )
 

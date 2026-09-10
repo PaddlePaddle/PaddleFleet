@@ -40,19 +40,19 @@ import paddle
 import paddle.nn.functional as F
 from paddle.distributed.fleet.meta_parallel import LayerSpec
 
-from paddlefleet.transformer.csa_attention import (
+from paddlefleet.transformer.attention.csa_attention import (
     _build_mqa_causal_topk_idxs_from_doc_bounds,
     _derive_csa_doc_boundaries,
 )
-from paddlefleet.transformer.dsa_attention import (
+from paddlefleet.transformer.attention.dsa_attention import (
     DSAIndexer,
     DSAIndexerSublayersSpec,
 )
-from paddlefleet.transformer.enums import AttnMaskType
-from paddlefleet.transformer.mqa_latent_attention import (
+from paddlefleet.transformer.attention.mqa_latent_attention import (
     MQALatentAttention,
     MQALatentAttentionSublayersSpec,
 )
+from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import init_method_normal, scaled_init_method_normal
 

@@ -469,7 +469,7 @@ class TestDotProductAttentionSinkInit(unittest.TestCase):
     """softmax_offset construction across softmax_type / sink-bias promotion."""
 
     def _build(self, **cfg_kwargs):
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             DotProductAttention,
         )
         from paddlefleet.transformer.enums import AttnMaskType
@@ -517,7 +517,7 @@ class TestDotProductAttentionSinkForward(unittest.TestCase):
     """Full fwd/bwd through the flashmask sink branch of DotProductAttention."""
 
     def _run(self, softmax_type, **cfg_kwargs):
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             DotProductAttention,
         )
         from paddlefleet.transformer.enums import AttnMaskType

@@ -62,7 +62,9 @@ from paddle.base import framework
 if TYPE_CHECKING:
     import paddle
 
-    from paddlefleet.transformer.csa_attention import CSADocMaskMetadata
+    from paddlefleet.transformer.attention.csa_attention import (
+        CSADocMaskMetadata,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +137,9 @@ class DocMaskMetaRegistry:
         keyed by ``max(1, ratio)`` because that is what ``build`` normalises to,
         but which index tables the layers will read depends on the raw value.
         """
-        from paddlefleet.transformer.csa_attention import CSADocMaskMetadata
+        from paddlefleet.transformer.attention.csa_attention import (
+            CSADocMaskMetadata,
+        )
 
         key = (int(mb_idx), max(1, int(ratio)), mask_group)
         meta = self._store.get(key)
@@ -170,7 +174,9 @@ class DocMaskMetaRegistry:
         gain. Sharing still dedups it across layers, it just is not hoisted out
         of the forward.
         """
-        from paddlefleet.transformer.csa_attention import CSA_MQA_RATIO
+        from paddlefleet.transformer.attention.csa_attention import (
+            CSA_MQA_RATIO,
+        )
 
         if ratio == CSA_MQA_RATIO:
             # Full-causal MQA reads only that O(seqlen^2) table, so there is
@@ -200,7 +206,9 @@ class DocMaskMetaRegistry:
         boundary rule (see ``MQADocMeta``'s docstring). The slot is tagged
         ``"mqa"`` where a CSA slot carries its ratio, so the two never collide.
         """
-        from paddlefleet.transformer.mqa_latent_attention import MQADocMeta
+        from paddlefleet.transformer.attention.mqa_latent_attention import (
+            MQADocMeta,
+        )
 
         key = (int(mb_idx), "mqa", mask_group)
         meta = self._store.get(key)

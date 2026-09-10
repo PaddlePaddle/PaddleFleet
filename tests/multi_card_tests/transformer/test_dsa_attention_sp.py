@@ -34,7 +34,7 @@ from paddle.distributed.fleet.meta_parallel import LayerSpec
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.training.initialize import initialize_fleet
-from paddlefleet.transformer.dsa_attention import (
+from paddlefleet.transformer.attention.dsa_attention import (
     DSAIndexer,
     DSAIndexerSublayersSpec,
 )
@@ -314,7 +314,7 @@ class TestDSAttentionPgCollectionNone(unittest.TestCase):
 
     def test_pg_collection_none_uses_mpu(self):
         """When pg_collection is None, DSAttention should get pg from use_mpu_process_groups()."""
-        from paddlefleet.transformer.dsa_attention import (
+        from paddlefleet.transformer.attention.dsa_attention import (
             DSAttention,
             DSAttentionSublayersSpec,
         )

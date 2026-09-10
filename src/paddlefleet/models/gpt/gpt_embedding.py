@@ -40,7 +40,9 @@ from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
 from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
-from paddlefleet.transformer.kimi_delta_attention import build_cu_seqlens
+from paddlefleet.transformer.attention.kimi_delta_attention import (
+    build_cu_seqlens,
+)
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:

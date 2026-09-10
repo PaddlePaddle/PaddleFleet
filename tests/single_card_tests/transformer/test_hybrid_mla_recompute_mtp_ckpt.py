@@ -44,7 +44,9 @@ import unittest
 import numpy as np
 import paddle
 
-from paddlefleet.transformer.dsa_attention import DSAIndexerLossLoggingHelper
+from paddlefleet.transformer.attention.dsa_attention import (
+    DSAIndexerLossLoggingHelper,
+)
 
 from .hybrid_mla_utils import (
     _CAPTURED,

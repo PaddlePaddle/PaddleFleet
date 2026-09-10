@@ -29,7 +29,7 @@ from unittest.mock import MagicMock, patch
 import paddle
 
 from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.transformer.dot_product_attention import (
+from paddlefleet.transformer.attention.dot_product_attention import (
     DotProductAttention,
 )
 from paddlefleet.transformer.transformer_config import TransformerConfig
@@ -240,7 +240,7 @@ class TestDotProductAttentionContextParallel(unittest.TestCase):
     """Tests for DotProductAttention with context parallelism (formerly CPDotProductAttention)."""
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size"
+        "paddlefleet.transformer.attention.dot_product_attention.get_context_parallel_world_size"
     )
     def test_forward_asserts_packed_seq(self, mock_cp_size):
         mock_cp_size.return_value = 2
@@ -259,7 +259,7 @@ class TestDotProductAttentionContextParallel(unittest.TestCase):
             attn(q, k, v, mask, packed_seq_params="fake")
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size"
+        "paddlefleet.transformer.attention.dot_product_attention.get_context_parallel_world_size"
     )
     def test_forward_asserts_attention_bias(self, mock_cp_size):
         mock_cp_size.return_value = 2

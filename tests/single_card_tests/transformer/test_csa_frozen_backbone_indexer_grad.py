@@ -41,7 +41,7 @@ import unittest
 import paddle
 
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
-from paddlefleet.transformer.csa_attention import CSAIndexer
+from paddlefleet.transformer.attention.csa_attention import CSAIndexer
 
 from .test_dsv4_hybrid_attention import _build_attention, _make_config
 
@@ -207,8 +207,8 @@ class TestCSAZeroLossCoeffSkipsLossPath(unittest.TestCase):
     def test_zero_coeff_runs_without_any_loss_construction(self):
         from unittest import mock
 
-        import paddlefleet.transformer.csa_attention as csa_mod
-        from paddlefleet.transformer.dsa_attention import (
+        import paddlefleet.transformer.attention.csa_attention as csa_mod
+        from paddlefleet.transformer.attention.dsa_attention import (
             DSAIndexerLossLoggingHelper,
         )
 

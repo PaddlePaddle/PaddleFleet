@@ -128,7 +128,7 @@ class TestLocalSpecProviderCoreAttention(unittest.TestCase):
 
     def test_returns_dot_product_attention(self):
         from paddlefleet.models.backends import LocalSpecProvider
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             DotProductAttention,
         )
 

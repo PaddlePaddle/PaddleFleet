@@ -87,8 +87,12 @@ import numpy as np
 import paddle
 import paddle.distributed as dist
 
-from paddlefleet.transformer.csa_attention import _derive_csa_doc_boundaries
-from paddlefleet.transformer.mqa_latent_attention import MQALatentAttention
+from paddlefleet.transformer.attention.csa_attention import (
+    _derive_csa_doc_boundaries,
+)
+from paddlefleet.transformer.attention.mqa_latent_attention import (
+    MQALatentAttention,
+)
 
 # Through the package path, not as a top-level sibling: the two entry points put
 # different things on ``sys.path[0]`` (``python <thisfile>`` this directory, the

@@ -152,7 +152,9 @@ def _ref_csa_indexer_topk(
 
 
 def _paddle_ref_csa_indexer_topk(q, k, weights, ratio, topk_effective):
-    from paddlefleet.transformer.dsa_attention import fused_qk_topk_naive
+    from paddlefleet.transformer.attention.dsa_attention import (
+        fused_qk_topk_naive,
+    )
 
     b, sq, h_i, d_i = q.shape
     sk = k.shape[1]
@@ -525,7 +527,7 @@ class TestCSAAttnTargetReducesum(unittest.TestCase):
             csa_attn_target_reducesum,
             csa_indexer_topk_fwd,
         )
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             _compute_attn_target_on_selected_set,
         )
 
@@ -615,7 +617,7 @@ class TestCSAAttnTargetReducesum(unittest.TestCase):
            for that entry (tests exact normalization in degenerate case).
         """
         from paddlefleet.tilelang_ops import csa_attn_target_reducesum
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             _compute_attn_target_on_selected_set,
         )
 
@@ -1305,10 +1307,10 @@ class TestTileLangCSAIndexerLossAutoScaler(unittest.TestCase):
     """
 
     def test_auto_scaler_backward_produces_correct_grads(self):
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             TileLangCSAIndexerLossAutoScaler,
         )
-        from paddlefleet.transformer.dsa_attention import (
+        from paddlefleet.transformer.attention.dsa_attention import (
             DSAIndexerLossAutoScaler,
         )
 
@@ -1439,7 +1441,7 @@ class TestCSAForwardTileLangFwdOnlyPath(unittest.TestCase):
         from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
             RotaryEmbedding,
         )
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             CompressedSparseAttention,
             CompressedSparseAttentionSublayersSpec,
             Compressor,

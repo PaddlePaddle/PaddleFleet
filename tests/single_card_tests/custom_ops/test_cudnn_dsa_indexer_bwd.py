@@ -693,7 +693,7 @@ class TestTileLangCSAIndexerLossAutoScalerCudnn(unittest.TestCase):
     """Cover TileLangCSAIndexerLossAutoScaler.backward cudnn branch."""
 
     def setUp(self):
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             DSAIndexerLossAutoScaler,
             TileLangCSAIndexerLossAutoScaler,
         )
@@ -809,7 +809,7 @@ class TestTileLangCSAIndexerLossAutoScalerCudnn(unittest.TestCase):
 
     def test_unknown_backend_raises(self):
         """Unknown backend in AutoScaler should raise NotImplementedError."""
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             DSAIndexerLossAutoScaler,
         )
 

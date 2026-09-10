@@ -132,7 +132,7 @@ def _make_attn(sp=False):
         SelfAttention,
         SelfAttentionSublayersSpec,
     )
-    from paddlefleet.transformer.dot_product_attention import (
+    from paddlefleet.transformer.attention.dot_product_attention import (
         DotProductAttention,
     )
     from paddlefleet.transformer.enums import AttnMaskType

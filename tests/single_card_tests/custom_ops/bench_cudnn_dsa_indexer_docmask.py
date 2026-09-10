@@ -40,7 +40,7 @@ from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
 from paddlefleet.cudnn_ops.indexer.docmask_utils import (
     shift_scores_to_local_window,
 )
-from paddlefleet.transformer.csa_attention import get_valid_range
+from paddlefleet.transformer.attention.csa_attention import get_valid_range
 
 if TYPE_CHECKING:
     from collections.abc import Callable

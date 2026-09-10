@@ -82,7 +82,9 @@ def _build_causal_mask(batch, seq_len, seq_len_comp, ratio):
 def _paddle_indexer_scores_and_topk(
     index_q, index_k_comp, weights, ratio, topk
 ):
-    from paddlefleet.transformer.dsa_attention import fused_qk_topk_naive
+    from paddlefleet.transformer.attention.dsa_attention import (
+        fused_qk_topk_naive,
+    )
 
     scores, indices = fused_qk_topk_naive(
         index_q,
@@ -413,7 +415,9 @@ class TestCudnnIndexerTopkFwd(unittest.TestCase):
 
     def test_seq_offset_with_valid_range_matches_sliced_global_run(self):
         """CP docmask fallback: local valid_range + seq_offset equals global slice."""
-        from paddlefleet.transformer.csa_attention import get_valid_range
+        from paddlefleet.transformer.attention.csa_attention import (
+            get_valid_range,
+        )
 
         B, S_global, H_i, D_i, ratio, topk = 1, 64, 64, 128, 4, 8
         S_k = S_global // ratio

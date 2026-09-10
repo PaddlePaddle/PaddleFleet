@@ -48,12 +48,18 @@ from paddlefleet.train_infer_consistent_ops.inspect_util import (
     inspect_tensor,
     inspect_tensor_set_current_layer,
 )
-from paddlefleet.transformer.dsv4_hybrid_attention import DSv4HybridAttention
+from paddlefleet.transformer.attention.dsv4_hybrid_attention import (
+    DSv4HybridAttention,
+)
+from paddlefleet.transformer.attention.kimi_delta_attention import (
+    KimiDeltaAttention,
+)
+from paddlefleet.transformer.attention.multi_latent_attention import (
+    MultiLatentAttention,
+)
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
-from paddlefleet.transformer.kimi_delta_attention import KimiDeltaAttention
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
-from paddlefleet.transformer.multi_latent_attention import MultiLatentAttention
 from paddlefleet.transformer.utils import profile
 from paddlefleet.utils import log_single_rank
 

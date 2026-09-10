@@ -26,11 +26,11 @@ from unittest import mock
 
 import paddle
 
-import paddlefleet.transformer.multi_latent_attention as mla_mod
-from paddlefleet.transformer.dot_product_attention import (
+import paddlefleet.transformer.attention.multi_latent_attention as mla_mod
+from paddlefleet.transformer.attention.dot_product_attention import (
     DotProductAttention,
 )
-from paddlefleet.transformer.multi_latent_attention import (
+from paddlefleet.transformer.attention.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSublayersSpec,
     MQASelfAttention,

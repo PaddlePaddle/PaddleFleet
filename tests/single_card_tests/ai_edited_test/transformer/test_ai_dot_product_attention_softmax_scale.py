@@ -41,7 +41,9 @@ from unittest.mock import MagicMock, patch
 
 import paddle
 
-from paddlefleet.transformer.dot_product_attention import DotProductAttention
+from paddlefleet.transformer.attention.dot_product_attention import (
+    DotProductAttention,
+)
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import init_method_normal, scaled_init_method_normal
@@ -154,7 +156,9 @@ class TestRRFlashAttentionSoftmaxScaleAssert(unittest.TestCase):
         )
         return attn
 
-    @patch("paddlefleet.transformer.dot_product_attention.flashmask_attention")
+    @patch(
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention"
+    )
     def test_rr_packed_seq_path_raises_with_custom_scale(self, mock_fm):
         """Line 439: packed_seq path + use_rr + custom scale -> AssertionError."""
         attn = self._make_attn(softmax_scale=0.5)
@@ -179,7 +183,9 @@ class TestRRFlashAttentionSoftmaxScaleAssert(unittest.TestCase):
             )
         self.assertIn("RefinedRcomputeFlashMaskAttention", str(ctx.exception))
 
-    @patch("paddlefleet.transformer.dot_product_attention.flashmask_attention")
+    @patch(
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention"
+    )
     def test_rr_packed_seq_path_ok_without_custom_scale(self, mock_fm):
         """Line 439: packed_seq path + use_rr + default scale -> no error."""
         attn = self._make_attn(softmax_scale=None)
@@ -225,9 +231,11 @@ class TestCPRRFlashAttentionSoftmaxScaleAssert(unittest.TestCase):
         return attn
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.flashmask_attention_cp"
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention_cp"
     )
-    @patch("paddlefleet.transformer.dot_product_attention.flashmask_attention")
+    @patch(
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention"
+    )
     def test_cp_rr_path_raises_with_custom_scale(self, mock_fm, mock_fm_cp):
         """Line 541: CP>1 + use_rr + custom scale -> AssertionError."""
         attn = self._make_cp_attn(softmax_scale=0.5)
@@ -259,7 +267,9 @@ class TestNonCPRRFlashAttentionSoftmaxScaleAssert(unittest.TestCase):
     Covers dot_product_attention.py line 547 (non-CP, RR path).
     """
 
-    @patch("paddlefleet.transformer.dot_product_attention.flashmask_attention")
+    @patch(
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention"
+    )
     def test_non_cp_rr_path_raises_with_custom_scale(self, mock_fm):
         """Line 547: CP=1 + use_rr + custom scale -> AssertionError."""
         config = _make_config(context_parallel_size=1)
@@ -288,7 +298,9 @@ class TestNonCPRRFlashAttentionSoftmaxScaleAssert(unittest.TestCase):
             )
         self.assertIn("RefinedRcomputeFlashMaskAttention", str(ctx.exception))
 
-    @patch("paddlefleet.transformer.dot_product_attention.flashmask_attention")
+    @patch(
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention"
+    )
     def test_non_cp_rr_path_ok_without_custom_scale(self, mock_fm):
         """Line 547: CP=1 + use_rr + default scale -> no error."""
         config = _make_config(context_parallel_size=1)
@@ -326,7 +338,7 @@ class TestSDPASoftmaxScale(unittest.TestCase):
     """
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.paddle.nn.functional.scaled_dot_product_attention"
+        "paddlefleet.transformer.attention.dot_product_attention.paddle.nn.functional.scaled_dot_product_attention"
     )
     def test_sdpa_passes_custom_scale(self, mock_sdpa):
         """SDPA path includes scale= when custom softmax_scale is set."""
@@ -350,7 +362,7 @@ class TestSDPASoftmaxScale(unittest.TestCase):
         self.assertEqual(call_kwargs["scale"], 0.25)
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.paddle.nn.functional.scaled_dot_product_attention"
+        "paddlefleet.transformer.attention.dot_product_attention.paddle.nn.functional.scaled_dot_product_attention"
     )
     def test_sdpa_no_scale_when_default(self, mock_sdpa):
         """SDPA path does NOT include scale= when using default softmax_scale."""
@@ -372,7 +384,7 @@ class TestSDPASoftmaxScale(unittest.TestCase):
         self.assertNotIn("scale", call_kwargs)
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.paddle.nn.functional.scaled_dot_product_attention"
+        "paddlefleet.transformer.attention.dot_product_attention.paddle.nn.functional.scaled_dot_product_attention"
     )
     def test_sdpa_passes_scale_with_layer_scaling(self, mock_sdpa):
         """SDPA passes scale when apply_query_key_layer_scaling is True."""
@@ -402,7 +414,9 @@ class TestFlashmaskFmKwargsSoftmaxScale(unittest.TestCase):
     Covers dot_product_attention.py lines 450-454.
     """
 
-    @patch("paddlefleet.transformer.dot_product_attention.flashmask_attention")
+    @patch(
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention"
+    )
     def test_fm_kwargs_with_custom_scale(self, mock_fm):
         """fm_kwargs includes softmax_scale when _has_custom_softmax_scale is True."""
         config = _make_config()
@@ -434,7 +448,9 @@ class TestFlashmaskFmKwargsSoftmaxScale(unittest.TestCase):
         self.assertIn("softmax_scale", call_kwargs)
         self.assertEqual(call_kwargs["softmax_scale"], 0.3)
 
-    @patch("paddlefleet.transformer.dot_product_attention.flashmask_attention")
+    @patch(
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention"
+    )
     def test_fm_kwargs_empty_when_default_scale(self, mock_fm):
         """fm_kwargs is empty when _has_custom_softmax_scale is False."""
         config = _make_config()
@@ -471,7 +487,9 @@ class TestFlashmaskExtraKwargsSoftmaxScale(unittest.TestCase):
     via extra_kwargs. Covers dot_product_attention.py lines 589-596.
     """
 
-    @patch("paddlefleet.transformer.dot_product_attention.flashmask_attention")
+    @patch(
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention"
+    )
     def test_extra_kwargs_with_custom_scale(self, mock_fm):
         """extra_kwargs includes softmax_scale when _has_custom_softmax_scale is True."""
         config = _make_config()
@@ -494,7 +512,9 @@ class TestFlashmaskExtraKwargsSoftmaxScale(unittest.TestCase):
         self.assertIn("softmax_scale", call_kwargs)
         self.assertEqual(call_kwargs["softmax_scale"], 0.7)
 
-    @patch("paddlefleet.transformer.dot_product_attention.flashmask_attention")
+    @patch(
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention"
+    )
     def test_extra_kwargs_empty_when_default_scale(self, mock_fm):
         """extra_kwargs has no softmax_scale when _has_custom_softmax_scale is False."""
         config = _make_config()
@@ -515,7 +535,9 @@ class TestFlashmaskExtraKwargsSoftmaxScale(unittest.TestCase):
         call_kwargs = mock_fm.call_args[1]
         self.assertNotIn("softmax_scale", call_kwargs)
 
-    @patch("paddlefleet.transformer.dot_product_attention.flashmask_attention")
+    @patch(
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention"
+    )
     def test_extra_kwargs_empty_when_rr(self, mock_fm):
         """extra_kwargs is empty dict when use_rr_flash_attention=True (default scale)."""
         config = _make_config()

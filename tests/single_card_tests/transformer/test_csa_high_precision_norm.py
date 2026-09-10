@@ -21,7 +21,7 @@ import paddle
 from paddle import nn
 from paddle.distributed.fleet.meta_parallel import LayerSpec
 
-from paddlefleet.transformer.csa_attention import (
+from paddlefleet.transformer.attention.csa_attention import (
     Compressor,
     CompressorSublayersSpec,
     CSAIndexer,

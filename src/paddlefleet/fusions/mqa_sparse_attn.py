@@ -43,7 +43,7 @@ production CSA/HCA layers never do, none of which may leak onto that path:
    ``d_sink``, because the SM100 backward returns an all-zero ``d_sink`` there.
 
 Consumers: the hybrid-MLA non-absorbed MQA layers
-(``paddlefleet.transformer.mqa_latent_attention``) and the HySparse block-sparse
+(``paddlefleet.transformer.attention.mqa_latent_attention``) and the HySparse block-sparse
 gather branch (``paddlefleet.cudnn_ops.block_sparse_mqa_dsa``), which expands
 its selected block ids into token columns first.
 """

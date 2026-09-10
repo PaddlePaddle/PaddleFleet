@@ -85,7 +85,7 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
 from paddlefleet.tensor_parallel.random import (
     model_parallel_cuda_manual_seed,
 )
-from paddlefleet.transformer.multi_latent_attention import (
+from paddlefleet.transformer.attention.multi_latent_attention import (
     MLASelfAttention,  # noqa: F401  (import forces hybrid_mla_* field registration)
 )
 from paddlefleet.transformer.transformer_config import (
@@ -1124,8 +1124,8 @@ class TestItem10IndexerKLValueAndDenominator(unittest.TestCase):
     NPAD = 48  # trailing padding folded into the last document's row range
 
     def _run_and_capture(self, coeff):
-        import paddlefleet.transformer.mqa_latent_attention as mqamod
-        from paddlefleet.transformer.dsa_attention import (
+        import paddlefleet.transformer.attention.mqa_latent_attention as mqamod
+        from paddlefleet.transformer.attention.dsa_attention import (
             DSAIndexerLossLoggingHelper as LOG,
         )
 

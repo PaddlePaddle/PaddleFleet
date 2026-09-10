@@ -77,7 +77,9 @@ import unittest
 import numpy as np
 import paddle
 
-from paddlefleet.transformer.csa_attention import _derive_csa_doc_boundaries
+from paddlefleet.transformer.attention.csa_attention import (
+    _derive_csa_doc_boundaries,
+)
 
 from .hybrid_mla_utils import (
     _GPU,

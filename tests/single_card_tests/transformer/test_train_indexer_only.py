@@ -39,10 +39,12 @@ from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet.recompute_utils import keep_indexer_grad_path
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
-from paddlefleet.transformer.csa_attention import (
+from paddlefleet.transformer.attention.csa_attention import (
     TileLangCSAIndexerLossAutoScaler,
 )
-from paddlefleet.transformer.dsa_attention import DSAIndexerLossAutoScaler
+from paddlefleet.transformer.attention.dsa_attention import (
+    DSAIndexerLossAutoScaler,
+)
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
@@ -439,7 +441,7 @@ class TestIndexerParameterOwnership(unittest.TestCase):
         from paddlefleet.tensor_parallel.random import (
             model_parallel_cuda_manual_seed,
         )
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             CompressedSparseAttention,
             CompressedSparseAttentionSublayersSpec,
             Compressor,

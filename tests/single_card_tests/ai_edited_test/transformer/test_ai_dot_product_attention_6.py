@@ -27,7 +27,7 @@ from unittest.mock import MagicMock, patch
 
 import paddle
 
-from paddlefleet.transformer.dot_product_attention import (
+from paddlefleet.transformer.attention.dot_product_attention import (
     DotProductAttention,
 )
 from paddlefleet.transformer.enums import AttnMaskType
@@ -37,10 +37,10 @@ class TestDotProductAttentionEagerMode(unittest.TestCase):
     """Tests for DotProductAttention with eager attention implementation."""
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.FusedScaleMaskSoftmax"
+        "paddlefleet.transformer.attention.dot_product_attention.FusedScaleMaskSoftmax"
     )
     @patch(
-        "paddlefleet.transformer.dot_product_attention.ProcessGroupCollection.use_mpu_process_groups"
+        "paddlefleet.transformer.attention.dot_product_attention.ProcessGroupCollection.use_mpu_process_groups"
     )
     def test_eager_mode_rejects_packed_seq(self, mock_pg, mock_softmax):
         """Eager mode should reject packed_seq_params."""
@@ -86,10 +86,10 @@ class TestDotProductAttentionQueryKeyLayerScaling(unittest.TestCase):
     """Tests for DotProductAttention with apply_query_key_layer_scaling."""
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.FusedScaleMaskSoftmax"
+        "paddlefleet.transformer.attention.dot_product_attention.FusedScaleMaskSoftmax"
     )
     @patch(
-        "paddlefleet.transformer.dot_product_attention.ProcessGroupCollection.use_mpu_process_groups"
+        "paddlefleet.transformer.attention.dot_product_attention.ProcessGroupCollection.use_mpu_process_groups"
     )
     def test_layer_scaling_divides_softmax_scale(self, mock_pg, mock_softmax):
         """apply_query_key_layer_scaling should divide softmax_scale by layer_number."""
@@ -131,10 +131,10 @@ class TestDotProductAttentionSoftmaxTypes(unittest.TestCase):
     """Tests for DotProductAttention with different softmax types."""
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.FusedScaleMaskSoftmax"
+        "paddlefleet.transformer.attention.dot_product_attention.FusedScaleMaskSoftmax"
     )
     @patch(
-        "paddlefleet.transformer.dot_product_attention.ProcessGroupCollection.use_mpu_process_groups"
+        "paddlefleet.transformer.attention.dot_product_attention.ProcessGroupCollection.use_mpu_process_groups"
     )
     def test_invalid_softmax_type_raises(self, mock_pg, mock_softmax):
         """Invalid softmax_type should raise ValueError."""
@@ -169,10 +169,10 @@ class TestDotProductAttentionSoftmaxTypes(unittest.TestCase):
             )
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.FusedScaleMaskSoftmax"
+        "paddlefleet.transformer.attention.dot_product_attention.FusedScaleMaskSoftmax"
     )
     @patch(
-        "paddlefleet.transformer.dot_product_attention.ProcessGroupCollection.use_mpu_process_groups"
+        "paddlefleet.transformer.attention.dot_product_attention.ProcessGroupCollection.use_mpu_process_groups"
     )
     def test_off_by_one_softmax_type(self, mock_pg, mock_softmax):
         """off-by-one softmax_type should create softmax_offset tensor."""

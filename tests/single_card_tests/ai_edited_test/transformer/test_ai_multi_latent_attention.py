@@ -29,12 +29,12 @@ from unittest.mock import MagicMock, patch
 
 import paddle
 
-from paddlefleet.transformer.dw_overlap import DeferredWeightGradLinear
-from paddlefleet.transformer.multi_latent_attention import (
+from paddlefleet.transformer.attention.multi_latent_attention import (
     MLASelfAttentionSublayersSpec,
     MultiLatentAttention,
     _ec_compatible_rope_apply,
 )
+from paddlefleet.transformer.dw_overlap import DeferredWeightGradLinear
 
 
 class TestMLASelfAttentionSublayersSpec(unittest.TestCase):
@@ -130,7 +130,7 @@ class TestMultiLatentAttentionRopeTypeValidation(unittest.TestCase):
         """Test that unsupported rope_type raises ValueError."""
         # Test the rope_type validation logic directly by patching
         # only the parts that would fail
-        from paddlefleet.transformer.multi_latent_attention import (
+        from paddlefleet.transformer.attention.multi_latent_attention import (
             MLASelfAttention,
         )
 
@@ -170,11 +170,11 @@ class TestMultiLatentAttentionRopeTypeValidation(unittest.TestCase):
 
         with (
             patch(
-                "paddlefleet.transformer.multi_latent_attention.Attention.__init__",
+                "paddlefleet.transformer.attention.multi_latent_attention.Attention.__init__",
                 patched_attention_init,
             ),
             patch(
-                "paddlefleet.transformer.multi_latent_attention.build_spec_layer",
+                "paddlefleet.transformer.attention.multi_latent_attention.build_spec_layer",
                 return_value=MagicMock(),
             ),
         ):
@@ -205,7 +205,7 @@ class TestMultiLatentAttentionForwardAssertions(unittest.TestCase):
                 return None
 
         with patch(
-            "paddlefleet.transformer.multi_latent_attention.Attention.__init__",
+            "paddlefleet.transformer.attention.multi_latent_attention.Attention.__init__",
             return_value=None,
         ):
             mla = ConcreteMLA.__new__(ConcreteMLA)

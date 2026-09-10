@@ -122,7 +122,7 @@ class TestFP8SimulateQAT(unittest.TestCase):
 
         from paddle import nn
 
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             Compressor,
             CompressorSublayersSpec,
         )

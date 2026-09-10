@@ -83,7 +83,7 @@ class MockGemma4Config:
 class TestStartendRowIndicesToDenseMask(unittest.TestCase):
     def test_single_bound_causal(self):
         """Test 1-bound flashmask: causal + LTS constraint."""
-        from paddlefleet.transformer.gemma4_attention import (
+        from paddlefleet.transformer.attention.gemma4_attention import (
             startend_row_indices_to_dense_mask,
         )
 
@@ -104,7 +104,7 @@ class TestStartendRowIndicesToDenseMask(unittest.TestCase):
 
     def test_two_bound_band(self):
         """Test 2-bound flashmask: band mask (LTS <= q < LTE)."""
-        from paddlefleet.transformer.gemma4_attention import (
+        from paddlefleet.transformer.attention.gemma4_attention import (
             startend_row_indices_to_dense_mask,
         )
 
@@ -540,7 +540,9 @@ class TestGemma4SelfAttentionConfig(unittest.TestCase):
     )
     def test_init_sliding_layer(self, mock_super_init):
         """Gemma4SelfAttention.__init__ for sliding layer configures correctly."""
-        from paddlefleet.transformer.gemma4_attention import Gemma4SelfAttention
+        from paddlefleet.transformer.attention.gemma4_attention import (
+            Gemma4SelfAttention,
+        )
 
         config = self._make_config()
         sublayers_spec = MagicMock()
@@ -569,7 +571,9 @@ class TestGemma4SelfAttentionConfig(unittest.TestCase):
     )
     def test_init_global_layer(self, mock_super_init):
         """Gemma4SelfAttention.__init__ for global layer sets K=V tying."""
-        from paddlefleet.transformer.gemma4_attention import Gemma4SelfAttention
+        from paddlefleet.transformer.attention.gemma4_attention import (
+            Gemma4SelfAttention,
+        )
 
         config = self._make_config()
         sublayers_spec = MagicMock()
@@ -591,7 +595,9 @@ class TestGemma4SelfAttentionConfig(unittest.TestCase):
 
     def test_get_query_key_value_tensors_sliding(self):
         """V-Norm is applied in sliding layer path (non-tied KV)."""
-        from paddlefleet.transformer.gemma4_attention import Gemma4SelfAttention
+        from paddlefleet.transformer.attention.gemma4_attention import (
+            Gemma4SelfAttention,
+        )
 
         attn = Gemma4SelfAttention.__new__(Gemma4SelfAttention)
         attn._tied_kv = False
@@ -617,7 +623,9 @@ class TestGemma4SelfAttentionConfig(unittest.TestCase):
 
     def test_get_query_key_value_tensors_tied_kv(self):
         """K=V tying: value = key (before K-Norm), then V-Norm and K-Norm applied."""
-        from paddlefleet.transformer.gemma4_attention import Gemma4SelfAttention
+        from paddlefleet.transformer.attention.gemma4_attention import (
+            Gemma4SelfAttention,
+        )
 
         class FakeAttn(Gemma4SelfAttention):
             def __init__(self):
@@ -646,7 +654,9 @@ class TestGemma4SelfAttentionConfig(unittest.TestCase):
 
     def test_forward_rope_selection_sliding(self):
         """Sliding layer picks rotary_pos_emb[0]."""
-        from paddlefleet.transformer.gemma4_attention import Gemma4SelfAttention
+        from paddlefleet.transformer.attention.gemma4_attention import (
+            Gemma4SelfAttention,
+        )
 
         attn = Gemma4SelfAttention.__new__(Gemma4SelfAttention)
         attn.is_sliding = True
@@ -671,7 +681,9 @@ class TestGemma4SelfAttentionConfig(unittest.TestCase):
 
     def test_forward_rope_selection_global(self):
         """Global layer picks rotary_pos_emb[1]."""
-        from paddlefleet.transformer.gemma4_attention import Gemma4SelfAttention
+        from paddlefleet.transformer.attention.gemma4_attention import (
+            Gemma4SelfAttention,
+        )
 
         attn = Gemma4SelfAttention.__new__(Gemma4SelfAttention)
         attn.is_sliding = False
@@ -695,7 +707,9 @@ class TestGemma4SelfAttentionConfig(unittest.TestCase):
 
     def test_forward_mask_dict_selection(self):
         """Dict attention_mask selects by layer type."""
-        from paddlefleet.transformer.gemma4_attention import Gemma4SelfAttention
+        from paddlefleet.transformer.attention.gemma4_attention import (
+            Gemma4SelfAttention,
+        )
 
         attn = Gemma4SelfAttention.__new__(Gemma4SelfAttention)
         attn.is_sliding = True
@@ -722,7 +736,9 @@ class TestGemma4SelfAttentionConfig(unittest.TestCase):
 
     def test_forward_global_converts_startend_to_dense(self):
         """Global layer converts startend_row_indices to dense mask."""
-        from paddlefleet.transformer.gemma4_attention import Gemma4SelfAttention
+        from paddlefleet.transformer.attention.gemma4_attention import (
+            Gemma4SelfAttention,
+        )
 
         attn = Gemma4SelfAttention.__new__(Gemma4SelfAttention)
         attn.is_sliding = False
@@ -781,7 +797,9 @@ class TestGeGLUActivation(unittest.TestCase):
 class TestGptLayerSpecsGemma4Branch(unittest.TestCase):
     def test_attention_spec_gemma4_returns_layerspec(self):
         """get_attention_spec('gemma4') returns a LayerSpec with Gemma4SelfAttention."""
-        from paddlefleet.transformer.gemma4_attention import Gemma4SelfAttention
+        from paddlefleet.transformer.attention.gemma4_attention import (
+            Gemma4SelfAttention,
+        )
 
         # We just verify the import and class reference work
         self.assertTrue(issubclass(Gemma4SelfAttention, nn.Layer))
@@ -1340,7 +1358,9 @@ class TestGptLayerSpecsGemma4(unittest.TestCase):
     def test_get_attention_spec_gemma4(self):
         """get_attention_spec('gemma4') returns LayerSpec with Gemma4SelfAttention."""
         from paddlefleet.models.gpt.gpt_layer_specs import get_attention_spec
-        from paddlefleet.transformer.gemma4_attention import Gemma4SelfAttention
+        from paddlefleet.transformer.attention.gemma4_attention import (
+            Gemma4SelfAttention,
+        )
 
         config = _RouterTestConfig(
             hidden_size=64,
@@ -1675,7 +1695,7 @@ class TestGemma4MoELayerHooks(unittest.TestCase):
 class TestDotProductAttentionSoftmaxScale(unittest.TestCase):
     def test_default_scale_flag_false(self):
         """Default softmax_scale → _has_custom_softmax_scale=False."""
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             DotProductAttention,
         )
 
@@ -1691,7 +1711,7 @@ class TestDotProductAttentionSoftmaxScale(unittest.TestCase):
 
     def test_custom_scale_flag_true(self):
         """Custom softmax_scale=1.0 → _has_custom_softmax_scale=True."""
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             DotProductAttention,
         )
 
@@ -1708,7 +1728,7 @@ class TestDotProductAttentionSoftmaxScale(unittest.TestCase):
 
 class TestGemma4SelfAttentionForwardPaths(unittest.TestCase):
     def _make_attention(self, is_sliding=True):
-        from paddlefleet.transformer.gemma4_attention import (
+        from paddlefleet.transformer.attention.gemma4_attention import (
             Gemma4SelfAttention,
         )
 
@@ -1966,7 +1986,7 @@ class TestDotProductAttentionRealInit(unittest.TestCase):
     """Test DotProductAttention real __init__ for softmax_scale flag."""
 
     def test_default_no_custom_scale(self):
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             DotProductAttention,
         )
 
@@ -1990,7 +2010,7 @@ class TestDotProductAttentionRealInit(unittest.TestCase):
         self.assertAlmostEqual(dpa.softmax_scale, 1.0 / math.sqrt(64))
 
     def test_custom_scale_sets_flag(self):
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             DotProductAttention,
         )
 
@@ -2013,7 +2033,7 @@ class TestDotProductAttentionRealInit(unittest.TestCase):
         self.assertEqual(dpa.softmax_scale, 0.5)
 
     def test_query_key_layer_scaling_sets_flag(self):
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             DotProductAttention,
         )
 

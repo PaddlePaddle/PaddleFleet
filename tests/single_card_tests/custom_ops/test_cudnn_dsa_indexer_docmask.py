@@ -426,7 +426,9 @@ class TestCudnnIndexerTopkDocmask(unittest.TestCase):
         from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
             cudnn_indexer_topk,
         )
-        from paddlefleet.transformer.csa_attention import get_valid_range
+        from paddlefleet.transformer.attention.csa_attention import (
+            get_valid_range,
+        )
 
         paddle.seed(0)
         ratio, sq, sk, topk = 4, 32, 8, 4
@@ -677,7 +679,7 @@ class TestMapCompressedTopkToKvFullDocmask(unittest.TestCase):
         from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
             cudnn_indexer_topk,
         )
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             _map_compressed_topk_to_kv_full,
             get_valid_range,
         )
@@ -739,7 +741,7 @@ class TestMapCompressedTopkToKvFullDocmask(unittest.TestCase):
         from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
             cudnn_indexer_topk,
         )
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             _map_compressed_topk_to_kv_full,
             get_valid_range,
         )
@@ -794,7 +796,7 @@ def _docmask_topk_idxs_for_attn(doc_lens, ratio, window_size, topk, seed):
     from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
         cudnn_indexer_topk,
     )
-    from paddlefleet.transformer.csa_attention import (
+    from paddlefleet.transformer.attention.csa_attention import (
         _map_compressed_topk_to_kv_full,
         get_valid_range,
         get_window_topk_idxs,
@@ -1152,7 +1154,9 @@ class TestCudnnVsTilelangIndexerBwdDocmask(unittest.TestCase):
         from paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn import (
             cudnn_indexer_topk_fwd,
         )
-        from paddlefleet.transformer.csa_attention import get_valid_range
+        from paddlefleet.transformer.attention.csa_attention import (
+            get_valid_range,
+        )
 
         paddle.seed(seed)
         sq = sum(doc_lens)

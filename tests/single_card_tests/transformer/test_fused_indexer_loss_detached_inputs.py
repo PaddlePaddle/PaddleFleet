@@ -46,7 +46,7 @@ import unittest
 
 import paddle
 
-from paddlefleet.transformer.dsa_attention import FusedDSAIndexerLoss
+from paddlefleet.transformer.attention.dsa_attention import FusedDSAIndexerLoss
 
 
 class TestFusedDSAIndexerLossDetachedInputs(unittest.TestCase):

@@ -26,7 +26,7 @@ _REPO_ROOT = os.path.dirname(
 sys.path.insert(0, os.path.join(_REPO_ROOT, "src"))
 
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
-from paddlefleet.transformer.dsv4_hybrid_attention import (
+from paddlefleet.transformer.attention.dsv4_hybrid_attention import (
     DSv4HybridAttention,
 )
 

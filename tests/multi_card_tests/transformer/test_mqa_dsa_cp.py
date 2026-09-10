@@ -71,7 +71,9 @@ import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet
 
-from paddlefleet.transformer.dsa_attention import DSAIndexerLossLoggingHelper
+from paddlefleet.transformer.attention.dsa_attention import (
+    DSAIndexerLossLoggingHelper,
+)
 
 # ``tests`` is a package, so the single-card helper is a normal import; the
 # multi-card runner puts the repository root on ``PYTHONPATH``

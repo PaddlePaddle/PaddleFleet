@@ -26,7 +26,7 @@ from unittest.mock import patch
 
 import paddle
 
-from paddlefleet.transformer.csa_attention import (
+from paddlefleet.transformer.attention.csa_attention import (
     CompressedSparseAttention,
     CSADocMaskMetadata,
 )

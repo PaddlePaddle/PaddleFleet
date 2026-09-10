@@ -27,7 +27,7 @@ from unittest.mock import MagicMock
 
 import paddle
 
-from paddlefleet.transformer.multi_latent_attention import (
+from paddlefleet.transformer.attention.multi_latent_attention import (
     MLASelfAttentionSublayersSpec,
     _ec_compatible_rope_apply,
 )

@@ -20,12 +20,14 @@ from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
 )
-from paddlefleet.transformer.dot_product_attention import DotProductAttention
-from paddlefleet.transformer.enums import AttnMaskType
-from paddlefleet.transformer.multi_latent_attention import (
+from paddlefleet.transformer.attention.dot_product_attention import (
+    DotProductAttention,
+)
+from paddlefleet.transformer.attention.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSublayersSpec,
 )
+from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import (
     init_method_normal,

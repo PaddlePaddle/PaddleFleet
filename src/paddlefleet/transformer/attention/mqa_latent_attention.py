@@ -109,21 +109,23 @@ from paddlefleet.context_parallel_utils import (
     preprocess_index,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
-from paddlefleet.transformer.cp_utils import (
-    all_gather_cp,
-    dualchunk_chunk_ids,
-    dualchunk_swap,
-)
-from paddlefleet.transformer.csa_attention import (
+from paddlefleet.transformer.attention.csa_attention import (
     TileLangCSAIndexerLossAutoScaler,
     _build_window_topk_idxs_from_doc_bounds,
     _derive_csa_doc_boundaries,
     _validate_csa_docmask_shape,
 )
-from paddlefleet.transformer.dot_product_attention import build_softmax_offset
-from paddlefleet.transformer.dsa_attention import (
+from paddlefleet.transformer.attention.dot_product_attention import (
+    build_softmax_offset,
+)
+from paddlefleet.transformer.attention.dsa_attention import (
     DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
+)
+from paddlefleet.transformer.cp_utils import (
+    all_gather_cp,
+    dualchunk_chunk_ids,
+    dualchunk_swap,
 )
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -2390,7 +2392,7 @@ class MQALatentAttention(FleetLayer):
         gradient does not depend on it, which is precisely what makes running the
         backward here -- during the *forward* pass -- legitimate.
         """
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             compute_csa_indexer_grads,
         )
 

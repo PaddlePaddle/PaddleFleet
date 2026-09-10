@@ -41,7 +41,7 @@ from paddle.distributed.fleet.meta_parallel import LayerSpec
 from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
     RotaryEmbedding,
 )
-from paddlefleet.transformer.csa_attention import (
+from paddlefleet.transformer.attention.csa_attention import (
     CompressedSparseAttention,
     CompressedSparseAttentionSublayersSpec,
     Compressor,
@@ -50,7 +50,7 @@ from paddlefleet.transformer.csa_attention import (
     CSAIndexer,
     CSAIndexerSublayersSpec,
 )
-from paddlefleet.transformer.dsv4_hybrid_attention import (
+from paddlefleet.transformer.attention.dsv4_hybrid_attention import (
     DSv4HybridSelfAttention,
     DSv4HybridSelfAttentionSublayersSpec,
 )

@@ -52,6 +52,10 @@ from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
     WeightGradStore,
 )
 
+from paddlefleet.transformer.attention.multi_latent_attention import (
+    MLASelfAttention,
+    MLASelfAttentionSublayersSpec,
+)
 from paddlefleet.transformer.dw_overlap import (
     DeferredWeightGradLinear,
     deferrable_linear,
@@ -60,10 +64,6 @@ from paddlefleet.transformer.dw_overlap import (
 from paddlefleet.transformer.moe.moe_router import (
     FusedGateDetachMatmul,
     gate_detach_matmul,
-)
-from paddlefleet.transformer.multi_latent_attention import (
-    MLASelfAttention,
-    MLASelfAttentionSublayersSpec,
 )
 from paddlefleet.transformer.transformer_config import (
     TransformerConfig,
@@ -135,7 +135,9 @@ class _SimpleRMSNorm(nn.Layer):
         return x * d * self.weight
 
 
-from paddlefleet.transformer.dot_product_attention import DotProductAttention
+from paddlefleet.transformer.attention.dot_product_attention import (
+    DotProductAttention,
+)
 
 
 def _make_mla_config(**overrides):
@@ -1708,13 +1710,19 @@ class TestDeferralHelpersAreImported(unittest.TestCase):
             "install_sonic_moe_dw_deferral",
         ),
         "paddlefleet.transformer.moe.moe_router": ("dw_overlap_enabled",),
-        "paddlefleet.transformer.multi_latent_attention": (
+        "paddlefleet.transformer.attention.multi_latent_attention": (
             "deferrable_linear",
         ),
-        "paddlefleet.transformer.dsv4_hybrid_attention": ("deferrable_linear",),
+        "paddlefleet.transformer.attention.dsv4_hybrid_attention": (
+            "deferrable_linear",
+        ),
         # The two sparse-attention indexers; both feed attn_indexer_* points.
-        "paddlefleet.transformer.dsa_attention": ("deferrable_linear",),
-        "paddlefleet.transformer.csa_attention": ("deferrable_linear",),
+        "paddlefleet.transformer.attention.dsa_attention": (
+            "deferrable_linear",
+        ),
+        "paddlefleet.transformer.attention.csa_attention": (
+            "deferrable_linear",
+        ),
     }
 
     def test_helpers_resolvable_in_each_module(self):

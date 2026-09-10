@@ -53,7 +53,9 @@ from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
 )
-from paddlefleet.transformer.dot_product_attention import DotProductAttention
+from paddlefleet.transformer.attention.dot_product_attention import (
+    DotProductAttention,
+)
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
 from paddlefleet.transformer.transformer_config import TransformerConfig

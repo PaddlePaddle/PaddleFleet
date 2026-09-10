@@ -464,7 +464,7 @@ class TestGenerateUseCacheIsCausal(unittest.TestCase):
         """Call DotProductAttention.forward entering flashmask+KV cache path."""
         from unittest.mock import MagicMock, patch
 
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             DotProductAttention,
         )
         from paddlefleet.transformer.enums import AttnMaskType
@@ -508,7 +508,7 @@ class TestGenerateUseCacheIsCausal(unittest.TestCase):
         past_kv.update = MagicMock(return_value=(key, value))
 
         with patch(
-            "paddlefleet.transformer.dot_product_attention.flashmask_attention"
+            "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention"
         ) as mock_fm:
             mock_fm.return_value = paddle.randn([B, q_len, H, D]).cast(
                 "bfloat16"

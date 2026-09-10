@@ -40,7 +40,7 @@ import unittest
 
 import paddle
 
-from paddlefleet.transformer.dsv4_hybrid_attention import (
+from paddlefleet.transformer.attention.dsv4_hybrid_attention import (
     DSv4HybridSelfAttention,
 )
 from paddlefleet.triton_ops import fused_apply_mla_rope_inplace

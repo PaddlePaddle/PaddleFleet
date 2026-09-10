@@ -52,7 +52,7 @@ class TestComputeTileLangLossMask(unittest.TestCase):
     @patch("paddlefleet.tilelang_ops.csa_attn_target_reducesum")
     def test_loss_mask_reduces_loss(self, mock_target):
         """Call _compute_fused_indexer_target with loss_mask."""
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             CompressedSparseAttention as CSA,
             DSAIndexerLossLoggingHelper as Logging,
         )
@@ -126,7 +126,7 @@ class TestAutoScalerBackwardLossMask(unittest.TestCase):
 
     @patch("paddlefleet.tilelang_ops.csa_indexer_bwd")
     def test_tilelang_backend(self, mock_bwd):
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             TileLangCSAIndexerLossAutoScaler,
         )
 
@@ -190,7 +190,7 @@ class TestDSAIndexerLossMask(unittest.TestCase):
         paddle.set_device("gpu")
 
     def test_loss_mask_applied(self):
-        from paddlefleet.transformer.dsa_attention import (
+        from paddlefleet.transformer.attention.dsa_attention import (
             _compute_dsa_indexer_loss,
         )
 
@@ -248,7 +248,7 @@ class TestTransformerLayerInputIdsRouting(unittest.TestCase):
 
     def test_input_ids_passed_to_dsv4(self):
         """isinstance check gates input_ids propagation."""
-        from paddlefleet.transformer.dsv4_hybrid_attention import (
+        from paddlefleet.transformer.attention.dsv4_hybrid_attention import (
             DSv4HybridAttention,
         )
 
@@ -272,7 +272,7 @@ class TestTransformerLayerInputIdsRouting(unittest.TestCase):
 
         input_ids = paddle.randint(0, 100, [1, 32])
         extra_kwargs = {}
-        from paddlefleet.transformer.dsv4_hybrid_attention import (
+        from paddlefleet.transformer.attention.dsv4_hybrid_attention import (
             DSv4HybridAttention,
         )
 
@@ -350,7 +350,7 @@ class TestCSAForwardLossMaskComputation(unittest.TestCase):
         Call CompressedSparseAttention.forward with input_ids to cover
         loss_mask & global_valid_count generation.
         """
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             CompressedSparseAttention,
             CompressedSparseAttentionSublayersSpec,
         )
@@ -404,7 +404,7 @@ class TestCSAForwardLossMaskComputation(unittest.TestCase):
     @patch("paddlefleet.fusions.csa_sparse_attn.csa_sparse_attn")
     def test_csa_forward_with_input_ids_cp_enabled(self, mock_sparse_attn):
         """Cover lines 1792-1799: CP-enabled loss_mask slicing from input_ids."""
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             CompressedSparseAttention,
             CompressedSparseAttentionSublayersSpec,
         )
@@ -466,9 +466,11 @@ class TestCSAForwardLossMaskComputation(unittest.TestCase):
             self.assertIsNotNone(call_kwargs["loss_mask"])
             self.assertIsNotNone(call_kwargs["global_valid_count"])
 
-    @patch("paddlefleet.transformer.csa_attention.ContextParallelGatherOp")
     @patch(
-        "paddlefleet.transformer.csa_attention.get_context_parallel_world_size",
+        "paddlefleet.transformer.attention.csa_attention.ContextParallelGatherOp"
+    )
+    @patch(
+        "paddlefleet.transformer.attention.csa_attention.get_context_parallel_world_size",
         return_value=2,
     )
     @patch("paddlefleet.fusions.csa_sparse_attn.csa_sparse_attn")
@@ -476,7 +478,7 @@ class TestCSAForwardLossMaskComputation(unittest.TestCase):
         self, mock_sparse_attn, mock_cp_world_size, mock_gather_op
     ):
         """Cover line 1779: ContextParallelGatherOp.apply when cp_world_size > 1."""
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             CompressedSparseAttention,
             CompressedSparseAttentionSublayersSpec,
         )

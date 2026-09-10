@@ -67,8 +67,12 @@ import numpy as np
 import paddle
 import paddle.nn.functional as F
 
-from paddlefleet.transformer.csa_attention import _derive_csa_doc_boundaries
-from paddlefleet.transformer.dsa_attention import DSAIndexerLossLoggingHelper
+from paddlefleet.transformer.attention.csa_attention import (
+    _derive_csa_doc_boundaries,
+)
+from paddlefleet.transformer.attention.dsa_attention import (
+    DSAIndexerLossLoggingHelper,
+)
 
 from .hybrid_mla_utils import (
     _GPU,

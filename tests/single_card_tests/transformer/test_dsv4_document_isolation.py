@@ -33,10 +33,10 @@ import unittest
 
 import paddle
 
-from paddlefleet.transformer.csa_attention import (
+from paddlefleet.transformer.attention.csa_attention import (
     CSADocMaskMetadata,
 )
-from paddlefleet.transformer.dsv4_hybrid_attention import (
+from paddlefleet.transformer.attention.dsv4_hybrid_attention import (
     _pack_dsv4_logical_batch,
     _unpack_dsv4_logical_batch,
     pack_dsv4_docmask,

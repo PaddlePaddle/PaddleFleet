@@ -29,7 +29,7 @@ from unittest.mock import patch
 import paddle
 
 from paddlefleet.tensor_parallel.layers import Linear
-from paddlefleet.transformer.dsa_attention import (
+from paddlefleet.transformer.attention.dsa_attention import (
     DSAIndexerLossAutoScaler,
     DSAIndexerSublayersSpec,
     FusedDSAIndexerLoss,
@@ -229,7 +229,9 @@ class TestIndexer(unittest.TestCase):
         indexer = Indexer(config, sublayers_spec=spec, layer_number=1)
         self.assertEqual(indexer.nope_head_dim, 8)
 
-    @patch("paddlefleet.transformer.dsa_attention._apply_rotary_pos_emb_bshd")
+    @patch(
+        "paddlefleet.transformer.attention.dsa_attention._apply_rotary_pos_emb_bshd"
+    )
     def test_apply_rope(self, mock_rope):
         mock_rope.return_value = paddle.randn([2, 4, 8])
         config = _make_config()
@@ -241,7 +243,7 @@ class TestIndexer(unittest.TestCase):
         self.assertEqual(result.shape, [2, 4, 16])
         mock_rope.assert_called()
 
-    @patch("paddlefleet.transformer.dsa_attention.rotate_activation")
+    @patch("paddlefleet.transformer.attention.dsa_attention.rotate_activation")
     def test_forward_before_topk_shape(self, mock_rotate):
         mock_rotate.side_effect = lambda x, use_fast_hadamard=False: x
         config = _make_config()
@@ -258,7 +260,7 @@ class TestIndexer(unittest.TestCase):
         for call in mock_rotate.call_args_list:
             self.assertEqual(call.kwargs.get("use_fast_hadamard"), False)
 
-    @patch("paddlefleet.transformer.dsa_attention.rotate_activation")
+    @patch("paddlefleet.transformer.attention.dsa_attention.rotate_activation")
     def test_forward_before_topk_use_fast_hadamard(self, mock_rotate):
         mock_rotate.side_effect = lambda x, use_fast_hadamard=False: x
         config = _make_config(use_fast_hadamard=True)

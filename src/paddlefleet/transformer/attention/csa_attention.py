@@ -47,7 +47,7 @@ _ACCURACY_COMPATIBLE_KERNEL: bool = (
 )
 from paddlefleet.context_parallel_utils import ContextParallelGatherOp
 from paddlefleet.parallel_state import get_context_parallel_world_size
-from paddlefleet.transformer.dsa_attention import (
+from paddlefleet.transformer.attention.dsa_attention import (
     DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
     FusedDSAIndexerLoss,

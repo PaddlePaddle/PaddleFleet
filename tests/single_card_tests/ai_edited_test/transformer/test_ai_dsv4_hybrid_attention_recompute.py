@@ -33,7 +33,7 @@ from unittest.mock import patch
 
 import paddle
 
-from paddlefleet.transformer.dsv4_hybrid_attention import (
+from paddlefleet.transformer.attention.dsv4_hybrid_attention import (
     DSv4HybridAttention,
 )
 

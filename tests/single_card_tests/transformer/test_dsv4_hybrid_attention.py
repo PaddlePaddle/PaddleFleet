@@ -79,7 +79,7 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_mtp_layers_spec,
 )
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
-from paddlefleet.transformer.csa_attention import (
+from paddlefleet.transformer.attention.csa_attention import (
     CompressedSparseAttention,
     CompressedSparseAttentionSublayersSpec,
     CSADocMaskMetadata,
@@ -90,19 +90,21 @@ from paddlefleet.transformer.csa_attention import (
     get_valid_range,
     get_window_topk_idxs,
 )
-from paddlefleet.transformer.dsa_attention import (
+from paddlefleet.transformer.attention.dsa_attention import (
     DSAttention,
     fused_qk_topk_naive,
 )
-from paddlefleet.transformer.dsv4_hybrid_attention import (
+from paddlefleet.transformer.attention.dsv4_hybrid_attention import (
     DSv4HybridSelfAttention,
     build_document_rope_freqs,
 )
-from paddlefleet.transformer.enums import AttnMaskType
-from paddlefleet.transformer.mqa_latent_attention import (
+from paddlefleet.transformer.attention.mqa_latent_attention import (
     MQALatentAttention,
 )
-from paddlefleet.transformer.multi_latent_attention import MLASelfAttention
+from paddlefleet.transformer.attention.multi_latent_attention import (
+    MLASelfAttention,
+)
+from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.triton_ops import (
     fused_grouped_matmul,
@@ -1422,7 +1424,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
 
         with (
             patch(
-                "paddlefleet.transformer.dsv4_hybrid_attention.CSADocMaskMetadata.build",
+                "paddlefleet.transformer.attention.dsv4_hybrid_attention.CSADocMaskMetadata.build",
                 wraps=CSADocMaskMetadata.build,
             ) as build_meta,
             paddle.no_grad(),
@@ -1468,7 +1470,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
 
         with (
             patch(
-                "paddlefleet.transformer.dsv4_hybrid_attention.CSADocMaskMetadata.build",
+                "paddlefleet.transformer.attention.dsv4_hybrid_attention.CSADocMaskMetadata.build",
                 wraps=CSADocMaskMetadata.build,
             ) as mocked,
             paddle.no_grad(),
@@ -2706,7 +2708,7 @@ class TestCSAHybridDecodeIndexerScores(unittest.TestCase):
         self.csa_layer = 1  # ratio=4
 
     def test_decode_indexer_scores_match_prefill(self):
-        import paddlefleet.transformer.csa_attention as csa_mod
+        import paddlefleet.transformer.attention.csa_attention as csa_mod
 
         n = 64
         ratio = 4

@@ -31,7 +31,9 @@ import unittest
 
 import paddle
 
-from paddlefleet.transformer.dsv4_hybrid_attention import GroupedOutputFP8
+from paddlefleet.transformer.attention.dsv4_hybrid_attention import (
+    GroupedOutputFP8,
+)
 
 _HAS_GPU = (
     paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0

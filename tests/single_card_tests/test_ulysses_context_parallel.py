@@ -1003,13 +1003,13 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
 
     def _make_attn_instance(self, config):
         """Create a DotProductAttention with mocked CP world size."""
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             DotProductAttention,
         )
         from paddlefleet.transformer.enums import AttnMaskType
 
         with patch(
-            "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size",
+            "paddlefleet.transformer.attention.dot_product_attention.get_context_parallel_world_size",
             return_value=config.context_parallel_size,
         ):
             attn = DotProductAttention(
@@ -1021,7 +1021,7 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
         return attn
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.flashmask_attention_cp"
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention_cp"
     )
     def test_forward_contiguous_a2a_passes_mode_kwarg(self, mock_cp_attn):
         """DotProductAttention.forward with contiguous_a2a passes mode='contiguous_a2a' to flashmask_attention_cp."""
@@ -1041,7 +1041,7 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
         mask = paddle.zeros([2, 1, 4, 2], dtype="int32")
 
         with patch(
-            "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size",
+            "paddlefleet.transformer.attention.dot_product_attention.get_context_parallel_world_size",
             return_value=2,
         ):
             result = attn(
@@ -1059,7 +1059,7 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
         self.assertEqual(call_kwargs.get("mode"), "contiguous_a2a")
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.flashmask_attention_cp"
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention_cp"
     )
     def test_forward_contiguous_a2a_skips_expand_mask(self, mock_cp_attn):
         """contiguous_a2a mode should NOT call expand_attn_mask_startend_row_indices_for_cp."""
@@ -1080,7 +1080,7 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
 
         with (
             patch(
-                "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size",
+                "paddlefleet.transformer.attention.dot_product_attention.get_context_parallel_world_size",
                 return_value=2,
             ),
             patch.object(
@@ -1101,7 +1101,7 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
         mock_expand.assert_not_called()
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.flashmask_attention_cp"
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention_cp"
     )
     def test_forward_dualchunk_calls_expand_mask(self, mock_cp_attn):
         """dualchunk_allgather mode SHOULD call expand_attn_mask_startend_row_indices_for_cp."""
@@ -1121,7 +1121,7 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
 
         with (
             patch(
-                "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size",
+                "paddlefleet.transformer.attention.dot_product_attention.get_context_parallel_world_size",
                 return_value=2,
             ),
             patch.object(
@@ -1159,7 +1159,7 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
 
         with (
             patch(
-                "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size",
+                "paddlefleet.transformer.attention.dot_product_attention.get_context_parallel_world_size",
                 return_value=2,
             ),
             patch.object(
@@ -1182,7 +1182,7 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
         self.assertEqual(call_kwargs.get("mode"), "contiguous_a2a")
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.flashmask_attention_cp"
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention_cp"
     )
     def test_forward_contiguous_a2a_preserves_causal(self, mock_cp_attn):
         """contiguous_a2a should preserve the original is_causal (not force it to False)."""
@@ -1204,7 +1204,7 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
         mask = paddle.zeros([2, 1, 4, 2], dtype="int32")
 
         with patch(
-            "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size",
+            "paddlefleet.transformer.attention.dot_product_attention.get_context_parallel_world_size",
             return_value=2,
         ):
             result = attn(
@@ -1222,7 +1222,7 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
         self.assertTrue(call_kwargs.get("causal", False))
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.flashmask_attention_cp"
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention_cp"
     )
     def test_forward_dualchunk_forces_causal_false(self, mock_cp_attn):
         """dualchunk_allgather should force is_causal=False."""
@@ -1242,7 +1242,7 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
 
         with (
             patch(
-                "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size",
+                "paddlefleet.transformer.attention.dot_product_attention.get_context_parallel_world_size",
                 return_value=2,
             ),
             patch.object(
@@ -1264,7 +1264,7 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
         self.assertFalse(call_kwargs.get("causal", True))
 
     @patch(
-        "paddlefleet.transformer.dot_product_attention.flashmask_attention_cp"
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention_cp"
     )
     def test_hybrid_mla_cp_mode_overrides_model_wide_mode(self, mock_cp_attn):
         """hybrid_mla_cp_mode wins over cp_balance_mode, and non-MLA is allowed.
@@ -1295,7 +1295,7 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
 
         with (
             patch(
-                "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size",
+                "paddlefleet.transformer.attention.dot_product_attention.get_context_parallel_world_size",
                 return_value=2,
             ),
             patch.object(
@@ -1325,7 +1325,7 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
 
     def test_hybrid_mla_cp_mode_rejects_swa_layer(self):
         """An SWA layer would silently miss the swap2p rewrite, so reject it."""
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             DotProductAttention,
         )
         from paddlefleet.transformer.enums import AttnMaskType
@@ -1334,7 +1334,7 @@ class TestDotProductAttentionContiguousA2a(unittest.TestCase):
         config.hybrid_mla_cp_mode = "contiguous_a2a"
         with (
             patch(
-                "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size",
+                "paddlefleet.transformer.attention.dot_product_attention.get_context_parallel_world_size",
                 return_value=2,
             ),
             self.assertRaises(ValueError) as ctx,

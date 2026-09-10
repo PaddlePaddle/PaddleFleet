@@ -392,8 +392,10 @@ class TestIndexerCPTileLangVsPaddleRef(unittest.TestCase):
 
     def _run(self, sq_global, cp_size, topk_eff, max_mismatch_rate=0.05):
         from paddlefleet.tilelang_ops import csa_indexer_topk_fwd
+        from paddlefleet.transformer.attention.csa_attention import (
+            fused_qk_topk_naive,
+        )
         from paddlefleet.transformer.cp_utils import build_causal_mask_cp
-        from paddlefleet.transformer.csa_attention import fused_qk_topk_naive
 
         b, h_i, d_i, ratio = 2, 16, 32, 4
         sq_local = sq_global // cp_size

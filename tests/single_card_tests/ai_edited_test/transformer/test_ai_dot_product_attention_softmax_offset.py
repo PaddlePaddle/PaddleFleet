@@ -60,7 +60,9 @@ import unittest
 
 import paddle
 
-from paddlefleet.transformer.dot_product_attention import DotProductAttention
+from paddlefleet.transformer.attention.dot_product_attention import (
+    DotProductAttention,
+)
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import init_method_normal, scaled_init_method_normal
@@ -221,7 +223,7 @@ class TestSoftmaxOffsetFnDropoutTraining(unittest.TestCase):
     """
 
     def test_dropout_uses_training_argument_no_nameerror(self):
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             scaled_dot_product_attention_with_softmax_offset,
         )
 
@@ -270,7 +272,7 @@ class TestSoftmaxOffsetFnMaskBranches(unittest.TestCase):
     """
 
     def _run(self, mask):
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             scaled_dot_product_attention_with_softmax_offset,
         )
 
@@ -363,7 +365,7 @@ class TestSoftmaxOffsetFnRowMaxWithSink(unittest.TestCase):
     """
 
     def test_large_sink_dominates_weights(self):
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             scaled_dot_product_attention_with_softmax_offset,
         )
 
@@ -392,7 +394,7 @@ class TestSoftmaxOffsetFnRowMaxWithSink(unittest.TestCase):
 
     def test_small_sink_matches_plain_softmax(self):
         """With a very negative sink, output must equal plain softmax(QK)V."""
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             scaled_dot_product_attention_with_softmax_offset,
         )
 
@@ -435,7 +437,7 @@ class TestSoftmaxOffsetFnGQAPath(unittest.TestCase):
     """
 
     def test_gqa_matches_expanded_reference(self):
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             scaled_dot_product_attention_with_softmax_offset,
         )
 
@@ -482,7 +484,7 @@ class TestSoftmaxOffsetFnGQAPath(unittest.TestCase):
 
     def test_gqa_with_bool_mask(self):
         """GQA path + bool mask branch simultaneously."""
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             scaled_dot_product_attention_with_softmax_offset,
         )
 
@@ -535,7 +537,7 @@ class TestSoftmaxOffsetFnCausalBranch(unittest.TestCase):
     """
 
     def test_causal_matches_manual_reference(self):
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             scaled_dot_product_attention_with_softmax_offset,
         )
 
@@ -583,7 +585,7 @@ class TestSoftmaxOffsetFnCausalBranch(unittest.TestCase):
         query.shape[1] == 1 must NOT enter the causal branch. With a single
         query token, the output equals plain softmax(QK/sqrt(d))V.
         """
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             scaled_dot_product_attention_with_softmax_offset,
         )
 
@@ -629,7 +631,7 @@ class TestSoftmaxOffsetFnScaleArg(unittest.TestCase):
     """
 
     def test_explicit_scale_used_instead_of_default(self):
-        from paddlefleet.transformer.dot_product_attention import (
+        from paddlefleet.transformer.attention.dot_product_attention import (
             scaled_dot_product_attention_with_softmax_offset,
         )
 

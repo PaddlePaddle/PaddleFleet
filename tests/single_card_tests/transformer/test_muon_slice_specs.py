@@ -31,15 +31,18 @@ from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionVHA,
 )
-from paddlefleet.transformer.csa_attention import Compressor, CSAIndexer
-from paddlefleet.transformer.dsv4_hybrid_attention import (
+from paddlefleet.transformer.attention.csa_attention import (
+    Compressor,
+    CSAIndexer,
+)
+from paddlefleet.transformer.attention.dsv4_hybrid_attention import (
     DSv4HybridSelfAttention,
+)
+from paddlefleet.transformer.attention.multi_latent_attention import (
+    MLASelfAttention,
 )
 from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_expert import GroupedMLPExpert
-from paddlefleet.transformer.multi_latent_attention import (
-    MLASelfAttention,
-)
 from paddlefleet.transformer.muon_utils import (
     ortho_blocks,
     ortho_ep_full_intermediate,

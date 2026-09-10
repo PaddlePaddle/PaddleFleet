@@ -29,7 +29,9 @@ from paddlefleet.transformer.attention import (
     SelfAttentionVHA,
     SelfAttentionVHASublayersSpec,
 )
-from paddlefleet.transformer.dot_product_attention import DotProductAttention
+from paddlefleet.transformer.attention.dot_product_attention import (
+    DotProductAttention,
+)
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.transformer.utils import (
@@ -490,7 +492,7 @@ class TestExpandAttnMaskForCP(unittest.TestCase):
         config.attention_dropout = 0.0
         config.flashmask_use_varlen = False
         with mock_patch(
-            "paddlefleet.transformer.dot_product_attention.get_context_parallel_world_size",
+            "paddlefleet.transformer.attention.dot_product_attention.get_context_parallel_world_size",
             return_value=cp_size,
         ):
             dpa = DotProductAttention(

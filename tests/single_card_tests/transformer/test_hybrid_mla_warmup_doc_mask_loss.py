@@ -78,9 +78,13 @@ import numpy as np
 import paddle
 import paddle.nn.functional as F
 
-import paddlefleet.transformer.mqa_latent_attention as mqa_mod
-from paddlefleet.transformer.csa_attention import _derive_csa_doc_boundaries
-from paddlefleet.transformer.dsa_attention import DSAIndexerLossLoggingHelper
+import paddlefleet.transformer.attention.mqa_latent_attention as mqa_mod
+from paddlefleet.transformer.attention.csa_attention import (
+    _derive_csa_doc_boundaries,
+)
+from paddlefleet.transformer.attention.dsa_attention import (
+    DSAIndexerLossLoggingHelper,
+)
 
 from .hybrid_mla_utils import (
     _CAPTURED,

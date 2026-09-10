@@ -42,7 +42,7 @@ from paddlefleet.tensor_parallel.layers import (
 )
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.training.initialize import initialize_fleet
-from paddlefleet.transformer.kimi_delta_attention import (
+from paddlefleet.transformer.attention.kimi_delta_attention import (
     HAVE_FLA,
     KimiDeltaAttention,
     KimiDeltaAttentionSublayersSpec,

@@ -28,11 +28,11 @@ from unittest.mock import MagicMock, patch
 
 import paddle
 
-from paddlefleet.transformer.dw_overlap import DeferredWeightGradLinear
-from paddlefleet.transformer.multi_latent_attention import (
+from paddlefleet.transformer.attention.multi_latent_attention import (
     MultiLatentAttention,
     _ec_compatible_rope_apply,
 )
+from paddlefleet.transformer.dw_overlap import DeferredWeightGradLinear
 
 
 class TestMLASelfAttentionBackwardDW(unittest.TestCase):
@@ -64,20 +64,20 @@ class TestMLASelfAttentionBackwardDW(unittest.TestCase):
 
         with (
             patch(
-                "paddlefleet.transformer.multi_latent_attention.Attention.__init__",
+                "paddlefleet.transformer.attention.multi_latent_attention.Attention.__init__",
                 return_value=None,
             ),
             patch(
-                "paddlefleet.transformer.multi_latent_attention.RotaryEmbedding"
+                "paddlefleet.transformer.attention.multi_latent_attention.RotaryEmbedding"
             ),
             patch(
-                "paddlefleet.transformer.multi_latent_attention.build_spec_layer"
+                "paddlefleet.transformer.attention.multi_latent_attention.build_spec_layer"
             ),
             patch(
-                "paddlefleet.transformer.multi_latent_attention.ProcessGroupCollection.use_mpu_process_groups"
+                "paddlefleet.transformer.attention.multi_latent_attention.ProcessGroupCollection.use_mpu_process_groups"
             ),
         ):
-            from paddlefleet.transformer.multi_latent_attention import (
+            from paddlefleet.transformer.attention.multi_latent_attention import (
                 MLASelfAttention,
             )
 
@@ -147,7 +147,7 @@ class TestMultiLatentAttentionGate(unittest.TestCase):
                 return None
 
         with patch(
-            "paddlefleet.transformer.multi_latent_attention.Attention.__init__",
+            "paddlefleet.transformer.attention.multi_latent_attention.Attention.__init__",
             return_value=None,
         ):
             mla = ConcreteMLA.__new__(ConcreteMLA)
@@ -223,7 +223,7 @@ class TestRecomputeQKVUpProjAndRope(unittest.TestCase):
         """Create a SimpleNamespace layer that can run get_query_key_value_tensors."""
         import types as _types
 
-        from paddlefleet.transformer.multi_latent_attention import (
+        from paddlefleet.transformer.attention.multi_latent_attention import (
             MLASelfAttention,
         )
 
@@ -579,7 +579,7 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
         """Instantiate MLASelfAttention with mocked base class init and build_spec_layer."""
         from unittest.mock import patch as _patch
 
-        from paddlefleet.transformer.multi_latent_attention import (
+        from paddlefleet.transformer.attention.multi_latent_attention import (
             MLASelfAttention,
         )
 
@@ -611,19 +611,19 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
 
         with (
             _patch(
-                "paddlefleet.transformer.multi_latent_attention.Attention.__init__",
+                "paddlefleet.transformer.attention.multi_latent_attention.Attention.__init__",
                 _fake_attention_init,
             ),
             _patch(
-                "paddlefleet.transformer.multi_latent_attention.build_spec_layer",
+                "paddlefleet.transformer.attention.multi_latent_attention.build_spec_layer",
                 _fake_build_spec_layer,
             ),
             _patch(
-                "paddlefleet.transformer.multi_latent_attention.RotaryEmbedding",
+                "paddlefleet.transformer.attention.multi_latent_attention.RotaryEmbedding",
                 MagicMock,
             ),
             _patch(
-                "paddlefleet.transformer.multi_latent_attention.ProcessGroupCollection",
+                "paddlefleet.transformer.attention.multi_latent_attention.ProcessGroupCollection",
                 MagicMock,
             ),
         ):
@@ -831,7 +831,7 @@ class TestForwardDiscardOutputAndRegisterRecompute(unittest.TestCase):
         and then sets _qkv_recompute to None."""
         from unittest.mock import MagicMock, patch as _patch
 
-        from paddlefleet.transformer.multi_latent_attention import (
+        from paddlefleet.transformer.attention.multi_latent_attention import (
             MLASelfAttention,
         )
 

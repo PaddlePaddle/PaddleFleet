@@ -31,7 +31,9 @@ from paddlefleet.transformer.attention import (
     SelfAttention,
     SelfAttentionSublayersSpec,
 )
-from paddlefleet.transformer.dot_product_attention import DotProductAttention
+from paddlefleet.transformer.attention.dot_product_attention import (
+    DotProductAttention,
+)
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.transformer.utils import (
@@ -2337,7 +2339,9 @@ class TestDotProductAttentionFlashMaskSWA(unittest.TestCase):
         )
         return attn
 
-    @patch("paddlefleet.transformer.dot_product_attention.flashmask_attention")
+    @patch(
+        "paddlefleet.transformer.attention.dot_product_attention.flashmask_attention"
+    )
     def test_flashmask_path_applies_sliding_window(self, mock_fm):
         """Verify startend_row_indices_add_sliding_window is called when is_swa."""
         attn = self._make_swa_dot_product_attention()

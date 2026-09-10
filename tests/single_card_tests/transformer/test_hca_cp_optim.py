@@ -34,11 +34,11 @@ import unittest
 import numpy as np
 import paddle
 
+from paddlefleet.transformer.attention.csa_attention import CSADocMaskMetadata
 from paddlefleet.transformer.cp_utils import (
     get_window_topk_idxs_cp,
     prepend_prev_window,
 )
-from paddlefleet.transformer.csa_attention import CSADocMaskMetadata
 from paddlefleet.triton_ops.document_mask_fusion import (
     compressed_doc_start_triton,
     compressed_topk_idxs_triton,

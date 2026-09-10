@@ -29,7 +29,7 @@ from unittest.mock import MagicMock, patch
 import paddle
 from paddle.distributed.fleet.meta_parallel import LayerSpec
 
-from paddlefleet.transformer.dsa_attention import (
+from paddlefleet.transformer.attention.dsa_attention import (
     DSAIndexer,
     DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
@@ -44,11 +44,11 @@ from paddlefleet.transformer.dsa_attention import (
     hadamard_transform,
     rotate_activation,
 )
-from paddlefleet.transformer.enums import AttnMaskType
-from paddlefleet.transformer.multi_latent_attention import (
+from paddlefleet.transformer.attention.multi_latent_attention import (
     MLASelfAttention,
     MLASelfAttentionSublayersSpec,
 )
+from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import (
     init_method_normal,
@@ -995,7 +995,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
         self.assertEqual(DSAIndexerLossLoggingHelper.num_layers, 4)
         self.assertEqual(DSAIndexerLossLoggingHelper.tracker, {})
 
-    @patch("paddlefleet.transformer.dsa_attention.parallel_state")
+    @patch("paddlefleet.transformer.attention.dsa_attention.parallel_state")
     def test_reduce_empty_tracker_with_num_layers_joins_pp_reduce(
         self, mock_ps
     ):
@@ -1013,7 +1013,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
         values = DSAIndexerLossLoggingHelper.tracker["values"]
         self.assertTrue(paddle.allclose(values, paddle.zeros([3])))
 
-    @patch("paddlefleet.transformer.dsa_attention.parallel_state")
+    @patch("paddlefleet.transformer.attention.dsa_attention.parallel_state")
     def test_reduce_empty_tracker_uses_registered_num_layers(self, mock_ps):
         """Empty tracker should infer registered layer count for PP reduce."""
         mock_ps.get_context_parallel_world_size.return_value = 1
@@ -1030,7 +1030,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
         values = DSAIndexerLossLoggingHelper.tracker["values"]
         self.assertTrue(paddle.allclose(values, paddle.zeros([3])))
 
-    @patch("paddlefleet.transformer.dsa_attention.parallel_state")
+    @patch("paddlefleet.transformer.attention.dsa_attention.parallel_state")
     def test_reduce_no_distributed_groups(self, mock_ps):
         """Reduce with no distributed groups should keep values unchanged."""
         mock_ps.get_context_parallel_world_size.return_value = 1
@@ -1050,7 +1050,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
             )
         )
 
-    @patch("paddlefleet.transformer.dsa_attention.parallel_state")
+    @patch("paddlefleet.transformer.attention.dsa_attention.parallel_state")
     def test_reduce_with_pp_group(self, mock_ps):
         """Reduce with PP group should call all_reduce."""
         mock_ps.get_context_parallel_world_size.return_value = 1
@@ -1067,7 +1067,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
             DSAIndexerLossLoggingHelper.reduce_loss_in_tracker()
             mock_all_reduce.assert_called_once()
 
-    @patch("paddlefleet.transformer.dsa_attention.parallel_state")
+    @patch("paddlefleet.transformer.attention.dsa_attention.parallel_state")
     def test_reduce_with_dp_group(self, mock_ps):
         """Reduce with DP group should call all_reduce and divide by nranks."""
         mock_ps.get_context_parallel_world_size.return_value = 1
@@ -1086,7 +1086,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
             # (all_reduce is mocked, so actual value won't change, but the
             #  division path is exercised)
 
-    @patch("paddlefleet.transformer.dsa_attention.parallel_state")
+    @patch("paddlefleet.transformer.attention.dsa_attention.parallel_state")
     def test_reduce_with_reduce_group(self, mock_ps):
         """Reduce with TP reduce_group should call all_reduce."""
         mock_ps.get_context_parallel_world_size.return_value = 1
@@ -1106,7 +1106,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
             DSAIndexerLossLoggingHelper.reduce_loss_in_tracker()
             mock_all_reduce.assert_called_once()
 
-    @patch("paddlefleet.transformer.dsa_attention.parallel_state")
+    @patch("paddlefleet.transformer.attention.dsa_attention.parallel_state")
     def test_reduce_with_avg_group(self, mock_ps):
         """Reduce with avg_group should call all_reduce and divide by nranks."""
         mock_ps.get_context_parallel_world_size.return_value = 1
@@ -1126,7 +1126,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
             DSAIndexerLossLoggingHelper.reduce_loss_in_tracker()
             mock_all_reduce.assert_called_once()
 
-    @patch("paddlefleet.transformer.dsa_attention.parallel_state")
+    @patch("paddlefleet.transformer.attention.dsa_attention.parallel_state")
     def test_reduce_pp_group_single_rank_skipped(self, mock_ps):
         """PP group with nranks=1 should not trigger all_reduce."""
         mock_ps.get_context_parallel_world_size.return_value = 1
@@ -1143,7 +1143,7 @@ class TestDSAIndexerLossLoggingHelperReduce(unittest.TestCase):
             DSAIndexerLossLoggingHelper.reduce_loss_in_tracker()
             mock_all_reduce.assert_not_called()
 
-    @patch("paddlefleet.transformer.dsa_attention.parallel_state")
+    @patch("paddlefleet.transformer.attention.dsa_attention.parallel_state")
     def test_reduce_dp_group_single_rank_skipped(self, mock_ps):
         """DP group with nranks=1 should not trigger all_reduce."""
         mock_ps.get_context_parallel_world_size.return_value = 1
@@ -1188,7 +1188,7 @@ class TestDSAIndexerLossLoggingHelperTrackMetrics(unittest.TestCase):
             loss, layer_number=1, num_layers=2
         )
         with self.assertLogs(
-            "paddlefleet.transformer.dsa_attention", level="INFO"
+            "paddlefleet.transformer.attention.dsa_attention", level="INFO"
         ) as cm:
             DSAIndexerLossLoggingHelper.track_indexer_metrics(
                 loss_scale=1.0, iteration=42

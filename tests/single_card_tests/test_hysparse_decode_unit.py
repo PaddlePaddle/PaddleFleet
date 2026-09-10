@@ -40,7 +40,7 @@ from paddlefleet.tilelang_ops.hysparse.pipeline import (
     decode_block_logit,
     select_topk_blocks,
 )
-from paddlefleet.transformer.multi_latent_attention import (
+from paddlefleet.transformer.attention.multi_latent_attention import (
     MQASelfAttention,
     MultiLatentAttention,
     _is_incremental_decode,
@@ -406,7 +406,7 @@ class TestMLAHySparseForwardRouting(unittest.TestCase):
     def _forward(self, stub, shared_kv, cache):
         with (
             mock.patch(
-                "paddlefleet.transformer.multi_latent_attention.get_context_parallel_world_size",
+                "paddlefleet.transformer.attention.multi_latent_attention.get_context_parallel_world_size",
                 return_value=1,
             ),
             mock.patch(
@@ -512,7 +512,7 @@ class TestMQAHySparseForwardRouting(unittest.TestCase):
 
         patches = (
             mock.patch(
-                "paddlefleet.transformer.multi_latent_attention.get_pg_size",
+                "paddlefleet.transformer.attention.multi_latent_attention.get_pg_size",
                 return_value=1,
             ),
             mock.patch(
@@ -549,7 +549,7 @@ class TestMQAHySparseForwardRouting(unittest.TestCase):
         block_indices = paddle.zeros([1, 1, 1, 1], dtype="int32")
 
         with mock.patch(
-            "paddlefleet.transformer.multi_latent_attention.get_context_parallel_world_size",
+            "paddlefleet.transformer.attention.multi_latent_attention.get_context_parallel_world_size",
             return_value=1,
         ):
             output, bias, calls = self._run_forward(
@@ -576,7 +576,7 @@ class TestMQAHySparseForwardRouting(unittest.TestCase):
 
         with (
             mock.patch(
-                "paddlefleet.transformer.multi_latent_attention.get_context_parallel_world_size",
+                "paddlefleet.transformer.attention.multi_latent_attention.get_context_parallel_world_size",
                 return_value=1,
             ),
             self.assertRaisesRegex(ValueError, "single query token"),
@@ -600,11 +600,11 @@ class TestMQAHySparseForwardRouting(unittest.TestCase):
 
         with (
             mock.patch(
-                "paddlefleet.transformer.multi_latent_attention.get_context_parallel_world_size",
+                "paddlefleet.transformer.attention.multi_latent_attention.get_context_parallel_world_size",
                 return_value=2,
             ),
             mock.patch(
-                "paddlefleet.transformer.multi_latent_attention.ContextParallelAllGatherOp.apply",
+                "paddlefleet.transformer.attention.multi_latent_attention.ContextParallelAllGatherOp.apply",
                 side_effect=lambda tensor, *_: tensor,
             ),
             self.assertRaisesRegex(ValueError, "doc_valid_range"),
@@ -624,15 +624,15 @@ class TestMQAHySparseForwardRouting(unittest.TestCase):
 
         with (
             mock.patch(
-                "paddlefleet.transformer.multi_latent_attention.get_context_parallel_world_size",
+                "paddlefleet.transformer.attention.multi_latent_attention.get_context_parallel_world_size",
                 return_value=2,
             ),
             mock.patch(
-                "paddlefleet.transformer.multi_latent_attention.ContextParallelAllGatherOp.apply",
+                "paddlefleet.transformer.attention.multi_latent_attention.ContextParallelAllGatherOp.apply",
                 side_effect=lambda tensor, *_: tensor,
             ),
             mock.patch(
-                "paddlefleet.transformer.multi_latent_attention.ContextParallelScatterOp.apply",
+                "paddlefleet.transformer.attention.multi_latent_attention.ContextParallelScatterOp.apply",
                 side_effect=lambda tensor, *_: tensor,
             ) as scatter,
         ):
@@ -648,7 +648,7 @@ class TestMQAHySparseForwardRouting(unittest.TestCase):
 
         with (
             mock.patch(
-                "paddlefleet.transformer.multi_latent_attention.get_context_parallel_world_size",
+                "paddlefleet.transformer.attention.multi_latent_attention.get_context_parallel_world_size",
                 return_value=1,
             ),
             self.assertRaisesRegex(ValueError, "top-k block indices"),

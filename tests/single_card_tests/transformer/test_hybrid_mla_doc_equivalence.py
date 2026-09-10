@@ -46,13 +46,15 @@ import unittest
 import numpy as np
 import paddle
 
-from paddlefleet.transformer.csa_attention import (
+from paddlefleet.transformer.attention.csa_attention import (
     _build_valid_range_from_doc_bounds,
     _build_window_topk_idxs_from_doc_bounds,
     _derive_csa_doc_boundaries,
     _validate_csa_docmask_shape,
 )
-from paddlefleet.transformer.dsa_attention import DSAIndexerLossLoggingHelper
+from paddlefleet.transformer.attention.dsa_attention import (
+    DSAIndexerLossLoggingHelper,
+)
 
 from .hybrid_mla_utils import (
     _CAPTURED,

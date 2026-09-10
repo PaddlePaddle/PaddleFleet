@@ -51,7 +51,9 @@ import numpy as np
 import paddle
 
 from paddlefleet.transformer import indexer_loss_overlap
-from paddlefleet.transformer.dsa_attention import DSAIndexerLossLoggingHelper
+from paddlefleet.transformer.attention.dsa_attention import (
+    DSAIndexerLossLoggingHelper,
+)
 
 from .hybrid_mla_utils import (
     _GPU,
@@ -1177,7 +1179,7 @@ class TestSharedGradientImplementation(unittest.TestCase):
         )
 
     def test_an_unknown_backend_is_rejected(self):
-        from paddlefleet.transformer.csa_attention import (
+        from paddlefleet.transformer.attention.csa_attention import (
             compute_csa_indexer_grads,
         )
 
@@ -1346,7 +1348,7 @@ class TestNeedsIndexerLoss(unittest.TestCase):
     """
 
     def _needs(self, owner, in_recompute=False, grad=True):
-        from paddlefleet.transformer.mqa_latent_attention import (
+        from paddlefleet.transformer.attention.mqa_latent_attention import (
             MQALatentAttention,
         )
 
@@ -1460,7 +1462,7 @@ class TestDeferredBranchArithmetic(unittest.TestCase):
         The gradient it hands back is all-ones, so whatever reaches the leaf is
         the projection subgraph's own contribution and nothing else.
         """
-        from paddlefleet.transformer.mqa_latent_attention import (
+        from paddlefleet.transformer.attention.mqa_latent_attention import (
             MQALatentAttention,
         )
 
@@ -1475,7 +1477,7 @@ class TestDeferredBranchArithmetic(unittest.TestCase):
             )
 
         with mock.patch(
-            "paddlefleet.transformer.csa_attention.compute_csa_indexer_grads",
+            "paddlefleet.transformer.attention.csa_attention.compute_csa_indexer_grads",
             fake_grads,
         ):
             MQALatentAttention._run_indexer_loss_branch(owner, work)

@@ -20,7 +20,9 @@ from unittest import mock
 import paddle
 
 from paddlefleet.transformer import multi_latent_attention as mla_mod
-from paddlefleet.transformer.multi_latent_attention import MLASelfAttention
+from paddlefleet.transformer.attention.multi_latent_attention import (
+    MLASelfAttention,
+)
 
 
 def _triton_rope_available():
