@@ -42,6 +42,13 @@ from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
     WeightGradStore,
 )
 from paddle.distributed.fleet.utils.sequence_parallel_utils import ScatterOp
+from paddle.distributed.flex_checkpoint.aoa.generation import (
+    format_dtype_cast_attr,
+    format_inv_dtype_cast_attr,
+    resolve_dtype_cast_rule,
+    resolve_names,
+    should_skip,
+)
 
 from paddlefleet.context_parallel_utils import (
     ContextParallelAllGatherOp,
@@ -1970,3 +1977,78 @@ class TopKRouter(StandardMoERouter):
             l_aux,
             l_zloss,
         )
+
+    def gen_aoa_statements(
+        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+    ):
+        """Checkpoint->model AOA for the router.
+
+        The router owns no fused layout: its own ``local_state_dict`` (this
+        layer only, no sub-layers) is the sole enumeration source, so hash
+        layers naturally cover ``weight`` / ``tid2eid`` and normal layers cover
+        the ``weight`` / ``weight_1`` / ``e_score_correction_bias`` /
+        ``routed_scaling_factor_param`` that actually exist. Every statement is
+        a plain rename; a dtype cast suffix is appended when the model rules
+        match. dtype is never guessed from ``model_type`` and never written as a
+        literal ``dtype=``.
+        """
+        statements = []
+        local_state_dict = self.state_dict(
+            structured_name_prefix="", include_sublayers=False
+        )
+        for name in local_state_dict:
+            if structured_name_prefix + name in ctx.excluded_names:
+                continue
+            checkpoint_name, model_name = resolve_names(
+                name,
+                ctx.checkpoint_name_prefix,
+                structured_name_prefix,
+                ctx.pp_to_single_mapping,
+                ctx.checkpoint_name_mapping,
+                aoa_name_scope=aoa_name_scope,
+                model_name_prefix=ctx.model_name_prefix,
+            )
+            cast = format_dtype_cast_attr(
+                resolve_dtype_cast_rule(
+                    model_name, ctx.dtype_cast_rules, ctx.model_name_prefix
+                )
+            )
+            if should_skip(checkpoint_name, model_name, cast):
+                continue
+            statements.append(f"{checkpoint_name} -> {model_name}{cast}")
+        return statements
+
+    def gen_inv_aoa_statements(
+        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+    ):
+        """Inverse (model -> checkpoint) AOA for the router.
+
+        Independently generated: the same ``local_state_dict`` keys are
+        resolved, but emitted model -> checkpoint with the dtype cast endpoints
+        swapped.
+        """
+        statements = []
+        local_state_dict = self.state_dict(
+            structured_name_prefix="", include_sublayers=False
+        )
+        for name in local_state_dict:
+            if structured_name_prefix + name in ctx.excluded_names:
+                continue
+            checkpoint_name, model_name = resolve_names(
+                name,
+                ctx.checkpoint_name_prefix,
+                structured_name_prefix,
+                ctx.pp_to_single_mapping,
+                ctx.checkpoint_name_mapping,
+                aoa_name_scope=aoa_name_scope,
+                model_name_prefix=ctx.model_name_prefix,
+            )
+            cast = format_inv_dtype_cast_attr(
+                resolve_dtype_cast_rule(
+                    model_name, ctx.dtype_cast_rules, ctx.model_name_prefix
+                )
+            )
+            if should_skip(checkpoint_name, model_name, cast):
+                continue
+            statements.append(f"{model_name} -> {checkpoint_name}{cast}")
+        return statements
