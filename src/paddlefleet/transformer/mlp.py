@@ -219,16 +219,42 @@ class MLP(FleetLayer):
             return {}
         return {"up_gate_proj.weight": (ortho_gate_up, {})}
 
-    def forward(self, hidden_states, per_token_scale=None):
-        """Perform the forward pass through the MLP block."""
+    def forward(
+        self, hidden_states, per_token_scale=None, hidden_states_up=None
+    ):
+        """Perform the forward pass through the MLP block.
+
+        ``hidden_states_up`` splits the fused gate/up projection into two
+        independent autograd consumers, matching a reference implementation that
+        keeps ``gate_proj`` and ``up_proj`` as separate ``nn.Linear`` modules
+        (e.g. HF ``Qwen3_5MoeMLP``). The fused K=2*inter dgrad is *not* bitwise
+        equal to the sum of the two K=inter dgrads, so reproducing the reference
+        gradient requires two projections whose grads enter the accumulation
+        chain separately. Each call sees a grad that is zero on the other half,
+        which is bitwise identical to the narrow per-half GEMM.
+        """
         # [s, b, 4 * h/p]
         nvtx_range_push(suffix="up_gate_proj")
-        intermediate_parallel, bias_parallel = deferrable_linear(
-            self.config,
-            self._dw_up_gate_point,
-            self.up_gate_proj,
-            hidden_states,
-        )
+        if hidden_states_up is None:
+            intermediate_parallel, bias_parallel = deferrable_linear(
+                self.config,
+                self._dw_up_gate_point,
+                self.up_gate_proj,
+                hidden_states,
+            )
+        else:
+            # Two independent consumers, so the shared dw deferral point is not
+            # usable here: it would be armed twice for one weight. The HF
+            # bit-exact path never runs with dw/p2p overlap, so call the
+            # projection directly and leave ``deferrable_linear`` to the default
+            # single-consumer branch above.
+            intermediate_gate, bias_parallel = self.up_gate_proj(hidden_states)
+            intermediate_up, _ = self.up_gate_proj(hidden_states_up)
+            half = intermediate_gate.shape[-1] // 2
+            intermediate_parallel = paddle.concat(
+                [intermediate_gate[..., :half], intermediate_up[..., half:]],
+                axis=-1,
+            )
         nvtx_range_pop(suffix="up_gate_proj")
 
         intermediate_parallel = inspect_tensor(

@@ -18,6 +18,7 @@ from copy import deepcopy
 import paddle
 import paddle.nn.functional as F
 
+from paddlefleet.accuracy_target import targets_hf
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
@@ -60,6 +61,7 @@ class StandardMLPSharedExpert(MLP):
         # Keep bf16 activation for backward; the gate already holds the
         # high-precision copy.
         self.up_gate_proj.save_original_input = True
+        self._maybe_tag_up_gate_norm_groups()
         if self.use_shared_expert_gate:
             self.gate_weight = paddle.create_parameter(
                 shape=[config.hidden_size, 1],
@@ -71,10 +73,51 @@ class StandardMLPSharedExpert(MLP):
         else:
             self.gate_weight = None
 
-    def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
-        output, output_bias = super().forward(hidden_states)
+    def _maybe_tag_up_gate_norm_groups(self) -> None:
+        """Tag ``up_gate_proj.weight`` with the reference's two projections.
+
+        HF's ``Qwen3_5MoeMLP`` keeps ``gate_proj`` and ``up_proj`` as separate
+        ``nn.Linear`` modules, so gradient clipping takes **two** per-tensor BF16
+        norms over the fused weight's two column halves, not one over the whole
+        thing. Squaring one BF16 norm of the concatenation is not the same as
+        summing the squares of the two halves' BF16 norms, so the fused layout
+        changes the global norm. Only the clip reads this; see
+        ``paddleformers/utils/hf_bitexact_clip.py``.
+        """
+        # ``getattr``: the old short-circuited
+        # ``HF_BITEXACT_ALIGN and self.use_accuracy_compatible`` never read the
+        # attribute when the flag was off, so callers that stub out ``MLP.__init__``
+        # (which is what sets it) used to work. Keep that tolerance.
+        if not targets_hf(getattr(self, "use_accuracy_compatible", False)):
+            return
+        weight = getattr(self.up_gate_proj, "weight", None)
+        if weight is None:
+            return
+        width = weight.shape[-1]
+        if width % 2:
+            return
+        half = width // 2
+        weight.hf_norm_groups = [
+            paddle.to_tensor(list(range(0, half)), dtype="int64"),
+            paddle.to_tensor(list(range(half, width)), dtype="int64"),
+        ]
+
+    def forward(
+        self,
+        hidden_states: paddle.Tensor,
+        hidden_states_up: paddle.Tensor | None = None,
+        hidden_states_gate: paddle.Tensor | None = None,
+    ) -> paddle.Tensor:
+        output, output_bias = super().forward(
+            hidden_states, hidden_states_up=hidden_states_up
+        )
         if self.use_shared_expert_gate:
-            logits = F.linear(hidden_states, self.gate_weight)
+            gate_source = (
+                hidden_states
+                if hidden_states_gate is None
+                else hidden_states_gate
+            )
+            logits = F.linear(gate_source, self.gate_weight)
             gate_score = F.sigmoid(logits)
             output = output * gate_score
         return output, output_bias

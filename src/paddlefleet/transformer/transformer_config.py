@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Literal
 
 import paddle.nn.functional as F
 
+from ..accuracy_target import AccuracyTarget, normalize_accuracy_target
 from ..model_parallel_config import ModelParallelConfig
 from ..recompute_utils import validate_recompute_modules
 from ..utils import (
@@ -1916,9 +1917,16 @@ class TransformerConfig(ModelParallelConfig):
     gpt_model_use_experimental_version: bool = False
     """Enable experimental version code paths for precision alignment."""
 
-    use_accuracy_compatible: bool = False
-    """Whether to enable accuracy-compatible kernels for cross-framework numerical
-    alignment. Defaults to False."""
+    use_accuracy_compatible: AccuracyTarget = False
+    """Which reference the accuracy-compatible kernels reproduce bit-for-bit.
+
+    ``False`` (default) uses the throughput kernels. ``"megatron"`` -- also
+    accepted as ``True``, which is what it has always meant -- aligns with
+    Megatron-LM. ``"hf"`` aligns with the HuggingFace/Torch reference. Both
+    non-default values are truthy, so ``if config.use_accuracy_compatible:``
+    still means "in some alignment mode"; use
+    ``paddlefleet.accuracy_target.targets_hf`` only where the two references
+    require different arithmetic. Normalized in ``__post_init__``."""
 
     moe_topk_fusion: bool = False
     """If True, use Triton fused MoE TopK kernel for expert selection."""
@@ -2093,6 +2101,14 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        # ``True`` predates the "hf" target and has always meant Megatron, so
+        # canonicalize it to the explicit name; every falsy spelling collapses to
+        # False. An unknown target raises rather than falling back to the default
+        # kernels, which would turn a typo into a slow run that silently aligns
+        # with nothing.
+        self.use_accuracy_compatible = normalize_accuracy_target(
+            self.use_accuracy_compatible
+        )
         # Normalize the indexer loss coefficient: None (e.g. from a HuggingFace
         # config.json ``"indexer_loss_coeff": null`` or explicit config) means
         # "disabled" and collapses to 0.0, so this config object never exposes

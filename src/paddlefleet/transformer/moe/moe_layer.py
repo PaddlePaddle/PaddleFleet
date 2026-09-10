@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
 from paddlefleet import utils
+from paddlefleet.accuracy_target import targets_hf
 from paddlefleet.recompute_utils import (
     module_needs_recompute,
     module_needs_refined_recompute,
@@ -66,7 +67,11 @@ from .fusion_layer_utils import (
 from .moe_expert import GroupedMLPExpert, SonicMoEExpert, StandardMLPExpert
 from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
-from .moe_utils import AddAuxiliaryLoss, use_accuracy_compatible_kernel
+from .moe_utils import (
+    AddAuxiliaryLoss,
+    _build_aligned_gather_index,
+    use_accuracy_compatible_kernel,
+)
 from .token_dispatcher import (
     AllGatherTokenDispatcher,
     AllToAllTokenDispatcher,
@@ -154,6 +159,110 @@ class ThreePathCloneAlignMG(PyLayer):
         partial = g_dispatcher + g_shared
         out = partial + g_router
         return out
+
+
+class HFMoeFanout(PyLayer):
+    """Four-way clone reproducing the tail of HF's grad accumulation order.
+
+    ``Qwen3_5MoeSparseMoeBlock`` reads ``hidden_states`` from the shared
+    expert's ``gate_proj`` and ``up_proj``, the router, every routed expert and
+    ``shared_expert_gate``. Torch accumulates a multiply-used tensor's gradient
+    one BF16 add at a time, and the measured arrival order is::
+
+        e_{E-1} + ... + e_0 + shared_expert_gate + gate + up_proj + gate_proj
+
+    The expert terms and ``shared_expert_gate`` need the permuted expert
+    gradient and are produced by :class:`HFMoeSlotFanout`, which hands the
+    finished head of the chain over as ``g_core``; this layer only appends the
+    router / up_proj / gate_proj tail, in that order.
+    """
+
+    @staticmethod
+    def forward(ctx, x):
+        return x.clone(), x.clone(), x.clone(), x.clone()
+
+    @staticmethod
+    def backward(ctx, g_core, g_router, g_up, g_gate):
+        with paddle.amp.auto_cast(False):
+            acc = g_core
+            for grad in (g_router, g_up, g_gate):
+                if grad is not None:
+                    acc = acc + grad
+        return acc
+
+
+class HFMoeSlotFanout(PyLayer):
+    """Permute-and-clone whose backward rebuilds HF's per-expert grad chain.
+
+    ``Qwen3_5MoeExperts`` is a Python loop, so every routed expert is an
+    independent consumer of ``hidden_states`` and torch chains their gradients
+    with one BF16 add each. A token contributes to exactly ``topk`` experts, so
+    the per-expert terms can be regrouped into ``topk`` dense "slot columns"
+    (column ``k`` holds the ``k``-th smallest selected expert index of every
+    token); chaining those columns from the last to the first reproduces the
+    reference bytes exactly, while a single FP32 reduction over the slots does
+    not (it rounds once instead of ``topk`` times).
+
+    ``shared_expert_gate`` is applied after the expert loop, so its gradient
+    joins the chain right behind the expert terms; it is therefore cloned here
+    and added last rather than seeding :class:`HFMoeFanout`.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        sorted_indices,
+        gather_index_flat,
+        valid_rows,
+        num_tokens,
+        topk,
+        hidden,
+        has_padding,
+    ):
+        ctx.input_dtype = x.dtype
+        ctx.num_tokens = num_tokens
+        ctx.topk = topk
+        ctx.hidden = hidden
+        ctx.has_padding = has_padding
+        ctx.save_for_backward(gather_index_flat, valid_rows)
+        permuted = x.index_select(axis=0, index=sorted_indices)
+        return permuted, x.clone()
+
+    @staticmethod
+    def backward(ctx, grad_permuted, grad_shared_gate):
+        gather_index_flat, valid_rows = ctx.saved_tensor()
+        if ctx.topk == 0:
+            return grad_shared_gate
+        gathered = grad_permuted.index_select(
+            axis=0, index=gather_index_flat
+        ).reshape([ctx.num_tokens, ctx.topk, ctx.hidden])
+        if ctx.has_padding:
+            # Padding rows point at slot 0; force their contribution to zero.
+            gathered = gathered * valid_rows.cast(gathered.dtype).reshape(
+                [ctx.num_tokens, 1, 1]
+            )
+        with paddle.amp.auto_cast(False):
+            acc = gathered[:, ctx.topk - 1]
+            for slot in range(ctx.topk - 2, -1, -1):
+                acc = acc + gathered[:, slot]
+            acc = acc + grad_shared_gate
+        return acc.cast(ctx.input_dtype)
+
+
+def _hf_aligned_permute_index(routing_map):
+    """``(sorted_indices, gather_index_flat, valid_rows, topk, has_padding)``."""
+    num_tokens, num_experts = routing_map.shape
+    routing_map_bool_T = routing_map.cast(paddle.bool).T.contiguous()
+    token_indices = (
+        paddle.arange(num_tokens).unsqueeze(0).expand([num_experts, -1])
+    )
+    sorted_indices = token_indices.masked_select(routing_map_bool_T)
+    sorted_indices.stop_gradient = True
+    gather_index_flat, valid_rows, topk, has_padding = (
+        _build_aligned_gather_index(routing_map)
+    )
+    return sorted_indices, gather_index_flat, valid_rows, topk, has_padding
 
 
 @dataclass
@@ -1737,12 +1846,42 @@ class MoELayer(nn.Layer):
 
         inspect_tensor_set_current_layer(layer_idx)
 
+        # The HF bit-exact topology is a *target selection* inside the accuracy
+        # -compatible mode, not a mode of its own: it overrides the Megatron
+        # three-path clone at the points where the two references disagree, so it
+        # must never engage while accuracy-compatible is off.
+        _hf_bitexact_paths = (
+            targets_hf(getattr(self, "use_accuracy_compatible", False))
+            and hidden_states.stop_gradient is False
+            and self._supports_three_path_clone()
+            and self.expert_model_parallel_size <= 1
+            and self.moe_expert_fusion
+            and not self.using_sonic_moe
+            and self.shared_experts is not None
+            and getattr(self.shared_experts, "use_shared_expert_gate", False)
+            and residual is None
+        )
         _three_paths_enabled = (
-            getattr(self, "use_accuracy_compatible", False)
+            not _hf_bitexact_paths
+            and getattr(self, "use_accuracy_compatible", False)
             and hidden_states.stop_gradient is False
             and self._supports_three_path_clone()
         )
-        if _three_paths_enabled:
+        _hs_shared_gate_path = None
+        _hs_shared_up = None
+        if _hf_bitexact_paths:
+            # HF fans ``hidden_states`` out to shared gate_proj / shared up_proj /
+            # router / every routed expert / shared_expert_gate and accumulates
+            # their gradients in reverse creation order, one BF16 add each. Split
+            # the tensor into exactly those consumers so Paddle's autograd walks
+            # the same chain; ``HFMoeSlotFanout`` (applied below, once the routing
+            # map exists) supplies the expert + shared_expert_gate head of it.
+            _hs_core, _hs_router_path, _hs_shared_up, _hs_shared_path = (
+                HFMoeFanout.apply(hidden_states)
+            )
+            _hs_dispatcher_path = _hs_core
+            residuals = _hs_shared_path
+        elif _three_paths_enabled:
             _hs_router_path, _hs_dispatcher_path, _hs_shared_path = (
                 ThreePathCloneAlignMG.apply(hidden_states)
             )
@@ -1841,8 +1980,34 @@ class MoELayer(nn.Layer):
                     reshaped_input,
                 )
             if self.moe_expert_fusion:
+                _pre_permuted = None
+                if _hf_bitexact_paths:
+                    (
+                        _sorted_indices,
+                        _gather_index_flat,
+                        _valid_rows,
+                        _slot_topk,
+                        _has_padding,
+                    ) = _hf_aligned_permute_index(mask)
+                    _permuted, _hs_shared_gate = HFMoeSlotFanout.apply(
+                        reshaped_input,
+                        _sorted_indices,
+                        _gather_index_flat,
+                        _valid_rows,
+                        reshaped_input.shape[0],
+                        _slot_topk,
+                        reshaped_input.shape[-1],
+                        _has_padding,
+                    )
+                    _hs_shared_gate_path = _hs_shared_gate
+                    _pre_permuted = (_permuted, _sorted_indices)
                 output = self._forward_single_card_grouped_gemm_moe(
-                    reshaped_input, mask, probs, topk_indices, topk_weights
+                    reshaped_input,
+                    mask,
+                    probs,
+                    topk_indices,
+                    topk_weights,
+                    pre_permuted=_pre_permuted,
                 )
             else:
                 output = self._forward_single_card_moe(
@@ -1873,6 +2038,14 @@ class MoELayer(nn.Layer):
             residuals = inspect_tensor("moe_shared_input", layer_idx, residuals)
             if combine_overlap_handle is not None:
                 shared_output = combine_overlap_handle["fn_out"][0]
+            elif _hs_shared_gate_path is not None:
+                shared_output = self.shared_experts(
+                    residuals,
+                    hidden_states_up=_hs_shared_up,
+                    hidden_states_gate=_hs_shared_gate_path.reshape(
+                        residuals.shape
+                    ),
+                )[0]
             else:
                 shared_output = self.shared_experts(residuals)[0]
             shared_output = self._post_shared_output(shared_output)
@@ -1950,6 +2123,7 @@ class MoELayer(nn.Layer):
         probs: paddle.Tensor,
         topk_indices: paddle.Tensor | None = None,
         topk_weights: paddle.Tensor | None = None,
+        pre_permuted: tuple[paddle.Tensor, paddle.Tensor] | None = None,
     ) -> paddle.Tensor:
         """
         Forward without expert parallelism
@@ -1983,9 +2157,12 @@ class MoELayer(nn.Layer):
             return final_hidden_states.cast(hidden_states.dtype)
         else:
             tokens_per_expert = routing_map.sum(axis=0)
-            permuted_local_hidden_states, sorted_indices = permute(
-                hidden_states, routing_map, tokens_per_expert
-            )
+            if pre_permuted is not None:
+                permuted_local_hidden_states, sorted_indices = pre_permuted
+            else:
+                permuted_local_hidden_states, sorted_indices = permute(
+                    hidden_states, routing_map, tokens_per_expert
+                )
             grouped_expert_out = self.grouped_gemm_experts(
                 permuted_local_hidden_states, tokens_per_expert
             )[0]
@@ -1995,6 +2172,18 @@ class MoELayer(nn.Layer):
                 restore_shape=hidden_states.shape,
                 probs=probs,
                 routing_map=routing_map,
+                # The HF-aligned dispatcher permute (``HFMoeSlotFanout``) pairs
+                # with the aligned gather/sum combine so the routed hidden state
+                # is accumulated one BF16 add per expert, as ``index_add_`` does.
+                # ``pre_permuted`` is only produced on the HF path, so forward the
+                # module's own target instead of a bare ``True``: ``unpermute``
+                # now picks its reduction from the target name, and ``True``
+                # normalizes to "megatron", which is the wrong arithmetic here.
+                use_accuracy_compatible=(
+                    getattr(self, "use_accuracy_compatible", False)
+                    if pre_permuted is not None
+                    else False
+                ),
             )
             return final_hidden_states.cast(hidden_states.dtype)
 

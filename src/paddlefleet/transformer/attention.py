@@ -32,6 +32,7 @@ from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet import tensor_parallel
+from paddlefleet.accuracy_target import targets_hf
 from paddlefleet.context_parallel_utils import ContextParallelScatterOp
 from paddlefleet.models.common.embeddings import (
     apply_rotary_pos_emb,
@@ -857,6 +858,25 @@ class SelfAttention(Attention):
         else:
             norm_input_parallel = config.tensor_model_parallel_size > 1
 
+        self._maybe_tag_qkv_dgrad_groups()
+
+        # Per-head q/k norms feed the attention core head-major, so their weight
+        # gradient must reduce in that physical row order to match the reference.
+        # See ``Qwen3_5RMSNorm._HFBroadcastScale``. Passed as **kwargs so the
+        # default path's norm construction is byte-identical to before.
+        qk_norm_extra_kwargs = (
+            {
+                "head_major_grad": getattr(
+                    self.config, "qk_norm_type", "per_head"
+                )
+                == "per_head"
+            }
+            if targets_hf(
+                getattr(self.config, "use_accuracy_compatible", False)
+            )
+            else {}
+        )
+
         if sublayers_spec.q_norm is not None:
             if getattr(self.config, "qk_norm_type", "per_head") == "per_layer":
                 q_norm_hidden_size = (
@@ -871,6 +891,7 @@ class SelfAttention(Attention):
                 config=self.config,
                 eps=self.config.rms_norm_eps,
                 input_is_parallel=norm_input_parallel,
+                **qk_norm_extra_kwargs,
             )
         else:
             self.q_norm = None
@@ -889,9 +910,79 @@ class SelfAttention(Attention):
                 config=self.config,
                 eps=self.config.rms_norm_eps,
                 input_is_parallel=norm_input_parallel,
+                **qk_norm_extra_kwargs,
             )
         else:
             self.k_norm = None
+
+    def _maybe_tag_qkv_dgrad_groups(self) -> None:
+        """Tag ``qkv_proj.weight`` with the reference's projection column groups.
+
+        HF's ``Qwen3_5MoeAttention`` builds three ``nn.Linear`` modules --
+        ``q_proj`` (emitting query and gate per head), ``k_proj`` and ``v_proj``
+        -- so the gradient w.r.t. their shared input is a chain of three narrow
+        GEMMs. PaddleFleet fuses them into one projection, whose dgrad is the
+        same sum computed as a single wide-K GEMM; BF16 GEMM K splitting is not
+        associative, so the two differ in the last mantissa bit. Recording the
+        fused columns belonging to each reference projection lets the linear
+        backward reproduce the split (see ``hf_dgrad_groups`` there).
+
+        The groups are ordered ``v, k, q`` because torch accumulates a
+        multiply-used tensor's gradient in reverse module-creation order.
+        """
+        if (
+            not targets_hf(
+                getattr(self.config, "use_accuracy_compatible", False)
+            )
+            or self.config.gpt_model_use_experimental_version
+        ):
+            return
+        if not self.gated_attention or getattr(self, "qkv_proj", None) is None:
+            return
+        weight = getattr(self.qkv_proj, "weight", None)
+        if weight is None:
+            return
+
+        heads_per_group = (
+            self.num_attention_heads_per_partition
+            // self.num_query_groups_per_partition
+        )
+        head_dim = self.hidden_size_per_attention_head
+        v_head_dim = self.value_hidden_size_per_attention_head
+        q_dim = heads_per_group * head_dim
+        gate_dim = heads_per_group * v_head_dim
+        group_dim = q_dim + gate_dim + head_dim + v_head_dim
+
+        q_cols: list[int] = []
+        k_cols: list[int] = []
+        v_cols: list[int] = []
+        for group in range(self.num_query_groups_per_partition):
+            base = group * group_dim
+            # HF's q_proj emits [query, gate] per head; PaddleFleet groups all
+            # queries of a group before all gates, so interleave them back into
+            # q_proj's own column order.
+            for head in range(heads_per_group):
+                start = base + head * head_dim
+                q_cols.extend(range(start, start + head_dim))
+                start = base + q_dim + head * v_head_dim
+                q_cols.extend(range(start, start + v_head_dim))
+            start = base + q_dim + gate_dim
+            k_cols.extend(range(start, start + head_dim))
+            start += head_dim
+            v_cols.extend(range(start, start + v_head_dim))
+
+        weight.hf_dgrad_groups = [
+            paddle.to_tensor(cols, dtype="int64")
+            for cols in (v_cols, k_cols, q_cols)
+        ]
+        # Gradient clipping needs the same split in forward order: torch takes
+        # one per-tensor norm per ``nn.Linear``, so the fused projection
+        # contributes three BF16 norms rather than one. See
+        # paddleformers/utils/hf_bitexact_clip.py.
+        weight.hf_norm_groups = [
+            paddle.to_tensor(cols, dtype="int64")
+            for cols in (q_cols, k_cols, v_cols)
+        ]
 
     def muon_slice_specs(self, muon_configs):
         """Muon orthogonal-slice specs for this module's fused QKV weight.

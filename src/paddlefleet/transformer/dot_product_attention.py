@@ -36,6 +36,7 @@ from paddlefleet_ops.flash_mask_facade import (
     needs_value_padding,
 )
 
+from paddlefleet.accuracy_target import targets_hf
 from paddlefleet.context_parallel_utils import (
     flashmask_attention_cp,
 )
@@ -57,10 +58,18 @@ from paddlefleet.utils import divide
 
 
 class _EagerQKScoresFn(paddle.autograd.PyLayer):
-    """Compute QK scores with baddbmm forward and explicit matmul backward."""
+    """Compute QK scores with baddbmm forward and explicit matmul backward.
+
+    ``key_is_transposed`` documents the operand layout of the forward GEMM:
+    ``key_t`` is ``[b*np, hn, sk]`` and the score product is an NN-GEMM, which is
+    what Megatron's ``baddbmm`` path does. The bit-exact path does not use this
+    layer at all -- see ``_hf_qk_scores``.
+    """
 
     @staticmethod
-    def forward(ctx, query, key_t, scale):
+    def forward(ctx, query, key_t, scale, key_is_transposed=True):
+        ctx.key_is_transposed = key_is_transposed
+        ctx.scale = scale
         matmul_input_buffer = paddle.empty(
             (query.shape[0], query.shape[1], key_t.shape[2]),
             dtype=query.dtype,
@@ -73,7 +82,6 @@ class _EagerQKScoresFn(paddle.autograd.PyLayer):
             alpha=scale,
         )
         ctx.save_for_backward(query, key_t)
-        ctx.scale = scale
         return scores
 
     @staticmethod
@@ -86,6 +94,27 @@ class _EagerQKScoresFn(paddle.autograd.PyLayer):
         d_query = paddle.matmul(d_scores, key) * scale
         d_key_t = paddle.matmul(query, d_scores, transpose_x=True) * scale
         return d_query, d_key_t
+
+
+def _hf_qk_scores(query, key, scale):
+    """Score GEMM in the reference operand layout, with plain autograd.
+
+    ``query`` is ``[b*np, sq, hn]`` and ``key`` is ``[b*np, sk, hn]``, so this is
+    literally ``torch.matmul(query, key_states.transpose(2, 3)) * scaling`` with
+    the batch dims flattened. Both halves matter:
+
+    * Forward -- passing an untransposed key and letting cuBLAS transpose it is
+      not interchangeable with materializing ``[b*np, hn, sk]`` first. The
+      materialized form moved 16/364816 scores at step 15 layer 3, which survived
+      the softmax on 6 probabilities and became 36 differing outputs.
+    * Backward -- paddle's own autograd for this expression already matches torch
+      on ``d_query``, ``d_key`` and ``d_value``. A hand-written backward that
+      forms ``d_key = d_scores^T @ query`` directly in ``[sk, hn]`` does *not*:
+      torch's graph produces ``query^T @ d_scores`` in ``[hn, sk]`` and transposes
+      it afterwards, and the two GEMMs differ on 5/62976 elements of ``d_key``
+      (step 12 layer 7). Leaving the expression to autograd keeps torch's shape.
+    """
+    return paddle.matmul(query, key, transpose_y=True) * scale
 
 
 def scaled_dot_product_attention_with_softmax_offset(
@@ -870,15 +899,33 @@ class DotProductAttention(FleetLayer):
         query = query.transpose([0, 2, 1, 3]).reshape(
             output_size[0] * output_size[1], output_size[2], -1
         )
-        # [b, sk, np, hn] -> [b * np, hn, sk]
-        key = key.transpose([0, 2, 3, 1]).reshape(
-            output_size[0] * output_size[1], -1, output_size[3]
+        eager_scores = self.config.use_accuracy_compatible or use_eager
+        hf_key_layout = (
+            targets_hf(self.config.use_accuracy_compatible) and eager_scores
         )
-
-        if self.config.use_accuracy_compatible or use_eager:
-            matmul_result = _EagerQKScoresFn.apply(
-                query, key, self.softmax_scale
+        if hf_key_layout:
+            # Keep the reference operand layout: ``torch.matmul(query, key.transpose(2, 3))``
+            # passes an untransposed ``[.., sk, hn]`` key and lets cuBLAS handle the
+            # transpose. Materializing ``[.., hn, sk]`` instead changes the reduction
+            # split and moves 16/364816 scores (see ``_EagerQKScoresFn``).
+            key = key.transpose([0, 2, 1, 3]).reshape(
+                output_size[0] * output_size[1], output_size[3], -1
             )
+        else:
+            # [b, sk, np, hn] -> [b * np, hn, sk]
+            key = key.transpose([0, 2, 3, 1]).reshape(
+                output_size[0] * output_size[1], -1, output_size[3]
+            )
+
+        if eager_scores:
+            if hf_key_layout:
+                matmul_result = _hf_qk_scores(query, key, self.softmax_scale)
+            else:
+                matmul_result = _EagerQKScoresFn.apply(
+                    query,
+                    key,
+                    self.softmax_scale,
+                )
         else:
             # preallocating input tensor: [b * np, sq, sk]
             matmul_input_buffer = paddle.empty(

@@ -73,6 +73,10 @@ class FakeCtx:
         "input_dtype": paddle.float32,
         "input_shape": (SEQ, BATCH, H_IN),
         "use_accuracy_compatible": False,
+        # Read off ``weight.hf_dgrad_groups`` by ``forward`` when the accuracy
+        # target is ``"hf"``. None means "one wide-K dgrad", i.e. the default and
+        # Megatron-aligned paths, which is what these backward tests exercise.
+        "hf_dgrad_groups": None,
         "inp_quant_func": None,
         "weight_quant_func": None,
         "use_pow2_scale": False,

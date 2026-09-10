@@ -30,6 +30,7 @@ from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
 
+from ..accuracy_target import AccuracyTarget, targets_hf
 from ..parallel_state import (
     get_global_memory_buffer,
     get_tensor_model_parallel_rank,
@@ -272,6 +273,55 @@ def _initialize_affine_weight_cpu(
     return None
 
 
+class _HFEmbeddingGather(paddle.autograd.PyLayer):
+    """Embedding lookup whose weight gradient matches torch's scatter order.
+
+    torch's ``embedding_dense_backward`` groups the tokens by id and, within a
+    group, reduces them in blocks of ``BLOCKDIMY = 32`` rows: each block's rows
+    are summed in FP32 and the block total is accumulated into the (BF16)
+    parameter gradient, i.e. rounded once per block. Paddle's ``index_select``
+    backward rounds after *every* row instead, which for this model moves up to
+    3.1e-02 on the 8 token ids that repeat inside the sequence.
+
+    With a 55-token sequence every group fits in one block, so the reduction is
+    "sum this id's rows in FP32, round once". The general block split is kept so
+    longer sequences stay correct.
+    """
+
+    BLOCK_ROWS = 32
+
+    @staticmethod
+    def forward(ctx, weight, index):
+        ctx.save_for_backward(index)
+        ctx.weight_shape = tuple(weight.shape)
+        ctx.weight_dtype = weight.dtype
+        return paddle.gather(weight, index.reshape([-1]), axis=0)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        (index,) = ctx.saved_tensor()
+        flat_index = index.reshape([-1])
+        rows, hidden = ctx.weight_shape
+        with paddle.amp.auto_cast(False):
+            grad_2d = grad_out.reshape([-1, hidden]).astype(paddle.float32)
+            total = flat_index.shape[0]
+            block = _HFEmbeddingGather.BLOCK_ROWS
+            grad_weight = paddle.zeros([rows, hidden], dtype=ctx.weight_dtype)
+            for start in range(0, total, block):
+                stop = min(start + block, total)
+                # One FP32 scatter-add per block, then a single round into the
+                # parameter gradient's dtype.
+                block_sum = paddle.zeros([rows, hidden], dtype=paddle.float32)
+                block_sum = paddle.scatter(
+                    block_sum,
+                    flat_index[start:stop],
+                    grad_2d[start:stop],
+                    overwrite=False,
+                )
+                grad_weight = grad_weight + block_sum.astype(ctx.weight_dtype)
+        return grad_weight
+
+
 class VocabParallelEmbedding(paddle.nn.Layer):
     """Embedding parallelized in the vocabulary dimension.
 
@@ -385,7 +435,14 @@ class VocabParallelEmbedding(paddle.nn.Layer):
         else:
             masked_input = input_
         # Get the embeddings.
-        if self.deterministic_mode or self.use_accuracy_compatible:
+        if (
+            targets_hf(self.use_accuracy_compatible)
+            and not self.weight.stop_gradient
+        ):
+            output_parallel = _HFEmbeddingGather.apply(
+                self.weight, masked_input
+            ).reshape([*masked_input.shape, self.embedding_dim])
+        elif self.deterministic_mode or self.use_accuracy_compatible:
             output_parallel = self.weight[masked_input]
         else:
             # F.embedding currently has a non-deterministic backward function
@@ -465,7 +522,7 @@ def linear_with_frozen_weight(
     grad_output_buffer: list[paddle.Tensor] | None = None,
     wgrad_deferral_limit: None = None,
     async_grad_allreduce: bool | None = None,
-    use_accuracy_compatible: bool = False,
+    use_accuracy_compatible: AccuracyTarget = False,
     **kwargs,
 ) -> paddle.Tensor:
     """Linear layer execution with weight.requires_grad == False.
@@ -601,6 +658,16 @@ def _make_bwd_inp_quant_func(use_pow2_scale, use_ue8m0):
         return _bwd_quant_blockwise_1x128(x, use_pow2_scale, use_ue8m0)
 
     return _f
+
+
+def _index_put_columns(target, columns, values):
+    """Return ``target`` with ``values`` written into its ``columns``.
+
+    ``paddle.scatter`` works along axis 0, so the assignment is done on the
+    transposed view. The groups tagged on a fused weight are disjoint and cover
+    every column, so the result is a plain permutation-free write.
+    """
+    return paddle.scatter(target.t(), columns, values.t()).t()
 
 
 def general_gemm(
@@ -771,6 +838,13 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         ctx.grad_output_buffer = grad_output_buffer
         ctx.tp_group = tp_group
         ctx.use_accuracy_compatible = use_accuracy_compatible
+        # Set by layers whose single fused projection stands in for several
+        # reference projections; see the dgrad branch in ``backward``.
+        ctx.hf_dgrad_groups = (
+            getattr(weight, "hf_dgrad_groups", None)
+            if targets_hf(use_accuracy_compatible)
+            else None
+        )
         # Cache input.stop_gradient: ``_new_shared_tensor()`` does not
         # necessarily preserve this flag, and Paddle's PyLayer contract
         # requires backward to return None at position 0 iff the original
@@ -954,12 +1028,58 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                     ),
                 )
             else:
-                if ctx.use_accuracy_compatible:
-                    grad_input, _ = general_gemm(
-                        grad_output, weight.t().contiguous()
+                dgrad_groups = ctx.hf_dgrad_groups
+                if dgrad_groups:
+                    # A fused projection's dgrad is a K-direction GEMM split of
+                    # the reference's per-projection dgrads, and BF16 GEMM K
+                    # splitting is not associative: cuBLAS reduces the whole K
+                    # range in one pass. Reproduce the reference by running one
+                    # narrow GEMM per original projection over exactly its
+                    # columns and chaining the results in the order torch's
+                    # autograd accumulates them (reverse module creation order).
+                    #
+                    # Each group also carries the *layout* of the reference
+                    # gradient. torch hands cuBLAS whatever tensor arrives, so a
+                    # projection whose output is later transposed (GDN's qkv,
+                    # b and a) produces a column-major [K, M] gradient that
+                    # cuBLAS consumes with a transpose flag, while one whose
+                    # output stays row-major (GDN's z) takes the ordinary path.
+                    # The two configurations disagree in the last mantissa bit,
+                    # so the operand layout has to be reproduced as well.
+                    leading = grad_output.shape[:-1]
+                    grad_2d = grad_output.reshape([-1, grad_output.shape[-1]])
+                    grad_input = None
+                    for entry in dgrad_groups:
+                        if isinstance(entry, (tuple, list)):
+                            columns, column_major = entry
+                        else:
+                            columns, column_major = entry, False
+                        grad_sub = grad_2d.index_select(axis=-1, index=columns)
+                        if column_major:
+                            grad_sub = grad_sub.t().contiguous().t()
+                        weight_sub = (
+                            weight.index_select(axis=-1, index=columns)
+                            .t()
+                            .contiguous()
+                        )
+                        part = paddle.matmul(grad_sub, weight_sub)
+                        grad_input = (
+                            part if grad_input is None else grad_input + part
+                        )
+                    grad_input = grad_input.reshape(
+                        [*leading, grad_input.shape[-1]]
                     )
                 else:
-                    grad_input, _ = general_gemm(grad_output, weight.t())
+                    weight_bwd = weight.t()
+                    if ctx.use_accuracy_compatible:
+                        # cuBLAS picks a different reduction split for a transposed
+                        # view than for the equivalent row-major matrix, and for some
+                        # shapes (observed at K=4096) the two disagree in the last
+                        # mantissa bit. torch's dgrad passes the weight as a plain
+                        # row-major [out, in] matrix, so materialize the transpose
+                        # to hit the same kernel configuration.
+                        weight_bwd = weight_bwd.contiguous()
+                    grad_input, _ = general_gemm(grad_output, weight_bwd)
         else:
             grad_input = None
 
@@ -1095,7 +1215,58 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                 grad_weight = paddle.zeros(weight.shape, dtype=input.dtype)
             elif wgrad_compute:
                 if total_input is not None:
-                    grad_weight, _ = general_gemm(total_input.t(), grad_output)
+                    wgrad_groups = ctx.hf_dgrad_groups
+                    if wgrad_groups:
+                        # Same reasoning as the dgrad branch: the reference runs
+                        # one wgrad GEMM per ``nn.Linear``, and each sees its
+                        # gradient in whatever layout that projection's output
+                        # happens to have. Column blocks are an N-direction
+                        # split, which is bit-exact, so only the per-group
+                        # operand layout has to be reproduced.
+                        #
+                        # The orientation matters as much as the layout.
+                        # ``nn.Linear`` stores ``[out, in]`` and computes
+                        # ``g^T @ x`` with M=out, N=in; paddle stores
+                        # ``[in, out]``, so evaluating ``x^T @ g`` here would
+                        # swap M and N. That is the same product mathematically
+                        # but a different GEMM: the tile shape changes, and for
+                        # the two narrow projections (``in_proj_b`` /
+                        # ``in_proj_a``, N=32 against 8192 and 4096) cuBLAS
+                        # reaches for a split-K variant the reference never
+                        # selects. A K-direction split is not associative in
+                        # BF16, so a handful of elements land one ULP off --
+                        # measured on real captures at seq_len 124 and 370.
+                        # Compute in the reference's orientation, then transpose.
+                        grad_2d = grad_output.reshape(
+                            [-1, grad_output.shape[-1]]
+                        )
+                        grad_weight = paddle.zeros_like(weight)
+                        for entry in wgrad_groups:
+                            if isinstance(entry, (tuple, list)):
+                                columns, column_major = entry
+                            else:
+                                columns, column_major = entry, False
+                            grad_sub = grad_2d.index_select(
+                                axis=-1, index=columns
+                            )
+                            if column_major:
+                                # The reference gradient reaches cuBLAS as a
+                                # [K, N] view over [N, K] storage; give the GEMM
+                                # that same physical operand.
+                                part_t = paddle.matmul(
+                                    grad_sub.t().contiguous(), total_input
+                                )
+                            else:
+                                part_t = paddle.matmul(
+                                    grad_sub, total_input, transpose_x=True
+                                )
+                            grad_weight = _index_put_columns(
+                                grad_weight, columns, part_t.t()
+                            )
+                    else:
+                        grad_weight, _ = general_gemm(
+                            total_input.t(), grad_output
+                        )
                 elif inp_t_fp8 is not None:
                     # No bf16 input saved; dequantize the fp8 transposed
                     # activation (shape [K, M] = total_input.t()) for bf16 wgrad.
@@ -1156,7 +1327,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
     wgrad_deferral_limit: int | None = 0,
     async_grad_allreduce: bool | None = None,
     tp_group: paddle.core.ProcessGroup | None = None,
-    use_accuracy_compatible: bool = False,
+    use_accuracy_compatible: AccuracyTarget = False,
     fp8: bool = False,
     fp8_wgrad: bool = False,
     inp_quant_func=None,

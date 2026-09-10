@@ -25,11 +25,13 @@ from typing import TYPE_CHECKING
 import paddle
 import paddle.nn.functional as F
 from paddle import nn
+from paddle.autograd.py_layer import PyLayer
 from paddle.distributed.fleet.meta_parallel import (
     LayerSpec,
     build_spec_layer,
 )
 
+from paddlefleet.accuracy_target import targets_hf
 from paddlefleet.jit import jit_fuser
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.transformer.identity_op import IdentityOp
@@ -56,12 +58,291 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Run the depthwise QKV convolution in FP32 and round once, instead of letting
+# cuDNN pick its own BF16 accumulation order. The reference implementation
+# (transformers' causal_conv1d_fn fallback) produces bit-for-bit the FP32 sum
+# rounded to BF16, while paddle's native BF16 conv1d differs in the last
+# mantissa bits on ~37% of elements -- the first divergence in the whole
+# forward pass. See paddlefleet/hf_bitexact.py for the opt-in flag.
 
-def _l2norm(x):
+
+def _hf_conv1d_wgrad(x, grad_out, kernel_size, padding):
+    """Depthwise conv1d weight gradient matching the reference accumulation.
+
+    Each element is ``sum_t grad_out[c, t] * x_padded[c, t + j]``; both operands
+    are BF16, so every product is exact in FP32 and only the summation order can
+    differ. torch's depthwise wgrad reduces the time axis with 32 lanes -- each
+    lane walks its own strided slice, then the 32 partials are combined by a
+    binary tree. Paddle's cuDNN path uses a different order and lands one BF16
+    ULP away on 1-3 of the 32768 elements per layer, which then propagates.
+
+    Only ever reached from ``_HFCausalConv1d.backward``, i.e. under the ``"hf"``
+    accuracy target, so it is written for the shape that mode actually runs:
+    micro-batch 1. A weight gradient has to be summed over the batch as well, and
+    the reference's reduction order across that axis has not been established
+    against a capture, so a larger batch is rejected rather than silently reduced
+    in a made-up order -- which would look aligned and not be.
+    """
+    assert x.shape[0] == 1, (
+        "_hf_conv1d_wgrad only supports micro-batch 1, got "
+        f"{x.shape[0]}. The HF-aligned depthwise conv weight gradient would "
+        "additionally need a batch reduction whose order is not yet pinned "
+        "against the reference; run the alignment mode with "
+        "micro_batch_size=1, or use the default/Megatron accuracy target."
+    )
+    channels = x.shape[1]
+    out_len = grad_out.shape[-1]
+    padded = F.pad(x.astype(paddle.float32), [padding, padding])
+    grad_f32 = grad_out.astype(paddle.float32)
+    products = paddle.stack(
+        [grad_f32 * padded[:, :, j : j + out_len] for j in range(kernel_size)],
+        axis=2,
+    )
+    lanes = 32
+    tail = (-out_len) % lanes
+    if tail:
+        products = F.pad(products, [0, tail])
+    rows = products.shape[-1] // lanes
+    lane_view = products.reshape([1, channels, kernel_size, rows, lanes])
+    acc = lane_view[:, :, :, 0]
+    for row in range(1, rows):
+        acc = acc + lane_view[:, :, :, row]
+    width = lanes
+    while width > 1:
+        half = width // 2
+        acc = acc[..., :half] + acc[..., half:width]
+        width = half
+    return acc.reshape([channels, 1, kernel_size])
+
+
+class _HFCausalConv1d(PyLayer):
+    """FP32 depthwise conv1d whose weight gradient matches the reference.
+
+    The forward is the reference's ``F.conv1d`` fallback (FP32 accumulation,
+    rounded once by the caller). The input gradient is already bit-exact through
+    paddle's own conv backward, so it is reused; only the weight gradient needs
+    the explicit reduction in ``_hf_conv1d_wgrad``.
+    """
+
+    @staticmethod
+    def forward(ctx, x, weight, bias, padding, groups):
+        ctx.save_for_backward(x, weight)
+        ctx.padding = padding
+        ctx.groups = groups
+        ctx.has_bias = bias is not None
+        with paddle.amp.auto_cast(False):
+            return F.conv1d(
+                x.astype(paddle.float32),
+                weight.astype(paddle.float32),
+                bias=None if bias is None else bias.astype(paddle.float32),
+                padding=padding,
+                groups=groups,
+            )
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        x, weight = ctx.saved_tensor()
+        grad_out = grad_out.detach()
+        with paddle.amp.auto_cast(False), paddle.enable_grad():
+            x_f32 = x.astype(paddle.float32).detach()
+            x_f32.stop_gradient = False
+            out = F.conv1d(
+                x_f32,
+                weight.astype(paddle.float32).detach(),
+                padding=ctx.padding,
+                groups=ctx.groups,
+            )
+            (grad_x,) = paddle.grad([out], [x_f32], grad_outputs=[grad_out])
+        with paddle.amp.auto_cast(False):
+            grad_weight = _hf_conv1d_wgrad(
+                x, grad_out, weight.shape[-1], ctx.padding
+            )
+        grad_x = grad_x.astype(x.dtype)
+        grad_weight = grad_weight.reshape(weight.shape).astype(weight.dtype)
+        if ctx.has_bias:
+            with paddle.amp.auto_cast(False):
+                grad_bias = grad_out.sum(axis=[0, 2])
+            return grad_x, grad_weight, grad_bias
+        return grad_x, grad_weight
+
+
+def _hf_cumsum(x, axis=-1):
+    """Inclusive prefix sum matching ``torch.cumsum`` bit-for-bit on FP32.
+
+    Paddle's default ``cumsum`` and torch's produce different last-mantissa bits,
+    and the delta-rule recurrence exponentiates that difference. With
+    ``FLAGS_use_accuracy_compatible_kernel=1`` -- which the rest of this alignment
+    already requires -- paddle's forward ``cumsum`` *does* match torch at every
+    shape measured (``tools/search_cumsum_kernel.py``: 1, 28, 32, 96 and 256 rows
+    of 64/128/2048 elements, 0 differing elements each), so the forward needs no
+    replacement.
+
+    The *backward* does not match: paddle's ``cumsum_grad`` differs from torch's
+    on ~17% of the elements (1025/6144 per layer). torch computes the gradient of
+    an inclusive prefix sum as a reversed inclusive prefix sum, and spelling that
+    out as ``flip -> cumsum -> flip`` is bit-exact
+    (``tools/search_cumsum_backward.py``), so only that is overridden.
+
+    Note: a hand-written Sklansky scan was used here previously. It is bit-exact
+    only while the tensor has at most 32 rows -- torch switches association order
+    above that -- so it silently broke as soon as a sequence spanned more than one
+    64-token chunk. Do not reintroduce it.
+    """
+    if axis not in (-1, x.ndim - 1):
+        return x.cumsum(axis=axis)
+    return _HFCumsum.apply(x)
+
+
+def _sklansky_scan(x):
+    """Inclusive Sklansky prefix sum over the last (power-of-two) axis.
+
+    Kept only for ``tools/search_cumsum_kernel.py``, which uses it to show that
+    torch's innermost-dim scan follows this association order for at most 32 rows
+    and a different one above that. Not used by the model path.
+    """
+    length = x.shape[-1]
+    lead = x.shape[:-1]
+    out = x
+    stride = 1
+    while stride < length:
+        out = out.reshape([*lead, length // (2 * stride), 2 * stride])
+        carry = out[..., stride - 1 : stride]
+        out = paddle.concat(
+            [out[..., :stride], out[..., stride:] + carry], axis=-1
+        ).reshape([*lead, length])
+        stride *= 2
+    return out
+
+
+class _HFCumsum(PyLayer):
+    """``cumsum`` whose backward matches torch's bit-for-bit.
+
+    The forward is paddle's own accuracy-compatible ``cumsum``, which already
+    agrees with torch. The gradient of an inclusive prefix sum is a reversed
+    inclusive prefix sum; torch computes it that way, and paddle's
+    ``cumsum_grad`` uses a different association order that moves ~17% of the
+    elements. Spelling the reversal out restores the reference exactly.
+    """
+
+    @staticmethod
+    def forward(ctx, x):
+        return x.cumsum(axis=-1)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad.flip(-1).cumsum(axis=-1).flip(-1)
+
+
+class _HFStateFanout(PyLayer):
+    """Fan ``last_recurrent_state`` out to its three consumers in torch's order.
+
+    Inside the chunk loop the running state is read three times::
+
+        v_prime    = k_cumdecay[:, :, i] @ state
+        attn_inter = (q_i * g_i.exp())   @ state
+        state_next = state * g_last.exp() + ...
+
+    so its gradient is a sum of three FP32 contributions, and that sum is not
+    associative. The two engines drain their ready queues differently --
+    ``tools/probe_accum_order.py`` measures torch accumulating in **reverse**
+    consumer-creation order and paddle in creation order -- which moves ~10% of
+    the state gradient by 1 ULP on the first chunk and then feeds the rest of the
+    recurrence, ultimately reaching ``in_q``/``in_k`` at 1e-03.
+
+    Routing the three reads through one node makes the accumulation explicit and
+    engine-independent. Verified against the recorded torch trace by
+    ``tools/search_gdr_state_grad.py``: reverse order is bit-exact (0/524288),
+    creation order differs on 54539 elements.
+    """
+
+    @staticmethod
+    def forward(ctx, state):
+        # Distinct buffers: paddle rejects a PyLayer that returns one tensor
+        # several times, and aliasing would defeat the point of separate grads.
+        return state.clone(), state.clone(), state.clone()
+
+    @staticmethod
+    def backward(ctx, grad_v_prime, grad_attn_inter, grad_decay):
+        return grad_decay + grad_attn_inter + grad_v_prime
+
+
+class _HFL2Norm(PyLayer):
+    """L2 normalization whose backward matches torch's autograd bit-for-bit.
+
+    The reference is ``x * rsqrt((x * x).sum(-1, keepdim=True) + eps)``. ``x``
+    feeds two consumers there, so its gradient is the sum of three terms: one
+    from the outer multiply and two symmetric ones from ``x * x``. Paddle's
+    autograd groups those three adds differently depending on
+    ``FLAGS_use_accuracy_compatible_kernel`` -- with the flag on (which the rest
+    of this alignment requires) ~28% of the elements move by up to 8e-03, which
+    the delta-rule recurrence then amplifies. Writing the backward out fixes the
+    grouping.
+
+    The exact recipe, verified bit-exact on the real layer-6 operands for both
+    ``query`` and ``key`` (0/225280 differing elements each):
+
+    * ``g_from_y = grad_out * inv_norm`` in FP32, then rounded to the input dtype
+      *before* being accumulated -- rounding after the adds instead moves nearly
+      every element;
+    * the reduction gradient is rounded to the input dtype before forming the two
+      ``x * x`` operand gradients, because ``x * x`` is a BF16 tensor;
+    * the ``rsqrt`` gradient cubes ``inv_norm`` as a **group**
+      (``-0.5 * g_inv * (inv * inv * inv)``, i.e. torch's ``-0.5 * grad *
+      result.pow(3)``). Multiplying left to right
+      (``-0.5 * g_inv * inv * inv * inv``) differs on a handful of rows whose
+      norm is large enough for the intermediate to lose a bit
+      (``tools/search_l2norm_backward2.py``: 5 elements of layer 5's ``key``);
+    * the outer-multiply term must not be added last (``y + s + s``, ``s + y + s``
+      both work; ``s + s + y`` does not).
+    """
+
+    @staticmethod
+    def forward(ctx, x, eps=1e-6):
+        with paddle.amp.auto_cast(False):
+            inv_norm = paddle.rsqrt(
+                (x * x).sum(-1, keepdim=True, dtype=paddle.float32) + eps
+            )
+            out = x * inv_norm
+        ctx.save_for_backward(x, inv_norm)
+        return out
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        x, inv_norm = ctx.saved_tensor()
+        with paddle.amp.auto_cast(False):
+            grad_from_y = (grad_out * inv_norm).astype(x.dtype)
+            grad_inv = (grad_out * x.astype(grad_out.dtype)).sum(
+                -1, keepdim=True
+            )
+            # torch's rsqrt backward is ``-0.5 * grad * result.pow(3)``; the cube
+            # has to be formed before it multiplies ``grad_inv``.
+            grad_total = -0.5 * grad_inv * (inv_norm * inv_norm * inv_norm)
+            # ``x * x`` is BF16, so its output gradient is BF16 as well.
+            grad_from_sq = grad_total.astype(x.dtype) * x
+            return grad_from_y + grad_from_sq + grad_from_sq
+
+
+def _l2norm(x, accuracy_target=True):
     """Apply L2 normalization along the last dimension.
 
     Equivalent to fla.modules.l2norm.l2norm for paddle tensors.
+
+    ``accuracy_target`` is the caller's ``use_accuracy_compatible`` value; it
+    defaults to the Megatron arithmetic so a bare one-argument call is unchanged.
     """
+    if targets_hf(accuracy_target):
+        # ``Qwen3_5MoeGatedDeltaNet`` runs under ``torch.autocast(bfloat16)``,
+        # where
+        #     inv_norm = rsqrt((x * x).sum(-1, keepdim=True) + eps); x * inv_norm
+        # squares in BF16 and reduces those BF16 values with an FP32
+        # *accumulator*. Paddle black-lists ``reduce_sum`` in AMP, so inside an
+        # ``auto_cast`` region the BF16 squares are first materialized as FP32 and
+        # that FP32 buffer is reduced -- a different rounding that moves ~24% of
+        # the elements by up to 5 ULP, which then feeds the whole delta-rule
+        # recurrence. Stepping out of AMP for the reduction restores the
+        # reference accumulation exactly. ``_HFL2Norm`` additionally pins the
+        # backward's accumulation order (see its docstring).
+        return _HFL2Norm.apply(x)
     x_float = x.astype(paddle.float32)
     inv_norm = paddle.rsqrt(x_float.pow(2).sum(-1, keepdim=True) + 1e-6)
     return (x_float * inv_norm).astype(x.dtype)
@@ -141,6 +422,13 @@ class GatedDeltaNet(FleetLayer):
 
         # Attributes from config
         self.hidden_size = config.hidden_size
+        # HF bit-exact arithmetic is a reference-target override *inside* the
+        # accuracy-compatible mode, so the config layer gates it as well. The
+        # module-level helpers (``_l2norm``, ``_hf_cumsum``,
+        # ``paddle_chunk_gated_delta_rule``) receive no config and rely on the
+        # env flag pair alone, as ``use_accuracy_compatible_kernel()`` does.
+        self.accuracy_target = getattr(config, "use_accuracy_compatible", False)
+        self.hf_bitexact = targets_hf(self.accuracy_target)
         self.act_fn = config.hidden_act
         self.activation = getattr(self.act_fn, "__name__", "silu")
         self.conv_kernel_dim = conv_kernel_dim
@@ -168,6 +456,7 @@ class GatedDeltaNet(FleetLayer):
             is_expert=False,
             tp_group=self.pg_collection.tp,
         )
+        self._maybe_tag_in_proj_dgrad_groups()
 
         # Conv1D for QKV
         self.conv_dim = self.qk_dim * 2 + self.v_dim
@@ -250,6 +539,58 @@ class GatedDeltaNet(FleetLayer):
         )
 
         self.reset_parameters()
+
+    def _maybe_tag_in_proj_dgrad_groups(self) -> None:
+        """Tag ``in_proj.weight`` with the reference's projection column groups.
+
+        The reference ``Qwen3_5MoeGatedDeltaNet`` splits this projection into
+        four ``nn.Linear`` modules -- ``in_proj_qkv``, ``in_proj_z``,
+        ``in_proj_b`` and ``in_proj_a`` -- so the gradient w.r.t. their shared
+        input is a chain of four narrow GEMMs. One fused wide-K GEMM computes
+        the same sum, but BF16 GEMM K splitting is not associative, so the
+        results differ in the last mantissa bit. Recording each reference
+        projection's fused columns lets the linear backward reproduce the split;
+        the order is reversed because torch accumulates a multiply-used
+        tensor's gradient in reverse module-creation order.
+
+        Each group also records whether the reference gradient reaches cuBLAS
+        column-major. ``qkv``, ``b`` and ``a`` feed tensors that the reference
+        transposes downstream (``qkv`` through the conv, ``b``/``a`` through
+        ``beta``/``g``), so their gradients arrive as ``[K, M]`` views; ``z``
+        stays row-major. Those two operand layouts make cuBLAS pick different
+        reduction splits, which changes the last mantissa bit on ~0.04% of the
+        elements.
+        """
+        if not self.hf_bitexact:
+            return
+        weight = getattr(self.in_proj, "weight", None)
+        if weight is None:
+            return
+        # (columns, gradient reaches the GEMM column-major)
+        specs = [
+            ((self.qk_dim * 2 + self.v_dim) // self.tp_size, True),
+            (self.v_dim // self.tp_size, False),
+            (self.num_value_heads // self.tp_size, True),
+            (self.num_value_heads // self.tp_size, True),
+        ]
+        groups = []
+        offset = 0
+        for size, column_major in specs:
+            groups.append(
+                (
+                    paddle.to_tensor(
+                        list(range(offset, offset + size)), dtype="int64"
+                    ),
+                    column_major,
+                )
+            )
+            offset += size
+        weight.hf_dgrad_groups = list(reversed(groups))
+        # The reference's *gradient-clipping* partition is the same split, but in
+        # forward order and without the layout tag: torch takes one per-tensor
+        # norm per ``nn.Linear``, so a fused projection contributes four BF16
+        # norms rather than one. See paddleformers/utils/hf_bitexact_clip.py.
+        weight.hf_norm_groups = [columns for columns, _ in groups]
 
     def reset_parameters(self):
         """Reset the parameters."""
@@ -455,7 +796,22 @@ class GatedDeltaNet(FleetLayer):
         qkv = qkv.transpose([0, 2, 1]).contiguous()  # b, s, d -> b, d, s
         nvtx_range_push(suffix="conv1d")
         # Always use Conv1D + activation path (causal_conv1d not available for Paddle)
-        qkv = self.act_fn(self.conv1d(qkv)[..., :seq_len])
+        if self.hf_bitexact and qkv.dtype != paddle.float32:
+            # FP32 accumulation, then a single round back to the activation
+            # dtype -- matches the reference F.conv1d fallback bit-for-bit.
+            # ``_HFCausalConv1d`` additionally pins the weight gradient's
+            # reduction order (see its docstring).
+            qkv_dtype = qkv.dtype
+            conv_out = _HFCausalConv1d.apply(
+                qkv,
+                self.conv1d.weight,
+                self.conv1d.bias,
+                self.conv_kernel_dim - 1,
+                self.conv_dim_local_tp,
+            ).astype(qkv_dtype)
+            qkv = self.act_fn(conv_out[..., :seq_len])
+        else:
+            qkv = self.act_fn(self.conv1d(qkv)[..., :seq_len])
         nvtx_range_pop(suffix="conv1d")
 
         # Split qkv into query, key, and value
@@ -474,9 +830,9 @@ class GatedDeltaNet(FleetLayer):
         value = value.reshape([batch, seq_len, -1, self.value_head_dim])
 
         # Apply L2 norm to query and key
-        if self.use_qk_l2norm:
-            query = _l2norm(query.contiguous())
-            key = _l2norm(key.contiguous())
+        if self.use_qk_l2norm and not self.hf_bitexact:
+            query = _l2norm(query.contiguous(), self.accuracy_target)
+            key = _l2norm(key.contiguous(), self.accuracy_target)
 
         # GQA repeat if num_value_heads > num_key_heads
         if self.num_value_heads // self.num_key_heads > 1:
@@ -513,7 +869,18 @@ class GatedDeltaNet(FleetLayer):
                 beta=beta,
                 initial_state=None,
                 output_final_state=False,
-                use_qk_l2norm_in_kernel=False,
+                # Qwen3_5MoeGatedDeltaNet passes use_qk_l2norm_in_kernel=True, so
+                # the reference kernel captures ``initial_dtype`` from the *raw*
+                # BF16 query and normalizes afterwards. Normalizing outside (the
+                # default path above) makes ``initial_dtype`` FP32 whenever AMP
+                # promotes the l2norm, so core_attn_out -- and with it the gated
+                # norm and out_proj input -- stays FP32 instead of being rounded
+                # back to BF16. L2 norm acts on the last axis only, so it
+                # commutes with the GQA repeat_interleave above either way.
+                use_qk_l2norm_in_kernel=bool(
+                    self.hf_bitexact and self.use_qk_l2norm
+                ),
+                accuracy_target=self.accuracy_target,
             )
         else:
             raise NotImplementedError("FLA not supported yet.")
@@ -554,9 +921,20 @@ class GatedDeltaNet(FleetLayer):
         # x: [b, s, num_heads, head_dim], gate: [b, s, num_heads, head_dim]
         x_dtype = x.dtype
         x = x.reshape([-1, x.shape[-1]])
-        y = self.out_norm(x)
-        # Output gate
         gate = gate.reshape([-1, gate.shape[-1]])
+        if self.hf_bitexact and hasattr(self.out_norm, "weight"):
+            # Reproduce Qwen3_5MoeRMSNormGated exactly: FP32 variance and rsqrt,
+            # round the normalized value back to the activation dtype, and only
+            # then scale by the weight. Paddle's fused rms_norm keeps the weight
+            # multiply in FP32, which shifts the last mantissa bits on ~26% of
+            # elements before the gate is applied.
+            h = x.astype(paddle.float32)
+            variance = h.pow(2).mean(-1, keepdim=True)
+            h = h * paddle.rsqrt(variance + self.out_norm.variance_epsilon)
+            y = self.out_norm.weight * h.astype(x_dtype)
+        else:
+            y = self.out_norm(x)
+        # Output gate
         y = y * self.act_fn(gate.astype(paddle.float32))
         y = y.astype(x_dtype)
         return y
@@ -659,6 +1037,7 @@ def paddle_chunk_gated_delta_rule(
     initial_state=None,
     output_final_state=False,
     use_qk_l2norm_in_kernel=False,
+    accuracy_target=True,
 ):
     """
     Paddle-native implementation of chunked gated delta rule for deterministic mode.
@@ -670,8 +1049,8 @@ def paddle_chunk_gated_delta_rule(
     """
     initial_dtype = query.dtype
     if use_qk_l2norm_in_kernel:
-        query = _l2norm(query)
-        key = _l2norm(key)
+        query = _l2norm(query, accuracy_target)
+        key = _l2norm(key, accuracy_target)
 
     # Convert to [b, num_heads, s, head_dim] and float32
     query, key, value, beta, g = [
@@ -711,7 +1090,8 @@ def paddle_chunk_gated_delta_rule(
     )
 
     # Chunk decay
-    g = g.cumsum(axis=-1)
+    _hf = targets_hf(accuracy_target)
+    g = _hf_cumsum(g, axis=-1) if _hf else g.cumsum(axis=-1)
     decay_mask = (
         (g.unsqueeze(-1) - g.unsqueeze(-2))
         .tril()
@@ -755,12 +1135,24 @@ def paddle_chunk_gated_delta_rule(
         attn = (
             q_i @ k_i.transpose([0, 1, 3, 2]) * decay_mask[:, :, i]
         ).masked_fill_(mask, 0)
-        v_prime = k_cumdecay[:, :, i] @ last_recurrent_state
+        if _hf and not last_recurrent_state.stop_gradient:
+            # One node feeds all three reads so the three gradient contributions
+            # are summed in torch's order rather than paddle's (see
+            # ``_HFStateFanout``). Only needed once the state carries a gradient,
+            # i.e. from the second chunk on.
+            state_v_prime, state_attn_inter, state_decay = _HFStateFanout.apply(
+                last_recurrent_state
+            )
+        else:
+            state_v_prime = state_attn_inter = state_decay = (
+                last_recurrent_state
+            )
+        v_prime = k_cumdecay[:, :, i] @ state_v_prime
         v_new = v_i - v_prime
-        attn_inter = (q_i * g[:, :, i, :, None].exp()) @ last_recurrent_state
+        attn_inter = (q_i * g[:, :, i, :, None].exp()) @ state_attn_inter
         core_attn_out[:, :, i] = attn_inter + attn @ v_new
         last_recurrent_state = (
-            last_recurrent_state * g[:, :, i, -1, None, None].exp()
+            state_decay * g[:, :, i, -1, None, None].exp()
             + (
                 k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]
             ).transpose([0, 1, 3, 2])

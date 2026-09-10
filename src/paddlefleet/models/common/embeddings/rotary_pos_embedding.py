@@ -27,6 +27,7 @@ import paddle
 from paddle import Tensor, nn
 
 from paddlefleet import parallel_state
+from paddlefleet.accuracy_target import targets_hf
 
 logger = logging.getLogger(__name__)
 
@@ -353,6 +354,24 @@ class MultimodalRotaryEmbedding(nn.Layer):
                 check_initialized=False
             )
         )
+
+        # ``inv_freq`` is a precision-critical constant, not a weight: BF16's 8
+        # mantissa bits give it a ~4e-3 relative error, and the phase is
+        # ``position * inv_freq``, so the error grows with position. Measured at
+        # rotary_base=5e6 / head_dim=128: 0.11 rad at position 128 and 3.7 rad at
+        # 4096 -- an arbitrary rotation, not a last-bit difference.
+        # ``paddle.amp.decorate(level="O2")`` walks every sublayer and casts float
+        # buffers to the AMP dtype unless the layer opts out, and the ``cast`` in
+        # ``forward`` cannot recover mantissa bits that are already gone.
+        #
+        # ``RotaryEmbedding`` above opts out unconditionally; here the opt-out is
+        # gated on the HF target. Doing it for everyone changes the rotation of
+        # every existing mRoPE run -- it moved the qwen3vl CI loss, which the
+        # precision gate caught. Lifting the truncation for the default and
+        # Megatron paths is a real fix, but it belongs in its own change with its
+        # own baseline update rather than in an alignment-mode PR.
+        if targets_hf(use_accuracy_compatible):
+            self._cast_to_low_precision = False
 
     def forward(
         self, position_ids: paddle.Tensor, mrope_section: list[int]

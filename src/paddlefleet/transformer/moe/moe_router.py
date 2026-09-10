@@ -43,6 +43,7 @@ from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
 )
 from paddle.distributed.fleet.utils.sequence_parallel_utils import ScatterOp
 
+from paddlefleet.accuracy_target import targets_hf
 from paddlefleet.context_parallel_utils import (
     ContextParallelAllGatherOp,
     ContextParallelGatherOp,
@@ -161,6 +162,49 @@ def apply_learnable_routed_scaling(top_gate, top_idx, param):
     return top_gate * gathered_scales
 
 
+class HFBitexactSoftmax(paddle.autograd.PyLayer):
+    """FP32 softmax whose autograd matches ``F.softmax(x, dtype=torch.float)``.
+
+    Under ``torch.autocast(bfloat16)`` the reference router computes
+    ``softmax(logits, dtype=float32)``, so the backward node is
+    ``_softmax_backward_data`` with an FP32 grad and a BF16 *input* gradient. Its
+    CUDA epilogue is written in the **distributed** form::
+
+        grad_logits = (grad_p * p - sum * p).to(bf16)
+
+    with ``sum = (grad_p * p).sum(-1)`` accumulated in FP32. The algebraically
+    equal but differently-rounded ``p * (grad_p - sum)`` disagrees on the rows
+    where two experts tie: for a tied top-2 the renormalized weight is exactly
+    0.5, the two surviving gradients cancel to the last bit, and the factored form
+    lands one ULP away (measured: 1/1384 elements on layer 6, which then moved 342
+    elements of that router's weight gradient).
+
+    Paddle's own ``softmax_grad`` differs from the reference expression in the
+    last mantissa bits (~47% of elements move by ~2e-10, which the router's top-k
+    renormalization then amplifies), and its FP32 forward also disagrees with
+    torch's by 1 ULP on ~40% of elements. Both are pinned here: the forward uses
+    the explicit max-subtract/exp/normalize sequence that reproduces torch's
+    bytes, and the backward uses the reference epilogue.
+    """
+
+    @staticmethod
+    def forward(ctx, logits):
+        ctx.in_dtype = logits.dtype
+        with paddle.amp.auto_cast(False):
+            x = logits.astype(paddle.float32)
+            exp = paddle.exp(x - x.max(axis=-1, keepdim=True))
+            probs = exp / exp.sum(axis=-1, keepdim=True)
+        ctx.save_for_backward(probs)
+        return probs
+
+    @staticmethod
+    def backward(ctx, grad_probs):
+        (probs,) = ctx.saved_tensor()
+        with paddle.amp.auto_cast(False):
+            inner = (grad_probs * probs).sum(axis=-1, keepdim=True)
+            return (grad_probs * probs - inner * probs).astype(ctx.in_dtype)
+
+
 class FusedGateDetachMatmul(paddle.autograd.PyLayer):
     """
     FusedGateDetachMatmul
@@ -173,10 +217,18 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
         """
         ctx.defer_dw = defer_dw
         ctx.use_accuracy_compatible = use_accuracy_compatible
-
+        # The two references disagree on where the gate projection is promoted
+        # to FP32, so this is the one place the target name matters.
+        ctx.hf_bitexact = targets_hf(use_accuracy_compatible)
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
         w = w.T
+        if ctx.hf_bitexact:
+            # Qwen3_5MoeTopKRouter keeps the gate projection in the activation
+            # dtype and only upcasts inside the softmax, whereas Megatron runs
+            # the projection itself in router_dtype=fp32. Both are valid; only
+            # the first reproduces the reference logits bit-for-bit.
+            return F.linear(x, w.cast(x.dtype)).cast(ctx.dtype)
         return F.linear(x.cast(ctx.dtype), w.cast(ctx.dtype))
 
     @staticmethod
@@ -239,6 +291,16 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                 WeightGradStore.enabled = False
                 return x_grad, None
         else:
+            if ctx.hf_bitexact:
+                # Mirror the reference autograd: the FP32 softmax input is a
+                # cast of the activation-dtype logits, so the incoming gradient
+                # is rounded back to that dtype before the two GEMMs run.
+                g = y_grad.cast(x.dtype)
+                x_g = paddle.matmul(g, w.cast(x.dtype))
+                w_g = paddle.matmul(g, x, transpose_x=True)
+                x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+                w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
+                return x_grad, w_grad
             if ctx.use_accuracy_compatible:
                 # Mirror MG `RouterGatingLinearFunction.backward`:
                 #   grad_input  = torch.mm(grad_output, weight.to(router_dtype))
@@ -526,6 +588,11 @@ class StandardMoERouter(nn.Layer):
         self, logits: paddle.Tensor, logits_type_promotion: bool = True
     ) -> paddle.Tensor:
         # [..., hidden_dim] -> [..., num_experts]
+        if (
+            targets_hf(self.use_accuracy_compatible)
+            and self.scoring_func == "softmax"
+        ):
+            return HFBitexactSoftmax.apply(logits)
         with paddle.amp.auto_cast(False):
             if logits_type_promotion:
                 logits = logits.cast("float32")
@@ -1910,14 +1977,23 @@ class TopKRouter(StandardMoERouter):
                 # QB fusion path passes norm_gate_logits=False to the kernel,
                 # so normalization must happen here in eager (for bit-exact alignment).
                 # Non-fusion paths also normalize here.
-                if self.use_accuracy_compatible:
+                if targets_hf(self.use_accuracy_compatible):
+                    # Qwen3_5MoeTopKRouter divides the FP32 top-k values by
+                    # their plain sum (no epsilon: top-k of a softmax is
+                    # strictly positive) and then rounds the result to the
+                    # activation dtype, so that is the combine weight the
+                    # experts actually multiply by.
+                    top_gate = top_gate / top_gate.sum(axis=-1, keepdim=True)
+                    top_gate = top_gate.cast(input.dtype)
+                elif self.use_accuracy_compatible:
                     _sum_f64 = top_gate.cast(paddle.float64).sum(
                         axis=-1, keepdim=True
                     )
                     denominator = _sum_f64.cast(paddle.float32) + 1e-20
+                    top_gate = top_gate / denominator
                 else:
                     denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
-                top_gate = top_gate / denominator
+                    top_gate = top_gate / denominator
             # When moe_topk_fusion=True and not QB, top_gate is already normalized by MoETopkFusion
 
         if self.routed_scaling_factor_learnable:
