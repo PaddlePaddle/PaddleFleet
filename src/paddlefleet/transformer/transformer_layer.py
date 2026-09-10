@@ -856,10 +856,11 @@ class TransformerLayer(nn.Layer):
             # receive unused tensors that cause backward errors.
             dict_args.pop("blocks", None)
         # Shared CSA document-mask metadata (see _docmask_meta_kwargs). Taken HERE,
-        # outside the recompute wrapper below: `forward` runs exactly once per
-        # (layer, micro-batch) whatever the recompute granularity is, while
-        # `_forward_impl` may be replayed. Empty dict for every layer class that
-        # does not opt in.
+        # outside the recompute wrapper below: for a decoder layer `forward` runs
+        # exactly once per (layer, micro-batch) whatever the recompute
+        # granularity is, while `_forward_impl` may be replayed. Empty dict for
+        # every layer class that does not opt in, and for MTP layers, whose
+        # `forward` is itself inside the MTP module's recompute segment.
         docmask_meta_kwargs = self._docmask_meta_kwargs()
 
         if self.full_recompute or (not has_recovered()):
@@ -1662,9 +1663,15 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         # Consumer identity for the shared CSA document-mask metadata
         # (config.csa_share_docmask_meta): one forward counter per consumer, so
         # virtual-pipeline interleaving across chunks cannot mix them up.
+        #
+        # MTP layers are not consumers at all -- see _docmask_meta_kwargs for
+        # why -- so they are not registered either; registering them would leave
+        # a permanently-unused counter in the step-boundary audit.
+        self._docmask_meta_is_consumer = not bool(is_mtp_layer)
         self._docmask_meta_key = (int(layer_number), bool(is_mtp_layer))
-        if getattr(config, "csa_share_docmask_meta", False) or getattr(
-            config, "mqa_share_docmask_meta", False
+        if self._docmask_meta_is_consumer and (
+            getattr(config, "csa_share_docmask_meta", False)
+            or getattr(config, "mqa_share_docmask_meta", False)
         ):
             from paddlefleet.transformer.doc_mask_meta_registry import (
                 doc_mask_meta_registry,
@@ -1809,7 +1816,25 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         Called from ``TransformerLayer.forward``, i.e. outside the recompute
         wrapper: the counter must advance exactly once per (layer, micro-batch),
         whereas ``_forward_impl`` may be replayed by recompute.
+
+        MTP layers opt out. Two reasons, either of which is sufficient:
+
+        * they would gain nothing. The trainer prebuilds only the ``("main",)``
+          mask group, while an MTP layer's attention asks for its own
+          ``("mtp", layer_number)`` group -- it is fed a slice of
+          ``mtp_startend_row_indices_all``, a different mask -- so every lookup
+          misses by design and the layer builds its own metadata anyway.
+        * their ``forward`` is not outside the recompute wrapper.
+          ``MultiTokenPredictionLayer._checkpointed_forward`` recomputes
+          ``_proj_and_transformer_layer``, i.e. one level *above* this layer's
+          ``forward``, so under ``recompute_granularity="full"`` +
+          ``recompute_method="uniform"`` the call lands inside a recompute
+          segment and ``advance`` rejects it -- the counter cannot be made
+          correct there, since paddle runs the original forward under
+          ``no_grad`` and only the backward replay with grad enabled.
         """
+        if not self._docmask_meta_is_consumer:
+            return {}
         if not (
             getattr(self.config, "csa_share_docmask_meta", False)
             or getattr(self.config, "mqa_share_docmask_meta", False)

@@ -596,14 +596,27 @@ class TestDocMaskLayerWiring(unittest.TestCase):
         self.assertNotIn((99, False), doc_mask_meta_registry._cnt)
         self.assertEqual(layer._docmask_meta_kwargs(), {})
 
-    def test_mtp_layer_uses_its_own_consumer_key(self):
+    def test_mtp_layer_opts_out_entirely(self):
+        # MTP layers are not consumers: the trainer never prebuilds their
+        # ("mtp", n) mask group, and their forward runs *inside* the MTP
+        # module's recompute segment, where advance() cannot be made correct.
         layer = _layer(is_mtp=True, layer_number=4)
         self.assertEqual(layer._docmask_meta_key, (4, True))
-        self.assertIn((4, True), doc_mask_meta_registry._cnt)
-        # separate counter from the main layer
+        self.assertNotIn((4, True), doc_mask_meta_registry._cnt)
+        self.assertEqual(layer._docmask_meta_kwargs(), {})
+        # and it does not disturb the main layer's counter
         main = _layer(is_mtp=False, layer_number=1)
         self.assertEqual(main._docmask_meta_kwargs(), {"docmask_mb_idx": 0})
-        self.assertEqual(layer._docmask_meta_kwargs(), {"docmask_mb_idx": 0})
+        self.assertEqual(layer._docmask_meta_kwargs(), {})
+
+    def test_mtp_layer_kwargs_ok_inside_nograd(self):
+        # The crash this opt-out fixes: under recompute_granularity="full" +
+        # recompute_method="uniform" the MTP module recomputes one level above
+        # TransformerLayer.forward, so this call happens under no_grad.
+        layer = _layer(is_mtp=True, layer_number=5)
+        layer.train()
+        with paddle.no_grad():
+            self.assertEqual(layer._docmask_meta_kwargs(), {})
 
     def test_advance_respects_accumulation_boundary(self):
         layer = _layer(share=True)
