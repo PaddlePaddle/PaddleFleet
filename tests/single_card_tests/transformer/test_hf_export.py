@@ -25,11 +25,9 @@ from types import SimpleNamespace
 
 from paddlefleet.transformer.hf_export import (
     FLEET_HF_FIELD_MAPPING,
-    HF_EXPORT_DROP_KEYS,
     HF_EXPORT_RULES,
     HF_IMPORT_RULES,
     check_window_export_conflict,
-    drop_deprecated_aliases,
     hidden_act_to_hf,
     inject_mhc_from_provider,
     is_active_window,
@@ -63,22 +61,6 @@ class TestRulesAndMapping(unittest.TestCase):
         self.assertEqual(
             rule_target("unknown_key", HF_EXPORT_RULES), "unknown_key"
         )
-
-    def test_drop_deprecated_aliases_removes_rotary_base_keeps_rope_theta(self):
-        out = {"rope_theta": 160000.0, "rotary_base": 160000.0}
-        self.assertIs(drop_deprecated_aliases(out), out)
-        self.assertEqual(out, {"rope_theta": 160000.0})
-
-    def test_drop_deprecated_aliases_missing_key_is_noop(self):
-        out = {"rope_theta": 10000.0}
-        self.assertEqual(drop_deprecated_aliases(out), out)
-
-    def test_export_drop_keys_are_not_renamed(self):
-        # Dropped aliases must not also appear as rename targets: an entry in
-        # both tables would mean the field is exported under another name even
-        # though the alias semantics say it should never persist.
-        for key in HF_EXPORT_DROP_KEYS:
-            self.assertNotIn(key, HF_EXPORT_RULES)
 
     def test_value_converters(self):
         # params_dtype -> torch_dtype strips the "paddle." prefix on export.

@@ -731,14 +731,14 @@ class DSv4HybridAttention(Attention):
         # Per-layer RoPE (potentially different base for compressed layers).
         # B2: rope_theta is the single base field (rotary_base is a deprecated
         # alias forwarded in TransformerConfig.__post_init__).
-        rope_base = config.rope_theta
+        rope_theta = config.rope_theta
         if compress_ratio > 1:
             # Every shipped model_config.json writes csa_compress_rotary_base as
             # a *string* ("160000.0"). pretrain.py coerces numeric strings
             # before building the config, but any path that calls from_config
             # directly (unit tests, offline inference, tooling) would reach
             # YarnRotaryEmbedding's math.log() with a str and raise TypeError.
-            rope_base = float(config.csa_compress_rotary_base)
+            rope_theta = float(config.csa_compress_rotary_base)
 
         # Resolve the RoPE variant for this layer. Historically compressed
         # layers (compress_ratio > 1, i.e. HCA/CSA) always used YaRN while
@@ -755,7 +755,7 @@ class DSv4HybridAttention(Attention):
             # misspelled fields.
             self.rotary_pos_emb = YarnRotaryEmbedding(
                 self.qk_pos_emb_head_dim,
-                rotary_base=rope_base,
+                rotary_base=rope_theta,
                 scaling_factor=config.rotary_scaling_factor,
                 original_max_position_embeddings=config.original_max_position_embeddings,
                 beta_fast=config.beta_fast,
@@ -768,7 +768,7 @@ class DSv4HybridAttention(Attention):
             self.rotary_pos_emb = RotaryEmbedding(
                 self.qk_pos_emb_head_dim,
                 rotary_percent=config.rotary_percent,
-                rotary_base=rope_base,
+                rotary_base=rope_theta,
                 rope_scaling=config.rope_scaling,
                 rotary_embed_cache=config.rotary_embed_cache,
                 use_accuracy_compatible=config.use_accuracy_compatible,

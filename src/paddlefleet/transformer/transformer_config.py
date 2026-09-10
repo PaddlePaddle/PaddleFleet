@@ -2086,11 +2086,7 @@ class TransformerConfig(ModelParallelConfig):
                     f"different values: rope_theta={self.rope_theta}, "
                     f"rotary_base={self.rotary_base}. please delete rotary_base."
                 )
-        # Strip the alias from the instance dict after the consistency check so
-        # dict-based serializers (HF ``to_dict`` / ``vars()``) never persist
-        # both rope_theta and rotary_base into the exported config (B2). The
-        # canonical value lives only in rope_theta; attribute reads still
-        # resolve through the class-level default (None).
+
         self.__dict__.pop("rotary_base", None)
 
         if self.p2p_overlap_dw_calc is not None:
