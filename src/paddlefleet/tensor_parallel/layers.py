@@ -763,8 +763,11 @@ def general_gemm(
 
     else:
         # Standard bf16/fp16 path.
-        # Preserve the native linear graph in alignment mode, including bias.
-        if use_accuracy_compatible or bias is not None:
+        # Keep biased alignment projections' separate GEMM and bias rounding.
+        if use_accuracy_compatible and bias is not None:
+            output = paddle.matmul(a, b.T.contiguous(), transpose_y=True)
+            output = output + bias
+        elif use_accuracy_compatible or bias is not None:
             output = F.linear(a, b, bias)
         else:
             output = paddle.matmul(a, b)
@@ -1307,9 +1310,11 @@ def linear_with_grad_accumulation_and_async_allreduce(
         and not fp8_wgrad
         and not gradient_accumulation_fusion
         and grad_output_buffer is None
+        and not getattr(weight, "is_expert_param", False)
     ):
         # The TP1 reference uses native linear backward, without the
         # communication PyLayer's reshaped dgrad and deferred wgrad graph.
+        # Expert parameters retain the PyLayer's FP32 main_grad accumulation.
         output, _ = general_gemm(
             input, weight, bias=bias, use_accuracy_compatible=True
         )

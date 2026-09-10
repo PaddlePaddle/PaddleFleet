@@ -371,6 +371,9 @@ class LanguageLoss(FleetLayer):
         self.use_accuracy_compatible = getattr(
             config, "use_accuracy_compatible", False
         )
+        self.defer_token_normalization = (
+            self.use_accuracy_compatible and config.defer_token_normalization
+        )
         self.ignored_index = -100
         self.enable_parallel_cross_entropy = (
             paddle.distributed.is_initialized()
@@ -615,7 +618,7 @@ class LanguageLoss(FleetLayer):
                     (1 - is_invalid_line_float).sum() + 1e-6
                 )
             else:
-                if self.use_accuracy_compatible:
+                if self.defer_token_normalization:
                     # leftover / IEEE E-654: fp32 sum then DeferToken.
                     loss = paddle.sum(
                         loss.cast(paddle.float32).reshape([-1]) * lossmask
@@ -626,6 +629,25 @@ class LanguageLoss(FleetLayer):
                         main_tokens=self._deferred_main_tokens,
                         use_accuracy_compatible=self.use_accuracy_compatible,
                     )
+                elif self.use_accuracy_compatible:
+                    flat_loss = (
+                        loss.cast(paddle.float32).reshape([-1]) * lossmask
+                    )
+                    loss_sum = (
+                        flat_loss.cast(paddle.float64)
+                        .sum()
+                        .cast(paddle.float32)
+                    )
+                    ep_group = self.pg_collection.ep
+                    ep_size = (
+                        dist.get_world_size(group=ep_group)
+                        if ep_group is not None
+                        else 1
+                    )
+                    accumulated_sum = paddle.zeros([1], dtype=paddle.float32)
+                    for _ in range(ep_size):
+                        accumulated_sum = accumulated_sum + loss_sum
+                    loss = accumulated_sum[0] / (lossmask.sum() * ep_size)
                 else:
                     # Default path must keep structure's tensor divisor.
                     loss = paddle.sum(
@@ -920,7 +942,7 @@ class LanguageLoss(FleetLayer):
                                 lossmask_cur_depth.sum().item()
                             )
                             if (
-                                self.use_accuracy_compatible
+                                self.defer_token_normalization
                                 and depth_tokens > 0
                             ):
                                 loss_cur_depth = _normalize_loss_by_tokens(

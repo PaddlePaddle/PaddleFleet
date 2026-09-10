@@ -340,6 +340,7 @@ class MLP(FleetLayer):
         )
         if (
             self.config.use_accuracy_compatible
+            and not self.config.bias_activation_fusion
             and bias_parallel is None
             and self.hidden_act == F.silu
             and self.config.gated_linear_unit

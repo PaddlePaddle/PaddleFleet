@@ -1929,6 +1929,14 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to enable accuracy-compatible kernels for cross-framework numerical
     alignment. Defaults to False."""
 
+    defer_token_normalization: bool = False
+    """Normalize FP32 gradient buffers after backward in accuracy-compatible mode.
+
+    Selected by model providers whose reference accumulates an FP32 token-loss
+    sum and normalizes gradients after reduction. False retains inline loss
+    normalization and the existing FP64 loss-sum contract.
+    """
+
     moe_router_use_fp32_master: bool = False
     """Keep an FP32 router parameter with BF16 reference weights and gradients.
 

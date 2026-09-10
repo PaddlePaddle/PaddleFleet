@@ -1182,8 +1182,7 @@ class StandardMoERouter(nn.Layer):
         # The bias term b is used only to adjust affinity scores for Top-K expert selection (routing); it does not affect gating.
         # The gate applied during dispatch and to weight the FFN output is computed from the original affinity score s_{i,t} (without the bias).
         if self.use_accuracy_compatible and (
-            not self.use_accuracy_compatible
-            or self.tensor_model_parallel_size > 1
+            not self.use_fp32_master or self.tensor_model_parallel_size > 1
         ):
             row_idx = paddle.arange(
                 bsz_seq_len, dtype=topk_idx.dtype
@@ -1856,8 +1855,7 @@ class TopKRouter(StandardMoERouter):
             self.use_accuracy_compatible
             and not use_split
             and (
-                not self.use_accuracy_compatible
-                or self.tensor_model_parallel_size > 1
+                not self.use_fp32_master or self.tensor_model_parallel_size > 1
             )
         ):
             gates_ori = self.gate_score_func(logits).cast(logits.dtype)
