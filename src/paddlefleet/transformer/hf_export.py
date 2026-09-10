@@ -114,6 +114,28 @@ HF_IMPORT_RULES = {
     for fleet_key, hf_key, _, import_fn in FLEET_HF_FIELD_MAPPING
 }
 
+# Fleet fields that must NOT be written to the exported HF config.json (B2
+# governance). Each is a deprecated alias whose value TransformerConfig
+# already normalizes into the canonical field in __post_init__ (rotary_base ->
+# rope_theta), so persisting both would resurrect the dual-field ambiguity on
+# the next import: rope_theta would win everywhere while the stale alias sits
+# in the config looking authoritative. Legacy configs that still carry the
+# alias keep working on import (the alias is forwarded there).
+HF_EXPORT_DROP_KEYS = ("rotary_base",)
+
+
+def drop_deprecated_aliases(out):
+    """Remove deprecated alias fields (``HF_EXPORT_DROP_KEYS``) from an
+    exported config dict, in place.
+
+    The exporter should call this on the assembled config dict right before
+    writing it out, so a normalized config never persists both the canonical
+    field and its alias.
+    """
+    for key in HF_EXPORT_DROP_KEYS:
+        out.pop(key, None)
+    return out
+
 
 def rule_target(key, rules):
     """The HF-side name a raw source key maps to under ``rules``.

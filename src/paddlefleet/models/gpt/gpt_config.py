@@ -27,7 +27,9 @@ class GPTConfig(TransformerConfig):
 
     rotary_percent: float = 1.0
 
-    rotary_base: int = 10000
+    # rotary_base is inherited from TransformerConfig as the deprecated alias
+    # of rope_theta (default None); do not re-declare a non-None default here
+    # or every GPTConfig would trigger the alias-forwarding path.
 
     rope_scaling: float = 1.0
 

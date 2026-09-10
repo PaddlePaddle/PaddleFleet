@@ -1170,7 +1170,7 @@ def _apply_rope(
     if squeeze_head:
         x = x.unsqueeze(2)  # [b, s, 1, dim]
 
-    if getattr(config, "apply_rope_fusion", False) and not high_precision_rope:
+    if config.apply_rope_fusion and not high_precision_rope:
         from paddlefleet.triton_ops import fused_apply_mla_rope_inplace
 
         out = fused_apply_mla_rope_inplace(x, freqs, nope_dim, mscale)
@@ -1620,7 +1620,7 @@ class Compressor(nn.Layer):
         self.swa_high_precision_norm = getattr(
             config, "swa_high_precision_norm", False
         )
-        self.high_precision_rope = getattr(config, "high_precision_rope", False)
+        self.high_precision_rope = config.high_precision_rope
 
     def muon_slice_specs(self, muon_configs):
         """Muon orthogonal-slice specs for the compressor (overlap/ratio-4 only).

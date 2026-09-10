@@ -477,15 +477,12 @@ class MultiLatentAttention(Attention):
             self.rotary_pos_emb = RotaryEmbedding(
                 self.qk_rope_head_dim,
                 rotary_interleaved=self.config.rotary_interleaved,
-                rotary_percent=1.0,
+                rotary_percent=self.config.rotary_percent,
                 rotary_base=self.rope_theta,
+                rope_scaling=self.config.rope_scaling,
                 cp_group=self.pg_collection.cp,
-                use_accuracy_compatible=getattr(
-                    self.config, "use_accuracy_compatible", False
-                ),
-                rotary_embed_cache=getattr(
-                    self.config, "rotary_embed_cache", False
-                ),
+                use_accuracy_compatible=self.config.use_accuracy_compatible,
+                rotary_embed_cache=self.config.rotary_embed_cache,
             )
         elif self.config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(
@@ -499,9 +496,7 @@ class MultiLatentAttention(Attention):
                 mscale=self.config.mscale,
                 mscale_all_dim=self.config.mscale_all_dim,
                 # cp_group=self.pg_collection.cp,
-                use_accuracy_compatible=getattr(
-                    self.config, "use_accuracy_compatible", False
-                ),
+                use_accuracy_compatible=self.config.use_accuracy_compatible,
             )
         else:
             raise ValueError(
