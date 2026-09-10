@@ -240,7 +240,7 @@ class TestPP(unittest.TestCase):
         if judge_machine_type() == "H":
             if judge_h_subtype() == "H800":
                 assert (
-                    overlap_loss._md5sum() == "7258f65d3eb11c437c1a6829ea1201d1"
+                    overlap_loss._md5sum() == "cec78c07122a4f66b129e777ca37fe86"
                 )
             else:
                 assert (

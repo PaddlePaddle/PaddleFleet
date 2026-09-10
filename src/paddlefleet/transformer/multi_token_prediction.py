@@ -72,7 +72,8 @@ SUPPORTED_ATTN_MASK = [
 #   * cp_group is None or size==1 → non-CP path.
 #   * cp_group.nranks > 1 with cu_seqlens_q → NotImplementedError; the
 #     mirror-chunk (DualChunkSwap) CP variant is not implemented on this path
-#     (CP is instead handled by extract_local_zigzag_chunks at the call site).
+#     (CP is instead handled by extract_local_cp_chunks at the call site,
+#     which follows config.cp_balance_mode).
 #
 # Note: we consciously do NOT wrap cu_seqlens_q in an MCore-style
 # PackedSeqParams dataclass. ernie5's model backend consumes doc boundaries
@@ -229,8 +230,8 @@ def roll_tensor(
     already holds a full-length ``[B, L]`` copy — no zigzag scatter happens
     before the model. Consequently rolling reduces to standard CP=1
     semantics on the full-length tensor, and callers should invoke
-    ``extract_local_zigzag_chunks`` after ``roll_tensor`` to obtain their
-    local slice before embedding / loss.
+    ``extract_local_cp_chunks`` (which follows ``config.cp_balance_mode``)
+    after ``roll_tensor`` to obtain their local slice before embedding / loss.
 
     Args:
         tensor: input tensor.
@@ -349,6 +350,92 @@ def extract_local_zigzag_chunks(tensor_full, cp_rank, cp_size, axis=1):
         ends=[seq_len - interval * cp_rank],
     )
     return paddle.concat([chunk_start, chunk_end], axis=dim)
+
+
+def extract_local_contiguous_chunk(tensor_full, cp_rank, cp_size, axis=1):
+    """Extract this CP rank's contiguous chunk from a full-length tensor.
+
+    Mirrors ``context_parallel_utils.scatter_contiguous``: rank ``r`` owns the
+    single slice ``tensor_full[..., chunk*r : chunk*(r+1), ...]`` with
+    ``chunk = L / cp_size``.
+
+    Extraction only — no CP communication, same contract as
+    ``extract_local_zigzag_chunks``.
+    """
+    if cp_size == 1:
+        return tensor_full
+    ndim = tensor_full.dim()
+    dim = axis if axis >= 0 else ndim + axis
+    seq_len = tensor_full.shape[dim]
+    if seq_len % cp_size != 0:
+        raise ValueError(
+            f"extract_local_contiguous_chunk: seq_len={seq_len} on axis={axis} "
+            f"is not divisible by cp_size={cp_size}."
+        )
+    chunk = seq_len // cp_size
+    # Deliberately a bare slice, unlike scatter_contiguous's paddle.assign: the
+    # per-depth caller keeps only this result, so a view holds F while a copy
+    # holds F + F/cp until the source is freed. Measured peaks over the roll
+    # loop are (2K+1)F for views vs 2F + K*F + (K+1)F/cp for assign -- worse at
+    # K=1 (every erndata model config here), even at K=3. The dominant term in
+    # both is roll_tensor's own grad-node retention, which neither changes.
+    return paddle.slice(
+        tensor_full,
+        axes=[dim],
+        starts=[chunk * cp_rank],
+        ends=[chunk * (cp_rank + 1)],
+    )
+
+
+def extract_local_cp_chunks(tensor_full, cp_rank, cp_size, axis=1, *, mode):
+    """Layout-aware local-slice extraction for the ``use_erndata`` MTP path.
+
+    That path keeps its tensors full-length on every CP rank and slices them
+    locally instead of calling ``ContextParallelScatterOp`` (which would redo the
+    embedding lookup ``cp_size`` times), so the slice must use the same layout
+    the rest of the model scatters with, i.e. ``config.cp_balance_mode``:
+
+    * ``dualchunk_allgather``  -> ``scatter_balance``    -> two zigzag chunks
+    * ``contiguous_allgather`` -> ``scatter_contiguous`` -> one contiguous chunk
+
+    ``contiguous_allgather`` is mandatory for the DSv4 hybrid stack, whose
+    attention layers assert on it under CP, so hard-coding zigzag here is wrong.
+
+    Args:
+        tensor_full: ``[..., L, ...]`` full-length tensor present on every rank.
+        cp_rank: this rank's index inside the CP group.
+        cp_size: CP world size; ``1`` returns ``tensor_full`` unchanged.
+        axis: sequence axis (default 1 for ``[B, L, ...]``).
+        mode: ``config.cp_balance_mode``. Keyword-only and required: the bug this
+            helper exists to fix was a call site that assumed a layout, and the
+            wrong layout is a silently wrong loss rather than a crash.
+
+    Returns:
+        ``[..., L / cp_size, ...]`` tensor holding this rank's slice.
+
+    Note:
+        ``cp_size == 1`` returns ``tensor_full`` itself, not a copy — do not
+        write into the result in place.
+    """
+    if cp_size == 1:
+        return tensor_full
+    if mode == "dualchunk_allgather":
+        return extract_local_zigzag_chunks(
+            tensor_full, cp_rank, cp_size, axis=axis
+        )
+    if mode == "contiguous_allgather":
+        return extract_local_contiguous_chunk(
+            tensor_full, cp_rank, cp_size, axis=axis
+        )
+    # contiguous_a2a shards the sequence contiguously too, so the slice would
+    # match, but its mask contract differs (DotProductAttention.forward skips
+    # expand_attn_mask_startend_row_indices_for_cp under a2a) and has never been
+    # run on this path. Refuse rather than guess.
+    raise ValueError(
+        f"extract_local_cp_chunks: unsupported cp_balance_mode={mode!r} for the "
+        "use_erndata MTP path; expected 'dualchunk_allgather' or "
+        "'contiguous_allgather'."
+    )
 
 
 def build_startend_row_indices_from_cu_seqlens(
@@ -1268,6 +1355,9 @@ class MultiTokenPredictionLayer(FleetLayer):
         # and no L+K token concatenation; instead we shift input_ids /
         # position_ids / labels / loss_mask inside this layer via
         # roll_tensor(cu_seqlens_q=...).
+        #
+        # enable_mtp_magic_send cannot reach here under erndata: TransformerConfig
+        # rejects the combination.
         if getattr(self.config, "use_erndata", False):
             return self._forward_megatron_style(dict_args)
 
@@ -1381,7 +1471,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                         mtp_input_embeds, input_ids == pad_token_id, 0
                     )
 
-                # Shifted embedding slice for current depth
+                # Shifted embedding slice for current depth: the L+K contract,
+                # where input_ids is longer than the backbone sequence, so
+                # depth d's embedding is a window offset by d+1.
                 decoder_input = mtp_input_embeds[
                     :, (depth + 1) : (depth + 1 + seq_len), :
                 ]
@@ -1855,7 +1947,8 @@ class MultiTokenPredictionLayer(FleetLayer):
     # Constraints: experimental_dataflow=False and enable_mtp_magic_send
     # disabled (both enforced at TransformerConfig.__post_init__). Context
     # parallelism is handled at the embedding / loss call sites via
-    # extract_local_zigzag_chunks rather than inside roll_tensor.
+    # extract_local_cp_chunks (layout picked by config.cp_balance_mode) rather
+    # than inside roll_tensor.
     # ------------------------------------------------------------------ #
 
     def _forward_megatron_style(self, dict_args: dict) -> dict:

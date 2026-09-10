@@ -36,14 +36,16 @@ EPILOG = """\
   # 1) 只看这份配置能跑在哪些机器规模上（不生成文件）
   python -m paddlefleet.config_adapter --input config.yaml
 
-  # 2) 适配到 2 台机器（默认每台 8 卡 = 16 卡），必要时自动缩小 EP/PP
+  # 2) 适配到 2 台机器（默认每台 8 卡 = 16 卡）；默认冻结并行度，
+  #    目标规模必须与源并行度兼容（缩 EP/PP 见 --test-accuracy）
   python -m paddlefleet.config_adapter --input config.yaml --target-nodes 2
 
   # 3) 测速：冻结 TP/PP/EP/CP/SEP 与 acc，只改 sharding 和 GBS
   python -m paddlefleet.config_adapter --input config.yaml \\
       --target-nodes 2 --test-performance
 
-  # 4) 精度测试：注入避免 aadiff 的开关，并保持等效 batch
+  # 4) 精度测试：注入避免 aadiff 的开关，保持等效 batch，
+  #    并允许缩小 EP/PP（唯一允许改模型结构的模式）
   python -m paddlefleet.config_adapter --input config.yaml \\
       --target-nodes 1 --test-accuracy
 
@@ -64,6 +66,10 @@ EPILOG = """\
       --target-nodes 1 --test-accuracy \\
       --set max_steps=10 --set n_routed_experts=32 \\
       --set json:some_new_field=1
+
+  # 9) 序列长度改到 32k：max_seq_length 覆盖为 32768，CP 同比例扩大
+  python -m paddlefleet.config_adapter --input config.yaml \\
+      --target-nodes 8 --scale-seq-length 32768
 """
 
 
@@ -73,8 +79,8 @@ def build_parser():
         prog="python -m paddlefleet.config_adapter",
         description=(
             "把面向大集群的训练 YAML 适配到更小的机器规模："
-            "重算 sharding 与 batch，必要时缩小 EP/PP 并联动改写 "
-            "model_config.json。"
+            "重算 sharding 与 batch；仅 --test-accuracy 模式允许缩小 "
+            "EP/PP 并联动改写 model_config.json。"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=EPILOG,
@@ -96,15 +102,16 @@ def build_parser():
     parser.add_argument(
         "--test-performance",
         action="store_true",
-        help="测速维度：冻结 TP/PP/EP/CP/SEP 与 acc，只改 sharding 和 GBS。"
-        "与 --test-accuracy 正交，可单独给、可同时给、也可都不给"
-        "（都不给时默认允许缩小 EP/PP）",
+        help="测速维度：冻结 TP/PP/EP/CP/SEP 与 acc，只改 sharding 和 "
+        "GBS。与 --test-accuracy 正交，可单独给、可同时给、也可都不给"
+        "（默认即冻结并行度；缩小 EP/PP 需 --test-accuracy）",
     )
     parser.add_argument(
         "--test-accuracy",
         action="store_true",
         help="精度维度：注入避免 aadiff 的开关；未同时指定 "
-        "--test-performance 时还会保持等效 batch（GBS 不变、acc 放大）",
+        "--test-performance 时还会保持等效 batch（GBS 不变、acc 放大），"
+        "并且是唯一允许缩小 EP/PP（改模型结构）的模式",
     )
     parser.add_argument(
         "--output-dir",
@@ -121,6 +128,16 @@ def build_parser():
         "（谁声明了这个 key 就改谁，两边都有就都改，两边都没有则新增到 "
         "yaml）；要把新字段加到 model_config.json 请显式写 json:KEY=VALUE。"
         "这些字段会被保护，不再参与自动适配",
+    )
+    parser.add_argument(
+        "--scale-seq-length",
+        type=int,
+        default=None,
+        metavar="N",
+        help="把 max_seq_length 覆盖为 N，并按同一整数倍率缩放 "
+        "context_parallel_size（序列变长时同比例扩大 CP，防止长序列 "
+        "OOM）。N 必须与源 max_seq_length 成整数倍关系；需配合 "
+        "--target-nodes 使用",
     )
     parser.add_argument(
         "-i",
@@ -216,6 +233,18 @@ def main(argv=None):
         print("错误：--cards-per-node 必须 >= 1", file=sys.stderr)
         return 1
 
+    if args.scale_seq_length is not None:
+        if args.scale_seq_length < 1:
+            print("错误：--scale-seq-length 必须 >= 1", file=sys.stderr)
+            return 1
+        if args.target_nodes is None:
+            print(
+                "错误：--scale-seq-length 需要配合 --target-nodes 使用"
+                "（不指定目标规模时只做检视，不生成任何文件）",
+                file=sys.stderr,
+            )
+            return 1
+
     try:
         yaml_overrides, json_overrides, auto_overrides = parse_overrides(
             args.overrides
@@ -264,6 +293,7 @@ def main(argv=None):
         output_dir=args.output_dir,
         in_place=args.in_place,
         force=args.force,
+        scale_seq_length=args.scale_seq_length,
     )
     ok, message = adapter.adapt(input_path)
     if not ok:

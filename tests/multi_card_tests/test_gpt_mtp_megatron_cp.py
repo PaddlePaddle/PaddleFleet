@@ -15,18 +15,29 @@
 """CP-aware ``use_erndata=True`` end-to-end test (CP=1 vs CP=2).
 
 The megatron MTP branch in ``GPTEmbedding`` slices the sequence itself with
-``extract_local_zigzag_chunks`` instead of going through
+``extract_local_cp_chunks`` instead of going through
 ``ContextParallelScatterOp`` (which is gated on ``experimental_dataflow``, a
 flag this style forbids). The RoPE tables are built by
 ``RotaryEmbedding.get_rotary_seq_len``, which scales the rank-local length back
 up by ``cp_group.world_size`` and therefore always yields the FULL length L --
-so they must be zigzag-sliced with the same layout, otherwise every rank
-applies the positions ``0..L/cp-1`` to chunks that actually live at
-``[interval*r, interval*(r+1)) u [L-interval*(r+1), L-interval*r)``.
+so they must be sliced with the same layout as the embeddings, otherwise every
+rank applies the positions ``0..L/cp-1`` to chunks that actually live
+elsewhere in the sequence.
 
-The primary check is a LAYOUT one (``test_rope_matches_zigzag_layout``): the
-``rotary_pos_emb`` the real ``GPTEmbedding`` hands to the decoder must equal the
-zigzag slice of the full-length table this rank's ``RotaryEmbedding`` produces.
+Which layout that is comes from ``config.cp_balance_mode``, and both supported
+values are exercised here:
+
+  ``dualchunk_allgather``  -> two zigzag chunks,
+    ``[interval*r, interval*(r+1)) u [L-interval*(r+1), L-interval*r)``
+    (``TestMTPMegatronCPRope``)
+  ``contiguous_allgather`` -> one rank-order chunk, ``[r*L/cp, (r+1)*L/cp)``
+    (``TestMTPMegatronCPContiguousRope``) -- the layout the DSv4 hybrid stack
+    requires under CP.
+
+The primary check in both is a LAYOUT one: the ``rotary_pos_emb`` the real
+``GPTEmbedding`` hands to the decoder must equal the mode's slice of the
+full-length table this rank's ``RotaryEmbedding`` produces, and must NOT equal
+the other mode's slice.
 
 ``test_cp_invariant_loss`` is a coarse companion: same weights (CPU init, so
 rank-independent) and same data must give the same loss at any ``cp_degree``.
@@ -114,7 +125,7 @@ def setUpModule():
     model_parallel_cuda_manual_seed(SEED)
 
 
-def _make_config():
+def _make_config(cp_balance_mode="dualchunk_allgather"):
     return GPTConfig(
         vocab_size=VOCAB,
         max_sequence_length=SEQ,
@@ -143,7 +154,7 @@ def _make_config():
         use_erndata=True,
         # CP
         context_parallel_size=CP_SIZE,
-        cp_balance_mode="dualchunk_allgather",
+        cp_balance_mode=cp_balance_mode,
         experimental_dataflow=False,
         sequence_parallel=False,
         tensor_model_parallel_size=1,
@@ -295,6 +306,136 @@ class TestMTPMegatronCPRope(unittest.TestCase):
                 ),
                 "rank>0 must not receive the contiguous RoPE prefix",
             )
+
+
+class TestMTPMegatronCPContiguousRope(unittest.TestCase):
+    """Same layout check for ``cp_balance_mode="contiguous_allgather"``.
+
+    Not a duplicate of the zigzag class: ``contiguous_allgather`` is a distinct
+    scatter layout (``scatter_contiguous``) and is *mandatory* for the DSv4
+    hybrid stack, whose attention layers assert on it under CP. Until this
+    class existed the only multi-card evidence for that layout came from
+    end-to-end training runs, which CI never sees -- so a call site that
+    hard-coded zigzag would have passed every test here.
+    """
+
+    def test_rope_matches_contiguous_layout(self):
+        from paddlefleet.parallel_state import get_context_parallel_rank
+        from paddlefleet.transformer.multi_token_prediction import (
+            extract_local_contiguous_chunk,
+            extract_local_zigzag_chunks,
+        )
+
+        paddle.seed(SEED)
+        model = gpt_builder(
+            _make_config(cp_balance_mode="contiguous_allgather"), num_stages=1
+        )
+        emb = _find_embedding(model)
+        raw = _make_inputs()
+
+        out = emb.forward(
+            {
+                "input_ids": raw["input_ids"],
+                "position_ids": raw["position_ids"],
+                "cu_seqlens_q": raw["cu_seqlens_q"],
+            }
+        )
+        rope_local = out["rotary_pos_emb"]
+
+        self.assertEqual(out["hidden_states"].shape[1], SEQ // CP_SIZE)
+        self.assertEqual(rope_local.shape[1], SEQ // CP_SIZE)
+
+        full = emb.rotary_pos_emb(SEQ)
+        cp_rank = get_context_parallel_rank() if CP_SIZE > 1 else 0
+        expected = extract_local_contiguous_chunk(
+            full, cp_rank, CP_SIZE, axis=1
+        )
+        np.testing.assert_array_equal(
+            rope_local.astype("float32").numpy(),
+            expected.astype("float32").numpy(),
+        )
+
+        if CP_SIZE > 1:
+            # And it must NOT be the zigzag slice: at CP=2 the two layouts
+            # differ on both ranks (rank0 [0:8)u[24:32) vs [0:16), rank1
+            # [8:24) vs [16:32) for L=32), so this is what would catch a call
+            # site that ignored cp_balance_mode.
+            zigzag = extract_local_zigzag_chunks(full, cp_rank, CP_SIZE, axis=1)
+            self.assertFalse(
+                bool(
+                    paddle.all(
+                        rope_local.astype("float32") == zigzag.astype("float32")
+                    )
+                ),
+                "contiguous_allgather must not receive the zigzag RoPE slice",
+            )
+
+    def test_derived_mask_stays_global_under_contiguous(self):
+        """The derived flashmask is full-length in BOTH layouts.
+
+        ``build_startend_row_indices_from_cu_seqlens`` is deliberately not
+        sliced: CP attention allgathers KV and remaps the global row values
+        itself. Pinning it per-layout keeps a future "slice the mask too as
+        well" change from passing silently under one mode.
+        """
+        masks = {}
+        for mode in ("dualchunk_allgather", "contiguous_allgather"):
+            paddle.seed(SEED)
+            model = gpt_builder(
+                _make_config(cp_balance_mode=mode), num_stages=1
+            )
+            emb = _find_embedding(model)
+            raw = _make_inputs(with_mask=False)
+            out = emb.forward(
+                {
+                    "input_ids": raw["input_ids"],
+                    "position_ids": raw["position_ids"],
+                    "cu_seqlens_q": raw["cu_seqlens_q"],
+                }
+            )
+            mask = out.get("attn_mask_startend_row_indices")
+            self.assertIsNotNone(mask, f"no derived mask under {mode}")
+            self.assertEqual(list(mask.shape), [BATCH, 1, SEQ, 1])
+            masks[mode] = mask.numpy()
+
+        np.testing.assert_array_equal(
+            masks["dualchunk_allgather"], masks["contiguous_allgather"]
+        )
+
+    def test_cp_invariant_loss_contiguous(self):
+        """End-to-end loss under ``contiguous_allgather``, not just the layout.
+
+        The layout checks above stop at ``GPTEmbedding``; everything after it --
+        ``roll_tensor`` + ``extract_local_cp_chunks`` per MTP depth, the CP
+        flashmask attention (``FlashMaskContextParallel`` with
+        ``mode="contiguous_allgather"``), and LanguageLoss's per-depth label
+        scatter -- is only exercised by a real forward/backward. Same ``REF_LOSS``
+        as the zigzag test: ``cp_balance_mode`` is a no-op at ``cp_size == 1``, so
+        the single-card reference is shared, and a correct implementation is
+        CP-invariant in either layout.
+        """
+        if (
+            not paddle.device.current_device_is_cpu
+            and paddle.device.get_device_capability()[0] < 9
+        ):
+            self.skipTest("requires SM90+ for the CP flashmask kernels")
+
+        paddle.seed(SEED)
+        model = gpt_builder(
+            _make_config(cp_balance_mode="contiguous_allgather"), num_stages=1
+        )
+        model = paddle.amp.decorate(
+            models=model, optimizers=None, level="O2", dtype="bfloat16"
+        )
+        loss = _forward_backward(model, _make_inputs())
+
+        val = float(loss.astype("float32"))
+        print(
+            f"[MTP-MEGATRON-CP] cp={CP_SIZE} mode=contiguous loss={val}",
+            flush=True,
+        )
+        self.assertTrue(np.isfinite(val), f"loss must be finite, got {val}")
+        np.testing.assert_allclose(val, REF_LOSS, rtol=5e-3, atol=0)
 
 
 class TestMTPMegatronCP(unittest.TestCase):

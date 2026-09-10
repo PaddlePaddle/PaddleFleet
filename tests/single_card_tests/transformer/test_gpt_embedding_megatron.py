@@ -46,9 +46,21 @@ import paddle
 import paddlefleet.models.gpt.gpt_embedding as ge
 from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
+from paddlefleet.transformer.multi_token_prediction import (
+    extract_local_cp_chunks,
+)
 
 
-def _make_embedding(K, B, L, H, *, use_erndata=True, magic_send=False):
+def _make_embedding(
+    K,
+    B,
+    L,
+    H,
+    *,
+    use_erndata=True,
+    magic_send=False,
+    cp_balance_mode="dualchunk_allgather",
+):
     emb = GPTEmbedding.__new__(GPTEmbedding)
     cfg = MagicMock()
     cfg.gpt_model_use_experimental_version = True
@@ -70,7 +82,7 @@ def _make_embedding(K, B, L, H, *, use_erndata=True, magic_send=False):
     cfg.pad_token_id = 0
     cfg.experimental_dataflow = False
     cfg.apply_rope_fusion = False
-    cfg.cp_balance_mode = "zigzag"
+    cfg.cp_balance_mode = cp_balance_mode
     cfg.clone_scatter_output_in_embedding = False
     cfg.layer_types = []  # -> has_kda_layer property returns False
     emb.config = cfg
@@ -95,10 +107,10 @@ def _make_embedding(K, B, L, H, *, use_erndata=True, magic_send=False):
 
 
 @contextlib.contextmanager
-def _fake_cp(cp_size=2):
-    """Force ``get_context_parallel_world_size`` -> cp_size and rank -> 0 in
-    the gpt_embedding namespace so ``if _cp_size > 1`` branches execute.
-    ``extract_local_zigzag_chunks`` is left REAL (pure slicing) so shapes stay
+def _fake_cp(cp_size=2, cp_rank=0):
+    """Force ``get_context_parallel_world_size`` -> cp_size and rank -> cp_rank
+    in the gpt_embedding namespace so ``if _cp_size > 1`` branches execute.
+    ``extract_local_cp_chunks`` is left REAL (pure slicing) so shapes stay
     correct; feed a seq length divisible by 2*cp_size.
     """
     with contextlib.ExitStack() as stack:
@@ -108,7 +120,7 @@ def _fake_cp(cp_size=2):
             )
         )
         stack.enter_context(
-            mock.patch.object(ge, "get_context_parallel_rank", lambda: 0)
+            mock.patch.object(ge, "get_context_parallel_rank", lambda: cp_rank)
         )
         yield
 
@@ -207,7 +219,7 @@ class TestGptEmbeddingMegatronCPSP(unittest.TestCase):
         LanguageLoss._cu_seqlens_q_stash = None
 
     def test_megatron_cp_extract(self) -> None:
-        # cp_size=2 -> real extract_local_zigzag_chunks halves the seq len
+        # cp_size=2 -> real extract_local_cp_chunks halves the seq len
         # (lines 457 and 494). L must be divisible by 2*cp_size.
         K, B, L, H = 2, 1, 8, 4
         emb = _make_embedding(K, B, L, H)
@@ -218,6 +230,45 @@ class TestGptEmbeddingMegatronCPSP(unittest.TestCase):
         # Each of the K+1 chunks is zigzag-halved to L/2 on axis 1.
         self.assertEqual(
             list(out["hidden_states"].shape), [(K + 1) * B, L // 2, H]
+        )
+
+    def test_megatron_cp_slice_follows_cp_balance_mode(self) -> None:
+        # The defect this change fixes: the megatron branch hard-coded the zigzag
+        # slice instead of reading cp_balance_mode, so a contiguous_allgather
+        # model got embeddings belonging to other ranks' tokens -- a silently
+        # wrong loss, not a crash.
+        #
+        # test_megatron_cp_extract above only asserts the *shape*, which both
+        # layouts share, so this is the only assertion that fails when the mode
+        # is ignored: it pins values at a rank where the layouts disagree.
+        K, B, L, H = 2, 1, 8, 4
+        cp_size, cp_rank = 2, 1
+        full = paddle.arange(B * L * H, dtype="float32").reshape([B, L, H])
+        sliced = {}
+        for mode in ("dualchunk_allgather", "contiguous_allgather"):
+            emb = _make_embedding(K, B, L, H, cp_balance_mode=mode)
+            input_ids = (
+                paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
+            )
+            cu = paddle.to_tensor([0, 3, 8], dtype="int32")
+            with _fake_cp(cp_size=cp_size, cp_rank=cp_rank):
+                out = emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu})
+            # hidden_states is the (K+1) chunks concatenated on axis 0; the
+            # first B rows are the main (unrolled) embedding.
+            main = out["hidden_states"][:B]
+            expected = extract_local_cp_chunks(
+                full, cp_rank, cp_size, axis=1, mode=mode
+            )
+            np.testing.assert_array_equal(main.numpy(), expected.numpy())
+            sliced[mode] = main.numpy()
+
+        # Guard the guard: if the two layouts happened to agree at this
+        # (L, cp_size, cp_rank) the loop above would pass with the mode ignored.
+        self.assertFalse(
+            np.array_equal(
+                sliced["dualchunk_allgather"], sliced["contiguous_allgather"]
+            ),
+            "the two CP layouts must differ here or this test proves nothing",
         )
 
     def test_megatron_sequence_parallel(self) -> None:
@@ -349,6 +400,35 @@ class TestGptEmbeddingMegatronCPRope(unittest.TestCase):
         self.assertEqual(
             out["rotary_pos_emb"].shape[1], out["hidden_states"].shape[1]
         )
+
+    def test_rope_slice_follows_cp_balance_mode(self) -> None:
+        # _slice_rope_for_mtp_megatron_cp is a second, independent call site of
+        # extract_local_cp_chunks. Every channel of the stub table holds the
+        # global position index, so the sliced table reads out directly as the
+        # position set this rank owns -- and the two layouts disagree at rank 1
+        # of 2 with L=8 (zigzag [2,3,4,5] vs contiguous [4,5,6,7]).
+        K, B, L, H, D = 2, 1, 8, 4, 4
+        expected_positions = {
+            "dualchunk_allgather": [2, 3, 4, 5],
+            "contiguous_allgather": [4, 5, 6, 7],
+        }
+        for mode, positions in expected_positions.items():
+            emb = _enable_rope(
+                _make_embedding(K, B, L, H, cp_balance_mode=mode),
+                cp_size=2,
+                dim=D,
+            )
+            input_ids = (
+                paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
+            )
+            cu = paddle.to_tensor([0, 3, 8], dtype="int32")
+            with _fake_cp(cp_size=2, cp_rank=1):
+                out = emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu})
+            np.testing.assert_array_equal(
+                out["rotary_pos_emb"][0, :, 0, 0].numpy(),
+                np.array(positions, dtype="float32"),
+                err_msg=f"rope slice ignored cp_balance_mode={mode!r}",
+            )
 
     def test_rope_untouched_without_cp(self) -> None:
         K, B, L, H, D = 2, 1, 8, 4, 4
