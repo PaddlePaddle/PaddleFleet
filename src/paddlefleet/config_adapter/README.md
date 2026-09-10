@@ -139,7 +139,6 @@ C3/C5 只取决于并行度本身，与卡数无关：这两项冲突时不会�
 ```
 加载 YAML
   -> 应用 --set yaml:（并锁定这些字段）
-  -> 删除 fa_version（与环境强绑定的 flash-attention 版本 pin）
   -> 需要时加载 model_config.json 并应用 --set json:
   -> 扫描两个文件，落定不带前缀的 --set
   -> --scale-seq-length：改写 max_seq_length 并同比例缩放 CP（并锁定两字段）
