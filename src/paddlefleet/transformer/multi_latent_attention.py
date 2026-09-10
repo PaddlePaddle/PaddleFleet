@@ -479,7 +479,6 @@ class MultiLatentAttention(Attention):
                 rotary_interleaved=self.config.rotary_interleaved,
                 rotary_percent=self.config.rotary_percent,
                 rotary_base=self.rope_theta,
-                rope_scaling=self.config.rope_scaling,
                 cp_group=self.pg_collection.cp,
                 use_accuracy_compatible=self.config.use_accuracy_compatible,
                 rotary_embed_cache=self.config.rotary_embed_cache,

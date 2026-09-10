@@ -769,7 +769,6 @@ class DSv4HybridAttention(Attention):
                 self.qk_pos_emb_head_dim,
                 rotary_percent=config.rotary_percent,
                 rotary_base=rope_theta,
-                rope_scaling=config.rope_scaling,
                 rotary_embed_cache=config.rotary_embed_cache,
                 use_accuracy_compatible=config.use_accuracy_compatible,
             )

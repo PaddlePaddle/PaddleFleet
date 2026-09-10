@@ -2084,7 +2084,7 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError(
                     "Both 'rope_theta' and 'rotary_base' are set with "
                     f"different values: rope_theta={self.rope_theta}, "
-                    f"rotary_base={self.rotary_base}. please delete rotary_base."
+                    f"rotary_base={self.rotary_base}. please set rope_theta and delete rotary_base."
                 )
 
         self.__dict__.pop("rotary_base", None)
