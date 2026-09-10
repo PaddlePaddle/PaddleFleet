@@ -174,16 +174,18 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
         defer_dw=False,
         use_accuracy_compatible=False,
         sequence_shards=1,
+        use_fp32_master=False,
     ):
         """
         forward
         """
         ctx.defer_dw = defer_dw
         ctx.use_accuracy_compatible = use_accuracy_compatible
+        ctx.use_fp32_master = use_accuracy_compatible and use_fp32_master
 
         ctx.sequence_shards = (
             int(sequence_shards or 1)
-            if use_accuracy_compatible
+            if ctx.use_fp32_master
             and w.dtype == paddle.float32
             and x.ndim == 2
             and not defer_dw
@@ -194,7 +196,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
         # consumes a BF16 weight, including in dgrad, after each master update.
         effective_w = (
             w.cast(paddle.bfloat16).cast(paddle.float32)
-            if use_accuracy_compatible
+            if ctx.use_fp32_master
             and w.dtype == paddle.float32
             and x.dtype == paddle.bfloat16
             and not defer_dw
@@ -311,7 +313,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                     w_g = paddle.matmul(
                         y_grad, x.cast(ctx.dtype), transpose_x=True
                     )
-                    if w.dtype == paddle.float32:
+                    if ctx.use_fp32_master and w.dtype == paddle.float32:
                         # Reference local weight gradients round through BF16.
                         w_g = w_g.cast(paddle.bfloat16).cast(paddle.float32)
                 x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
@@ -343,10 +345,16 @@ def gate_detach_matmul(
     defer_dw=False,
     use_accuracy_compatible=False,
     sequence_shards=1,
+    use_fp32_master=False,
 ):
     if use_fuse:
         score = FusedGateDetachMatmul.apply(
-            x, weight, defer_dw, use_accuracy_compatible, sequence_shards
+            x,
+            weight,
+            defer_dw,
+            use_accuracy_compatible,
+            sequence_shards,
+            use_fp32_master,
         )
     else:
         x = x.cast(paddle.float32)
@@ -432,10 +440,19 @@ class StandardMoERouter(nn.Layer):
                 f"but got {self.scoring_func!r}. "
             )
 
-        # Keep an FP32 optimizer master; alignment forward uses its BF16 view.
+        self.use_fp32_master = (
+            self.use_accuracy_compatible and config.moe_router_use_fp32_master
+        )
+        # Preserve existing models' checkpoint dtype unless an FP32 master
+        # was explicitly selected by the model's configuration.
+        weight_dtype = (
+            config.params_dtype
+            if self.use_accuracy_compatible and not self.use_fp32_master
+            else "float32"
+        )
         self.weight = paddle.create_parameter(
             shape=[self.num_experts, self.hidden_size],
-            dtype="float32",
+            dtype=weight_dtype,
             default_initializer=paddle.nn.initializer.Constant(0.0),
         )
         config.init_method(self.weight)
@@ -1726,6 +1743,7 @@ class TopKRouter(StandardMoERouter):
                     self.config.moe_router_force_load_balancing,
                     dw_overlap_enabled(self.config, "moe_router_gate"),
                     self.use_accuracy_compatible,
+                    use_fp32_master=self.use_fp32_master,
                 )
                 logits_1 = gate_detach_matmul(
                     input,
@@ -1734,6 +1752,7 @@ class TopKRouter(StandardMoERouter):
                     self.config.moe_router_force_load_balancing,
                     dw_overlap_enabled(self.config, "moe_router_gate"),
                     self.use_accuracy_compatible,
+                    use_fp32_master=self.use_fp32_master,
                 )
 
                 logits_0, logits_1 = inspect_tensor(
@@ -1768,6 +1787,7 @@ class TopKRouter(StandardMoERouter):
                         and self.config.expert_model_parallel_size <= 1
                         else 1
                     ),
+                    use_fp32_master=self.use_fp32_master,
                 )
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)

@@ -1929,6 +1929,15 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to enable accuracy-compatible kernels for cross-framework numerical
     alignment. Defaults to False."""
 
+    moe_router_use_fp32_master: bool = False
+    """Keep an FP32 router parameter with BF16 reference weights and gradients.
+
+    Applies only in accuracy-compatible mode. The router casts its master to
+    BF16 for each forward and rounds each sequence-local weight gradient before
+    FP32 accumulation. False preserves the existing ``params_dtype`` storage
+    and checkpoint-loading contract; computation still uses FP32.
+    """
+
     moe_topk_fusion: bool = False
     """If True, use Triton fused MoE TopK kernel for expert selection."""
 

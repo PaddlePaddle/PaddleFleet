@@ -14,36 +14,21 @@
 
 """Exercise the production gate PyLayer against independent local graphs."""
 
-import ast
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 import paddle
 import paddle.nn.functional as F
 
+from paddlefleet.transformer.moe.moe_router import (
+    FusedGateDetachMatmul,
+    StandardMoERouter,
+)
+from paddlefleet.transformer.transformer_config import TransformerConfig
+
 
 class TestIEEEGateSequence(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        source = (
-            Path(__file__).resolve().parents[3]
-            / "src/paddlefleet/transformer/moe/moe_router.py"
-        )
-        tree = ast.parse(source.read_text())
-        node = next(
-            n
-            for n in tree.body
-            if isinstance(n, ast.ClassDef) and n.name == "FusedGateDetachMatmul"
-        )
-        cls.ns = {"paddle": paddle, "F": F, "ieee_kernel_enabled": lambda: True}
-        exec(
-            compile(
-                ast.Module(body=[node], type_ignores=[]), str(source), "exec"
-            ),
-            cls.ns,
-        )
-        cls.gate = cls.ns["FusedGateDetachMatmul"]
+    gate = FusedGateDetachMatmul
 
     def equal(self, a, b):
         self.assertEqual(a.shape, b.shape)
@@ -68,7 +53,7 @@ class TestIEEEGateSequence(unittest.TestCase):
         dy = paddle.randn([84, 16], dtype="float32")
         x.stop_gradient = False
         w.stop_gradient = False
-        y = self.gate.apply(x, w, False, True, shards)
+        y = self.gate.apply(x, w, False, True, shards, True)
         y.backward(dy)
         ys, dxs, dws = [], [], []
         size = 84 // shards
@@ -123,7 +108,7 @@ class TestIEEEGateSequence(unittest.TestCase):
                     x = paddle.randn([84, 32]).cast("bfloat16")
                     x.stop_gradient = False
                     dy = paddle.randn([84, 16])
-                    y = self.gate.apply(x, master, False, True, shards)
+                    y = self.gate.apply(x, master, False, True, shards, True)
                     y.backward(dy)
                     ys, dxs, dws = [], [], []
                     size = 84 // shards
@@ -175,27 +160,74 @@ class TestIEEEGateSequence(unittest.TestCase):
     def test_existing_union_path_when_accuracy_compatible_is_off(self):
         x = paddle.ones([6, 8], dtype="bfloat16")
         w = paddle.ones([3, 8], dtype="float32")
-        for ieee, uac in [(False, False), (True, False)]:
+        for use_fp32_master in (False, True):
             with (
-                patch.dict(self.ns, ieee_kernel_enabled=lambda: ieee),
+                self.subTest(use_fp32_master=use_fp32_master),
                 patch.object(F, "linear", wraps=F.linear) as linear,
             ):
-                self.gate.apply(x, w, False, uac, 2)
+                self.gate.apply(x, w, False, False, 2, use_fp32_master)
                 self.assertEqual(linear.call_count, 1)
 
     def test_nondivisible_rows_use_existing_union_path(self):
         x = paddle.ones([5, 8], dtype="bfloat16")
         w = paddle.ones([3, 8], dtype="float32")
         with patch.object(F, "linear", wraps=F.linear) as linear:
-            self.gate.apply(x, w, False, True, 2)
+            self.gate.apply(x, w, False, True, 2, True)
             self.assertEqual(linear.call_count, 1)
 
     def test_deferred_weight_gradient_retains_existing_forward(self):
         x = paddle.ones([6, 8], dtype="bfloat16")
         w = paddle.ones([3, 8], dtype="float32")
         with patch.object(F, "linear", wraps=F.linear) as linear:
-            self.gate.apply(x, w, True, True, 2)
+            self.gate.apply(x, w, True, True, 2, True)
             self.assertEqual(linear.call_count, 1)
+
+    def test_default_fp32_weight_is_not_rounded_or_sequence_split(self):
+        paddle.seed(514)
+        x = paddle.randn([12, 8]).cast("bfloat16")
+        w = paddle.randn([4, 8])
+        dy = paddle.randn([12, 4])
+        x.stop_gradient = w.stop_gradient = False
+        # The pre-existing public call must retain its FP32 parameter semantics,
+        # even when sequence_shards is supplied by a newer caller.
+        y = self.gate.apply(x, w, False, True, 2)
+        y.backward(dy)
+        self.equal(y, F.linear(x.detach().cast("float32"), w.detach().T))
+        self.equal(x.grad, paddle.matmul(dy, w.detach()).cast("bfloat16"))
+        self.equal(
+            w.grad,
+            paddle.matmul(dy, x.detach().cast("float32"), transpose_x=True),
+        )
+        self.assertNotEqual(
+            w.numpy().tobytes(),
+            w.cast("bfloat16").cast("float32").numpy().tobytes(),
+        )
+
+    def test_router_storage_policy_preserves_legacy_checkpoint_dtype(self):
+        for enabled, master, expected in (
+            (True, False, paddle.bfloat16),
+            (True, True, paddle.float32),
+            (False, False, paddle.float32),
+            (False, True, paddle.float32),
+        ):
+            with self.subTest(enabled=enabled, master=master):
+                config = TransformerConfig(
+                    num_hidden_layers=1,
+                    hidden_size=8,
+                    num_attention_heads=1,
+                    n_routed_experts=4,
+                    num_experts_per_tok=2,
+                    params_dtype="bfloat16",
+                    use_accuracy_compatible=enabled,
+                    moe_router_use_fp32_master=master,
+                )
+                router = StandardMoERouter(config)
+                self.assertEqual(router.weight.dtype, expected)
+                checkpoint_weight = (
+                    paddle.arange(32).reshape([4, 8]).cast(expected)
+                )
+                router.weight.set_value(checkpoint_weight)
+                self.equal(router.weight, checkpoint_weight)
 
 
 if __name__ == "__main__":
