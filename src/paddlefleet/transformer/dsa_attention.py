@@ -51,6 +51,7 @@ from paddlefleet.transformer.cp_utils import all_gather_cp
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.transformer.utils import get_current_layer, inspect_tensor
 
 try:
     from paddlefleet_ops.fast_hadamard_transform import (
@@ -486,6 +487,7 @@ class DSAIndexer(paddle.nn.Layer):
             rotary_interleaved=self.config.dsa_indexer_rotary_interleaved,
             multi_latent_attention=False,
             mscale=mscale,
+            high_precision_rope=self.config.high_precision_rope,
         )
         return paddle.concat([x_pe, x_nope], axis=-1)
 
@@ -554,23 +556,48 @@ class DSAIndexer(paddle.nn.Layer):
             else freqs
         )
 
+        q_latent = inspect_tensor(
+            "mla_indexer_q_latent", get_current_layer(), q_latent
+        )
+
         q, _ = deferrable_linear(
             self.config, "attn_indexer_q_proj", self.wq_b, q_latent
         )  # [b, s, n_heads * head_dim]
+
+        q = inspect_tensor("mla_indexer_q_proj", get_current_layer(), q)
+
         q = q.reshape([bsz, seqlen, self.n_heads, self.head_dim])
         q = self._apply_rope(q, freqs_q, mscale)
+
+        q = inspect_tensor("mla_indexer_q_rope", get_current_layer(), q)
+
+        hidden_states = inspect_tensor(
+            "mla_indexer_hidden_states", get_current_layer(), hidden_states
+        )
 
         k, _ = deferrable_linear(
             self.config, "attn_indexer_k_proj", self.wk, hidden_states
         )  # [b, s, head_dim]
+
+        k = inspect_tensor("mla_indexer_k_proj", get_current_layer(), k)
+
         if cp_size > 1:
             k = all_gather_cp(k, dim=1, group=cp_group)  # [b, s_global, hd]
         k = self.k_norm(k)
+
+        k = inspect_tensor("mla_indexer_k_norm", get_current_layer(), k)
+
         k = self._apply_rope(k.unsqueeze(2), freqs, mscale).squeeze(2)
+
+        k = inspect_tensor("mla_indexer_k_rope", get_current_layer(), k)
 
         # Rotate activation (Hadamard transform)
         q = rotate_activation(q, use_fast_hadamard=self.use_fast_hadamard)
         k = rotate_activation(k, use_fast_hadamard=self.use_fast_hadamard)
+
+        q = inspect_tensor("mla_indexer_q_hadamard", get_current_layer(), q)
+
+        k = inspect_tensor("mla_indexer_k_hadamard", get_current_layer(), k)
 
         weights, _ = deferrable_linear(
             self.config,
@@ -578,6 +605,11 @@ class DSAIndexer(paddle.nn.Layer):
             self.weights_proj,
             hidden_states,
         )
+
+        weights = inspect_tensor(
+            "mla_indexer_weights_proj", get_current_layer(), weights
+        )
+
         weights = weights * (self.n_heads**-0.5) * self.softmax_scale
 
         return q, k, weights

@@ -130,6 +130,8 @@ from paddlefleet.transformer.layer import FleetLayer
 if TYPE_CHECKING:
     from paddlefleet.transformer.enums import AttnMaskType
 
+from paddlefleet.transformer.utils import get_current_layer, inspect_tensor
+
 # Working set of the phase-3 KL-target gather, as a ``rows x slots`` budget:
 # 256 rows x 512 slots x 576 dims is ~150MB of gathered bf16 keys, transient and
 # freed every iteration. Measured at s=8192/h=64/topk=512/dk=576 on one B30Z:
@@ -220,6 +222,28 @@ def _doc_segment_lens(doc_starts: Tensor, s_global: int) -> list[int]:
     starts = [int(v) for v in doc_starts.tolist()]
     ends = [*starts[1:], int(s_global)]
     return [b - a for a, b in zip(starts, ends)]
+
+
+def _sort_topk_indices_pad_last(topk_indices: Tensor) -> Tensor:
+    """Sort top-k indices ascending with ``-1`` padding kept at the row tail.
+
+    Sort ascending to match the inference side, which emits each row in
+    increasing key order; cuDNN emits its own (roughly descending) order, so
+    the two dumps disagree on layout even when they select the identical set.
+    Attention softmaxes over a set, so the reorder only moves the accumulation
+    order (the last bits), not the value. ``-1`` padding is mapped to
+    ``INT32_MAX`` for the sort so it stays at the tail of the row, then mapped
+    back.
+    """
+    pad = paddle.full_like(topk_indices, 2**31 - 1)
+    sorted_idxs = paddle.sort(
+        paddle.where(topk_indices >= 0, topk_indices, pad), axis=-1
+    )
+    return paddle.where(
+        sorted_idxs == 2**31 - 1,
+        paddle.full_like(sorted_idxs, -1),
+        sorted_idxs,
+    )
 
 
 class _HashableTensor(paddle.Tensor):
@@ -2168,6 +2192,10 @@ class MQALatentAttention(FleetLayer):
         with paddle.enable_grad():
             w_idx = w_idx * (float(self.indexer.head_dim) ** 0.5)
 
+        w_idx = inspect_tensor(
+            "mla_indexer_w_idx_scale", get_current_layer(), w_idx
+        )
+
         # The cuDNN top-k backward (``indexer_backward_sm100.__init__``) asserts
         # ``topk % block_I == 0`` with ``block_I = 128``, so keep the configured
         # budget instead of clamping it to the sequence length. Short rows come
@@ -2209,6 +2237,14 @@ class MQALatentAttention(FleetLayer):
             topk_indices = paddle.where(
                 row_empty, paddle.full_like(selected, -1), selected
             )
+            # Ascending order to match the inference side (see
+            # ``_sort_topk_indices_pad_last``).
+            topk_indices = inspect_tensor(
+                "mla_indexer_topk_indices",
+                get_current_layer(),
+                topk_indices,
+                pre_save_func=lambda t: _sort_topk_indices_pad_last(t),
+            )
             # ``[indexer topk, window]``, not the other way round: the kernel's
             # ``lse_indexer`` covers the *first* ``indexer_topk`` columns
             # (``flash_mla_sparse_fwd``), and that restricted per-head LSE is
@@ -2239,6 +2275,9 @@ class MQALatentAttention(FleetLayer):
                 self.softmax_scale,
                 kv_lora_rank,
                 indexer_topk=topk,
+            )
+            core_out = inspect_tensor(
+                "mla_indexer_core_out", get_current_layer(), core_out
             )
         else:
             lse_indexer = None
