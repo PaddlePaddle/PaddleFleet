@@ -244,7 +244,25 @@ class TestPP(unittest.TestCase):
         print("PP loss MD5:", overlap_loss._md5sum())
 
         actual_md5 = overlap_loss._md5sum()
-        expected_md5 = "4bac2f3bcd5a3f2bcc82f8d2b914bf53"
+        # The bf16 MoE alltoall + MTP loss is bit-exact per device family, not
+        # across them, so the baseline has to be selected the same way the other
+        # pipeline_parallel suites select theirs (``test_gpt_pp.py:240``,
+        # ``test_gpt_pp_with_moe_with_mtp.py:260``): one value per H subtype
+        # plus one for B. Skip rather than compare on a family with no recorded
+        # baseline -- asserting some other family's MD5 would only report a diff
+        # that says nothing about the code under test.
+        machine_type = judge_machine_type()
+        if machine_type == "H":
+            if judge_h_subtype() == "H800":
+                expected_md5 = "0d81f9d08f2294e33ba67b146a317d20"
+            else:
+                expected_md5 = "4bac2f3bcd5a3f2bcc82f8d2b914bf53"
+        elif machine_type == "B":
+            expected_md5 = "d44eab93f459728e1ca549422e37534b"
+        else:
+            self.skipTest(
+                f"No PP loss MD5 baseline recorded for machine type {machine_type}"
+            )
         print(f"PP loss MD5 - Actual: {actual_md5}, Expected: {expected_md5}")
         assert actual_md5 == expected_md5, (
             f"PP loss MD5 mismatch! Actual: {actual_md5}, Expected: {expected_md5}"
