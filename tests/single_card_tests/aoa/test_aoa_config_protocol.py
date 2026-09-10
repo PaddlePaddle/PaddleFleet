@@ -22,7 +22,9 @@
 # the direction-independence contract (no ``direction`` / ``reverse`` param, a
 # ``_fwd_`` / ``_inv_`` helper split with no cross-direction calls and no
 # ``aoa_config_reverse`` call).
+import ast
 import dataclasses
+import inspect
 import os
 import sys
 import unittest
@@ -39,6 +41,7 @@ sys.path.insert(
 
 from paddle.distributed.flex_checkpoint.aoa.generation import AOAContext
 
+from paddlefleet.models.gpt import aoa_generator
 from paddlefleet.models.gpt.aoa_generator import (
     DEFAULT_CHECKPOINT_NAME_MAPPING,
     DEFAULT_CHECKPOINT_NAME_PREFIX,
@@ -283,6 +286,73 @@ class TestAoaModularNotConfigInjectable(unittest.TestCase):
         inst = object.__new__(TransformerConfig)
         inst._process_attribute("some_unrelated_attr", 123)
         self.assertEqual(inst.some_unrelated_attr, 123)
+
+
+def _module_funcs(module):
+    """Yields every ``FunctionDef`` / ``AsyncFunctionDef`` in a module's AST."""
+    tree = ast.parse(inspect.getsource(module))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield node
+
+
+def _arg_names(func_node):
+    a = func_node.args
+    names = [arg.arg for arg in (*a.posonlyargs, *a.args, *a.kwonlyargs)]
+    if a.vararg:
+        names.append(a.vararg.arg)
+    if a.kwarg:
+        names.append(a.kwarg.arg)
+    return names
+
+
+def _called_identifiers(func_node):
+    ids = set()
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.Call):
+            f = node.func
+            if isinstance(f, ast.Name):
+                ids.add(f.id)
+            elif isinstance(f, ast.Attribute):
+                ids.add(f.attr)
+    return ids
+
+
+class TestDirectionIndependenceLint(unittest.TestCase):
+    """Static lint pinning the direction-independence contract."""
+
+    def test_no_direction_or_reverse_param(self):
+        for func in _module_funcs(aoa_generator):
+            names = set(_arg_names(func))
+            self.assertNotIn(
+                "direction",
+                names,
+                f"{func.name} takes a forbidden 'direction' param",
+            )
+            self.assertNotIn(
+                "reverse",
+                names,
+                f"{func.name} takes a forbidden 'reverse' param",
+            )
+
+    def test_no_aoa_config_reverse_call(self):
+        src = inspect.getsource(aoa_generator)
+        self.assertNotIn("aoa_config_reverse", src)
+
+    def test_directions_do_not_cross_call(self):
+        by_name = {f.name: f for f in _module_funcs(aoa_generator)}
+        fwd = by_name["gen_whole_model_aoa"]
+        inv = by_name["gen_whole_model_inv_aoa"]
+        fwd_calls = _called_identifiers(fwd)
+        inv_calls = _called_identifiers(inv)
+        # forward must not reach into any inverse-marked emitter
+        self.assertNotIn("gen_inv_aoa_statements", fwd_calls)
+        self.assertNotIn("emit_alias_inv_aoa", fwd_calls)
+        self.assertNotIn("gen_whole_model_inv_aoa", fwd_calls)
+        # inverse must not reach into any forward emitter
+        self.assertNotIn("gen_aoa_statements", inv_calls)
+        self.assertNotIn("emit_alias_aoa", inv_calls)
+        self.assertNotIn("gen_whole_model_aoa", inv_calls)
 
 
 if __name__ == "__main__":

@@ -30,7 +30,15 @@ if TYPE_CHECKING:
 
 from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_parallel import ScheduleChunk
+from paddle.distributed.flex_checkpoint.aoa.generation import (
+    resolve_names,
+)
 
+from paddlefleet.models.gpt.aoa_generator import (
+    build_aoa_context,
+    gen_whole_model_aoa,
+    gen_whole_model_inv_aoa,
+)
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import (
     GPTLMHead,
@@ -185,6 +193,31 @@ class GPTModel(PipelineLayer):
     Args:
         gpt_layer_desc:
     """
+
+    # Model-side AOA protocol: this class owns its whole-model AOA entry, so a
+    # multi-tower container must call ``gen_(inv_)aoa_statements(tower_config)``
+    # on it and must never recurse into it through the ``Layer`` protocol.
+    # Read by ``gen_multi_tower_aoa`` / ``gen_multi_tower_inv_aoa`` to pick the
+    # entry call over component recursion.
+    aoa_whole_model_boundary = True
+
+    # ``SharedLayerDesc.layer_name`` -> whether the checkpoint stores ONE tensor
+    # for the whole shared group. Read by ``_aoa_shared_layer_collapses``, which
+    # documents why this cannot be inferred and must be declared.
+    _AOA_SHARED_LAYER_COLLAPSES = {
+        # tie_word_embeddings / mtp_lm_head: a tied checkpoint omits the head
+        # weight entirely, so the embedding key feeds both model keys. With
+        # ``separate_mtp_headloss`` the MTP head is a real checkpoint producer,
+        # so ``collect_alias_plan`` splits this group per route instead.
+        "embed": True,
+        # enable_mtp_magic_send: MTPEmbeddingLayer's weight is a placeholder
+        # (perform_initialization=False, mtp_embedding_layer.py) replaced by the
+        # shared embedding, and the layout keeps no separate MTP embedding key.
+        "mtp_embed": True,
+        # mtp_shared_last_layer: the layout keeps the backbone's last layer and
+        # the MTP layer as independent keys.
+        "mtp_reuse_transformer": False,
+    }
 
     def __init__(
         self,
@@ -1260,3 +1293,109 @@ class GPTModel(PipelineLayer):
                 paddle.distributed.all_reduce(
                     grad.contiguous(), group=self._mtp_embed_global_group
                 )
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # AOA modular generation: whole-model entries + generator callbacks
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def gen_aoa_statements(self, config=None, *, globalize=True):
+        """Whole-model entry: checkpoint -> model (forward) AOA statements.
+
+        Builds the read-only context (so consumers never construct it) and hands
+        off to the modular generator. When ``config`` is passed explicitly the
+        context is built from it rather than from ``self.config``.
+        ``globalize=False`` is for a caller that unions this model's statements
+        with another's and globalizes the union itself.
+
+        The signature deliberately does not accept the ``Layer`` recursion
+        protocol's ``structured_name_prefix`` / ``aoa_name_scope``: this is a
+        whole-model boundary, so a container that recursed into it raises
+        ``TypeError`` instead of silently producing partial statements.
+        """
+        ctx = build_aoa_context(
+            self, config if config is not None else self.config
+        )
+        return gen_whole_model_aoa(self, ctx, globalize=globalize)
+
+    def gen_inv_aoa_statements(self, config=None, *, globalize=True):
+        """Whole-model entry: model -> checkpoint (inverse) AOA statements.
+
+        The independent mirror of :meth:`gen_aoa_statements`: it builds its own
+        context and never derives the inverse from the checkpoint->model
+        statements.
+        """
+        ctx = build_aoa_context(
+            self, config if config is not None else self.config
+        )
+        return gen_whole_model_inv_aoa(self, ctx, globalize=globalize)
+
+    # The three methods below are NOT called by the two entries above: they are
+    # model-side hooks the generator in ``aoa_generator`` calls back into while
+    # it walks this model.
+
+    def _raw_structured_state_dict(self):
+        """Returns the raw pipeline-structured ``state_dict`` (pre single-name
+        remap), including duplicate keys for shared tensors.
+
+        This is the same source ``_set_pipeline_name_mapping`` builds
+        ``_pp_to_single_mapping`` from, so its keys are exactly the mapping's
+        keys and its tensor identities expose tied / shared aliases.
+        """
+        return super().state_dict()
+
+    def _resolve_leaf_names(self, pipeline_name, ctx):
+        """Resolves one pipeline-local structured name to its
+        ``(checkpoint_name, single_name)`` pair.
+
+        Reuses ``_pp_to_single_mapping`` (built idempotently) for the
+        pipeline -> single step; a miss raises explicitly rather than falling
+        back. The single -> checkpoint step is delegated to the ``aoa`` naming
+        helpers so there is no parallel mapping.
+
+        Args:
+            pipeline_name: A structured (pipeline-local) tensor name, i.e. a key
+                of ``_pp_to_single_mapping``.
+            ctx: The read-only :class:`AOAContext` carrying the checkpoint-side
+                prefix and name mapping.
+
+        Returns:
+            ``(checkpoint_name, single_name)``.
+
+        Raises:
+            KeyError: If ``pipeline_name`` is not in ``_pp_to_single_mapping``.
+        """
+        if self._pipeline_name_mapping is None:
+            self._set_pipeline_name_mapping()
+        # Pass the full structured name as the local name with an empty prefix so
+        # ``resolve_single_name`` looks it up verbatim in _pp_to_single_mapping.
+        return resolve_names(
+            pipeline_name,
+            ctx.checkpoint_name_prefix,
+            "",
+            ctx.pp_to_single_mapping,
+            ctx.checkpoint_name_mapping,
+            model_name_prefix=ctx.model_name_prefix,
+        )
+
+    def _aoa_shared_layer_collapses(self, layer_name: str) -> bool:
+        """Whether the checkpoint stores ONE tensor for a shared-weight group.
+
+        Not derivable model-side: the module tree only records WHICH names share
+        a tensor, while keeping one key for the group or one key per member is a
+        target-layout convention. ``mtp_embed`` and ``mtp_reuse_transformer``
+        are both one-tensor ``SharedLayerDesc`` groups, yet the first needs one
+        key fanned out and the second needs both keys materialized. So the
+        layout must be declared in ``_AOA_SHARED_LAYER_COLLAPSES`` (or by
+        overriding this method); an unregistered name raises instead of taking a
+        default, because either default silently writes a wrong checkpoint.
+        """
+        try:
+            return self._AOA_SHARED_LAYER_COLLAPSES[layer_name]
+        except KeyError:
+            raise ValueError(
+                f"unregistered SharedLayerDesc layer_name {layer_name!r} on "
+                f"{type(self).__name__}; declare whether the checkpoint stores "
+                f"one tensor for the whole shared group by extending "
+                f"_AOA_SHARED_LAYER_COLLAPSES or overriding "
+                f"_aoa_shared_layer_collapses"
+            ) from None
