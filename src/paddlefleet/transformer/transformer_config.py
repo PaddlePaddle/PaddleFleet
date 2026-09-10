@@ -21,7 +21,7 @@ import functools
 import logging
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 import paddle.nn.functional as F
 
@@ -1950,6 +1950,40 @@ class TransformerConfig(ModelParallelConfig):
     deepep_buffer_configs: dict | None = None
     """DeepEP buffer configuration."""
 
+    ####################
+    # AOA generator migration marker (code-level, not a config item)
+    ####################
+
+    aoa_modular: ClassVar[bool] = False
+    """Whether this model has been migrated to modular AOA.
+
+    Deliberately a ``ClassVar``, so it is not a dataclass field -- it records a
+    property of the model's *code*, not a choice the user makes per run. A
+    provider subclass flips it to ``True`` once its components carry their own
+    AOA markers and its hand-written generator is gone (see
+    ``Ernie5V2Provider``). Because ``register_attributes`` would otherwise turn
+    an ``aoa_modular`` key in a yaml / ``config.json`` into an instance
+    attribute that shadows this ``ClassVar``, ``_process_attribute`` rejects
+    that key outright, so it can only ever be set in a class body.
+
+    One marker drives two coupled behaviours, which is why they cannot be
+    separate switches:
+
+    * whole-model AOA generation: ``True`` -> module-tree recursion
+      (``gen_whole_model_aoa``), ``False`` -> the per-model hand-written
+      generator attached on the model instance (``model._gen_aoa_config``).
+    * empty-layer naming: ``True`` -> ``EmptyLayer`` instances get their own
+      ``empty_layers.<i>`` namespace and transformer layers are numbered
+      ``layers.0 .. layers.{num_hidden_layers - 1}`` regardless of
+      ``num_empty_layers_add_in_head=H``; ``False`` -> both kinds share one
+      ``layers.<i>`` counter, so the first transformer layer is ``layers.H``.
+
+    The modular generator is written against decoupled numbering and every
+    legacy generator against the shared counter, so mixing the two would
+    silently corrupt checkpoint keys. Keeping a single marker makes that
+    mixed state inexpressible.
+    """
+
     # Field name mapping rules: HuggingFace config.json name -> TransformerConfig name
     transform_rules = {
         # DSA field mapping
@@ -2080,6 +2114,12 @@ class TransformerConfig(ModelParallelConfig):
                 f"{self.renamed_config_keys_when_set[key]} Update the config "
                 f"that still sets {key}={value!r}; it would otherwise be "
                 f"silently ignored."
+            )
+        elif key == "aoa_modular":
+            raise ValueError(
+                "aoa_modular is a code-level modular-AOA migration marker "
+                "(a ClassVar flipped in a provider class body), not a config "
+                "field; it must never be set from yaml / config.json."
             )
         else:
             setattr(self, key, value)
