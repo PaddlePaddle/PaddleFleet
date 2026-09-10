@@ -735,6 +735,10 @@ class SonicMoEExpert(GroupedMLPExpert):
         self._weights_layout = self._GROUPED_LAYOUT
 
         self.sonic_moe_config = _refresh_fp8_config()
+        clamp_value = self.config.activation_func_clamp_value
+        self.sonic_moe_config.swiglu_clamp_value = (
+            0.0 if clamp_value is None else float(clamp_value)
+        )
         self.sonic_moe_config.enabled = self.config.fp8 is not None
         self.sonic_moe_config.fp8_wgrad = self.config.fp8_wgrad
         self.sonic_moe_config.fuse_y1_quant = True
