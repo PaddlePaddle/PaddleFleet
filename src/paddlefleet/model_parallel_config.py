@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -65,6 +66,11 @@ class ModelParallelConfig:
     """Makes tensor parallelism more memory efficient for LLMs (20B+) by parallelizing layer norms
        and dropout sequentially.  See Reducing Activation Recomputation in Large Transformer Models
        (https://arxiv.org/abs/2205.05198) for more details.
+
+       NOTE: This field is NOT user-configurable. It is auto-derived in ``__post_init__`` as
+       ``sequence_parallel = (tensor_model_parallel_size > 1)``: enabled when tensor model
+       parallelism is used (``tensor_model_parallel_size > 1``), disabled otherwise. Any
+       user-specified value is ignored and overridden.``.
     """
 
     context_parallel_size: int = 1
@@ -377,17 +383,17 @@ class ModelParallelConfig:
         details.
         """
 
-        if self.tensor_model_parallel_size <= 1:
-            self.sequence_parallel = False
+        if self.sequence_parallel and self.tensor_model_parallel_size <= 1:
+            warnings.warn(
+                "sequence_parallel is not a user-configurable field: it is auto-derived as "
+                "(sequence_parallel = tensor_model_parallel_size > 1). The configured value True is overridden "
+                "to False because tensor_model_parallel_size <= 1.",
+                stacklevel=3,
+            )
+        self.sequence_parallel = self.tensor_model_parallel_size > 1
 
         if getattr(self, "use_accuracy_compatible", False):
             self.deterministic_mode = True
-
-        if self.sequence_parallel:
-            if self.tensor_model_parallel_size <= 1:
-                raise ValueError(
-                    "Can not use sequence paralllelism without tensor parallelism"
-                )
 
         if self.expert_tensor_parallel_size is None:
             self.expert_tensor_parallel_size = self.tensor_model_parallel_size
@@ -415,16 +421,6 @@ class ModelParallelConfig:
             raise ValueError(
                 "Wgrad deferral limit should be greater than or equal to 0 when it is enabled!"
             )
-
-        if (
-            self.expert_model_parallel_size > 1
-            and self.tensor_model_parallel_size > 1
-        ):
-            if self.sequence_parallel is False:
-                raise ValueError(
-                    "When using expert parallelism and tensor parallelism, "
-                    "sequence parallelism must be used"
-                )
 
         if self.microbatch_group_size_per_vp_stage is None:
             self.microbatch_group_size_per_vp_stage = (
