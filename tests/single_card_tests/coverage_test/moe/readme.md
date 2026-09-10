@@ -1,0 +1,30 @@
+# MoE Tests / 混合专家模块测试
+
+Unit tests for PaddleFleet Mixture of Experts layer, router, expert, token dispatcher, and related utilities.
+PaddleFleet 混合专家层、路由器、专家、Token 调度器及相关工具的单元测试。
+
+## Test Files
+
+| File | Description / 描述 |
+|------|-------------------|
+| `test_coverage_allgather_dispatcher.py` |  |
+| `test_coverage_block_attn_res.py` | Unit tests for block_attn_res module / 测试 block attention residual 模块 |
+| `test_coverage_fp8_utils.py` |  |
+| `test_coverage_fp8_utils_use_accuracy_compatible.py` |  |
+| `test_coverage_fused_a2a.py` | Unit tests for fused_a2a module / 测试融合 All-to-All 通信模块 |
+| `test_coverage_fusion_layer_utils.py` | Unit tests for fusion_layer_utils module / 测试融合层工具模块 |
+| `test_coverage_m_indices.py` |  |
+| `test_coverage_moe_expert.py` | Unit tests for moe_expert module / 测试 MoE 专家模块 |
+| `test_coverage_moe_layer.py` | Unit tests for moe_layer module / 测试 MoE 层模块 |
+| `test_coverage_moe_layer_2.py` |  |
+| `test_coverage_moe_router.py` | Unit tests for moe_router module / 测试 MoE 路由器模块 |
+| `test_coverage_moe_router_use_accuracy_compatible.py` |  |
+| `test_coverage_moe_utils.py` | Unit tests for moe_utils module / 测试 MoE 工具模块 |
+| `test_coverage_moe_utils_use_accuracy_compatible.py` |  |
+| `test_coverage_multi_token_prediction.py` | Unit tests for multi_token_prediction module / 测试多 Token 预测模块 |
+| `test_coverage_pre_permute_coverage.py` |  |
+| `test_coverage_router_scale_fast.py` | Unit tests for apply_learnable_routed_scaling / 测试可学习路由缩放因子的 gather 前反向 |
+| `test_coverage_three_path_clone_align_mg.py` |  |
+| `test_coverage_token_dispatcher.py` | Unit tests for token_dispatcher module / 测试 Token 调度器模块 |
+| `test_kgroupgemm.py` | Tests for k-grouped gemm code paths including fp8+deep_gemm / 测试 k-grouped GEMM 代码路径 |
+| `test_latent_moe.py` | Tests for latent MoE config field defaults and validation / 测试潜在 MoE 配置默认值与校验 |
