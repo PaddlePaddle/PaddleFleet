@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -29,21 +28,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 from paddlefleet.transformer.utils import profile
-
-# Fine-grained ring timers are opt-in. Eight scopes firing once per round per
-# MoE layer per micro-batch cost ~60 ms/step in CUDA events alone (measured at
-# EP=16 with 11 MoE layers and gradient_accumulation_steps=8) -- the same order
-# as the optimisations they exist to measure, so leaving them on makes the ring
-# look slower than it is. Set PADDLEFLEET_RING_PROFILE_DETAIL=1 to break the
-# ring's time down; ``ringmoe`` and ``fusion_mlp`` are always recorded.
-_RING_PROFILE_DETAIL = os.environ.get(
-    "PADDLEFLEET_RING_PROFILE_DETAIL", "0"
-).lower() not in ("0", "", "false", "off")
-
-
-def _ring_profile(name):
-    """``profile(name)`` when detailed ring timers are on, else a no-op scope."""
-    return profile(name if _RING_PROFILE_DETAIL else None)
 
 from .fp8_utils import FP8_ALIGN
 from .fused_a2a import (
@@ -2546,7 +2530,11 @@ class _RingFP8AllGather(paddle.autograd.PyLayer):
     def forward(ctx, x, group):
         ctx.group = group
         fused_local, H, H128, scale_dtype = _quantize_and_pack_fp8(x)
-        fused_global = all_gather_group(fused_local, group=group)
+        fused_global = (
+            fused_local
+            if group is None or group.nranks == 1
+            else all_gather_group(fused_local, group=group)
+        )
         out = _split_fused_fp8_gather(fused_global, H, H128, scale_dtype)
         # _UpProjection.backward hands back a bf16 dx while this forward output
         # is e4m3.  Without these two, Paddle coerces the grad to the output
@@ -2641,9 +2629,6 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         """
         if not self.fp8_dispatch:
             return self._ag(tok, group), None
-        if group is None or group.nranks == 1:
-            fused, H, H128, sdt = _quantize_and_pack_fp8(tok)
-            return _split_fused_fp8_gather(fused, H, H128, sdt)
         return _RingFP8AllGather.apply(tok, group)
 
     def _rs(self, t, group):
@@ -2758,14 +2743,12 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         (do idx/w once for all N rounds instead of once per round) and that was
         tried -- it is a **173 ms/step regression**, see the ring_forward note.
         """
-        with _ring_profile("ring_intra_gather"):
-            g_tok, g_scale = self._ag_tokens(tok, self.intra_group)
-            g_idx = self._ag_indices(cur_idx, self.intra_group)
-            g_w = self._ag_router(cur_w, self.intra_group)
-        with _ring_profile("ring_hist"):
-            tokens_per_expert = _tokens_per_expert_histogram(
-                g_idx, self.num_experts
-            )
+        g_tok, g_scale = self._ag_tokens(tok, self.intra_group)
+        g_idx = self._ag_indices(cur_idx, self.intra_group)
+        g_w = self._ag_router(cur_w, self.intra_group)
+        tokens_per_expert = _tokens_per_expert_histogram(
+            g_idx, self.num_experts
+        )
         # Same timer name as the flat path's expert GEMM, so the two dispatchers
         # report comparable compute time. Accumulates over the N rounds: the
         # collectives around it are outside the scope, so this is compute only.
@@ -2781,10 +2764,7 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
                 fp8_combine_grad_handle=None,
             )
         handle = {}
-        # Issue only -- the wait lands in 'ring_rs_drain' in ring_forward, so
-        # these two scopes together separate launch cost from exposed wait.
-        with _ring_profile("ring_intra_rs_issue"):
-            out = self._rs_async(part, self.intra_group, handle)
+        out = self._rs_async(part, self.intra_group, handle)
         return out, handle
 
     def _inter_combine(self, x, group, combine_overlap_handle):
@@ -2918,16 +2898,15 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             # asynchronous.
             if step < n - 1:
                 h_tok, h_idx, h_w = {}, {}, {}
-                with _ring_profile("ring_shift_issue"):
-                    nxt_tok = _InterRingShift.apply(
-                        tok, self.inter_group, dst, src, h_tok
-                    )
-                    nxt_idx = _InterRingShift.apply(
-                        cur_idx, self.inter_group, dst, src, h_idx
-                    )
-                    nxt_w = _InterRingShift.apply(
-                        cur_w, self.inter_group, dst, src, h_w
-                    )
+                nxt_tok = _InterRingShift.apply(
+                    tok, self.inter_group, dst, src, h_tok
+                )
+                nxt_idx = _InterRingShift.apply(
+                    cur_idx, self.inter_group, dst, src, h_idx
+                )
+                nxt_w = _InterRingShift.apply(
+                    cur_w, self.inter_group, dst, src, h_w
+                )
             # Tokens held at this step originate from home node (r0 - step) % n,
             # so this node's slice for them is destined to that home.
             node_part, h_rs = self._node_slice(
@@ -2943,19 +2922,15 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             partials[(r0 - step) % n] = node_part
             if step < n - 1:
                 # Wait for the in-flight rotation before consuming it next round.
-                with _ring_profile("ring_shift_wait"):
-                    h_tok["task"].wait()
-                    h_idx["task"].wait()
-                    h_w["task"].wait()
+                h_tok["task"].wait()
+                h_idx["task"].wait()
+                h_w["task"].wait()
                 tok, cur_idx, cur_w = nxt_tok, nxt_idx, nxt_w
         # partials[d] = this node's contribution destined to home node d.
         # Every round's reduce must land before the concat reads its buffer.
-        with _ring_profile("ring_rs_drain"):
-            self._drain(rs_handles)
+        self._drain(rs_handles)
         # ReduceScatter over inter sums contributions from all nodes per home.
-        with _ring_profile("ring_concat"):
-            buf = paddle.concat(partials, axis=0)  # [n*T, d_l]
-        with _ring_profile("ring_inter_combine"):
-            return self._inter_combine(
-                buf, self.inter_group, combine_overlap_handle
-            )
+        buf = paddle.concat(partials, axis=0)  # [n*T, d_l]
+        return self._inter_combine(
+            buf, self.inter_group, combine_overlap_handle
+        )
