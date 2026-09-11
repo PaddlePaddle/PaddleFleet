@@ -317,6 +317,22 @@ class TransformerConfig(ModelParallelConfig):
     flashmask_use_varlen: bool = False
     """If True, convert flashmask to varlen in attention."""
 
+    # ---- HyperEncoder attention backend ----
+    # Used only by the HyperEncoder model (models/hyperencoder/*). Declared here
+    # so the switches are first-class config fields (validated, serialized,
+    # test-covered) instead of environment variables. Other models leave them at
+    # their defaults and never read them. The Triton kernel launch tuning
+    # (block size / warps / stages / plan-cache) is not exposed: production never
+    # varies it, so those values are fixed in the kernel.
+    hyperencoder_attn_backend: str = "dp"
+    """HyperEncoder core-attention backend: "dp" (dense per-layer mask) or
+    "triton" (packed prefix-LM core). Validated in the model config's
+    __post_init__ ("flex" and unknown values raise)."""
+
+    hyperencoder_packed_decoder: bool = False
+    """Run the HyperEncoder trunk as a single packed call. Requires
+    hyperencoder_attn_backend="triton"."""
+
     intermediate_size: int | None = None
     """Transformer Feed-Forward Network hidden size. This is set to 4*hidden_size
     if not provided."""

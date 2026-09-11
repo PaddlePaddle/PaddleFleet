@@ -117,10 +117,10 @@ class PrefixLMTritonCore(FleetLayer):
             if softmax_scale is not None
             else 1.0 / math.sqrt(float(head_dim))
         )
-        # Block sizes and launch tuning come from config fields (declared and
-        # validated on the HyperEncoder config). Changing the block shape changes
-        # both the plan and the softmax reduction tree, so it must be consistent
-        # across a run.
+        # Block sizes and launch tuning are read from config with defaults (the
+        # fields are declared on the HyperEncoder config). Changing the block
+        # shape changes both the plan and the softmax reduction tree, so it must
+        # be consistent across a run.
         self.block_m = int(getattr(config, "hyperencoder_triton_block_m", 64))
         self.block_n = int(getattr(config, "hyperencoder_triton_block_n", 64))
         self.fwd_warps = int(
