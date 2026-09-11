@@ -12,20 +12,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HyperBody decoder 在 PaddleFleet 侧的部分：**只提供组件**。
+"""The PaddleFleet side of the HyperBody decoder: **components only**.
 
-分工与参考实现 ``fleet_formers`` 的 hyperencoder 一致：
-
-| 侧 | 内容 |
+| Side | Contents |
 |---|---|
-| **PaddleFleet（本包）** | ``layer_specs.py`` —— 12 层 backbone 的 ``LayerSpec`` 列表 / block spec |
-| PaddleFormers ``transformers/hyperbody_decoder/`` | HF-style config → ``GPTConfig`` 的转换 + 组网装配 + 顶层 Model |
+| **PaddleFleet (this package)** | ``layer_specs.py`` -- the ``LayerSpec`` list / block spec for the backbone |
+| PaddleFormers ``transformers/hyperbody_decoder/`` | HF-style config -> ``GPTConfig`` conversion + model assembly + top-level Model |
 
-几何常量与 ``GPTConfig`` 的装配**不在这里** —— 它们属于「HF-style config 到
-GPTConfig 的转换」这一职责，全部收在 formers 的 ``configuration.py`` /
-``modeling.py``。这与 hyperencoder 那边 ``build_hyperencoder_config`` 位于
-``PaddleFormers/paddleformers/transformers/hyperencoder/configuration.py``
-是同一个约定。
+Geometry constants and ``GPTConfig`` assembly do **not** live here -- they belong to
+the "HF-style config to GPTConfig conversion" responsibility, which is entirely
+collected in the PaddleFormers ``configuration.py`` / ``modeling.py``.
 """
 
 from .layer_specs import (
