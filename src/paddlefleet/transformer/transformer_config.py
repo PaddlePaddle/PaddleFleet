@@ -1541,6 +1541,12 @@ class TransformerConfig(ModelParallelConfig):
 
     Corresponds to ``linear_attn_config["gate_lower_bound"]``."""
 
+    linear_cp_use_tf32x3_affine_chain: bool = False
+    """KDA only, and only when context parallel is on. Use tf32x3 instead of
+    ieee for the affine-chain dots of fla's CP pre-process / merge kernels,
+    which trades a little accuracy in the cross-rank state fixup for speed.
+    NVIDIA-only; fla falls back to ieee (with a warning) on other backends."""
+
     ####################
     # DSA (DeepSeek Sparse Attention)
     ####################
