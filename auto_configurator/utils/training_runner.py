@@ -60,7 +60,7 @@ def build_launch_cmd(
     train_data = os.environ.get("AUTOCONFIG_TRAIN_DATA", "")
     eval_data = os.environ.get("AUTOCONFIG_EVAL_DATA", "")
 
-    # 构建 paddleformers-cli train 命令
+    # 构建 paddlefleet-cli train 命令
     # 如果没有提供 base_yaml，这里只打印配置信息
     if base_yaml is None:
         return (
@@ -118,7 +118,7 @@ def build_launch_cmd(
         f"NNODES={nnodes} RANK={rank} "
         f"MASTER_ADDR={master} MASTER_PORT={port} "
         f"CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 "
-        f"paddleformers-cli train {base_yaml} " + " ".join(overrides)
+        f"paddlefleet-cli train {base_yaml} " + " ".join(overrides)
     )
     return cmd
 

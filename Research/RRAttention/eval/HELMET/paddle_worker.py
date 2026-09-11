@@ -18,7 +18,7 @@ if str(ROOT) not in sys.path:
 
 import numpy as np
 import paddle
-from paddleformers.generation import GenerationConfig
+from paddlefleet.generation import GenerationConfig
 
 
 def disable_unavailable_deep_ep():
@@ -162,7 +162,7 @@ def cast_tiny_model(model, dtype):
 
 def build_tiny_model(model_type, dtype):
     if model_type == "llama":
-        from paddleformers.transformers import LlamaConfig, LlamaForCausalLM
+        from paddlefleet.transformers import LlamaConfig, LlamaForCausalLM
 
         config = LlamaConfig(
             vocab_size=1024,
@@ -184,8 +184,8 @@ def build_tiny_model(model_type, dtype):
         )
 
     if model_type == "qwen":
-        from paddleformers.transformers import Qwen2Config
-        from paddleformers.transformers.qwen2.modeling import (
+        from paddlefleet.transformers import Qwen2Config
+        from paddlefleet.transformers.qwen2.modeling import (
             Qwen2ForCausalLMDeprecated,
         )
 
@@ -211,7 +211,7 @@ def build_tiny_model(model_type, dtype):
         )
 
     if model_type == "ernie":
-        from paddleformers.transformers import (
+        from paddlefleet.transformers import (
             Ernie4_5Config,
             Ernie4_5ForCausalLM,
         )
@@ -248,13 +248,13 @@ def load_model(model_name, model_type, dtype, tiny_random):
     from rrattn.checkpoint_utils import load_pretrained_checkpoint
 
     if model_type == "llama":
-        from paddleformers.transformers import LlamaForCausalLM
+        from paddlefleet.transformers import LlamaForCausalLM
 
         return load_pretrained_checkpoint(
             LlamaForCausalLM, model_name, dtype=dtype
         )
     if model_type == "qwen":
-        from paddleformers.transformers.qwen2.modeling import (
+        from paddlefleet.transformers.qwen2.modeling import (
             Qwen2ForCausalLMDeprecated,
         )
 
@@ -262,7 +262,7 @@ def load_model(model_name, model_type, dtype, tiny_random):
             Qwen2ForCausalLMDeprecated, model_name, dtype=dtype
         )
     if model_type == "ernie_moe":
-        from paddleformers.transformers.ernie4_5_moe.modeling import (
+        from paddlefleet.transformers.ernie4_5_moe.modeling import (
             Ernie4_5_MoeForCausalLM,
         )
 
@@ -270,7 +270,7 @@ def load_model(model_name, model_type, dtype, tiny_random):
             Ernie4_5_MoeForCausalLM, model_name, dtype=dtype
         )
     if model_type == "ernie":
-        from paddleformers.transformers import Ernie4_5ForCausalLM
+        from paddlefleet.transformers import Ernie4_5ForCausalLM
 
         return load_pretrained_checkpoint(
             Ernie4_5ForCausalLM, model_name, dtype=dtype
