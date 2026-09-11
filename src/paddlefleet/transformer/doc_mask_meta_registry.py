@@ -44,7 +44,11 @@ the same scheme ``ernie-core``'s ``MagicInstance`` uses:
 
 * one counter per consumer, keyed by ``(layer_number, is_mtp_layer)``;
 * advanced exactly once per micro-batch, from ``TransformerLayer.forward`` --
-  which always runs outside the recompute wrapper, unlike ``_forward_impl``;
+  which for a decoder layer always runs outside the recompute wrapper, unlike
+  ``_forward_impl``. MTP layers are not consumers: their mask group is never
+  prebuilt, and their ``forward`` *is* inside a recompute segment (the MTP
+  module recomputes one level above it), so they opt out in
+  ``_docmask_meta_kwargs`` and build their metadata privately;
 * ``mb_idx = counter % accumulate_steps`` picks the slot;
 * counters are reset and audited at the step boundary by the trainer.
 

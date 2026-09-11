@@ -317,6 +317,22 @@ class TransformerConfig(ModelParallelConfig):
     flashmask_use_varlen: bool = False
     """If True, convert flashmask to varlen in attention."""
 
+    # ---- HyperEncoder attention backend ----
+    # Used only by the HyperEncoder model (models/hyperencoder/*). Declared here
+    # so the switches are first-class config fields (validated, serialized,
+    # test-covered) instead of environment variables. Other models leave them at
+    # their defaults and never read them. The Triton kernel launch tuning
+    # (block size / warps / stages / plan-cache) is not exposed: production never
+    # varies it, so those values are fixed in the kernel.
+    hyperencoder_attn_backend: str = "dp"
+    """HyperEncoder core-attention backend: "dp" (dense per-layer mask) or
+    "triton" (packed prefix-LM core). Validated in the model config's
+    __post_init__ ("flex" and unknown values raise)."""
+
+    hyperencoder_packed_decoder: bool = False
+    """Run the HyperEncoder trunk as a single packed call. Requires
+    hyperencoder_attn_backend="triton"."""
+
     intermediate_size: int | None = None
     """Transformer Feed-Forward Network hidden size. This is set to 4*hidden_size
     if not provided."""
@@ -1033,6 +1049,37 @@ class TransformerConfig(ModelParallelConfig):
     "dualchunk_allgather": balanced front+rear chunk splitting (default).
     "contiguous_allgather": simple rank-order contiguous slicing.
     "contiguous_a2a".
+    """
+
+    linear_cp_mode: str = "chunkwise"
+    """How the linear-attention layers (KDA, ...) parallelise over the CP group.
+
+    This is *not* a kernel selector -- the kernel is chunkwise either way. It
+    picks which axis the CP group cuts, and it only affects these layers: the
+    global token layout stays whatever ``cp_balance_mode`` says, and every other
+    layer of the same model is unaffected.
+
+    ``"chunkwise"`` (default) cuts the **sequence**, which is what the layer has
+    always done: each rank owns ``s/cp`` tokens, relays the chunk state rank to
+    rank, and exchanges a conv halo with its neighbours. Works under any
+    ``cp_balance_mode``, but cannot be bitwise against a single card -- the halo
+    backward is a partial sum, and a rank whose local varlen segments do not line
+    up with the global 64-token chunk grid re-segments the recurrence.
+
+    ``"headwise"`` cuts the **heads** (Ulysses): before the short conv each rank
+    trades its ``[s/cp, all heads]`` slice for ``[s, heads/cp]``, so the conv and
+    the recurrence see the *whole* sequence and run with plain single-card
+    semantics -- no halo, no state relay, global ``cu_seqlens`` -- and the output
+    is swapped back before ``out_norm``. That is what buys bitwise: the forward,
+    the input gradients and the per-head parameter gradients match a single card
+    exactly, leaving only the dense projections' ``dW`` at the ~1e-7 any-CP floor.
+
+    Costs and limits of ``"headwise"``: five all-to-all exchanges forward and one
+    back per layer instead of the halo exchange; requires
+    ``(num_key_heads // tp) % cp == 0`` and ``(num_value_heads // tp) % cp == 0``
+    (``KimiDeltaAttention.__init__`` raises otherwise); and because the swap
+    assumes rank ``r`` owns the contiguous token block ``[r*s/cp, (r+1)*s/cp)``,
+    ``cp_balance_mode`` must be one of the contiguous layouts.
     """
 
     ####################
@@ -3383,15 +3430,40 @@ class TransformerConfig(ModelParallelConfig):
                 )
             _warnings.warn(f"[MULTIMAX-CONFIG] multimax_modules={_multimax}")
 
-        if self.cp_balance_mode not in {
+        valid_cp_balance_modes = {
             "dualchunk_allgather",
             "contiguous_allgather",
             "contiguous_a2a",
-        }:
+        }
+        if self.cp_balance_mode not in valid_cp_balance_modes:
             raise ValueError(
                 f"cp_balance_mode={self.cp_balance_mode!r} is invalid. "
-                "Must be one of {'dualchunk_allgather', 'contiguous_allgather', 'contiguous_a2a'}."
+                f"Must be one of {sorted(valid_cp_balance_modes)}."
             )
+
+        # only support linear_cp_mode in {chunkwise, headwise}
+        valid_linear_cp_modes = {"chunkwise", "headwise"}
+        if self.linear_cp_mode not in valid_linear_cp_modes:
+            raise ValueError(
+                f"linear_cp_mode={self.linear_cp_mode!r} is invalid. "
+                f"Must be one of {sorted(valid_linear_cp_modes)}."
+            )
+        if self.linear_cp_mode == "headwise" and self.context_parallel_size > 1:
+            # The head swap is layer-local: heads are exchanged by all-to-all
+            # inside the layer and swapped back before ``out_norm``, which is only
+            # sound while the *global* token layout is the contiguous one the swap
+            # assumes ("rank r owns tokens [r*s/cp, (r+1)*s/cp)").  Under the
+            # dualchunk layout each rank holds two non-adjacent chunks, so the
+            # gathered sequence would be permuted and the recurrence -- which is
+            # order-dependent -- would silently compute against the wrong token
+            # order.  ``startswith`` rather than an exact value: the swap does not
+            # care which *contiguous* mode the non-linear-attention layers use.
+            if not self.cp_balance_mode.startswith("contiguous"):
+                raise ValueError(
+                    "linear_cp_mode='headwise' needs a contiguous "
+                    "cp_balance_mode (the head swap assumes rank r owns the "
+                    f"contiguous token block), got {self.cp_balance_mode!r}."
+                )
 
         # only support hybrid_mla_cp_mode == contiguous_a2a if not None
         if self.hybrid_mla_cp_mode is not None:

@@ -282,16 +282,14 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
             #
             # The forward output was formed with the sink competing in the softmax
             # denominator: p_k = exp(l_k - lse_full), lse_full = logaddexp(lse_kv,
-            # sink). But the forward kernel returns a KV-only ``lse`` (the sink is
-            # excluded), and the cuDNN DSA backward's ``d_qk != d_v`` branch (the
-            # absorbed-MQA Dk=576 / Dv=512 layout used here) consumes the passed LSE
-            # verbatim -- it does NOT fold the sink into the denominator itself.
-            # Feeding it the KV-only LSE therefore overestimates every p_k for a
-            # finite sink and corrupts dq (confirmed: packed finite-sink dQ cos
-            # 0.976 vs the dense reference). Fix: for a finite (learnable) sink on
-            # this Dk!=Dv path, pass a sink-inclusive LSE and neutralize the sink
-            # argument (a -1e30 sink can no longer double-count in the kernel), so
-            # p_k matches the forward exactly.
+            # sink), while the forward kernel returns a KV-only ``lse``. The sink
+            # therefore has to reach the backward exactly once: pass a
+            # sink-inclusive LSE *and* neutralize the sink argument, because the
+            # vendored cuDNN DSA backward folds ``attn_sink`` into the LSE itself
+            # (``_interface_sm100.py``) and would otherwise count it twice.
+            # Measured on SM100, dq rel-err vs an fp32 autograd reference at
+            # sink=3.0: this pairing 3.7e-3, double-counted 0.30, sink missing
+            # from the backward entirely 1.96.
             #
             # Sinkless keeps the KV-only ``lse`` and the -1e30 ``sink`` untouched
             # (logaddexp(lse, -1e30) == lse), so that path is bit-for-bit unchanged.
@@ -299,13 +297,12 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
             # KV-only ``lse`` (it re-derives lse_full from it).
             lse_bwd = lse
             sink_bwd = sink
-            # This correction is load-bearing and silent: dropping it leaves the
-            # forward output bit-identical (it only touches the backward), while
-            # ``dq`` gets ~75x and ``dkv`` ~120x worse against an autograd
-            # reference. Do not use forward agreement to conclude the backward is
-            # fine. See ``tests/.../test_block_sparse_dsa_gradcheck.py::
+            # Load-bearing and silent: getting the sink count wrong here leaves the
+            # forward output bit-identical (this only touches the backward). Do not
+            # use forward agreement to conclude the backward is fine. See
+            # ``tests/.../test_block_sparse_dsa_gradcheck.py::
             # test_finite_sink_lse_fix_matters``, which re-drives the raw kernels
-            # with the uncorrected KV-only LSE to pin the gap.
+            # with a sink-free backward to pin the gap.
             if ctx.learnable_sink and dk != d_v:
                 lse_bwd = paddle.logaddexp(
                     lse.astype("float32"),
