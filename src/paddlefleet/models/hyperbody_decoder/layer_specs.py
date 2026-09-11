@@ -55,6 +55,7 @@ from typing import TYPE_CHECKING
 from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_block import (
+    LayerNormImpl,
     TransformerBlockSublayersSpec,
 )
 
@@ -86,7 +87,17 @@ def _is_moe_layer(config: TransformerConfig, layer_idx: int) -> bool:
                 f"moe_layer_freq length {len(freq)} != num_hidden_layers "
                 f"{config.num_hidden_layers}"
             )
-        return bool(freq[layer_idx])
+        flag = freq[layer_idx]
+        # Only 0/1 is a valid per-layer flag. Any other truthy value (2, -1,
+        # a string, ...) would be silently coerced to a MoE layer by bool(),
+        # producing a different model structure. get_gpt_decoder_layers_spec
+        # rejects the same non-0/1 patterns (gpt_layer_specs.py:825-826).
+        if flag not in (0, 1):
+            raise ValueError(
+                f"moe_layer_freq[{layer_idx}] = {flag!r} is not a 0/1 flag; "
+                "moe_layer_freq must be a per-layer 0/1 list."
+            )
+        return bool(flag)
     raise TypeError(
         f"HyperBody decoder requires moe_layer_freq to be a per-layer list, got {type(freq).__name__}. "
         "Passing an int would take the `i % N` semantics, an inevitable mismatch."
@@ -109,6 +120,19 @@ def get_hyperbody_decoder_layer_specs(
         raise ValueError(
             "HyperBody decoder is pure MHA (num_query_groups == num_attention_heads). "
             "multi_latent_attention must be False."
+        )
+    # get_gpt_layer_local_spec would otherwise switch to the DSV4 hybrid
+    # attention path (gpt_layer_specs.py:637-645), which is not pure MHA.
+    if getattr(config, "experimental_attention_variant", None) is not None:
+        raise ValueError(
+            "HyperBody decoder is pure MHA; experimental_attention_variant "
+            f"must be None, got {config.experimental_attention_variant!r}."
+        )
+    # use_vha_attention would route self_attention to SelfAttentionVHA
+    # (gpt_layer_specs.py:234-262), again not pure MHA.
+    if getattr(config, "use_vha_attention", False):
+        raise ValueError(
+            "HyperBody decoder is pure MHA; use_vha_attention must be False."
         )
 
     specs: list[LayerSpec] = []
@@ -134,15 +158,20 @@ def get_hyperbody_decoder_block_spec(
 ) -> TransformerBlockSublayersSpec:
     """Produce the spec for the whole block (N layers + final norm).
 
-    ``layer_norm=None`` means we keep the one that ``TransformerBlock`` builds itself
-    according to ``config.normalization``.
+    ``layer_norm`` is the stock ``LayerNormImpl`` (``WrappedPaddleNorm``), which
+    resolves to RMSNorm / LayerNorm per ``config.normalization`` -- the same
+    default ``_get_block_sublayers_spec`` applies when a bare ``LayerSpec`` is
+    handed to ``TransformerBlock``. This is required: ``TransformerBlock`` only
+    builds the final norm when ``layer_norm`` is truthy, so a ``None`` here
+    would silently drop the final norm (transformer_block.py:170-182).
 
-    This function is not used on the ``paddleformers-cli`` pipeline path (that path
-    wants the bare ``list[LayerSpec]``, see ``get_hyperbody_decoder_layer_specs``);
-    it is for single-card scripts / unit tests that build a ``TransformerBlock``
-    directly without going through ``PipelineLayer``.
+    This function is not used on the ``paddleformers-cli`` pipeline path (that
+    path wants the bare ``list[LayerSpec]``, see
+    ``get_hyperbody_decoder_layer_specs``); it is for single-card scripts /
+    unit tests that build a ``TransformerBlock`` directly without going through
+    ``PipelineLayer``.
     """
     return TransformerBlockSublayersSpec(
         layer_specs=get_hyperbody_decoder_layer_specs(config),
-        layer_norm=None,
+        layer_norm=LayerNormImpl,
     )

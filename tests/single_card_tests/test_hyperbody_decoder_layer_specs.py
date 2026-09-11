@@ -27,6 +27,7 @@ from paddlefleet.models.hyperbody_decoder.layer_specs import (
     get_hyperbody_decoder_layer_specs,
 )
 from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.transformer_block import LayerNormImpl
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
@@ -78,10 +79,12 @@ class TestHyperBodyDecoderLayerSpecs(unittest.TestCase):
                 AttnMaskType.causal,
             )
 
-    def test_block_spec_final_norm_is_none(self):
+    def test_block_spec_final_norm_is_stock_norm(self):
+        # layer_norm must be the stock LayerNormImpl -- a None would make
+        # TransformerBlock silently drop the final norm.
         config = _make_config()
         block = get_hyperbody_decoder_block_spec(config)
-        self.assertIsNone(block.layer_norm)
+        self.assertIs(block.layer_norm, LayerNormImpl)
         self.assertEqual(len(block.layer_specs), config.num_hidden_layers)
 
     def test_int_moe_layer_freq_rejected(self):
@@ -99,6 +102,29 @@ class TestHyperBodyDecoderLayerSpecs(unittest.TestCase):
     def test_multi_latent_attention_rejected(self):
         # HyperBody decoder is pure MHA; MLA must be refused early.
         config = _make_config(multi_latent_attention=True)
+        with self.assertRaises(ValueError):
+            get_hyperbody_decoder_layer_specs(config)
+
+    def test_non_binary_moe_layer_freq_rejected(self):
+        # A non-0/1 entry would be silently coerced to a MoE layer by bool();
+        # it must be rejected instead.
+        config = _make_config(moe_layer_freq=[0, 2, 1, 1])
+        with self.assertRaises(ValueError):
+            _is_moe_layer(config, 1)
+
+    def test_dsv4_hybrid_attention_variant_rejected(self):
+        # experimental_attention_variant="dsv4_hybrid" would route to the DSV4
+        # hybrid attention path, not pure MHA -> must be refused early.
+        config = _make_config()
+        config.experimental_attention_variant = "dsv4_hybrid"
+        with self.assertRaises(ValueError):
+            get_hyperbody_decoder_layer_specs(config)
+
+    def test_vha_attention_rejected(self):
+        # use_vha_attention=True would route self_attention to SelfAttentionVHA,
+        # not pure MHA -> must be refused early.
+        config = _make_config()
+        config.use_vha_attention = True
         with self.assertRaises(ValueError):
             get_hyperbody_decoder_layer_specs(config)
 
