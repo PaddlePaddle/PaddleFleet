@@ -58,18 +58,21 @@ class TestFuseStackUe8m0ScaleTransposeTriton(unittest.TestCase):
             .transpose([0, 2, 1])
             .reshape([-1, m])
         )
-        np.testing.assert_allclose(
-            expected_out.numpy(),
-            transpose_out.numpy(),
-            atol=0,
-            rtol=0,
+        # ``paddlefleet.utils.paddle_patch`` makes ``.numpy()`` return an
+        # ml_dtypes float8_e4m3fn array instead of Paddle's native int8 bit
+        # view. ml_dtypes float8 cannot take part in the dtype promotion
+        # ``np.isclose`` performs, so compare the raw bytes to keep the
+        # bit-exact semantics that ``atol=0, rtol=0`` was expressing.
+        expected_bytes = expected_out.numpy().view(np.int8)
+        transpose_bytes = transpose_out.numpy().view(np.int8)
+        np.testing.assert_array_equal(
+            expected_bytes,
+            transpose_bytes,
             err_msg=f"output mismatch for num_experts={num_experts}, m={m}, k={k}",
         )
-        np.testing.assert_allclose(
+        np.testing.assert_array_equal(
             converted_scale.numpy(),
             transpose_scale.numpy(),
-            atol=0,
-            rtol=0,
             err_msg=f"scale mismatch for num_experts={num_experts}, m={m}, k={k}",
         )
 
