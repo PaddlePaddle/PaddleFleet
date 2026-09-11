@@ -149,13 +149,11 @@ jobs:
           source /root/proxy
           mkdir -p /home/.cache/pip
           pip cache dir
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-          bash miniconda.sh -b -p $HOME/miniconda -u
+          wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
           conda init bash
-          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
           conda activate python${PYTHON_VERSION}
           paddle_url=${PADDLE_URL}
           if [ ${CUDA_VERSION} == "cu129" ]; then
@@ -326,13 +324,11 @@ jobs:
           rm -rf * .[^.]*
           source /root/proxy
           pip install --upgrade pip
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-          bash miniconda.sh -b -p $HOME/miniconda -u
+          wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
           conda init bash
-          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
           conda activate python${PYTHON_VERSION}
           paddle_url=${PADDLE_URL}
           if [ ${CUDA_VERSION} == "cu129" ]; then
@@ -520,13 +516,11 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-          bash miniconda.sh -b -p $HOME/miniconda -u
+          wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
           conda init bash
-          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
           conda activate python${PYTHON_VERSION}
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
@@ -797,13 +791,11 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-          bash miniconda.sh -b -p $HOME/miniconda -u
+          wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
           conda init bash
-          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
           conda activate python${PYTHON_VERSION}
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
@@ -1329,13 +1321,11 @@ jobs:
           mkdir -p /home/.cache/pip
           pip cache dir
           pip install --upgrade pip
-          wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
-          bash miniconda.sh -b -p $HOME/miniconda -u
+          wget -q https://paddle-qa.bj.bcebos.com/paddlefleet/whl/Miniforge3-Linux-x86_64.sh -O miniconda.sh
+          bash miniconda.sh -b -p $HOME/miniconda -u > /dev/null
           source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
-          conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
           conda init bash
-          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y
+          conda create -n python${PYTHON_VERSION} python=${PYTHON_VERSION} -y -q > /dev/null
           conda activate python${PYTHON_VERSION}
           git clone https://github.com/PaddlePaddle/PaddleFleet.git
           cd PaddleFleet
