@@ -17,7 +17,7 @@ from collections.abc import Iterable
 
 import paddle
 from paddle.nn.functional.flash_attention import flash_attention
-from paddleformers.nn.attention.eager_attention import repeat_kv
+from paddlefleet.nn.attention.eager_attention import repeat_kv
 
 from .flexprefill import flex_prefill
 from .full_prefill import flash_full_prefill

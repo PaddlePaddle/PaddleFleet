@@ -6,7 +6,7 @@
 ## 目录结构
 
 - `setup_venvs.sh`：创建/复用 `venv/torch`、`venv/paddle` 两个虚拟环境，分别安装
-  Torch 侧（Megatron-LM + ms-swift）与 Paddle 侧（PaddleFleet + PaddleFormers）依赖。
+  Torch 侧（Megatron-LM + ms-swift）与 Paddle 侧（PaddleFleet）依赖。
 - `run_alignment_test.sh`：对齐测试入口，依次跑每个用例的 paddle/torch 训练脚本，
   再用 `compare_loss.py` 对比两侧日志中的 loss md5，汇总所有用例的成功/失败。
 - `compare_loss.py`：解析训练日志里的 `per_token_loss` / `final_loss` 锚点并逐 step

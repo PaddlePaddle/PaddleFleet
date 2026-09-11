@@ -343,13 +343,13 @@ def _parse_preset_key(preset_key: str):
 
 
 def load_args_from_yaml(yaml_path: str, **overrides) -> argparse.Namespace:
-    """从标准 PaddleFormers 训练 YAML 推断 AutoConfigurator 参数.
+    """从标准 PaddleFleet 训练 YAML 推断 AutoConfigurator 参数.
 
     自动从 YAML 中的 model_name_or_path 推断 model_type/model_size/moe，
     从 use_expert_parallel 推断 MoE 模式。搜索空间等参数通过 overrides 传入。
 
     Args:
-        yaml_path: 标准 PaddleFormers 训练 YAML 路径
+        yaml_path: 标准 PaddleFleet 训练 YAML 路径
         **overrides: 覆盖推断值的键值对，如 tensor_parallel_sizes="1", max_steps=10
 
     Returns:

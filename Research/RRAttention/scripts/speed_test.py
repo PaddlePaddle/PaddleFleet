@@ -208,13 +208,13 @@ def load_model(model_name, model_type, dtype):
     from rrattn.checkpoint_utils import load_pretrained_checkpoint
 
     if model_type == "llama":
-        from paddleformers.transformers import LlamaForCausalLM
+        from paddlefleet.transformers import LlamaForCausalLM
 
         return load_pretrained_checkpoint(
             LlamaForCausalLM, model_name, dtype=dtype
         )
     if model_type == "qwen":
-        from paddleformers.transformers.qwen2.modeling import (
+        from paddlefleet.transformers.qwen2.modeling import (
             Qwen2ForCausalLMDeprecated,
         )
 
@@ -222,13 +222,13 @@ def load_model(model_name, model_type, dtype):
             Qwen2ForCausalLMDeprecated, model_name, dtype=dtype
         )
     if model_type == "ernie":
-        from paddleformers.transformers import Ernie4_5ForCausalLM
+        from paddlefleet.transformers import Ernie4_5ForCausalLM
 
         return load_pretrained_checkpoint(
             Ernie4_5ForCausalLM, model_name, dtype=dtype
         )
     if model_type == "ernie_moe":
-        from paddleformers.transformers.ernie4_5_moe.modeling import (
+        from paddlefleet.transformers.ernie4_5_moe.modeling import (
             Ernie4_5_MoeForCausalLM,
         )
 
@@ -239,7 +239,7 @@ def load_model(model_name, model_type, dtype):
 
 
 def load_tokenizer(model_name):
-    from paddleformers.transformers import AutoTokenizer
+    from paddlefleet.transformers import AutoTokenizer
 
     return AutoTokenizer.from_pretrained(model_name, use_fast=False)
 

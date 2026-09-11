@@ -31,6 +31,8 @@ feeded = 'feeded'
 grad = "grad"
 Halfs = 'Halfs'
 kinf = 'kinf'
+# Part of the HuggingFace dataset name "DoclingMatix" used by CI fixtures
+Matix = 'Matix'
 operants = 'operants'
 Optin = 'Optin'
 padd = 'padd'
