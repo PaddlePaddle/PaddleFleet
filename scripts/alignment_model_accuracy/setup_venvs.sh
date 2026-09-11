@@ -30,7 +30,6 @@ readonly NIGHTLY_WHL_BASE="https://paddle-whl.bj.bcebos.com/nightly/cu130"
 # PaddleFleet will install default paddle"
 readonly PADDLEFLEET_WHEEL="${PADDLEFLEET_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/paddlefleet/paddlefleet-0.4.0.dev20260807+d01517879a3-py3-none-any.whl}"
 readonly PADDLEFLEET_OPS_WHEEL="${PADDLEFLEET_OPS_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/paddlefleet-ops/paddlefleet_ops-0.4.0.dev20260807+d0151787-cp312-cp312-linux_x86_64.whl}"
-readonly PADDLEFORMERS_WHEEL="${NIGHTLY_WHL_BASE}/paddleformers/paddleformers-0.0.0.dev-py3-none-any.whl"
 readonly MEGATRON_CORE_WHEEL="${MEGATRON_CORE_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/megatron_core-0.19.0+f2706b6f3-cp312-cp312-linux_x86_64.whl}"
 readonly MS_SWIFT_WHEEL="${MS_SWIFT_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/ms_swift-4.5.0.dev0-py3-none-any.whl}"
 readonly MCORE_BRIDGE_WHEEL="${MCORE_BRIDGE_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/mcore_bridge-1.7.0.dev0-py3-none-any.whl}"
@@ -45,7 +44,7 @@ Usage: setup_venvs.sh
 
 Create or reuse:
   - venv/torch   (torch + Megatron-LM + ms-swift)
-  - venv/paddle  (paddlepaddle-gpu + PaddleFleet + PaddleFormers)
+  - venv/paddle  (paddlepaddle-gpu + PaddleFleet)
 
 Both venvs are created next to this script, and the four sibling repositories
 are installed editable from the same directory.
@@ -145,7 +144,7 @@ setup_paddle_venv() {
 
     # PaddleFleet. --no-deps is intentionally dropped: the wheel's pinned
     # paddlepaddle-gpu dependency must be installed here, otherwise
-    # venv/paddle/bin/paddleformers-cli fails to import paddle at runtime.
+    # venv/paddle/bin/paddlefleet-cli fails to import paddle at runtime.
     uv pip install --python "${paddle_py}" "${paddle_index[@]}" \
         --force-reinstall \
         "${PADDLEFLEET_WHEEL}"
@@ -162,11 +161,6 @@ setup_paddle_venv() {
         "${PADDLEFLEET_OPS_WHEEL}"
     # uv pip install --python "${paddle_py}" -v --no-build-isolation \
     #     -e ./PaddleFleet/packages/paddlefleet_ops
-
-    # PaddleFormers
-    UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --python "${paddle_py}" --force-reinstall \
-        "${PADDLEFORMERS_WHEEL}"
-    # uv pip install --python "${paddle_py}" -v -e ./PaddleFormers
 }
 
 print_installed_versions() {

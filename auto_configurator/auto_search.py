@@ -16,7 +16,7 @@
 
 """AutoConfigurator Search Entry - 自动搜索最优并行策略并 benchmark
 
-从标准 PaddleFormers 训练 YAML 自动推断模型类型，
+从标准 PaddleFleet 训练 YAML 自动推断模型类型，
 通过评分函数筛选 Top-N 配置后批量运行 benchmark。
 
 用法:
@@ -129,7 +129,7 @@ def main():
         type=str,
         nargs="?",
         default=DEFAULT_YAML,
-        help="PaddleFormers 训练 YAML 路径 (default: utils/qwen3_moe_30b.yaml)",
+        help="PaddleFleet 训练 YAML 路径 (default: utils/qwen3_moe_30b.yaml)",
     )
     # search space (optional overrides)
     parser.add_argument(

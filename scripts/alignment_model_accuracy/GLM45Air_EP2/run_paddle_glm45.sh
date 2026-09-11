@@ -73,8 +73,8 @@ export SAVE_TENSOR_SAVE_NPY="${SAVE_TENSOR_SAVE_NPY:-0}"
 export SAVE_TENSOR_NAMES=output,grad,input
 
 RUN_TS="$(date +%Y%m%d-%H%M%S)"
-export PADDLEFORMERS_DIST_LOG="${WORKSPACE_DIR}/logs/paddle/${RUN_TS}"
+export PADDLEFLEET_DIST_LOG="${WORKSPACE_DIR}/logs/paddle/${RUN_TS}"
 export PF_TENSOR_DEBUG_DIR="${WORKSPACE_DIR}/logs/pf"
-mkdir -p "${PADDLEFORMERS_DIST_LOG}" "${PF_TENSOR_DEBUG_DIR}"
+mkdir -p "${PADDLEFLEET_DIST_LOG}" "${PF_TENSOR_DEBUG_DIR}"
 
-exec "${WORKSPACE_DIR}/venv/paddle/bin/paddleformers-cli" train "${CONFIG}"
+exec "${WORKSPACE_DIR}/venv/paddle/bin/paddlefleet-cli" train "${CONFIG}"

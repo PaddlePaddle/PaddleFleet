@@ -56,7 +56,7 @@ except ImportError as e:
     print("Please set PYTHONPATH before running this script:")
     print()
     print(
-        "  export PYTHONPATH=<path/to/PaddleFleet/src>:<path/to/PaddleFormers>:$PYTHONPATH"
+        "  export PYTHONPATH=<path/to/PaddleFleet/src>:<path/to/PaddleFleet>:$PYTHONPATH"
     )
     print()
     raise e

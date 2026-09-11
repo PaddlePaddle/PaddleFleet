@@ -73,7 +73,7 @@ def new_attention_forward(
     key_states = key_states.transpose(1, 2)
     value_states = value_states.transpose(1, 2)
 
-    from paddleformers.transformers.qwen2.modeling import apply_rotary_pos_emb
+    from paddlefleet.transformers.qwen2.modeling import apply_rotary_pos_emb
 
     cos, sin = position_embeddings
     query_states, key_states = apply_rotary_pos_emb(
@@ -115,7 +115,7 @@ def patch_qwen_attention(
     rrattn_version: str = "v1",
     **kwargs,
 ):
-    from paddleformers.transformers.qwen2.modeling import Qwen2Attention
+    from paddlefleet.transformers.qwen2.modeling import Qwen2Attention
 
     from .patch_utils import patch_attention_layers
 
