@@ -1960,7 +1960,9 @@ def flashmask_attention_cp(
         dropout (float, optional): Dropout probability. Defaults to 0.0
         causal (bool, optional): Whether to use causal attention. Defaults to False
         training (bool, optional): Whether in training mode. Defaults to True
-        mode (str, optional): Attention mode. Defaults to "dualchunk_allgather"
+        mode (str, optional): Attention mode. Defaults to "dualchunk_allgather".
+            The "_overlap" suffix selects the variant that overlaps the KV
+            communication inside the attention kernel
     Returns:
         paddle.Tensor: Attention output with shape [batch, seq_len/n, num_heads, head_dim]
     Example:
@@ -1980,6 +1982,27 @@ def flashmask_attention_cp(
         )
         ```
     """
+    if mode.endswith("_overlap"):
+        # Imported lazily: the overlapped path needs a newer paddlefleet_ops
+        # than the rest of this module, and it imports back from here.
+        from paddlefleet.overlap_context_parallel import (
+            overlap_flashmask_attention_cp,
+        )
+
+        return overlap_flashmask_attention_cp(
+            query,
+            key,
+            value,
+            startend_row_indices,
+            fixed_seed_offset,
+            dropout,
+            causal,
+            training,
+            learnable_sink,
+            softmax_scale,
+            mode,
+        )
+
     if mode == "contiguous_swap2p":
         hcg = fleet.get_hybrid_communicate_group()
         cp_group = hcg.get_context_parallel_group()

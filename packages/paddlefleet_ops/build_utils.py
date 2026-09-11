@@ -411,7 +411,7 @@ def get_libs():
             artifacts=[
                 Artifact("flash_mask", "flash_mask"),
             ],
-            extra_env={"FLASHMASK_BUILD": "fa4+utils"},
+            extra_env={"FLASHMASK_BUILD": "fa4+utils+ovl"},
             include_dirs=[
                 "flash_mask/flashmask_attention_v3/csrc",
                 "flash_mask/flashmask_attention_v3",
