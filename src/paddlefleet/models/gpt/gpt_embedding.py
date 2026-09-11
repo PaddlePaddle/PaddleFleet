@@ -42,6 +42,7 @@ from paddlefleet.tensor_parallel.mappings import (
 from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.kimi_delta_attention import build_cu_seqlens
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.utils import get_pg_size
 
 if TYPE_CHECKING:
     from paddle import Tensor
@@ -119,6 +120,10 @@ class GPTEmbedding(FleetLayer):
         self.rotary_pos_emb = None
         self.swa_rotary_pos_emb = None
         self.mrope_section = mrope_section
+        # Claim main_grad so MixPrecision skips this Parameter. The
+        # PyLayer deposits IndexingBackward into this buffer (E-471).
+        if self.config.use_accuracy_compatible:
+            self.embedding.embed_tokens.weight.main_grad = None
         self.position_embedding_type = position_embedding_type
         if sublayers_spec.rope_embedding is not None:
             self.rotary_pos_emb = build_spec_layer(
@@ -305,6 +310,27 @@ class GPTEmbedding(FleetLayer):
                     "multi_latent_attention is not supported when gpt_model_use_experimental_version=True and sequence_parallel=True"
                 )
         input_ids = dict_args["input_ids"]
+        # In accuracy-compatible mode, zero the MTP carrier tail so offset slices match
+        # Megatron roll-and-zero-fill (E-217). FLAG+UAC alone stays on the
+        # structure carrier. Main path slices input_ids[:, :-num_nextn]
+        # and is unchanged.
+        if (
+            self.config.use_accuracy_compatible
+            and input_ids is not None
+            and self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
+            and input_ids.shape[-1] > self.config.num_nextn_predict_layers
+        ):
+            _mtp_tail = self.config.num_nextn_predict_layers
+            input_ids = paddle.concat(
+                [
+                    input_ids[..., :-_mtp_tail],
+                    paddle.zeros_like(input_ids[..., -_mtp_tail:]),
+                ],
+                axis=-1,
+            )
+            dict_args["input_ids"] = input_ids
         input_ids = inspect_tensor("embedding_input", -1, input_ids)
         labels = dict_args.get("labels", None)
         if labels is not None:
@@ -381,21 +407,47 @@ class GPTEmbedding(FleetLayer):
         # Shape: [B, num_mtp, max_seq] when MTP is enabled, None otherwise.
         mtp_input_ids_for_moe_mask = None
         if decoder_input is None:
+            mtp_depth = self.config.num_nextn_predict_layers
+            detach_mtp_tail = (
+                self.config.use_accuracy_compatible
+                and not getattr(self.config, "use_erndata", False)
+                and mtp_depth > 0
+                and not self.config.mtp_load_weight_only
+                and input_ids is not None
+                and input_ids.shape[-1] > mtp_depth
+                and get_pg_size(self.embedding.tp_group) <= 1
+            )
+            lookup_ids = (
+                input_ids[..., :-mtp_depth] if detach_mtp_tail else input_ids
+            )
+            lookup_positions = position_ids
+            if detach_mtp_tail and lookup_positions is not None:
+                lookup_positions = lookup_positions[..., : lookup_ids.shape[-1]]
             decoder_input = self.embedding(
-                input_ids=input_ids,
+                input_ids=lookup_ids,
                 position_ids=None
                 if self.multimodal_embedding
-                else position_ids,
+                else lookup_positions,
             )
+            if detach_mtp_tail:
+                # Keep the tail value for the MTP carrier, but give its weight
+                # gradient exclusively to the explicit second lookup below.
+                extra = self.embedding(
+                    input_ids=input_ids[..., -mtp_depth:], position_ids=None
+                )
+                decoder_input = paddle.concat(
+                    [decoder_input, extra.detach()], axis=1
+                )
             decoder_input = inspect_tensor(
                 "embedding_output", -1, decoder_input
             )
-            # Padding-Token is 0，avoiding Grad updating (ernie_core fill_feature func）
+            # IEEE alignment keeps shifted MTP embeddings and routing the
+            # same across EP/TP layouts, including the embedding of token 0.
             if (
                 self.config.expert_model_parallel_size > 1
                 and self.config.tensor_model_parallel_size < 2
-                or self.config.gpt_model_use_experimental_version
-            ):
+                and not (self.config.use_accuracy_compatible)
+            ) or self.config.gpt_model_use_experimental_version:
                 pad_token_id = getattr(self.config, "pad_token_id", 0)
                 if pad_token_id is None:
                     pad_token_id = 0
@@ -702,6 +754,69 @@ class GPTEmbedding(FleetLayer):
                                     .permute(1, 0, 2)
                                     .contiguous()
                                 )  # change to [S, B, H]
+                            # Second GradNode after ScatterOp plus fp32
+                            # main_grad scatter. MixPrecision cannot
+                            # add_(bf16) on the second hit.
+                            if self.config.use_accuracy_compatible:
+                                seq_length_ids = (
+                                    input_ids.shape[1]
+                                    - self.config.num_nextn_predict_layers
+                                )
+                                mtp_ids = input_ids[
+                                    :,
+                                    (depth + 1) : (depth + 1 + seq_length_ids),
+                                ]
+                                if (
+                                    self.config.use_accuracy_compatible
+                                    and get_pg_size(self.embedding.tp_group)
+                                    <= 1
+                                ):
+                                    semantic_ids = input_ids[:, :seq_length_ids]
+                                    mtp_ids = paddle.concat(
+                                        [
+                                            semantic_ids[:, depth + 1 :],
+                                            paddle.zeros_like(
+                                                semantic_ids[:, : depth + 1]
+                                            ),
+                                        ],
+                                        axis=1,
+                                    )
+                                looked = self.embedding(
+                                    input_ids=mtp_ids,
+                                    position_ids=None,
+                                )
+                                if (
+                                    get_context_parallel_world_size() > 1
+                                    and self.config.experimental_dataflow
+                                ):
+                                    looked = ContextParallelScatterOp.apply(
+                                        looked,
+                                        axis=1,
+                                        mode=self.config.cp_balance_mode,
+                                    )
+                                if self.sequence_parallel:
+                                    looked = looked.reshape(
+                                        [-1, looked.shape[-1]]
+                                    )
+                                    looked = ScatterOp.apply(looked)
+                                    looked = (
+                                        looked.reshape(
+                                            [batch_size, -1, hidden_size]
+                                        )
+                                        .permute(1, 0, 2)
+                                        .contiguous()
+                                    )
+                                inputs_embeds_mtp = (
+                                    inputs_embeds_mtp.detach()
+                                    + (looked - looked.detach())
+                                )
+                                print(
+                                    "[TWO-FP32-ACCUM] "
+                                    "second lookup armed depth="
+                                    f"{depth} looked={tuple(looked.shape)} "
+                                    f"carrier={tuple(inputs_embeds_mtp.shape)}",
+                                    flush=True,
+                                )
                             mtp_emb_res.append(inputs_embeds_mtp)
 
             if self.multimodal_embedding:
@@ -964,31 +1079,41 @@ class GPTEmbedding(FleetLayer):
             # this is None (stripped by the None-cleanup loop below).
             "cu_seqlens_q": cu_seqlens_q,
         }
-        # New dataflow: pass mtp_startend_row_indices_all and mtp_hidden_inputs_mask_all
-        # through dict_args to MTP layer. They must both be present or both be absent.
+        # Pass either compressed or dense per-depth MTP masks through to the MTP layer.
         mtp_startend_row_indices_all = dict_args.get(
             "mtp_startend_row_indices_all", None
         )
+        mtp_attn_mask = dict_args.get("mtp_attn_mask", None)
         mtp_hidden_inputs_mask_all = dict_args.get(
             "mtp_hidden_inputs_mask_all", None
         )
-        assert (mtp_startend_row_indices_all is None) == (
-            mtp_hidden_inputs_mask_all is None
-        ), (
-            "mtp_startend_row_indices_all and mtp_hidden_inputs_mask_all must both be None or both be not None, "
-            f"got mtp_startend_row_indices_all={'None' if mtp_startend_row_indices_all is None else 'not None'}, "
-            f"mtp_hidden_inputs_mask_all={'None' if mtp_hidden_inputs_mask_all is None else 'not None'}"
+        assert not (
+            mtp_startend_row_indices_all is not None
+            and mtp_attn_mask is not None
+        ), "MTP compressed and dense attention masks are mutually exclusive"
+        has_mtp_attention_mask = (
+            mtp_startend_row_indices_all is not None
+            or mtp_attn_mask is not None
         )
-        if mtp_startend_row_indices_all is not None:
-            # Ensure tensor is on GPU (dataloader may deliver it as pinned CPU memory).
-            # PP P2P communication (NCCL) cannot send pinned tensors directly.
-            if not mtp_startend_row_indices_all.place.is_gpu_place():
-                mtp_startend_row_indices_all = (
-                    mtp_startend_row_indices_all.cuda()
+        assert has_mtp_attention_mask == (
+            mtp_hidden_inputs_mask_all is not None
+        ), (
+            "an MTP attention mask and mtp_hidden_inputs_mask_all must both be present or both be absent"
+        )
+        if has_mtp_attention_mask:
+            # Ensure tensors are on GPU; PP P2P communication cannot send pinned tensors directly.
+            if mtp_startend_row_indices_all is not None:
+                if not mtp_startend_row_indices_all.place.is_gpu_place():
+                    mtp_startend_row_indices_all = (
+                        mtp_startend_row_indices_all.cuda()
+                    )
+                preproc_output["mtp_startend_row_indices_all"] = (
+                    mtp_startend_row_indices_all
                 )
-            preproc_output["mtp_startend_row_indices_all"] = (
-                mtp_startend_row_indices_all
-            )
+            else:
+                if not mtp_attn_mask.place.is_gpu_place():
+                    mtp_attn_mask = mtp_attn_mask.cuda()
+                preproc_output["mtp_attn_mask"] = mtp_attn_mask
             if not mtp_hidden_inputs_mask_all.place.is_gpu_place():
                 mtp_hidden_inputs_mask_all = mtp_hidden_inputs_mask_all.cuda()
             preproc_output["mtp_hidden_inputs_mask_all"] = (

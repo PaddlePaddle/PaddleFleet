@@ -421,9 +421,21 @@ def get_attention_spec(
             },
             sublayers_spec=MLASelfAttentionSublayersSpec(
                 q_proj=backend.column_parallel_linear(),
-                q_a_proj=backend.column_parallel_linear(),
+                # Default keeps the historical column-sharded down-projections.
+                # IEEE+UAC replicates them to match official glm_moe_dsa /
+                # mcore / PaddleFormers deepseek_v3 (E-205). FLAG+UAC alone
+                # stays column-sharded for Minimax / GLM-4.5 Air CI.
+                q_a_proj=(
+                    backend.linear()
+                    if getattr(config, "use_accuracy_compatible", False)
+                    else backend.column_parallel_linear()
+                ),
                 q_b_proj=backend.column_parallel_linear(),
-                kv_a_proj_with_mqa=backend.column_parallel_linear(),
+                kv_a_proj_with_mqa=(
+                    backend.linear()
+                    if getattr(config, "use_accuracy_compatible", False)
+                    else backend.column_parallel_linear()
+                ),
                 kv_b_proj=backend.column_parallel_linear(),
                 core_attention=core_attention,
                 o_proj=backend.row_parallel_linear(),

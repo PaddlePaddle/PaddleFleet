@@ -1,0 +1,88 @@
+# GLM-5.2 official minimum_complete: 3 dense + 1 MoE + 1 MTP, 16 experts.
+# TP1 PP2 EP2, four GPUs. Native loss comparison requires all 100 steps.
+stage: SFT
+fine_tuning: full
+model_name_or_path: /home/.cache/PaddleFormers/GLM-5.2-BF16-minimal
+tokenizer_name_or_path: /home/.cache/PaddleFormers/GLM-5.2-BF16-minimal
+continue_training: true
+load_via_cpu: false
+num_nextn_predict_layers: 1
+mtp_num_layers: 1
+
+dataset_type: iterable
+train_dataset_type: erniekit
+train_dataset_path: /home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP/alignment_paddle.jsonl
+train_dataset_prob: "1.0"
+max_seq_len: 512
+random_shuffle: false
+packing: false
+template: glm5_2
+template_backend: custom
+use_template: true
+encode_one_turn: true
+enable_thinking: false
+
+_attn_implementation: eager
+use_attn_mask_startend_row_indices: true
+use_sparse_flash_attn: false
+mtp_attention_flexible: true
+
+seed: 2026
+do_train: true
+do_eval: false
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 1
+global_batch_size: 2
+variable_seq_lengths: true
+max_steps: 100
+num_train_epochs: 1
+learning_rate: 0.000001
+lr_scheduler_type: constant
+warmup_steps: 0
+weight_decay: 0.0
+max_grad_norm: 0.0
+moe_router_bias_update_rate: 0.0
+adam_beta1: 0.9
+adam_beta2: 0.95
+adam_epsilon: 0.00000001
+
+bf16: true
+fp16_opt_level: O2
+fp32_residual_connection: false
+persist_layer_norm: false
+use_accuracy_compatible: true
+bias_activation_fusion: false
+moe_expert_fusion: true
+deterministic_mode: true
+dsa_indexer_loss_coeff: 0.0
+tensor_model_parallel_size: 1
+pipeline_model_parallel_size: 2
+context_parallel_size: 1
+expert_model_parallel_size: 2
+expert_tensor_model_parallel_size: 1
+sequence_parallel: false
+overlap_p2p_comm: false
+batch_p2p_comm: true
+partial_send_recv: false
+use_expert_parallel: true
+moe_deep_gemm: false
+moe_token_dispatcher_type: deepep
+moe_shared_expert_overlap: false
+apply_rope_fusion: false
+recompute_granularity: null
+
+output_dir: logs/paddle/glm52/trainer
+logging_dir: logs/paddle/glm52/vdl
+logging_steps: 1
+save_strategy: steps
+save_steps: 100
+save_to_hf: false
+save_safetensors: true
+ignore_save_lr_and_optim: true
+save_checkpoint_format: flex_checkpoint
+load_checkpoint_format: flex_checkpoint
+unified_checkpoint: false
+overwrite_output_dir: true
+report_to: []
+
+hybrid_parallel_expert_grad_scale: 1.0

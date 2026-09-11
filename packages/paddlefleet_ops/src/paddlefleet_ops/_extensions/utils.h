@@ -22,6 +22,7 @@
 
 #include <iostream>
 #include <limits>
+#include <type_traits>
 
 #include "paddle/extension.h"
 #include "paddle/phi/api/all.h"
@@ -65,15 +66,22 @@ inline int LimitGridDim(int64_t n) {
 inline int GetSwiGLURowGridSize(int64_t rows) { return LimitGridDim(rows); }
 
 #ifdef __CUDACC__
+// T may be const (read-only pointer arrays). paddle::Tensor::data is only
+// instantiated for cv-unqualified element types; data<const float>() is not
+// in libpaddle. Strip cv only on the Tensor::data template argument. The
+// host vector stays const T* because tensors is a const vector, so
+// data<Elem>() returns const Elem*. Returned device pointer type remains T*
+// so const T* callers stay const.
 template <typename T>
 T** GetTensorDevicePtrs(const std::vector<paddle::Tensor>& tensors,
                         paddle::Tensor* ptr_tensor,
                         cudaStream_t stream,
                         phi::Place place) {
+  using Elem = std::remove_cv_t<T>;
   auto nbytes = tensors.size() * sizeof(T*);
   std::vector<const T*> cpu_ptrs(tensors.size());
   for (size_t i = 0; i < tensors.size(); ++i) {
-    cpu_ptrs[i] = tensors[i].data<T>();
+    cpu_ptrs[i] = tensors[i].data<Elem>();
   }
   *ptr_tensor = paddle::empty(
       {static_cast<int64_t>(nbytes)}, paddle::DataType::UINT8, place);

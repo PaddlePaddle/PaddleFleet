@@ -25,6 +25,7 @@ This module provides:
 from __future__ import annotations
 
 import logging
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -47,10 +48,12 @@ from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_sequence_parallel_region,
 )
+from paddlefleet.tensor_parallel.random import _fork_rng
 from paddlefleet.transformer.cp_utils import all_gather_cp
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.utils import get_pg_size
 
 try:
     from paddlefleet_ops.fast_hadamard_transform import (
@@ -65,6 +68,125 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _absorb_q_nope_k_up(
+    qn3, k_abs_weight, *, use_accuracy_compatible: bool = False
+):
+    """K-absorb q_nope @ k_up. Torch-aligned UAC path uses bmm, not einsum."""
+    uac = use_accuracy_compatible
+    if uac:
+        return paddle.bmm(qn3, k_abs_weight)
+    return paddle.einsum(
+        "hsk,hkd->hsd", qn3.cast("float32"), k_abs_weight.cast("float32")
+    ).cast(qn3.dtype)
+
+
+def _accuracy_compat_linear(projection, x):
+    """Torch-aligned F.linear for duplicated indexer projections in TP2.
+
+    IEEE 1-5 (E-062 / e468): Indexer wq_b / wk / weights_proj must use
+    paddle.nn.functional.linear rather than Linear's autograd Function.
+    The two GEMMs are not bit-identical on this graph.
+    """
+    bias = projection.bias if not projection.skip_bias_add else None
+    output_bias = projection.bias if projection.skip_bias_add else None
+    output = F.linear(x, projection.weight, bias)
+    return output, output_bias
+
+
+class _SteQKMatmul(paddle.autograd.PyLayer):
+    """Opaque 4D QK STE matmul so live PIR cannot rewrite dK to bf16 GEMM."""
+
+    @staticmethod
+    def forward(ctx, q4: Tensor, k4: Tensor, scale: Tensor) -> Tensor:
+        q = q4.cast("float32") if q4.dtype != paddle.float32 else q4
+        k = k4.cast("float32") if k4.dtype != paddle.float32 else k4
+        ctx.save_for_backward(q, k, scale)
+        ctx.k_dtype = k4.dtype
+        ctx.k_heads = int(k.shape[1])
+        return paddle.matmul(q, k.transpose([0, 1, 3, 2])) * scale
+
+    @staticmethod
+    def backward(ctx, grad_scores: Tensor):
+        q, k, scale = ctx.saved_tensor()
+        g = (
+            grad_scores.cast("float32")
+            if grad_scores.dtype != paddle.float32
+            else grad_scores
+        )
+        gk = paddle.matmul(g.transpose([0, 1, 3, 2]), q) * scale
+        if ctx.k_heads == 1 and int(gk.shape[1]) != 1:
+            gk = gk.sum(axis=1, keepdim=True)
+        if gk.dtype != ctx.k_dtype:
+            gk = gk.cast(ctx.k_dtype)
+        return None, gk, None
+
+
+class _AccuracyCompatibleQKMatmul(paddle.autograd.PyLayer):
+    """Batched QK matmul with an explicit broadcast-key gradient reduction."""
+
+    @staticmethod
+    def forward(ctx, query: Tensor, key: Tensor) -> Tensor:
+        # query: [b, h, sq, d], key: [b, 1|h, d, sk]. Under sequence
+        # parallel sq may already be gathered while sk is still s/TP;
+        # expand only the head axis, never rewrite sk from sq.
+        batch_size, num_heads, query_seq, head_dim = query.shape
+        key_seq = int(key.shape[-1])
+        expanded_key = key.expand([batch_size, num_heads, head_dim, key_seq])
+        scores = paddle.bmm(
+            query.reshape([batch_size * num_heads, query_seq, head_dim]),
+            expanded_key.reshape([batch_size * num_heads, head_dim, key_seq]),
+        ).reshape([batch_size, num_heads, query_seq, key_seq])
+        ctx.save_for_backward(query, key)
+        return scores
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor) -> tuple[Tensor, Tensor]:
+        query, key = ctx.saved_tensor()
+        batch_size, num_heads, query_seq, head_dim = query.shape
+        key_seq = int(key.shape[-1])
+        expanded_key = key.expand([batch_size, num_heads, head_dim, key_seq])
+        grad_query = paddle.bmm(
+            grad_output.reshape([batch_size * num_heads, query_seq, key_seq]),
+            expanded_key.transpose([0, 1, 3, 2]).reshape(
+                [batch_size * num_heads, key_seq, head_dim]
+            ),
+        ).reshape(query.shape)
+        grad_key_per_head = paddle.matmul(
+            query.transpose([0, 1, 3, 2]), grad_output
+        )
+        grad_key = paddle.sum(grad_key_per_head, axis=1, keepdim=True)
+        return grad_query, grad_key
+
+
+class _AccuracyCompatibleSoftmax(paddle.autograd.PyLayer):
+    """Masked softmax with explicit reduction and positive masked zeros."""
+
+    @staticmethod
+    def forward(ctx, logits: Tensor, valid_mask: Tensor) -> Tensor:
+        probabilities = F.softmax(logits, axis=-1)
+        probabilities = paddle.where(
+            valid_mask, probabilities, paddle.zeros_like(probabilities)
+        )
+        ctx.save_for_backward(probabilities, valid_mask)
+        return probabilities
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor) -> tuple[Tensor, None]:
+        probabilities, valid_mask = ctx.saved_tensor()
+        grad_logits = probabilities * (
+            grad_output
+            - paddle.sum(
+                grad_output * probabilities,
+                axis=-1,
+                keepdim=True,
+            )
+        )
+        grad_logits = paddle.where(
+            valid_mask, grad_logits, paddle.zeros_like(grad_logits)
+        )
+        return grad_logits, None
 
 
 def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
@@ -155,6 +277,9 @@ def _unfused_dsa_attention(
     value: Tensor,
     combined_mask: Tensor | None,
     softmax_scale: float,
+    *,
+    use_accuracy_compatible: bool = False,
+    tensor_parallel_size: int = 1,
 ) -> Tensor:
     """Unfused DSA sparse attention
 
@@ -174,17 +299,48 @@ def _unfused_dsa_attention(
     """
     b, s, nhpp, qk_hd = query.shape
     v_hd = value.shape[-1]
+    uac_mqa = (
+        use_accuracy_compatible
+        and key.dim() == 4
+        and key.shape[2] == 1
+        and nhpp > 1
+        and key.shape[-1] >= v_hd
+    )
+    key_mqa = key
 
     # Reshape for bmm: [b*nhpp, s, hd]
     q = query.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, qk_hd])
-    k = key.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, qk_hd])
-    v = value.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, v_hd])
+    if key.dim() == 4 and key.shape[2] == 1 and nhpp > 1:
+        # MQA key broadcast to the query head count (absorbed core path).
+        key_e = key.expand([b, s, nhpp, qk_hd])
+        if uac_mqa:
+            key_e = key_e.detach()
+        k = key_e.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, qk_hd])
+    else:
+        k = key.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, qk_hd])
+    if uac_mqa:
+        # V is the leading slice of absorbed key, matching torch key[..., :v].
+        value = paddle.slice(key, axes=[-1], starts=[0], ends=[v_hd])
+        if not (use_accuracy_compatible and tensor_parallel_size <= 1):
+            value = value * 1
+    if value.dim() == 4 and value.shape[2] == 1 and nhpp > 1:
+        value_e = value.expand([b, s, nhpp, v_hd])
+        v = value_e.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, v_hd])
+    else:
+        v = value.transpose([0, 2, 1, 3]).reshape([b * nhpp, s, v_hd])
 
     # Q * K^T with scale: [b*nhpp, s, s]
     attn_scores = (
         paddle.bmm(q.cast("float32"), k.cast("float32").transpose([0, 2, 1]))
         * softmax_scale
     )
+    if uac_mqa:
+        q4 = query.transpose([0, 2, 1, 3]).cast("float32").detach()
+        k4 = key_mqa.transpose([0, 2, 1, 3]).cast("float32")
+        scale_t = paddle.full([], softmax_scale, dtype="float32")
+        scores_bwd = _SteQKMatmul.apply(q4, k4, scale_t)
+        scores_bwd = scores_bwd.reshape([b * nhpp, s, s])
+        attn_scores = attn_scores + (scores_bwd - scores_bwd.detach())
 
     # Apply combined mask (causal + sparse index mask)
     if combined_mask is not None:
@@ -195,7 +351,12 @@ def _unfused_dsa_attention(
         )
         attn_scores = attn_scores + mask.cast("float32")
 
-    attn_weights = F.softmax(attn_scores, axis=-1)
+    if use_accuracy_compatible:
+        attn_weights = _AccuracyCompatibleSoftmax.apply(
+            attn_scores, paddle.isfinite(attn_scores)
+        )
+    else:
+        attn_weights = F.softmax(attn_scores, axis=-1)
 
     # Attention_weights * V: [b*nhpp, s, v_hd]
     output = paddle.bmm(attn_weights.cast(v.dtype), v)
@@ -210,15 +371,161 @@ def _unfused_dsa_attention(
     return output
 
 
+def _unfused_absorbed_dsa_attention(
+    query: Tensor,
+    key: Tensor,
+    value: Tensor,
+    v_up_weight: Tensor,
+    combined_mask: Tensor | None,
+    softmax_scale: float,
+    *,
+    use_accuracy_compatible: bool = False,
+) -> Tensor:
+    """Unfused absorbed-MLA sparse attention for accuracy alignment."""
+    b, s, num_heads, _ = query.shape
+    q = query.transpose([0, 2, 1, 3])
+    k = key.transpose([0, 2, 3, 1])
+    if use_accuracy_compatible:
+        scores = _AccuracyCompatibleQKMatmul.apply(
+            q.cast("float32"), k.cast("float32")
+        )
+    else:
+        scores = paddle.matmul(q.cast("float32"), k.cast("float32"))
+    scores = scores * softmax_scale
+    if combined_mask is not None:
+        scores = scores + combined_mask.cast("float32")
+    probabilities = (
+        _AccuracyCompatibleSoftmax.apply(scores, paddle.isfinite(scores))
+        if use_accuracy_compatible
+        else F.softmax(scores, axis=-1)
+    )
+    latent_value = value.transpose([0, 2, 1, 3])
+    latent_context = paddle.matmul(
+        probabilities.cast(value.dtype), latent_value
+    )
+    projected = paddle.einsum("bhsr,hrd->bshd", latent_context, v_up_weight)
+    return projected.reshape([b, s, num_heads * v_up_weight.shape[-1]])
+
+
 def _normalize_dsa_mask(mask: Tensor | None) -> Tensor | None:
     if mask is None:
         return None
     if mask.ndim == 4:
         assert mask.shape[1] == 1, "DSA mask must have singleton head dimension"
         mask = mask.squeeze(1)
-    if mask.ndim == 3 and mask.shape[0] == 1:
-        mask = mask.squeeze(0)
+    # Keep a leading batch axis so sequence-parallel local masks [1, sq, sk_local]
+    # are not flattened into [sq, sk_local] and then added onto gathered scores.
     return mask
+
+
+def _align_dsa_indexer_mask(
+    mask: Tensor | None,
+    score_sk: int,
+    *,
+    sequence_parallel: bool = False,
+    tp_group=None,
+) -> Tensor | None:
+    """Match a DSA indexer mask onto gathered index scores.
+
+    Indexer Q/K are all-gathered under sequence parallel, so scores are
+    ``[..., s, s]``. The dense ``attention_mask`` often stays sharded on the
+    last dim (``[..., s, s/TP]``). Adding those ranks fail-closes with a
+    broadcast error. Gather that last dim when it is the SP shard; otherwise
+    leave a last-dim mismatch as ``None`` so the caller can use the
+    already-sized causal mask.
+    """
+    mask = _normalize_dsa_mask(mask)
+    if mask is None:
+        return None
+    mask_sk = int(mask.shape[-1])
+    if mask_sk == int(score_sk):
+        return mask
+    tp_size = (
+        int(tp_group.nranks)
+        if tp_group is not None and getattr(tp_group, "nranks", 1) > 1
+        else 1
+    )
+    if not (
+        sequence_parallel and tp_size > 1 and mask_sk * tp_size == int(score_sk)
+    ):
+        return None
+    if mask.ndim == 2:
+        gathered = gather_from_sequence_parallel_region(
+            mask.transpose([1, 0]).contiguous(), group=tp_group
+        )
+        return gathered.transpose([1, 0]).contiguous()
+    if mask.ndim == 3:
+        gathered = gather_from_sequence_parallel_region(
+            mask.transpose([2, 0, 1]).contiguous(), group=tp_group
+        )
+        return gathered.transpose([1, 2, 0]).contiguous()
+    return None
+
+
+def _align_sp_aux_to_query(tensor: Tensor, query: Tensor) -> Tensor:
+    """Lift a seq-sharded MLA auxiliary to the query layout [b, s, ...].
+
+    Query entering DSAttention is batch-first and already gathered under
+    sequence parallel. ``kv_compressed`` / ``k_pos_emb`` stay at s/TP, so
+    concatenating them into absorbed key fail-closes in QK expand
+    (sk=30 vs sq=60).
+    """
+    if tensor is None or query.ndim != 4:
+        return tensor
+    batch, seq = int(query.shape[0]), int(query.shape[1])
+    if tensor.ndim == 3:
+        if int(tensor.shape[0]) == batch and int(tensor.shape[1]) == seq:
+            return tensor
+        if int(tensor.shape[0]) == seq and int(tensor.shape[1]) == batch:
+            return tensor.transpose([1, 0, 2])
+        if int(tensor.shape[0]) == batch and int(tensor.shape[1]) < seq:
+            return (
+                gather_from_sequence_parallel_region(
+                    tensor.transpose([1, 0, 2]).contiguous()
+                )
+                .transpose([1, 0, 2])
+                .contiguous()
+            )
+        if int(tensor.shape[0]) < seq and int(tensor.shape[1]) == batch:
+            gathered = gather_from_sequence_parallel_region(tensor.contiguous())
+            if (
+                int(gathered.shape[0]) == seq
+                and int(gathered.shape[1]) == batch
+            ):
+                return gathered.transpose([1, 0, 2])
+            return gathered
+        return tensor
+    if tensor.ndim == 4:
+        if int(tensor.shape[0]) == batch and int(tensor.shape[1]) == seq:
+            return tensor
+        if int(tensor.shape[0]) == seq and int(tensor.shape[1]) == batch:
+            return tensor.transpose([1, 0, 2, 3])
+        if int(tensor.shape[0]) == batch and int(tensor.shape[1]) < seq:
+            return (
+                gather_from_sequence_parallel_region(
+                    tensor.transpose([1, 0, 2, 3]).contiguous()
+                )
+                .transpose([1, 0, 2, 3])
+                .contiguous()
+            )
+        if int(tensor.shape[0]) < seq and int(tensor.shape[1]) == batch:
+            gathered = gather_from_sequence_parallel_region(tensor.contiguous())
+            if (
+                int(gathered.shape[0]) == seq
+                and int(gathered.shape[1]) == batch
+            ):
+                return gathered.transpose([1, 0, 2, 3])
+            return gathered
+        # IEEE 1-5: k_pos_emb can still be full-seq on the batch-first
+        # axis while query is the local SP shard. Slice that rank's window
+        # instead of gathering (gather would expand query, not shrink rope).
+        if int(tensor.shape[0]) == batch and int(tensor.shape[1]) > seq:
+            if int(tensor.shape[1]) % seq == 0:
+                world = int(tensor.shape[1]) // seq
+                rank = int(paddle.distributed.get_rank()) % world
+                return tensor[:, rank * seq : (rank + 1) * seq]
+        return tensor
+    return tensor
 
 
 # ---------------------------------------------------------------------------
@@ -554,15 +861,24 @@ class DSAIndexer(paddle.nn.Layer):
             else freqs
         )
 
-        q, _ = deferrable_linear(
-            self.config, "attn_indexer_q_proj", self.wq_b, q_latent
-        )  # [b, s, n_heads * head_dim]
+        # IEEE e468: Indexer GEMMs must use F.linear under UAC, not
+        # Linear.forward / deferrable_linear. Gate on the import-time
+        # module constant, not a per-call FLAG read.
+        if self.config.use_accuracy_compatible and not (
+            self.config.use_accuracy_compatible
+            and get_pg_size(self.pg_collection.tp) <= 1
+        ):
+            q, _ = _accuracy_compat_linear(self.wq_b, q_latent)
+            k, _ = _accuracy_compat_linear(self.wk, hidden_states)
+        else:
+            q, _ = deferrable_linear(
+                self.config, "attn_indexer_q_proj", self.wq_b, q_latent
+            )  # [b, s, n_heads * head_dim]
+            k, _ = deferrable_linear(
+                self.config, "attn_indexer_k_proj", self.wk, hidden_states
+            )  # [b, s, head_dim]
         q = q.reshape([bsz, seqlen, self.n_heads, self.head_dim])
         q = self._apply_rope(q, freqs_q, mscale)
-
-        k, _ = deferrable_linear(
-            self.config, "attn_indexer_k_proj", self.wk, hidden_states
-        )  # [b, s, head_dim]
         if cp_size > 1:
             k = all_gather_cp(k, dim=1, group=cp_group)  # [b, s_global, hd]
         k = self.k_norm(k)
@@ -572,12 +888,20 @@ class DSAIndexer(paddle.nn.Layer):
         q = rotate_activation(q, use_fast_hadamard=self.use_fast_hadamard)
         k = rotate_activation(k, use_fast_hadamard=self.use_fast_hadamard)
 
-        weights, _ = deferrable_linear(
-            self.config,
-            "attn_indexer_weights_proj",
-            self.weights_proj,
-            hidden_states,
-        )
+        if self.config.use_accuracy_compatible and not (
+            self.config.use_accuracy_compatible
+            and get_pg_size(self.pg_collection.tp) <= 1
+        ):
+            weights, _ = _accuracy_compat_linear(
+                self.weights_proj, hidden_states
+            )
+        else:
+            weights, _ = deferrable_linear(
+                self.config,
+                "attn_indexer_weights_proj",
+                self.weights_proj,
+                hidden_states,
+            )
         weights = weights * (self.n_heads**-0.5) * self.softmax_scale
 
         return q, k, weights
@@ -597,7 +921,20 @@ class DSAIndexer(paddle.nn.Layer):
         index_scores = (weights.unsqueeze(-1) * F.relu(scores)).sum(axis=2)
 
         if mask is not None:
-            index_scores = index_scores + _normalize_dsa_mask(mask)
+            aligned = _align_dsa_indexer_mask(
+                mask,
+                int(index_scores.shape[-1]),
+                sequence_parallel=bool(
+                    getattr(self.config, "sequence_parallel", False)
+                ),
+                tp_group=(
+                    self.pg_collection.tp
+                    if self.pg_collection is not None
+                    else None
+                ),
+            )
+            if aligned is not None:
+                index_scores = index_scores + aligned
 
         topk_k = min(self.index_topk, index_scores.shape[-1])
         topk_indices = paddle.topk(index_scores, k=topk_k, axis=-1)[1]
@@ -663,7 +1000,7 @@ def _compute_index_scores_and_topk(
     index_scores = _compute_index_scores_fused(q, weights, k)
 
     mask = _normalize_dsa_mask(mask)
-    if mask is not None:
+    if mask is not None and int(mask.shape[-1]) == int(index_scores.shape[-1]):
         index_scores = index_scores + mask
 
     topk_k = min(index_topk, index_scores.shape[-1])
@@ -787,14 +1124,14 @@ def _compute_dsa_indexer_loss(
 
     # Handle fully-masked rows (all -inf) to prevent NaN in softmax
     if causal_mask_override is not None:
-        if causal_mask.ndim == 2:
-            row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [sq]
+        row_valid = (causal_mask > float("-inf")).any(axis=-1)
+        if row_valid.ndim == 1:
             attn_row_mask = row_valid.reshape([1, 1, sq, 1])
             idx_row_mask = row_valid.reshape([1, sq, 1])
         else:
-            row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [b, sq]
-            attn_row_mask = row_valid.reshape([b, 1, sq, 1])
-            idx_row_mask = row_valid.reshape([b, sq, 1])
+            mask_b = int(row_valid.shape[0])
+            attn_row_mask = row_valid.reshape([mask_b, 1, sq, 1])
+            idx_row_mask = row_valid.reshape([mask_b, sq, 1])
 
         attention_scores = paddle.where(
             attn_row_mask, attention_scores, paddle.zeros_like(attention_scores)
@@ -923,14 +1260,14 @@ def _bwd_fused_indexer_loss(
 
     # Handle fully-masked rows (all -inf) to prevent NaN in softmax
     if causal_mask_override is not None:
-        if causal_mask.ndim == 2:
-            row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [sq]
+        row_valid = (causal_mask > float("-inf")).any(axis=-1)
+        if row_valid.ndim == 1:
             attn_row_mask = row_valid.reshape([1, 1, sq, 1])
             idx_row_mask = row_valid.reshape([1, sq, 1])
         else:
-            row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [b, sq]
-            attn_row_mask = row_valid.reshape([b, 1, sq, 1])
-            idx_row_mask = row_valid.reshape([b, sq, 1])
+            mask_b = int(row_valid.shape[0])
+            attn_row_mask = row_valid.reshape([mask_b, 1, sq, 1])
+            idx_row_mask = row_valid.reshape([mask_b, sq, 1])
 
         attention_scores = paddle.where(
             attn_row_mask, attention_scores, paddle.zeros_like(attention_scores)
@@ -1394,6 +1731,229 @@ class DSAIndexerLossLoggingHelper:
         DSAIndexerLossLoggingHelper.clean_loss_in_tracker()
 
 
+def is_dsa_skip_topk_layer(
+    layer_number: int, skip_topk_offset: int, topk_freq: int
+) -> bool:
+    """Return whether a 1-indexed layer reuses a previous DSA top-k result."""
+    if layer_number < 1:
+        raise ValueError(
+            f"layer_number must be 1-indexed and positive, got {layer_number}."
+        )
+    if skip_topk_offset < 0:
+        raise ValueError(
+            f"skip_topk_offset must be non-negative, got {skip_topk_offset}."
+        )
+    if topk_freq < 1:
+        raise ValueError(f"topk_freq must be positive, got {topk_freq}.")
+    skip_topk_offset = max(skip_topk_offset, 1)
+    return (max(layer_number - skip_topk_offset, 0) % topk_freq) != 0
+
+
+def source_dsa_compute_layer(
+    layer_number: int, skip_topk_offset: int, topk_freq: int
+) -> int:
+    """Return the computing layer whose DSA top-k a skip layer reuses."""
+    is_dsa_skip_topk_layer(layer_number, skip_topk_offset, topk_freq)
+    skip_topk_offset = max(skip_topk_offset, 1)
+    if layer_number <= skip_topk_offset:
+        return layer_number
+    return layer_number - ((layer_number - skip_topk_offset) % topk_freq)
+
+
+def decoder_dsa_logical_layer(
+    config, layer_number: int, is_mtp_layer: bool = False
+) -> int:
+    """Map a GPT physical layer id onto the decoder-only ``indexer_types`` index."""
+    if is_mtp_layer:
+        return layer_number
+    head_offset = getattr(config, "num_empty_layers_add_in_head", 0) or 0
+    logical_index = layer_number - head_offset
+    num_hidden_layers = getattr(config, "num_hidden_layers", 0) or 0
+    if num_hidden_layers and not 0 <= logical_index < num_hidden_layers:
+        raise IndexError(
+            f"decoder layer_number {layer_number} resolves to logical index "
+            f"{logical_index}, outside [0, {num_hidden_layers})"
+        )
+    return logical_index
+
+
+def decoder_dsa_topk_producer_layer(config, layer_number: int) -> int:
+    """Return the 0-based decoder layer that actually computes this layer's top-k."""
+    index_topk_freq = getattr(config, "dsa_indexer_topk_freq", None) or 1
+    index_skip_topk_offset = (
+        getattr(config, "dsa_indexer_skip_topk_offset", 0) or 0
+    )
+    indexer_types = getattr(config, "dsa_indexer_types", None)
+    if indexer_types is not None:
+        if not 0 <= layer_number < len(indexer_types):
+            raise ValueError(
+                f"Decoder layer {layer_number} is outside dsa_indexer_types "
+                f"length {len(indexer_types)}."
+            )
+        if indexer_types[layer_number] == "full":
+            return layer_number
+        full_layers = [
+            index
+            for index, layer_type in enumerate(indexer_types[:layer_number])
+            if layer_type == "full"
+        ]
+        if not full_layers:
+            raise ValueError(
+                f"Shared DSA layer {layer_number} has no preceding full indexer layer."
+            )
+        return full_layers[-1]
+    if index_topk_freq > 1 and is_dsa_skip_topk_layer(
+        layer_number + 1,
+        index_skip_topk_offset,
+        index_topk_freq,
+    ):
+        return (
+            source_dsa_compute_layer(
+                layer_number + 1,
+                index_skip_topk_offset,
+                index_topk_freq,
+            )
+            - 1
+        )
+    return layer_number
+
+
+def _decoder_layer_publishes_shared_topk(config, layer_number: int) -> bool:
+    """Whether a computing decoder layer must publish top-k for a later consumer."""
+    if layer_number < 0:
+        return False
+    index_topk_freq = getattr(config, "dsa_indexer_topk_freq", None) or 1
+    index_skip_topk_offset = (
+        getattr(config, "dsa_indexer_skip_topk_offset", 0) or 0
+    )
+    indexer_types = getattr(config, "dsa_indexer_types", None)
+    share_for_mtp_iteration = bool(
+        getattr(config, "dsa_index_share_for_mtp_iteration", False)
+    )
+    num_hidden_layers = getattr(config, "num_hidden_layers", 0) or 0
+    if indexer_types is not None:
+        for later, layer_type in enumerate(
+            indexer_types[layer_number + 1 :], start=layer_number + 1
+        ):
+            if layer_type == "shared" and (
+                decoder_dsa_topk_producer_layer(config, later) == layer_number
+            ):
+                return True
+    elif index_topk_freq > 1:
+        for later in range(layer_number + 1, num_hidden_layers):
+            if is_dsa_skip_topk_layer(
+                later + 1,
+                index_skip_topk_offset,
+                index_topk_freq,
+            ) and (
+                source_dsa_compute_layer(
+                    later + 1,
+                    index_skip_topk_offset,
+                    index_topk_freq,
+                )
+                - 1
+                == layer_number
+            ):
+                return True
+    if share_for_mtp_iteration and num_hidden_layers >= 1:
+        return (
+            decoder_dsa_topk_producer_layer(config, num_hidden_layers - 1)
+            == layer_number
+        )
+    return False
+
+
+def resolve_dsa_indexer_layout(
+    config,
+    layer_number: int,
+    is_mtp_layer: bool = False,
+    *,
+    tensor_parallel_size: int | None = None,
+) -> tuple[str, bool, bool, int]:
+    """Resolve DSA indexer type / skip / share / source for one layer.
+
+    Official GLM-5.2 fields: ``indexer_types``, ``index_topk_freq``,
+    ``index_skip_topk_offset``, ``index_share_for_mtp_iteration``.
+    ``indexer_types`` is decoder-only (length ``num_hidden_layers``).
+    GPT layer specs pass a physical ``layer_number`` that already includes
+    ``num_empty_layers_add_in_head``. Decoder layout lookup subtracts that
+    offset so ``indexer_types`` stays decoder-only. Periodic skip helpers
+    stay 1-indexed, matching the official ``index_skip_topk_offset`` numbering.
+
+    Holder keys are the 0-based producer layer. Shared consumers, including
+    MTP when ``index_share_for_mtp_iteration`` is set, look up that producer
+    rather than their own index.
+    """
+    share_for_mtp_iteration = bool(
+        getattr(config, "dsa_index_share_for_mtp_iteration", False)
+    )
+    num_hidden_layers = getattr(config, "num_hidden_layers", 0) or 0
+    if not is_mtp_layer:
+        layer_number = decoder_dsa_logical_layer(config, layer_number)
+    if is_mtp_layer:
+        # Official GLM-5.2 checkpoints still ship a full MTP indexer.
+        # Training honours share-for-MTP by skipping that indexer and
+        # reusing the last decoder's producer top-k, matching the HF field.
+        if tensor_parallel_size is None:
+            tensor_parallel_size = config.tensor_model_parallel_size
+        full_indexer_for_alignment = (
+            config.use_accuracy_compatible and tensor_parallel_size > 1
+        )
+        indexer_type = (
+            "shared"
+            if share_for_mtp_iteration and not full_indexer_for_alignment
+            else "full"
+        )
+        if indexer_type not in {"full", "shared"}:
+            raise ValueError(
+                f"Unsupported DSA indexer type {indexer_type!r} for layer {layer_number}."
+            )
+        skip_topk = indexer_type == "shared"
+        if skip_topk:
+            if num_hidden_layers < 1:
+                raise ValueError(
+                    "An MTP shared indexer requires a preceding decoder layer."
+                )
+            source_layer = decoder_dsa_topk_producer_layer(
+                config, num_hidden_layers - 1
+            )
+        else:
+            source_layer = layer_number
+        return indexer_type, skip_topk, skip_topk, source_layer
+
+    index_topk_freq = getattr(config, "dsa_indexer_topk_freq", None) or 1
+    index_skip_topk_offset = (
+        getattr(config, "dsa_indexer_skip_topk_offset", 0) or 0
+    )
+    indexer_types = getattr(config, "dsa_indexer_types", None)
+    if indexer_types is not None and 0 <= layer_number < len(indexer_types):
+        indexer_type = indexer_types[layer_number]
+    else:
+        indexer_type = (
+            "shared"
+            if index_topk_freq > 1
+            and is_dsa_skip_topk_layer(
+                layer_number + 1,
+                index_skip_topk_offset,
+                index_topk_freq,
+            )
+            else "full"
+        )
+    if indexer_type not in {"full", "shared"}:
+        raise ValueError(
+            f"Unsupported DSA indexer type {indexer_type!r} for layer {layer_number}."
+        )
+    skip_topk = indexer_type == "shared"
+    if skip_topk:
+        source_layer = decoder_dsa_topk_producer_layer(config, layer_number)
+    else:
+        source_layer = layer_number
+    index_share = skip_topk or _decoder_layer_publishes_shared_topk(
+        config, layer_number
+    )
+    return indexer_type, skip_topk, index_share, source_layer
+
+
 # ---------------------------------------------------------------------------
 # DSAttention - Core Attention Component with DSA
 # ---------------------------------------------------------------------------
@@ -1411,6 +1971,8 @@ class DSAttention(FleetLayer):
             ...
         )
     """
+
+    _HOLDER_ATTR = "_dsa_index_share_topk_holder"
 
     def __init__(
         self,
@@ -1431,13 +1993,24 @@ class DSAttention(FleetLayer):
     ):
         super().__init__(config=config)
 
-        DSAIndexerLossLoggingHelper.register_total_num_layers(config)
-        self.layer_number = layer_number
-        self.attn_mask_type = attn_mask_type
-
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
         self.pg_collection = pg_collection
+
+        DSAIndexerLossLoggingHelper.register_total_num_layers(config)
+        self.layer_number = layer_number
+        self.attn_mask_type = attn_mask_type
+        (
+            _indexer_type,
+            self.skip_topk,
+            self.index_share,
+            self.source_layer,
+        ) = resolve_dsa_indexer_layout(
+            config,
+            layer_number,
+            is_mtp_layer,
+            tensor_parallel_size=get_pg_size(pg_collection.tp),
+        )
 
         if softmax_scale is None:
             # Default to 1/sqrt(k_channels) consistent with DotProductAttention
@@ -1446,23 +2019,66 @@ class DSAttention(FleetLayer):
         else:
             self.softmax_scale = softmax_scale
 
-        # DSA Indexer - build from spec
-        # sublayers_spec.indexer should be a LayerSpec for DSAIndexer
-        self.indexer = build_spec_layer(
-            sublayers_spec.indexer,
-            config=config,
-            layer_number=layer_number,
-            pg_collection=pg_collection,
-        )
+        # Shared MTP still owns the official checkpoint's dormant indexer.
+        # Its layout is fixed at construction; forward keeps reusing decoder
+        # top-k. Preserve RNG so these extra weights cannot perturb later
+        # initialization, and exclude them from gradient/optimizer updates.
+        self.indexer = None
+        if not self.skip_topk or is_mtp_layer:
+            with _fork_rng() if self.skip_topk else nullcontext():
+                self.indexer = build_spec_layer(
+                    sublayers_spec.indexer,
+                    config=config,
+                    layer_number=layer_number,
+                    pg_collection=pg_collection,
+                )
+            if self.skip_topk:
+                for parameter in self.indexer.parameters():
+                    parameter.stop_gradient = True
 
-        # DSA loss config; None is normalized to 0.0 (disabled), so all
-        # downstream checks can key on ``> 0`` instead of ``is not None``.
+        # Accuracy-compatible routing retains the explicitly configured zero-coefficient
+        # indexer graph; TP2 also attaches its zero loss to the trunk.
+        self.retain_indexer_loss_graph = (
+            self.config.use_accuracy_compatible
+            and getattr(config, "dsa_indexer_loss_coeff", None) is not None
+        )
         self.dsa_indexer_loss_coeff = float(
             getattr(config, "dsa_indexer_loss_coeff", 0.0) or 0.0
         )
         self.dsa_indexer_use_sparse_loss = getattr(
             config, "dsa_indexer_use_sparse_loss", False
         )
+
+    def _get_index_share_topk_holder(
+        self, attention_mask: Tensor | None
+    ) -> dict:
+        # Shared top-k must survive attention_mask.clone() in selective
+        # core-attn recompute. Keep the holder on the process-local config.
+        # Pipeline stages that split a producer from its consumer cannot
+        # share this Python dict; those layouts fail closed in forward.
+        del attention_mask
+        holder = getattr(self.config, self._HOLDER_ATTR, None)
+        if holder is None:
+            holder = {}
+            setattr(self.config, self._HOLDER_ATTR, holder)
+        return holder
+
+    def _publish_index_share_topk(
+        self, topk_holder: dict, topk_indices
+    ) -> None:
+        # Consumers look up source_layer from resolve_dsa_indexer_layout
+        # (logical producer id after num_empty_layers_add_in_head).
+        # Publishing the physical GPT layer_number would miss that lookup.
+        topk_holder[self.source_layer] = topk_indices
+
+    def _lookup_index_share_topk(self, topk_holder: dict | None):
+        if topk_holder is None or self.source_layer not in topk_holder:
+            raise RuntimeError(
+                "DSA index-share skip layer "
+                f"{self.layer_number} needs top-k indices from source layer "
+                f"{self.source_layer}, but the source layer did not run first."
+            )
+        return topk_holder[self.source_layer]
 
     def forward(
         self,
@@ -1487,6 +2103,7 @@ class DSAttention(FleetLayer):
         k_pos_emb: paddle.Tensor = None,
         q_absorbed: paddle.Tensor = None,
         v_b_proj_weight: paddle.Tensor = None,
+        k_abs_weight: paddle.Tensor = None,
     ) -> Tensor:
         """Forward pass for Sparse Attention.
 
@@ -1523,10 +2140,14 @@ class DSAttention(FleetLayer):
         # Use detach() + stop_gradient=False so that:
         # 1. Gradients don't flow back to the main model (detach breaks the graph)
         # 2. Linear layers can still compute grad_input in backward without PyLayer errors
-        x = x.detach()
-        x.stop_gradient = False
-        qr = qr.detach()
-        qr.stop_gradient = False
+        if not (
+            self.config.use_accuracy_compatible
+            and get_pg_size(self.pg_collection.tp) <= 1
+        ):
+            x = x.detach()
+            x.stop_gradient = False
+            qr = qr.detach()
+            qr.stop_gradient = False
 
         # rotate_activation requires bf16 input
         assert x.dtype == paddle.bfloat16, (
@@ -1536,13 +2157,28 @@ class DSAttention(FleetLayer):
             f"DSAttention: qr must be bfloat16, got {qr.dtype}"
         )
 
-        # Layout: batch-first [b, sq, np, hn]
+        # Layout: batch-first [b, sq, np, hn]. Indexer Q/K are gathered under
+        # sequence parallel, so index scores are [b, s, s]. Size the causal
+        # mask to that gathered length; a Q/K-shaped [s/TP, s/TP] mask cannot
+        # be added onto [s, s] scores.
         b, sq, np, hn = query.shape
         sk = key.shape[1]
+        indexer_sq, indexer_sk = sq, sk
+        if (
+            self.config.sequence_parallel
+            and self.pg_collection.tp is not None
+            and self.pg_collection.tp.nranks > 1
+            and x.ndim == 3
+        ):
+            gathered = int(x.shape[0]) * int(self.pg_collection.tp.nranks)
+            indexer_sq = gathered
+            indexer_sk = gathered
 
         # Build causal mask
         causal_mask = paddle.triu(
-            paddle.full([sq, sk], float("-inf"), dtype="float32"),
+            paddle.full(
+                [indexer_sq, indexer_sk], float("-inf"), dtype="float32"
+            ),
             diagonal=1,
         )  # [sq, sk]
 
@@ -1552,19 +2188,36 @@ class DSAttention(FleetLayer):
                 0
             )  # [1, 1, sq, sk]
         elif attention_mask is not None:
-            mask = attention_mask.squeeze(1)
-            indexer_float_mask = paddle.zeros_like(
-                mask, dtype="float32"
-            ).masked_fill(mask.cast("bool"), float("-inf"))
+            aligned = _align_dsa_indexer_mask(
+                attention_mask.squeeze(1),
+                indexer_sk,
+                sequence_parallel=bool(self.config.sequence_parallel),
+                tp_group=self.pg_collection.tp,
+            )
+            if aligned is None:
+                indexer_float_mask = causal_mask.unsqueeze(0).unsqueeze(0)
+            else:
+                indexer_float_mask = paddle.zeros_like(
+                    aligned, dtype="float32"
+                ).masked_fill(aligned.cast("bool"), float("-inf"))
 
         else:
             indexer_float_mask = causal_mask.unsqueeze(0).unsqueeze(
                 0
             )  # [1, 1, sq, sk]
 
-        # Training with indexer loss (coeff is normalized to 0.0 when
-        # unset/None, so ``> 0`` is the single "enabled" check)
-        if self.training and self.dsa_indexer_loss_coeff > 0:
+        topk_holder = (
+            self._get_index_share_topk_holder(attention_mask)
+            if self.index_share
+            else None
+        )
+        if self.skip_topk:
+            topk_indices = self._lookup_index_share_topk(topk_holder)
+            indexer_loss = None
+        elif self.training and (
+            self.dsa_indexer_loss_coeff > 0 or self.retain_indexer_loss_graph
+        ):
+            assert self.indexer is not None
             # Indexer forward_before_topk runs WITH gradient tracking
             # RoPE is computed internally by the indexer
             q_idx, k_idx, weights_idx = self.indexer.forward_before_topk(x, qr)
@@ -1588,12 +2241,17 @@ class DSAttention(FleetLayer):
             topk_indices = FusedDSAIndexerLoss._last_topk_indices
         else:
             # Inference or no loss
+            assert self.indexer is not None
             _, topk_indices = self.indexer.forward(x, qr, indexer_float_mask)
             indexer_loss = None
 
-        # Build sparse mask
+        if self.index_share and not self.skip_topk:
+            self._publish_index_share_topk(topk_holder, topk_indices)
+
+        # Build sparse mask. Use the indexer-gathered sequence so top-k
+        # indices (full seq under SP) and the causal mask share a layout.
         index_mask = paddle.full(
-            [b, sq, sk],
+            [b, indexer_sq, indexer_sk],
             fill_value=float("-inf"),
             dtype="float32",
         )
@@ -1613,12 +2271,108 @@ class DSAttention(FleetLayer):
         combined_mask = index_mask.unsqueeze(1)  # [b, 1, sq, sk]
 
         if attention_mask is not None:
-            combined_mask = attention_mask.cast("float32") + combined_mask
+            aligned_attn = _align_dsa_indexer_mask(
+                attention_mask,
+                indexer_sk,
+                sequence_parallel=bool(self.config.sequence_parallel),
+                tp_group=self.pg_collection.tp,
+            )
+            if aligned_attn is not None:
+                if aligned_attn.ndim == 3:
+                    aligned_attn = aligned_attn.unsqueeze(1)
+                combined_mask = aligned_attn.cast("float32") + combined_mask
 
         # Run sparse attention (batch-first layout)
-        core_attn_out = _unfused_dsa_attention(
-            query, key, value, combined_mask, self.softmax_scale
-        )
+        if (
+            q_absorbed is not None or k_abs_weight is not None
+        ) and v_b_proj_weight is not None:
+            # IEEE 1-5: torch-aligned absorbed core. Query is latent
+            # [b,s,h,512+rope]; key = cat(kv_compressed, k_pos_emb); scores
+            # go through STE unfused DSA; V de-absorption is bmm on wv_b.
+            if q_absorbed is None:
+                qk_hd = query.shape[-1]
+                rope_hd = (
+                    k_pos_emb.shape[-1]
+                    if k_pos_emb is not None
+                    else int(getattr(self.config, "qk_rope_head_dim", 64))
+                )
+                nope_hd = qk_hd - rope_hd
+                q_nope = query[..., :nope_hd]
+                q_pe = query[..., nope_hd:]
+                bs_abs = query.shape[0] * query.shape[1]
+                qn3 = q_nope.reshape(
+                    [bs_abs, query.shape[2], nope_hd]
+                ).transpose([1, 0, 2])
+                q_abs_nope = _absorb_q_nope_k_up(
+                    qn3,
+                    k_abs_weight,
+                    use_accuracy_compatible=self.config.use_accuracy_compatible,
+                )
+                q_abs_nope = q_abs_nope.transpose([1, 0, 2]).reshape(
+                    [
+                        query.shape[0],
+                        query.shape[1],
+                        query.shape[2],
+                        k_abs_weight.shape[-1],
+                    ]
+                )
+                q_absorbed = paddle.concat([q_abs_nope, q_pe], axis=-1)
+            _kv_c = _align_sp_aux_to_query(kv_compressed, query)
+            # Keep the compressed-KV gradient accumulation order under TP.
+            uac = self.config.use_accuracy_compatible
+            if uac and not (
+                self.config.use_accuracy_compatible
+                and get_pg_size(self.pg_collection.tp) <= 1
+            ):
+                # x + x*0 is an add, not a view. clone/contiguous were PIR-folded.
+                _kv_c = _kv_c + (_kv_c * 0)
+            k_latent = _kv_c.unsqueeze(2)
+            k_rope = _align_sp_aux_to_query(k_pos_emb, query)
+            if k_rope.ndim == 3:
+                k_rope = k_rope.unsqueeze(2)
+            key_abs = paddle.concat([k_latent, k_rope], axis=-1)
+            # Dummy, not k_latent: live PIR CSE'd key[..., :v] to k_latent.
+            value = paddle.zeros(k_latent.shape, dtype=k_latent.dtype)
+            latent_flat = _unfused_dsa_attention(
+                q_absorbed,
+                key_abs,
+                value,
+                combined_mask,
+                self.softmax_scale,
+                use_accuracy_compatible=self.config.use_accuracy_compatible,
+                tensor_parallel_size=get_pg_size(self.pg_collection.tp),
+            )
+            nh = q_absorbed.shape[2]
+            kv_rank = _kv_c.shape[-1]
+            latent_out = latent_flat.reshape([b, sq, nh, kv_rank])
+            if uac:
+                _bs = b * sq
+                _lat = latent_out.transpose([2, 0, 1, 3]).reshape(
+                    [nh, _bs, kv_rank]
+                )
+                _v = v_b_proj_weight.transpose([0, 2, 1])
+                core_attn_out = (
+                    paddle.bmm(_lat, _v)
+                    .reshape([nh, b, sq, -1])
+                    .transpose([1, 2, 0, 3])
+                )
+            else:
+                core_attn_out = paddle.einsum(
+                    "bshc,hdc->bshd", latent_out, v_b_proj_weight
+                )
+            core_attn_out = core_attn_out.reshape(
+                [b, sq, nh * core_attn_out.shape[-1]]
+            )
+        else:
+            core_attn_out = _unfused_dsa_attention(
+                query,
+                key,
+                value,
+                combined_mask,
+                self.softmax_scale,
+                use_accuracy_compatible=self.config.use_accuracy_compatible,
+                tensor_parallel_size=get_pg_size(self.pg_collection.tp),
+            )
 
         # Attach indexer loss if training
         if self.training and indexer_loss is not None:
@@ -1630,9 +2384,16 @@ class DSAttention(FleetLayer):
                         self.config
                     ),
                 )
-            core_attn_out = DSAIndexerLossAutoScaler.apply(
-                core_attn_out, indexer_loss
-            )
+            if (
+                not (
+                    self.config.use_accuracy_compatible
+                    and get_pg_size(self.pg_collection.tp) <= 1
+                )
+                or self.dsa_indexer_loss_coeff > 0
+            ):
+                core_attn_out = DSAIndexerLossAutoScaler.apply(
+                    core_attn_out, indexer_loss
+                )
 
         return core_attn_out
 

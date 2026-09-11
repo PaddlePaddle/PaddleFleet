@@ -66,7 +66,9 @@ from .fusion_layer_utils import (
 from .moe_expert import GroupedMLPExpert, SonicMoEExpert, StandardMLPExpert
 from .moe_router import TopKRouter
 from .moe_shared_expert import StandardMLPSharedExpert
-from .moe_utils import AddAuxiliaryLoss, use_accuracy_compatible_kernel
+from .moe_utils import (
+    AddAuxiliaryLoss,
+)
 from .token_dispatcher import (
     AllGatherTokenDispatcher,
     AllToAllTokenDispatcher,
@@ -110,6 +112,53 @@ from .moe_utils import (
     permute,
     unpermute,
 )
+
+
+class _AccuracyCompatibleMoEInputBranches(PyLayer):
+    """Fan out MoE input branches and combine their dgrads in Megatron order."""
+
+    @staticmethod
+    def forward(ctx, hidden_states):
+        return (
+            hidden_states.clone(),
+            hidden_states.clone(),
+            hidden_states.clone(),
+        )
+
+    @staticmethod
+    def backward(ctx, routed_grad, router_grad, shared_grad):
+        return (routed_grad + router_grad) + shared_grad
+
+
+class _AccuracyCompatibleExpertInputGather(PyLayer):
+    """Gather expert inputs while fixing routed-token dgrad accumulation order."""
+
+    @staticmethod
+    def forward(ctx, hidden_states, token_indices, tokens_per_expert):
+        ctx.hidden_shape = hidden_states.shape
+        ctx.save_for_backward(token_indices, tokens_per_expert)
+        return paddle.index_select(hidden_states, token_indices, axis=0)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        token_indices, tokens_per_expert = ctx.saved_tensor()
+        grad_hidden = paddle.zeros(ctx.hidden_shape, dtype=grad_output.dtype)
+        offset = 0
+        for count in tokens_per_expert.tolist():
+            count = int(count)
+            if count == 0:
+                continue
+            next_offset = offset + count
+            expert_grad = paddle.zeros_like(grad_hidden)
+            expert_grad = paddle.scatter(
+                expert_grad,
+                token_indices[offset:next_offset],
+                grad_output[offset:next_offset],
+                overwrite=False,
+            )
+            grad_hidden = grad_hidden + expert_grad
+            offset = next_offset
+        return grad_hidden, None, None
 
 
 class GradDtypeGuard(PyLayer):
@@ -217,7 +266,15 @@ class MoELayer(nn.Layer):
             "ringmoe",
         )
         self.moe_allgather_gate_overlap = config.moe_allgather_gate_overlap
-        if self.use_accuracy_compatible:
+        if self.use_accuracy_compatible and not (
+            self.config.use_accuracy_compatible
+            and config.moe_expert_fusion
+            and self.moe_token_dispatcher_type == "deepep"
+            and pg_collection.ep is not None
+            and utils.get_pg_size(pg_collection.ep) > 1
+        ):
+            # IEEE fused experts retain their explicitly selected EP backend.
+            # Ordinary compatibility mode keeps the existing all-to-all path.
             self.moe_token_dispatcher_type = "alltoall"
         self.use_hybrid_ep_backend = False
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
@@ -539,29 +596,27 @@ class MoELayer(nn.Layer):
         else:
             self.shared_experts = None
 
-        # when sp is enabled, mark shared_experts as sequence parallel, because:
-        # 1. shared_experts only process local tokens which shape is [s/tp,b,h]
-        # 2. shared_experts'weight and bias will not be splited across tp ranks
+        # In compatibility mode, only replicated shared parameters need the
+        # cross-TP SP gradient sum; TP-sharded matrices must keep local grads.
         if (
             not self.config.gpt_model_use_experimental_version
             and self.sequence_parallel
             and self.expert_model_parallel_size > 1
             and self.shared_experts is not None
         ):
-            mark_as_sequence_parallel_parameter(
-                self.shared_experts.up_gate_proj.weight
-            )
-            if shared_expert_config.use_bias:
-                mark_as_sequence_parallel_parameter(
-                    self.shared_experts.up_gate_proj.bias
-                )
-            mark_as_sequence_parallel_parameter(
-                self.shared_experts.down_proj.weight
-            )
-            if shared_expert_config.use_bias:
-                mark_as_sequence_parallel_parameter(
-                    self.shared_experts.down_proj.bias
-                )
+            for projection in (
+                self.shared_experts.up_gate_proj,
+                self.shared_experts.down_proj,
+            ):
+                parameters = [projection.weight]
+                if shared_expert_config.use_bias:
+                    parameters.append(projection.bias)
+                for parameter in parameters:
+                    if parameter is not None and (
+                        not self.use_accuracy_compatible
+                        or not getattr(parameter, "is_distributed", False)
+                    ):
+                        mark_as_sequence_parallel_parameter(parameter)
 
         if self.expert_model_parallel_size > 1:
             if self.moe_token_dispatcher_type in (
@@ -870,13 +925,13 @@ class MoELayer(nn.Layer):
             dispatched_input, num_or_sections=tokens_per_expert, axis=0
         )
         scale_chunks = None
-        if use_accuracy_compatible_kernel():
+        if self.config.use_accuracy_compatible:
             per_token_scale = getattr(
                 self.token_dispatcher, "global_input_probs", None
             )
             if per_token_scale is None:
                 raise RuntimeError(
-                    "FLAGS_use_accuracy_compatible_kernel requires dispatched "
+                    "use_accuracy_compatible requires dispatched "
                     "router probabilities from the token dispatcher."
                 )
             else:
@@ -924,9 +979,13 @@ class MoELayer(nn.Layer):
             elif scale_chunks is None:
                 expert_output = expert(chunk)[0]
             else:
-                expert_output = expert(chunk, per_token_scale=scale_chunks[i])[
-                    0
-                ]
+                expert_output = expert(
+                    chunk,
+                    per_token_scale=scale_chunks[i],
+                    accuracy_compatible_router_reduction_rows=dispatched_input.shape[
+                        0
+                    ],
+                )[0]
             outputs += [expert_output]
 
         if not outputs:
@@ -1254,7 +1313,14 @@ class MoELayer(nn.Layer):
         topk_weights: paddle.Tensor | None = None,
         topk_indices: paddle.Tensor | None = None,
     ):
-        if self.use_accuracy_compatible:
+        ieee_deepep_fusion = (
+            self.use_accuracy_compatible
+            and self.config.use_accuracy_compatible
+            and self.moe_expert_fusion
+            and self.moe_token_dispatcher_type == "deepep"
+            and self.expert_model_parallel_size > 1
+        )
+        if self.use_accuracy_compatible and not ieee_deepep_fusion:
             if (
                 combine_overlap_handle is not None
                 and "fn_out" not in combine_overlap_handle
@@ -1272,6 +1338,15 @@ class MoELayer(nn.Layer):
                 topk_indices=topk_indices,
             )
         hidden_states = self._project_to_latent(hidden_states)
+        if ieee_deepep_fusion:
+            # Rebuild the dispatch operands from sparse routing, preserving
+            # the expert ordering used by the accuracy-compatible fused path.
+            topk_weights = None
+            topk_indices = None
+            if self.is_mtp_layer:
+                hidden_states = hidden_states.cast("float32").cast(
+                    hidden_states.dtype
+                )
         layer_idx = getattr(self, "layer_number", None)
         hidden_states = inspect_tensor(
             "moe_latent_input", layer_idx, hidden_states
@@ -1290,12 +1365,16 @@ class MoELayer(nn.Layer):
             "moe_dispatch_tokens_per_expert",
             layer_idx,
             tokens_per_expert,
-            pre_save_func=lambda counts: counts
-            if isinstance(counts, paddle.Tensor)
-            else paddle.to_tensor(counts, dtype="int32"),
-            post_load_func=lambda loaded: loaded
-            if isinstance(tokens_per_expert, paddle.Tensor)
-            else loaded.tolist(),
+            pre_save_func=lambda counts: (
+                counts
+                if isinstance(counts, paddle.Tensor)
+                else paddle.to_tensor(counts, dtype="int32")
+            ),
+            post_load_func=lambda loaded: (
+                loaded
+                if isinstance(tokens_per_expert, paddle.Tensor)
+                else loaded.tolist()
+            ),
         )
         dispatched_probs = inspect_tensor(
             "moe_dispatched_probs",
@@ -1369,6 +1448,10 @@ class MoELayer(nn.Layer):
                     use_w4a8=self.use_w4a8,
                     use_w4a8_fused_quant=self.use_w4a8_fused_quant,
                 )
+                if ieee_deepep_fusion:
+                    # Keep the fused output's autograd edge before DeepEP
+                    # combine, as in the verified accuracy-compatible path.
+                    hidden_states = hidden_states.clone()
 
         hidden_states = inspect_tensor(
             "moe_zipped_output", layer_idx, hidden_states
@@ -1732,23 +1815,39 @@ class MoELayer(nn.Layer):
 
         orig_shape = hidden_states.shape
         residuals = hidden_states
-
-        layer_idx = getattr(self, "layer_number", None)
-
-        inspect_tensor_set_current_layer(layer_idx)
-
         _three_paths_enabled = (
             getattr(self, "use_accuracy_compatible", False)
             and hidden_states.stop_gradient is False
             and self._supports_three_path_clone()
         )
+        if (
+            self.config.use_accuracy_compatible
+            and not _three_paths_enabled
+            and self.shared_experts is not None
+            and self.expert_model_parallel_size <= 1
+        ):
+            hidden_states, router_hidden_states, residuals = (
+                _AccuracyCompatibleMoEInputBranches.apply(hidden_states)
+            )
+        else:
+            router_hidden_states = hidden_states
+
+        layer_idx = getattr(self, "layer_number", None)
+
+        inspect_tensor_set_current_layer(layer_idx)
+
         if _three_paths_enabled:
             _hs_router_path, _hs_dispatcher_path, _hs_shared_path = (
                 ThreePathCloneAlignMG.apply(hidden_states)
             )
             residuals = _hs_shared_path
         else:
-            _hs_router_path = _hs_dispatcher_path = hidden_states
+            # ``router_hidden_states`` is ``hidden_states`` unless the
+            # env-gated accuracy-compatible branch above replaced it, so this
+            # keeps that probe path alive while upstream's config-gated
+            # three-path clone takes precedence when it is enabled.
+            _hs_router_path = router_hidden_states
+            _hs_dispatcher_path = hidden_states
         _log_moe_md5(hidden_states, "moe_input", layer_idx)
 
         self._maybe_pre_allgather_overlap(hidden_states)
@@ -1918,6 +2017,25 @@ class MoELayer(nn.Layer):
         tokens_per_expert = expert_mask.reshape([expert_mask.shape[0], -1]).sum(
             axis=-1
         )
+        accuracy_compatible = self.config.use_accuracy_compatible
+        gathered_state_chunks = None
+        token_counts = [int(count) for count in tokens_per_expert.tolist()]
+        if accuracy_compatible:
+            expert_token_indices = []
+            for expert_idx in range(self.num_experts):
+                _, expert_indices = paddle.where(expert_mask[expert_idx])
+                if tokens_per_expert[expert_idx] > 0.1:
+                    expert_token_indices.append(expert_indices.reshape([-1]))
+            token_indices = paddle.concat(expert_token_indices, axis=0)
+            gathered_states = _AccuracyCompatibleExpertInputGather.apply(
+                hidden_states, token_indices, tokens_per_expert
+            )
+            gathered_state_chunks = paddle.split(
+                gathered_states,
+                num_or_sections=token_counts,
+                axis=0,
+            )
+
         # Loop over all available experts in the model and perform the computation on each expert
         for expert_idx in range(self.num_experts):
             expert_layer = self.experts[expert_idx]
@@ -1927,10 +2045,21 @@ class MoELayer(nn.Layer):
             # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
             if tokens_per_expert[expert_idx] <= 0.1:
                 continue
-            current_state = hidden_states[idx, None].reshape([-1, d_model])
-            expert_out = expert_layer(current_state)[0]
+            if accuracy_compatible:
+                current_state = gathered_state_chunks[expert_idx]
+            else:
+                current_state = hidden_states[idx, None].reshape([-1, d_model])
             current_weight = topk_weights[idx, top_x].unsqueeze(-1)
-            current_hidden_states = expert_out * current_weight
+            if accuracy_compatible:
+                expert_out = expert_layer(
+                    current_state,
+                    per_token_scale=current_weight.squeeze(-1),
+                    accuracy_compatible_router_reduction_rows=selected_experts.numel(),
+                )[0]
+                current_hidden_states = expert_out
+            else:
+                expert_out = expert_layer(current_state)[0]
+                current_hidden_states = expert_out * current_weight
 
             # use scatter to replace index_add
             final_hidden_states_tmp = paddle.zeros_like(final_hidden_states)
@@ -1982,20 +2111,56 @@ class MoELayer(nn.Layer):
             )
             return final_hidden_states.cast(hidden_states.dtype)
         else:
+            # Accuracy-compatible expert path (E-163 / e468). Under
+            # use_accuracy_compatible: permute/unpermute use the MG-aligned
+            # gather/sum PyLayers; fold routing probs into post-GLU before
+            # fc2; batch each expert GEMM per SP shard so bf16 M matches
+            # mcore. Dump / LOCAL_SHARD env knobs stay on the Explore tree.
+            ac_expert_path = self.config.use_accuracy_compatible
             tokens_per_expert = routing_map.sum(axis=0)
             permuted_local_hidden_states, sorted_indices = permute(
-                hidden_states, routing_map, tokens_per_expert
+                hidden_states,
+                routing_map,
+                tokens_per_expert,
+                use_accuracy_compatible=ac_expert_path,
             )
-            grouped_expert_out = self.grouped_gemm_experts(
-                permuted_local_hidden_states, tokens_per_expert
-            )[0]
-            final_hidden_states = unpermute(
-                grouped_expert_out,
-                sorted_indices,
-                restore_shape=hidden_states.shape,
-                probs=probs,
-                routing_map=routing_map,
-            )
+            if ac_expert_path:
+                shard_len = max(
+                    hidden_states.shape[0]
+                    // max(self.tensor_model_parallel_size, 1),
+                    1,
+                )
+                row_owner = sorted_indices // shard_len
+                permuted_probs = None
+                if probs is not None:
+                    permuted_probs = probs.T.contiguous().masked_select(
+                        routing_map.T.contiguous().cast("bool")
+                    )
+                grouped_expert_out = self.grouped_gemm_experts(
+                    permuted_local_hidden_states,
+                    tokens_per_expert,
+                    permuted_probs=permuted_probs,
+                    row_owner=row_owner,
+                )[0]
+                final_hidden_states = unpermute(
+                    grouped_expert_out,
+                    sorted_indices,
+                    restore_shape=hidden_states.shape,
+                    probs=None,
+                    routing_map=routing_map,
+                    use_accuracy_compatible=True,
+                )
+            else:
+                grouped_expert_out = self.grouped_gemm_experts(
+                    permuted_local_hidden_states, tokens_per_expert
+                )[0]
+                final_hidden_states = unpermute(
+                    grouped_expert_out,
+                    sorted_indices,
+                    restore_shape=hidden_states.shape,
+                    probs=probs,
+                    routing_map=routing_map,
+                )
             return final_hidden_states.cast(hidden_states.dtype)
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
