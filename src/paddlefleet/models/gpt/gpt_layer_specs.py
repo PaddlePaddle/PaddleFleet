@@ -661,16 +661,23 @@ def get_gpt_layer_local_spec(
             is_mtp_layer=is_mtp_layer,
         )
 
-    # mHC: build HC LayerSpec for sublayers_spec
+    # mHC / iHC: build HC LayerSpec for sublayers_spec
     self_attention_hc_spec = IdentityOp
     mlp_hc_spec = IdentityOp
     if config is not None and config.enable_hyper_connections:
         from paddlefleet.transformer.hyper_connection import (
             HyperConnectionModule,
+            IdentityHyperConnectionModule,
         )
 
-        self_attention_hc_spec = LayerSpec(layer=HyperConnectionModule)
-        mlp_hc_spec = LayerSpec(layer=HyperConnectionModule)
+        if config.enable_identity_hyper_connections:
+            self_attention_hc_spec = LayerSpec(
+                layer=IdentityHyperConnectionModule
+            )
+            mlp_hc_spec = LayerSpec(layer=IdentityHyperConnectionModule)
+        else:
+            self_attention_hc_spec = LayerSpec(layer=HyperConnectionModule)
+            mlp_hc_spec = LayerSpec(layer=HyperConnectionModule)
 
     # Gemma4: use extended sublayer spec with extra norms and custom MoE
     if attention_layer_type == "gemma4":
