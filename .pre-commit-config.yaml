@@ -42,6 +42,7 @@ repos:
         exclude: &paddleformers_derived |
           (?x)^(
             src/paddlefleet/(cli|data|datasets|mergekit|nn|peft|quantization|trainer|transformers|triton_kernels)/|
+            src/paddlefleet/utils/(?!_fleet_utils\.py)|
             test/formers/
           )
   # For Python files
