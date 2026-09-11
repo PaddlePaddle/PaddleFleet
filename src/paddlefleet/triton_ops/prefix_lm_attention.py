@@ -42,7 +42,6 @@ implementation details.
 
 from __future__ import annotations
 
-import os
 from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
@@ -433,10 +432,8 @@ def build_exec_plan(layout: SegmentLayout, block_m: int, block_n: int) -> dict:
 # Rebuilding it on every call costs ~2ms of Python loops + transfer (for a 4k
 # token pack) while the flash kernel itself is only ~0.05ms; with recompute
 # enabled each layer pays it twice. So the device-side tensors are memoized by
-# layout. The cache-size env var lets deployments tune the memory footprint.
-_PLAN_CACHE_MAX = int(
-    os.environ.get("HYPERBODY_TRITON_BLOCK_PLAN_CACHE_SIZE", "64")
-)
+# layout. The cache cap (`cache_max`) comes from a config field and lets
+# deployments tune the memory footprint (0 disables caching).
 _EXEC_PLAN_CACHE: OrderedDict[tuple, dict] = OrderedDict()
 
 
@@ -455,9 +452,11 @@ def _layout_cache_key(
     )
 
 
-def get_exec_plan(layout: SegmentLayout, block_m: int, block_n: int) -> dict:
-    """Return the cached exec plan (device-side tensors), LRU-capped at `_PLAN_CACHE_MAX`."""
-    if _PLAN_CACHE_MAX <= 0:
+def get_exec_plan(
+    layout: SegmentLayout, block_m: int, block_n: int, cache_max: int = 64
+) -> dict:
+    """Return the cached exec plan (device-side tensors), LRU-capped at `cache_max`."""
+    if cache_max <= 0:
         return build_exec_plan(layout, block_m, block_n)
     key = _layout_cache_key(layout, block_m, block_n)
     val = _EXEC_PLAN_CACHE.get(key)
@@ -466,7 +465,7 @@ def get_exec_plan(layout: SegmentLayout, block_m: int, block_n: int) -> dict:
         return val
     val = build_exec_plan(layout, block_m, block_n)
     _EXEC_PLAN_CACHE[key] = val
-    if len(_EXEC_PLAN_CACHE) > _PLAN_CACHE_MAX:
+    if len(_EXEC_PLAN_CACHE) > cache_max:
         _EXEC_PLAN_CACHE.popitem(last=False)
     return val
 
@@ -525,23 +524,8 @@ def _st(x) -> tuple:
 # ---------------------------------------------------------------------------
 
 
-# warps/stages are read from env vars: num_warps directly determines the
-# softmax reduction tree, so it (and num_stages) are configurable to tune the
-# launch configuration.
-def _fwd_launch() -> tuple[int, int]:
-    return (
-        int(os.environ.get("HYPERBODY_TRITON_FWD_WARPS", "4")),
-        int(os.environ.get("HYPERBODY_TRITON_FWD_STAGES", "2")),
-    )
-
-
-def _bwd_launch() -> tuple[int, int]:
-    return (
-        int(os.environ.get("HYPERBODY_TRITON_BWD_WARPS", "4")),
-        int(os.environ.get("HYPERBODY_TRITON_BWD_STAGES", "2")),
-    )
-
-
+# num_warps directly determines the softmax reduction tree, so it (and
+# num_stages) are passed in from config fields to tune the launch configuration.
 def triton_prefix_lm_forward(
     query,
     key,
@@ -551,6 +535,9 @@ def triton_prefix_lm_forward(
     scale: float,
     block_m: int = 64,
     block_n: int = 64,
+    num_warps: int = 4,
+    num_stages: int = 2,
+    cache_max: int = 64,
     plan: dict | None = None,
 ):
     """Run the Triton prefix-LM flash forward.
@@ -559,6 +546,8 @@ def triton_prefix_lm_forward(
         query/key/value: `[B, H, T, D]`, ideally contiguous.
         layout: packed segment layout (`T == seq_total`).
         scale: softmax scale.
+        num_warps/num_stages: launch configuration for the forward kernel.
+        cache_max: LRU cap for the exec-plan cache.
         plan: output of `get_exec_plan`; if omitted it is built on the fly
             (slower, same semantics).
 
@@ -570,11 +559,14 @@ def triton_prefix_lm_forward(
     b, h, t, d = query.shape
     if t != layout.seq_total:
         raise ValueError(f"seq len {t} != layout.seq_total {layout.seq_total}")
-    p = plan if plan is not None else get_exec_plan(layout, block_m, block_n)
+    p = (
+        plan
+        if plan is not None
+        else get_exec_plan(layout, block_m, block_n, cache_max)
+    )
 
     out = paddle.empty_like(query)
     lse = paddle.empty([b, h, t], dtype="float32")
-    warps, stages = _fwd_launch()
     _kernels()["_prefix_lm_fwd_kernel"][(p["n_q_blocks"], b * h)](
         query,
         key,
@@ -599,8 +591,8 @@ def triton_prefix_lm_forward(
         HEAD_DIM=d,
         BLOCK_M=block_m,
         BLOCK_N=block_n,
-        num_warps=warps,
-        num_stages=stages,
+        num_warps=num_warps,
+        num_stages=num_stages,
     )
     return out, lse
 
@@ -617,6 +609,9 @@ def triton_prefix_lm_backward(
     scale: float,
     block_m: int = 64,
     block_n: int = 64,
+    num_warps: int = 4,
+    num_stages: int = 2,
+    cache_max: int = 64,
     plan: dict | None = None,
 ):
     """Run the Triton prefix-LM flash backward.
@@ -633,7 +628,11 @@ def triton_prefix_lm_backward(
     import paddle
 
     b, h, t, d = query.shape
-    p = plan if plan is not None else get_exec_plan(layout, block_m, block_n)
+    p = (
+        plan
+        if plan is not None
+        else get_exec_plan(layout, block_m, block_n, cache_max)
+    )
     ks = _kernels()
 
     dout = dout.contiguous()
@@ -654,7 +653,7 @@ def triton_prefix_lm_backward(
         HEAD_DIM=d,
         BLOCK_M=block_m,
     )
-    warps, stages = _bwd_launch()
+    warps, stages = num_warps, num_stages
     ks["_prefix_lm_dkdv_kernel"][(p["n_kv_blocks"], b * h)](
         query,
         key,
@@ -745,8 +744,22 @@ def _attn_cls():
         """
 
         @staticmethod
-        def forward(ctx, query, key, value, layout, scale, block_m, block_n):
-            plan = get_exec_plan(layout, block_m, block_n)
+        def forward(
+            ctx,
+            query,
+            key,
+            value,
+            layout,
+            scale,
+            block_m,
+            block_n,
+            fwd_warps,
+            fwd_stages,
+            bwd_warps,
+            bwd_stages,
+            cache_max,
+        ):
+            plan = get_exec_plan(layout, block_m, block_n, cache_max)
             out, lse = triton_prefix_lm_forward(
                 query,
                 key,
@@ -755,6 +768,9 @@ def _attn_cls():
                 scale=scale,
                 block_m=block_m,
                 block_n=block_n,
+                num_warps=fwd_warps,
+                num_stages=fwd_stages,
+                cache_max=cache_max,
                 plan=plan,
             )
             ctx.save_for_backward(query, key, value, out, lse)
@@ -762,6 +778,9 @@ def _attn_cls():
             ctx.scale = scale
             ctx.block_m = block_m
             ctx.block_n = block_n
+            ctx.bwd_warps = bwd_warps
+            ctx.bwd_stages = bwd_stages
+            ctx.cache_max = cache_max
             # PyLayer contract: stop_gradient inputs must return None
             ctx.needs_grad = (
                 not query.stop_gradient,
@@ -784,11 +803,17 @@ def _attn_cls():
                 scale=ctx.scale,
                 block_m=ctx.block_m,
                 block_n=ctx.block_n,
-                plan=get_exec_plan(ctx.layout, ctx.block_m, ctx.block_n),
+                num_warps=ctx.bwd_warps,
+                num_stages=ctx.bwd_stages,
+                cache_max=ctx.cache_max,
+                plan=get_exec_plan(
+                    ctx.layout, ctx.block_m, ctx.block_n, ctx.cache_max
+                ),
             )
             gq, gk, gv = ctx.needs_grad
-            # One gradient slot per TENSOR input, in order; layout/scale/block_*
-            # are non-tensors and do not occupy a slot.
+            # One gradient slot per TENSOR input, in order; the non-tensor args
+            # (layout / scale / block_* / warps / stages / cache_max) do not
+            # occupy a slot.
             return (dq if gq else None, dk if gk else None, dv if gv else None)
 
     _ATTN_CLS = _PrefixLMTritonAttn
@@ -807,6 +832,24 @@ def triton_prefix_lm_attention(
     scale: float,
     block_m: int = 64,
     block_n: int = 64,
+    fwd_warps: int = 4,
+    fwd_stages: int = 2,
+    bwd_warps: int = 4,
+    bwd_stages: int = 2,
+    plan_cache_size: int = 64,
 ):
     """Differentiable Triton prefix-LM attention; inputs are `[B, H, T, D]`."""
-    return _attn_cls().apply(query, key, value, layout, scale, block_m, block_n)
+    return _attn_cls().apply(
+        query,
+        key,
+        value,
+        layout,
+        scale,
+        block_m,
+        block_n,
+        fwd_warps,
+        fwd_stages,
+        bwd_warps,
+        bwd_stages,
+        plan_cache_size,
+    )

@@ -12,14 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Attention backend switches for HyperEncoder.
+"""Attention backend selection for HyperEncoder.
 
-## Environment variables
+The backend and packed-decoder path are driven by config fields rather than
+environment variables, so they are declared with defaults, validated centrally
+(in ``HyperEncoderProvider.__post_init__``, which calls these functions), and
+serialized with the rest of the config:
 
-| env | values | effect |
+| field | values | effect |
 |---|---|---|
-| ``HYPERBODY_ENCODER_ATTN_BACKEND`` | ``dp`` (default) / ``flex`` / ``triton`` | selects the ``core_attention`` implementation |
-| ``HYPERBODY_PACKED_FLEX_DECODER`` | ``0`` (default) / ``1`` | run the trunk with a single packed call |
+| ``hyperencoder_attn_backend`` | ``dp`` (default) / ``triton`` | selects the ``core_attention`` implementation |
+| ``hyperencoder_packed_decoder`` | ``False`` (default) / ``True`` | run the trunk with a single packed call |
 
 **The ``flex`` backend is not implemented here**: it is a compiled artifact of
 ``torch.nn.attention.flex_attention`` and has no Paddle equivalent. The ``flex``
@@ -28,17 +31,12 @@ supports ``dp`` and ``triton`` only and **raises on ``flex``** instead of
 silently falling back to ``dp`` (a silent downgrade would produce misleading
 results).
 
-## Functions instead of module-level constants
-
-The backend selection is read on every call rather than fixed at import time.
-Some scripts run several configurations back-to-back in one process; fixing the
-switch at import time would make a later configuration silently inherit the
-first one's backend.
+The readers use ``getattr`` with defaults so any ``TransformerConfig`` works;
+the fields are authoritatively declared and validated on the HyperEncoder
+config.
 """
 
 from __future__ import annotations
-
-import os
 
 __all__ = [
     "encoder_attn_backend",
@@ -46,48 +44,41 @@ __all__ = [
     "use_packed_decoder",
 ]
 
-_TRUE = ("1", "true", "on")
-_FALSE = ("0", "false", "off")
 
-
-def encoder_attn_backend() -> str:
+def encoder_attn_backend(config) -> str:
     """Return ``dp`` or ``triton``. ``flex`` raises (see module docstring)."""
-    v = os.environ.get("HYPERBODY_ENCODER_ATTN_BACKEND", "dp").lower()
+    v = str(getattr(config, "hyperencoder_attn_backend", "dp")).lower()
     if v == "flex":
         raise ValueError(
-            "HYPERBODY_ENCODER_ATTN_BACKEND=flex is not implemented here: "
+            "hyperencoder_attn_backend='flex' is not implemented here: "
             "flex is a compiled artifact of torch.nn.attention.flex_attention "
             "and has no Paddle equivalent. Use triton for packed semantics "
             "(it is equivalent to flex)."
         )
     if v not in ("dp", "triton"):
         raise ValueError(
-            f"Unknown HYPERBODY_ENCODER_ATTN_BACKEND={v!r}; expected 'dp' or 'triton'"
+            f"Unknown hyperencoder_attn_backend={v!r}; expected 'dp' or 'triton'"
         )
     return v
 
 
-def use_triton_encoder_attn() -> bool:
+def use_triton_encoder_attn(config) -> bool:
     """Whether to replace ``core_attention`` with ``PrefixLMTritonCore``."""
-    return encoder_attn_backend() == "triton"
+    return encoder_attn_backend(config) == "triton"
 
 
-def use_packed_decoder() -> bool:
+def use_packed_decoder(config) -> bool:
     """Whether the trunk runs as a single packed call."""
-    v = os.environ.get("HYPERBODY_PACKED_FLEX_DECODER", "0").lower()
-    if v not in _TRUE + _FALSE:
-        raise ValueError(
-            f"Unknown HYPERBODY_PACKED_FLEX_DECODER={v!r}; expected 0/1/false/true/off/on"
-        )
-    on = v in _TRUE
+    on = bool(getattr(config, "hyperencoder_packed_decoder", False))
     # The packed path attaches the segment layout to packed_seq_params, which
     # only the triton backend reads. Enabling packed while staying on the dp
     # backend would silently ignore the layout and degrade the mask, so this is
     # a hard error.
-    if on and not use_triton_encoder_attn():
+    if on and not use_triton_encoder_attn(config):
         raise RuntimeError(
-            "HYPERBODY_PACKED_FLEX_DECODER=1 requires HYPERBODY_ENCODER_ATTN_BACKEND=triton: "
-            "the packed segment layout is only read by the triton core and would "
-            "be silently ignored on the dp backend."
+            "hyperencoder_packed_decoder=True requires "
+            "hyperencoder_attn_backend='triton': the packed segment layout is "
+            "only read by the triton core and would be silently ignored on the "
+            "dp backend."
         )
     return on

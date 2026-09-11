@@ -112,5 +112,13 @@ class TestForwardBackward(unittest.TestCase):
         self.assertTrue(paddle.allclose(norm.weight.grad, w2.grad, atol=1e-4))
 
 
+class TestMuonSliceSpecs(unittest.TestCase):
+    def test_no_slice_hook(self):
+        # weight is a 1-D RMSNorm scale (not a matrix): Muon leaves it to the
+        # AdamW group, so the module intentionally does not expose the hook.
+        norm = HyperEncoderRMSNorm(_cfg())
+        self.assertFalse(hasattr(norm, "muon_slice_specs"))
+
+
 if __name__ == "__main__":
     unittest.main()

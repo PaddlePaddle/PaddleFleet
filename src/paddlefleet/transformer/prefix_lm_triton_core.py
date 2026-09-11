@@ -55,7 +55,6 @@ not recompute-safe.
 from __future__ import annotations
 
 import math
-import os
 from typing import TYPE_CHECKING
 
 from paddlefleet.transformer.layer import FleetLayer
@@ -118,11 +117,27 @@ class PrefixLMTritonCore(FleetLayer):
             if softmax_scale is not None
             else 1.0 / math.sqrt(float(head_dim))
         )
-        # Block sizes are configurable via env vars: changing the block shape
-        # changes both the plan and the softmax reduction tree, so it must be
-        # set consistently across a run.
-        self.block_m = int(os.environ.get("HYPERBODY_TRITON_BLOCK_M", "64"))
-        self.block_n = int(os.environ.get("HYPERBODY_TRITON_BLOCK_N", "64"))
+        # Block sizes and launch tuning come from config fields (declared and
+        # validated on the HyperEncoder config). Changing the block shape changes
+        # both the plan and the softmax reduction tree, so it must be consistent
+        # across a run.
+        self.block_m = int(getattr(config, "hyperencoder_triton_block_m", 64))
+        self.block_n = int(getattr(config, "hyperencoder_triton_block_n", 64))
+        self.fwd_warps = int(
+            getattr(config, "hyperencoder_triton_fwd_warps", 4)
+        )
+        self.fwd_stages = int(
+            getattr(config, "hyperencoder_triton_fwd_stages", 2)
+        )
+        self.bwd_warps = int(
+            getattr(config, "hyperencoder_triton_bwd_warps", 4)
+        )
+        self.bwd_stages = int(
+            getattr(config, "hyperencoder_triton_bwd_stages", 2)
+        )
+        self.plan_cache_size = int(
+            getattr(config, "hyperencoder_triton_plan_cache_size", 64)
+        )
 
         if (
             pg_collection is not None
@@ -222,6 +237,11 @@ class PrefixLMTritonCore(FleetLayer):
             scale=self.softmax_scale,
             block_m=self.block_m,
             block_n=self.block_n,
+            fwd_warps=self.fwd_warps,
+            fwd_stages=self.fwd_stages,
+            bwd_warps=self.bwd_warps,
+            bwd_stages=self.bwd_stages,
+            plan_cache_size=self.plan_cache_size,
         )
         # [B,N,S,D] -> [B,S,N*D]
         return out.transpose([0, 2, 1, 3]).reshape([b, s, n_heads * head_dim])

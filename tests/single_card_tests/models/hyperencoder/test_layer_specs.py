@@ -14,10 +14,8 @@
 
 """Unit tests for the HyperEncoder layer-spec builders."""
 
-import os
 import types
 import unittest
-from contextlib import contextmanager
 from unittest import mock
 
 import paddle  # noqa: F401
@@ -33,24 +31,6 @@ from paddlefleet.models.hyperencoder.norm import (
 )
 
 
-@contextmanager
-def _env(**kv):
-    saved = {k: os.environ.get(k) for k in kv}
-    try:
-        for k, v in kv.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        yield
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-
-
 def _cfg(**over):
     base = {
         "num_hidden_layers": 2,
@@ -58,6 +38,7 @@ def _cfg(**over):
         "n_routed_experts": 4,
         "moe_expert_fusion": True,
         "_attn_implementation": "eager",
+        "hyperencoder_attn_backend": "dp",
     }
     base.update(over)
     return types.SimpleNamespace(**base)
@@ -96,34 +77,28 @@ class TestIsMoeLayer(unittest.TestCase):
 
 class TestLayerSpecsEager(unittest.TestCase):
     def test_missing_eager_raises(self):
-        with _env(HYPERBODY_ENCODER_ATTN_BACKEND=None):
-            cfg = _cfg(_attn_implementation="sdpa")
-            with self.assertRaises(ValueError):
-                get_hyperencoder_layer_specs(cfg)
+        cfg = _cfg(_attn_implementation="sdpa")
+        with self.assertRaises(ValueError):
+            get_hyperencoder_layer_specs(cfg)
 
     def test_happy_path_replaces_norms(self):
-        with _env(HYPERBODY_ENCODER_ATTN_BACKEND=None):
-            cfg = _cfg()
-            with mock.patch.object(
-                layer_specs,
-                "get_gpt_layer_local_spec",
-                side_effect=lambda **kw: _make_spec(),
-            ) as build:
-                specs = get_hyperencoder_layer_specs(cfg)
-            self.assertEqual(len(specs), 2)
-            for s in specs:
-                self.assertIs(
-                    s.sublayers_spec.input_layernorm, HyperEncoderRMSNorm
-                )
-                self.assertIs(
-                    s.sublayers_spec.post_attention_layernorm,
-                    HyperEncoderRMSNorm,
-                )
-            # MoE layer index 1 should receive num_experts; index 0 should not.
-            num_experts = [
-                c.kwargs["num_experts"] for c in build.call_args_list
-            ]
-            self.assertEqual(num_experts, [None, 4])
+        cfg = _cfg()
+        with mock.patch.object(
+            layer_specs,
+            "get_gpt_layer_local_spec",
+            side_effect=lambda **kw: _make_spec(),
+        ) as build:
+            specs = get_hyperencoder_layer_specs(cfg)
+        self.assertEqual(len(specs), 2)
+        for s in specs:
+            self.assertIs(s.sublayers_spec.input_layernorm, HyperEncoderRMSNorm)
+            self.assertIs(
+                s.sublayers_spec.post_attention_layernorm,
+                HyperEncoderRMSNorm,
+            )
+        # MoE layer index 1 should receive num_experts; index 0 should not.
+        num_experts = [c.kwargs["num_experts"] for c in build.call_args_list]
+        self.assertEqual(num_experts, [None, 4])
 
 
 class TestLayerSpecsTriton(unittest.TestCase):
@@ -132,48 +107,43 @@ class TestLayerSpecsTriton(unittest.TestCase):
             PrefixLMTritonCore,
         )
 
-        with _env(HYPERBODY_ENCODER_ATTN_BACKEND="triton"):
-            cfg = _cfg()
-            with mock.patch.object(
-                layer_specs,
-                "get_gpt_layer_local_spec",
-                side_effect=lambda **kw: _make_spec(),
-            ):
-                specs = get_hyperencoder_layer_specs(cfg)
-            for s in specs:
-                self.assertIs(
-                    s.sublayers_spec.self_attn.sublayers_spec.core_attention,
-                    PrefixLMTritonCore,
-                )
+        cfg = _cfg(hyperencoder_attn_backend="triton")
+        with mock.patch.object(
+            layer_specs,
+            "get_gpt_layer_local_spec",
+            side_effect=lambda **kw: _make_spec(),
+        ):
+            specs = get_hyperencoder_layer_specs(cfg)
+        for s in specs:
+            self.assertIs(
+                s.sublayers_spec.self_attn.sublayers_spec.core_attention,
+                PrefixLMTritonCore,
+            )
 
     def test_triton_missing_core_attention_raises(self):
-        with _env(HYPERBODY_ENCODER_ATTN_BACKEND="triton"):
-            cfg = _cfg()
-            with (
-                mock.patch.object(
-                    layer_specs,
-                    "get_gpt_layer_local_spec",
-                    side_effect=lambda **kw: _make_spec(
-                        with_core_attention=False
-                    ),
-                ),
-                self.assertRaises(RuntimeError),
-            ):
-                get_hyperencoder_layer_specs(cfg)
+        cfg = _cfg(hyperencoder_attn_backend="triton")
+        with (
+            mock.patch.object(
+                layer_specs,
+                "get_gpt_layer_local_spec",
+                side_effect=lambda **kw: _make_spec(with_core_attention=False),
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            get_hyperencoder_layer_specs(cfg)
 
 
 class TestBlockSpec(unittest.TestCase):
     def test_block_spec_wraps_layers_and_final_norm(self):
-        with _env(HYPERBODY_ENCODER_ATTN_BACKEND=None):
-            cfg = _cfg()
-            with mock.patch.object(
-                layer_specs,
-                "get_gpt_layer_local_spec",
-                side_effect=lambda **kw: _make_spec(),
-            ):
-                block = get_hyperencoder_block_spec(cfg)
-            self.assertEqual(len(block.layer_specs), 2)
-            self.assertIs(block.layer_norm, HyperEncoderRMSNorm)
+        cfg = _cfg()
+        with mock.patch.object(
+            layer_specs,
+            "get_gpt_layer_local_spec",
+            side_effect=lambda **kw: _make_spec(),
+        ):
+            block = get_hyperencoder_block_spec(cfg)
+        self.assertEqual(len(block.layer_specs), 2)
+        self.assertIs(block.layer_norm, HyperEncoderRMSNorm)
 
 
 if __name__ == "__main__":

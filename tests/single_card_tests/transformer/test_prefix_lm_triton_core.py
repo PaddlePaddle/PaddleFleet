@@ -19,10 +19,8 @@ it is replaced with a stub so the surrounding permute / reshape / guard logic
 can be validated deterministically on CPU.
 """
 
-import os
 import types
 import unittest
-from contextlib import contextmanager
 from unittest import mock
 
 import paddle
@@ -35,30 +33,14 @@ from paddlefleet.transformer.prefix_lm_triton_core import (
 )
 
 
-@contextmanager
-def _env(**kv):
-    saved = {k: os.environ.get(k) for k in kv}
-    try:
-        for k, v in kv.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        yield
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-
-
-def _cfg(head_dim=None, hidden_size=32, num_attention_heads=4):
-    return types.SimpleNamespace(
-        head_dim=head_dim,
-        hidden_size=hidden_size,
-        num_attention_heads=num_attention_heads,
-    )
+def _cfg(head_dim=None, hidden_size=32, num_attention_heads=4, **over):
+    base = {
+        "head_dim": head_dim,
+        "hidden_size": hidden_size,
+        "num_attention_heads": num_attention_heads,
+    }
+    base.update(over)
+    return types.SimpleNamespace(**base)
 
 
 def _psp(layout=None):
@@ -88,11 +70,33 @@ class TestInit(unittest.TestCase):
         core = PrefixLMTritonCore(_cfg(head_dim=8), softmax_scale=0.5)
         self.assertAlmostEqual(core.softmax_scale, 0.5)
 
-    def test_block_sizes_from_env(self):
-        with _env(HYPERBODY_TRITON_BLOCK_M="32", HYPERBODY_TRITON_BLOCK_N="16"):
-            core = PrefixLMTritonCore(_cfg(head_dim=8))
-            self.assertEqual(core.block_m, 32)
-            self.assertEqual(core.block_n, 16)
+    def test_block_sizes_default(self):
+        core = PrefixLMTritonCore(_cfg(head_dim=8))
+        self.assertEqual(core.block_m, 64)
+        self.assertEqual(core.block_n, 64)
+        self.assertEqual(core.fwd_warps, 4)
+        self.assertEqual(core.plan_cache_size, 64)
+
+    def test_tuning_from_config(self):
+        core = PrefixLMTritonCore(
+            _cfg(
+                head_dim=8,
+                hyperencoder_triton_block_m=32,
+                hyperencoder_triton_block_n=16,
+                hyperencoder_triton_fwd_warps=8,
+                hyperencoder_triton_fwd_stages=3,
+                hyperencoder_triton_bwd_warps=2,
+                hyperencoder_triton_bwd_stages=1,
+                hyperencoder_triton_plan_cache_size=0,
+            )
+        )
+        self.assertEqual(core.block_m, 32)
+        self.assertEqual(core.block_n, 16)
+        self.assertEqual(core.fwd_warps, 8)
+        self.assertEqual(core.fwd_stages, 3)
+        self.assertEqual(core.bwd_warps, 2)
+        self.assertEqual(core.bwd_stages, 1)
+        self.assertEqual(core.plan_cache_size, 0)
 
     def test_context_parallel_rejected(self):
         cp = types.SimpleNamespace(nranks=2)
@@ -174,9 +178,12 @@ class TestForwardHappyPath(unittest.TestCase):
         b, s, n, d = 1, 4, 4, 8
         q = paddle.randn([b, s, n, d])
 
-        def fake_kernel(qt, kt, vt, layout, scale, block_m, block_n):
+        def fake_kernel(qt, kt, vt, layout, scale, block_m, block_n, **kw):
             # kernel operates on [B, N, S, D]; echo the shape back.
             self.assertEqual(qt.shape, [b, n, s, d])
+            # tuning knobs are forwarded from config as keyword args.
+            self.assertIn("fwd_warps", kw)
+            self.assertIn("plan_cache_size", kw)
             return paddle.zeros([b, n, s, d], dtype=qt.dtype)
 
         with (

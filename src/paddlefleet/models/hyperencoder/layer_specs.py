@@ -91,7 +91,7 @@ def _is_moe_layer(config: TransformerConfig, layer_idx: int) -> bool:
 
 def get_hyperencoder_layer_specs(config: TransformerConfig) -> list[LayerSpec]:
     """Build the list of per-layer ``LayerSpec`` objects."""
-    triton_attn = use_triton_encoder_attn()
+    triton_attn = use_triton_encoder_attn(config)
     if (
         not triton_attn
         and getattr(config, "_attn_implementation", None) != "eager"

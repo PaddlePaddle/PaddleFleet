@@ -12,110 +12,72 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the HyperEncoder attention-backend env switches."""
+"""Unit tests for the HyperEncoder attention-backend config helpers."""
 
-import os
+import types
 import unittest
-from contextlib import contextmanager
 
 from paddlefleet.models.hyperencoder import attn_backend
 
 
-@contextmanager
-def _env(**kv):
-    saved = {k: os.environ.get(k) for k in kv}
-    try:
-        for k, v in kv.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        yield
-    finally:
-        for k, v in saved.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+def _cfg(**kw):
+    """A duck-typed config carrying only the hyperencoder_* fields under test."""
+    return types.SimpleNamespace(**kw)
 
 
 class TestEncoderAttnBackend(unittest.TestCase):
     def test_default_is_dp(self):
-        with _env(HYPERBODY_ENCODER_ATTN_BACKEND=None):
-            self.assertEqual(attn_backend.encoder_attn_backend(), "dp")
-            self.assertFalse(attn_backend.use_triton_encoder_attn())
+        # A config without the field falls back to the "dp" default.
+        self.assertEqual(attn_backend.encoder_attn_backend(_cfg()), "dp")
+        self.assertFalse(attn_backend.use_triton_encoder_attn(_cfg()))
 
     def test_triton_selected(self):
-        with _env(HYPERBODY_ENCODER_ATTN_BACKEND="triton"):
-            self.assertEqual(attn_backend.encoder_attn_backend(), "triton")
-            self.assertTrue(attn_backend.use_triton_encoder_attn())
+        c = _cfg(hyperencoder_attn_backend="triton")
+        self.assertEqual(attn_backend.encoder_attn_backend(c), "triton")
+        self.assertTrue(attn_backend.use_triton_encoder_attn(c))
 
     def test_case_insensitive(self):
-        with _env(HYPERBODY_ENCODER_ATTN_BACKEND="TRITON"):
-            self.assertEqual(attn_backend.encoder_attn_backend(), "triton")
+        c = _cfg(hyperencoder_attn_backend="TRITON")
+        self.assertEqual(attn_backend.encoder_attn_backend(c), "triton")
 
     def test_flex_raises(self):
-        with (
-            _env(HYPERBODY_ENCODER_ATTN_BACKEND="flex"),
-            self.assertRaises(ValueError),
-        ):
-            attn_backend.encoder_attn_backend()
+        with self.assertRaises(ValueError):
+            attn_backend.encoder_attn_backend(
+                _cfg(hyperencoder_attn_backend="flex")
+            )
 
     def test_unknown_backend_raises(self):
-        with (
-            _env(HYPERBODY_ENCODER_ATTN_BACKEND="nope"),
-            self.assertRaises(ValueError),
-        ):
-            attn_backend.encoder_attn_backend()
+        with self.assertRaises(ValueError):
+            attn_backend.encoder_attn_backend(
+                _cfg(hyperencoder_attn_backend="nope")
+            )
 
 
 class TestUsePackedDecoder(unittest.TestCase):
     def test_default_off(self):
-        with _env(
-            HYPERBODY_PACKED_FLEX_DECODER=None,
-            HYPERBODY_ENCODER_ATTN_BACKEND=None,
-        ):
-            self.assertFalse(attn_backend.use_packed_decoder())
+        self.assertFalse(attn_backend.use_packed_decoder(_cfg()))
 
     def test_on_with_triton(self):
-        with _env(
-            HYPERBODY_PACKED_FLEX_DECODER="1",
-            HYPERBODY_ENCODER_ATTN_BACKEND="triton",
-        ):
-            self.assertTrue(attn_backend.use_packed_decoder())
+        c = _cfg(
+            hyperencoder_packed_decoder=True,
+            hyperencoder_attn_backend="triton",
+        )
+        self.assertTrue(attn_backend.use_packed_decoder(c))
 
-    def test_truthy_variants(self):
-        for v in ("1", "true", "on", "TRUE", "On"):
-            with _env(
-                HYPERBODY_PACKED_FLEX_DECODER=v,
-                HYPERBODY_ENCODER_ATTN_BACKEND="triton",
-            ):
-                self.assertTrue(attn_backend.use_packed_decoder())
-
-    def test_falsy_variants(self):
-        for v in ("0", "false", "off"):
-            with _env(
-                HYPERBODY_PACKED_FLEX_DECODER=v,
-                HYPERBODY_ENCODER_ATTN_BACKEND="dp",
-            ):
-                self.assertFalse(attn_backend.use_packed_decoder())
-
-    def test_unknown_value_raises(self):
-        with (
-            _env(HYPERBODY_PACKED_FLEX_DECODER="maybe"),
-            self.assertRaises(ValueError),
-        ):
-            attn_backend.use_packed_decoder()
+    def test_off_with_dp(self):
+        c = _cfg(
+            hyperencoder_packed_decoder=False,
+            hyperencoder_attn_backend="dp",
+        )
+        self.assertFalse(attn_backend.use_packed_decoder(c))
 
     def test_on_without_triton_raises(self):
-        with (
-            _env(
-                HYPERBODY_PACKED_FLEX_DECODER="1",
-                HYPERBODY_ENCODER_ATTN_BACKEND="dp",
-            ),
-            self.assertRaises(RuntimeError),
-        ):
-            attn_backend.use_packed_decoder()
+        c = _cfg(
+            hyperencoder_packed_decoder=True,
+            hyperencoder_attn_backend="dp",
+        )
+        with self.assertRaises(RuntimeError):
+            attn_backend.use_packed_decoder(c)
 
 
 if __name__ == "__main__":

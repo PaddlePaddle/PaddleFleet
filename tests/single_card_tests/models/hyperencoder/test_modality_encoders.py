@@ -154,5 +154,39 @@ class TestAudioEncoderConv(unittest.TestCase):
         self.assertIsNotNone(x.grad)
 
 
+class TestMuonSliceSpecs(unittest.TestCase):
+    """These modules intentionally do not expose a Muon slice-spec hook.
+
+    ``muon_slice_specs`` is only needed for weights that pack several logically
+    independent matrices into one tensor (fused QKV / gate-up / stacked experts).
+    None of these modules does: the projector is a single ``nn.Linear``, the
+    towers are ``Conv`` kernels plus non-matrix positional tables. Muon handles
+    them with its default per-weight update, so the hook is deliberately absent;
+    this assertion locks that decision in.
+    """
+
+    def test_no_slice_hook(self):
+        modules = [
+            MlpProjector(
+                {"projector_type": "linear", "input_dim": 4, "n_embed": 6}
+            ),
+            PatchEmbed(
+                kernel_size=(2, 2), stride=(2, 2), in_chans=3, embed_dim=8
+            ),
+            ImageEncoderConv(
+                img_size=8, patch_size=2, in_chans=3, embed_dim=8, out_chans=16
+            ),
+            AudioEncoderConv(
+                num_mel_bins=4, embed_dim=8, max_position_embeddings=64
+            ),
+        ]
+        for m in modules:
+            self.assertFalse(
+                hasattr(m, "muon_slice_specs"),
+                f"{type(m).__name__} unexpectedly declares muon_slice_specs; "
+                "if a fused weight was added, provide a real spec here.",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()
