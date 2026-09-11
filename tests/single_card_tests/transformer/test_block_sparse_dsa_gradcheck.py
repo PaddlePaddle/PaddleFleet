@@ -224,14 +224,22 @@ def _kernel_grads(
     return dq, dkv, dsink
 
 
-def _kernel_dq_with_kv_only_lse(q_np, kv_np, ti_np, dO_np, sink_mag):
-    """dQ from the raw kernels with the **uncorrected** KV-only LSE.
+def _kernel_dq_with_sinkless_bwd(q_np, kv_np, ti_np, dO_np, sink_mag):
+    """dQ from the raw kernels with the sink absent from the *backward*.
 
-    ``mqa_sparse_attn`` always folds the sink into the LSE it hands the cuDNN
-    DSA backward, because that kernel's ``d_qk != d_v`` branch consumes the LSE
-    verbatim. This helper drives the same kernel pair directly and skips the
-    fold, so a test can measure what the correction is worth without the layer
-    needing a switch for it.
+    The forward still competes against the real sink; only the backward is
+    driven with a denominator that knows nothing about it (the KV-only LSE the
+    forward returns, plus a ``-1e30`` sink). That is the quantity
+    ``mqa_sparse_attn``'s finite-sink correction buys, and it is measurable
+    whichever LSE convention the vendored cuDNN kernel follows:
+
+    * cuDNN >= 1.28 folds ``attn_sink`` into the LSE itself, so the KV-only LSE
+      *with* the real sink is already correct (measured 3.7e-3 -- which is why
+      that pairing cannot be used as the negative control);
+    * older kernels consume the passed LSE verbatim.
+
+    Either way ``logaddexp(lse_kv, -1e30) == lse_kv`` leaves the sink out of the
+    softmax denominator, so every ``p_k`` is overestimated (measured 1.96).
     """
     from paddlefleet.cudnn_ops import csa_sparse_attn_bwd_cudnn
     from paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn import (
@@ -276,8 +284,8 @@ def _kernel_dq_with_kv_only_lse(q_np, kv_np, ti_np, dO_np, sink_mag):
         kvb.reshape([b * skv, DK]),
         out.reshape([b * s, hp, DV]),
         do.reshape([b * s, hp, DV]),
-        lse.reshape([b * s, hp]),  # KV-only: the sink is NOT folded in
-        sink,
+        lse.reshape([b * s, hp]),  # KV-only: the sink is NOT folded in ...
+        paddle.full([hp], _NEG_SINK, dtype="float32"),  # ... nor passed on
         _local_to_global_flat(ti, skv),
         softmax_scale=float(SM),
         topk_length=tl,
@@ -524,10 +532,14 @@ class TestSinkSpecifics(_Base):
         self.assertEqual(agree, 1.0)
 
     def test_finite_sink_lse_fix_matters(self):
-        """dk(576) != d_v(512): the finite-sink LSE fold is load-bearing.
+        """dk(576) != d_v(512): the finite-sink LSE handling is load-bearing.
 
-        The layer always folds the sink into the LSE it passes the backward;
-        driving the same kernels with the raw KV-only LSE must be far worse.
+        The layer folds the sink into the LSE it passes the backward (and
+        neutralises the sink argument so a folding kernel cannot count it
+        twice). Driving the same kernels with a backward that never sees the
+        sink at all must be far worse -- see
+        :func:`_kernel_dq_with_sinkless_bwd` for why that, and not the plain
+        KV-only LSE, is the version-independent control.
         """
         H, s = 8, 64
         q = _rand([1, s, H, DK], 0.3, 91)
@@ -536,7 +548,7 @@ class TestSinkSpecifics(_Base):
         dO = _rand([1, s, H * DV], 1.0, 94)
         rq, _, _ = _analytic_ref_grads(q, kv, ti, dO, 3.0)
         folded, _, _ = _kernel_grads(q, kv, ti, dO, 3.0)
-        raw = _kernel_dq_with_kv_only_lse(q, kv, ti, dO, 3.0)
+        raw = _kernel_dq_with_sinkless_bwd(q, kv, ti, dO, 3.0)
         e_folded, e_raw = _relerr(folded, rq), _relerr(raw, rq)
         self.assertLess(e_folded, 1e-2)
         self.assertGreater(e_raw, 0.5)
