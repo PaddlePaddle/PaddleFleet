@@ -299,13 +299,23 @@ class GPTModel(PipelineLayer):
                 gpu_param = param.cuda()
                 gpu_param._share_buffer_to(param)
 
-    def get_layer_desc_list(self, spec, tie_word_embeddings):
-        layers = []
+    def _model_name_prefix(self) -> str:
+        """The model single-name root prefix (no trailing dot).
+
+        Authoritative for how this model roots its single-name space: used by
+        :meth:`get_layer_desc_list` to name pipeline layers and fed into
+        ``build_aoa_context``, so pipeline naming and AOA name resolution never
+        diverge (e.g. ``model.language_model`` for the qwen3_vl / qwen3_5
+        language tower instead of the ``model`` default).
+        """
         model_type = getattr(self.config, "model_type", "")
         if "qwen3_vl" in model_type or "qwen3_5" in model_type:
-            name_prefix = "model.language_model"
-        else:
-            name_prefix = "model"
+            return "model.language_model"
+        return "model"
+
+    def get_layer_desc_list(self, spec, tie_word_embeddings):
+        layers = []
+        name_prefix = self._model_name_prefix()
         if tie_word_embeddings:
             self.add_sequential_layer(
                 layers,
@@ -331,11 +341,32 @@ class GPTModel(PipelineLayer):
                 layers, LayerDesc(spec.embedding), name_prefix
             )
         i = 0
+        empty_index = 0
+        aoa_modular = getattr(
+            getattr(self, "config", None), "aoa_modular", False
+        )
+
+        def next_empty_layer_name():
+            """Name for the next EmptyLayer, advancing the right counter.
+
+            With ``aoa_modular`` empty layers live in their own
+            ``empty_layers.<i>`` namespace and do not consume a ``layers.<i>``
+            slot, so transformer layers start at ``layers.0``. Otherwise both
+            kinds share the ``i`` counter (the legacy ``+H`` offset).
+            """
+            nonlocal i, empty_index
+            if aoa_modular:
+                name = f"{name_prefix}.empty_layers.{empty_index}"
+                empty_index += 1
+            else:
+                name = f"{name_prefix}.layers.{i}"
+                i += 1
+            return name
+
         for head_empty_layer in spec.head_empty_layers:
             self.add_sequential_layer(
-                layers, LayerDesc(head_empty_layer), f"{name_prefix}.layers.{i}"
+                layers, LayerDesc(head_empty_layer), next_empty_layer_name()
             )
-            i += 1
 
         if spec.mhc_expand is not None:
             self.add_sequential_layer(
@@ -449,9 +480,8 @@ class GPTModel(PipelineLayer):
 
         for tail_empty_layer in spec.tail_empty_layers:
             self.add_sequential_layer(
-                layers, LayerDesc(tail_empty_layer), f"{name_prefix}.layers.{i}"
+                layers, LayerDesc(tail_empty_layer), next_empty_layer_name()
             )
-            i += 1
 
         if (
             self.config.gpt_model_use_experimental_version
