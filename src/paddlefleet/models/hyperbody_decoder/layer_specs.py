@@ -50,14 +50,18 @@ that into an explicit error instead of a silent mismatch.
 
 from __future__ import annotations
 
-from paddle.distributed.fleet.meta_parallel import LayerSpec
+from typing import TYPE_CHECKING
 
 from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_block import (
     TransformerBlockSublayersSpec,
 )
-from paddlefleet.transformer.transformer_config import TransformerConfig
+
+if TYPE_CHECKING:
+    from paddle.distributed.fleet.meta_parallel import LayerSpec
+
+    from paddlefleet.transformer.transformer_config import TransformerConfig
 
 __all__ = [
     "get_hyperbody_decoder_layer_specs",

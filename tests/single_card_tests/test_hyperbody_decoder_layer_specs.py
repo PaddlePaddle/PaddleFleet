@@ -32,19 +32,19 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 
 def _make_config(**overrides) -> TransformerConfig:
     """A tiny DeepSeekV2-Lite-shaped config: layer 0 dense, rest MoE."""
-    kwargs = dict(
-        num_hidden_layers=4,
-        hidden_size=64,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        intermediate_size=128,
-        moe_layer_freq=[0, 1, 1, 1],
-        n_routed_experts=4,
-        moe_intermediate_size=64,
-        num_experts_per_tok=2,
-        n_shared_experts=1,
-        normalization="RMSNorm",
-    )
+    kwargs = {
+        "num_hidden_layers": 4,
+        "hidden_size": 64,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 4,
+        "intermediate_size": 128,
+        "moe_layer_freq": [0, 1, 1, 1],
+        "n_routed_experts": 4,
+        "moe_intermediate_size": 64,
+        "num_experts_per_tok": 2,
+        "n_shared_experts": 1,
+        "normalization": "RMSNorm",
+    }
     kwargs.update(overrides)
     return TransformerConfig(**kwargs)
 
@@ -64,7 +64,9 @@ class TestHyperBodyDecoderLayerSpecs(unittest.TestCase):
 
     def test_is_moe_layer_reads_list(self):
         config = _make_config()
-        flags = [_is_moe_layer(config, i) for i in range(config.num_hidden_layers)]
+        flags = [
+            _is_moe_layer(config, i) for i in range(config.num_hidden_layers)
+        ]
         self.assertEqual(flags, [False, True, True, True])
 
     def test_all_layers_causal(self):
