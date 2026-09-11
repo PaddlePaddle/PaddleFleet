@@ -241,6 +241,42 @@ class TestRingTopology(_RingTestBase):
         )
         self.assertTrue(disp.fp8_dispatch)
 
+    def test_degenerate_fp8_gather_preserves_input_gradient(self):
+        """The local FP8 path must use the same straight-through PyLayer."""
+        from paddlefleet.transformer.moe import token_dispatcher as td
+
+        disp = td.RingMoETokenDispatcher(
+            None,
+            1,
+            num_experts=self.num_experts,
+            fp8_dispatch=True,
+        )
+        x = self._tokens()
+        tok = x * 1.0
+        with (
+            mock.patch.object(
+                td,
+                "_quantize_and_pack_fp8",
+                return_value=(
+                    tok.detach().clone(),
+                    self.d_latent,
+                    self.d_latent,
+                    tok.dtype,
+                ),
+            ),
+            mock.patch.object(
+                td,
+                "_split_fused_fp8_gather",
+                side_effect=lambda fused, *_: (fused, None),
+            ),
+        ):
+            gathered, scale = disp._ag_tokens(tok, None)
+            gathered.sum().backward()
+
+        self.assertIsNone(scale)
+        self.assertIsNotNone(x.grad)
+        np.testing.assert_allclose(x.grad.numpy(), np.ones_like(x.numpy()))
+
     def test_fp8_dispatch_accepts_ue8m0(self):
         """``use_ue8m0`` must not gate fp8 dispatch.
 

@@ -45,6 +45,7 @@ from paddlefleet.training.initialize import initialize_fleet
 
 _pg_collection = None
 
+
 def _ensure_fleet():
     """Bring up a 4-rank EP-only topology (or reuse one already standing)."""
     global _pg_collection
@@ -109,6 +110,7 @@ def _weighted_expert_fn():
         return g_tok * g_w.sum(axis=-1, keepdim=True)
 
     return expert_fn
+
 
 class TestTwoLevelRing(unittest.TestCase):
     @classmethod
@@ -188,7 +190,9 @@ class TestTwoLevelRing(unittest.TestCase):
         np.testing.assert_allclose(
             x.grad.numpy(),
             np.full(
-                [self.T_local, self.d_latent], 2.0 * self.ep_size, dtype="float32"
+                [self.T_local, self.d_latent],
+                2.0 * self.ep_size,
+                dtype="float32",
             ),
             rtol=1e-5,
             atol=1e-5,
