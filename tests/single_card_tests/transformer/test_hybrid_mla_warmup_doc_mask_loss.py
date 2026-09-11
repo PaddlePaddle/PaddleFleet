@@ -223,11 +223,12 @@ def _capture_loss_args():
     reference. A sum over the last axis -- which is all the KL does -- is
     permutation invariant and may be taken on the column layout directly.
 
-    ``cap`` stays empty if the module was not in the warmup phase -- which is
-    itself the assertion that phase 3 does not reach this code. Phase 3
-    attaches through the *same* PyLayer now, so the discriminator is the
-    ``indexer_backend`` tag: ``"tilelang"`` is phase 2's full-candidate kernel,
-    ``"cudnn"`` is phase 3's top-k one, and only the former is recorded.
+    ``cap`` only records calls tagged ``indexer_backend="tilelang"`` -- phase
+    2's full-candidate kernel. Phase 3 attaches through the *same* PyLayer and
+    carries the same tag whenever ``csa_indexer_backend`` is left at its
+    ``"tilelang"`` default (as these fixtures do), so an empty ``cap`` is not a
+    reliable "phase 3 did not get here" signal; tests that need that control
+    assert on the recorded columns instead.
     """
     real = mqa_mod.TileLangCSAIndexerLossAutoScaler
     actual = [
@@ -847,7 +848,16 @@ class TestWarmupIndexerLossPrecision(unittest.TestCase):
         sparse = _warmup_module(sparse_loss=True)
         logged_sparse, cap_sparse, _ = self._step(sparse, seqlen, [seqlen])
         self.assertEqual(logged_sparse, 0.0)
-        self.assertEqual(cap_sparse, {}, "phase 3 reached the warmup KL")
+        # Phase 3 attaches through the same PyLayer, and this fixture leaves
+        # ``csa_indexer_backend`` at its ``"tilelang"`` default, so the spy
+        # records it too. What makes it the control is the *content*: the
+        # clamped range leaves every column at the -1 sentinel, so nothing is
+        # live and the KL it differentiates is identically zero.
+        self.assertTrue(bool((cap_sparse["columns"] == -1).all()))
+        self.assertFalse(
+            bool(cap_sparse["live"].any()), "phase 3 reached the warmup KL"
+        )
+        self.assertEqual(float(np.abs(cap_sparse["target"]).max()), 0.0)
 
         module = _warmup_module()
         logged, cap, _ = self._step(module, seqlen, [seqlen])
