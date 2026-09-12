@@ -54,6 +54,10 @@ from paddlefleet.transformer.dsa_attention import (
     fused_qk_topk_naive,
     rotate_activation,
 )
+from paddlefleet.transformer.init_from_scratch_aoa import (
+    gen_init_from_scratch_aoa,
+    resolve_init_from_scratch,
+)
 
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -2108,6 +2112,32 @@ class CSAIndexer(nn.Layer):
                 {"heads": self.index_n_heads},
             ),
         }
+
+    def gen_aoa_statements(
+        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+    ):
+        """Checkpoint -> model, with the phase-1 add branch.
+
+        Phase 1 runs with ``csa_dense_mode=true`` and builds no Indexer, so this
+        subtree (including its nested ``compressor``) can be absent from the
+        checkpoint being resumed. ``indexer_init_from_scratch`` says whether it
+        is; see ``init_from_scratch_aoa.gen_init_from_scratch_aoa``. The inverse
+        direction is intentionally not overridden.
+        """
+        if not resolve_init_from_scratch(
+            self.config, "a CSA Indexer", "csa_dense_mode=false"
+        ):
+            return super().gen_aoa_statements(
+                ctx,
+                structured_name_prefix=structured_name_prefix,
+                aoa_name_scope=aoa_name_scope,
+            )
+        return gen_init_from_scratch_aoa(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            aoa_name_scope=aoa_name_scope,
+        )
 
     def forward_before_topk(
         self,

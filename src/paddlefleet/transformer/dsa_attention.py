@@ -50,6 +50,10 @@ from paddlefleet.tensor_parallel.mappings import (
 from paddlefleet.transformer.cp_utils import all_gather_cp
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.init_from_scratch_aoa import (
+    gen_init_from_scratch_aoa,
+    resolve_init_from_scratch,
+)
 from paddlefleet.transformer.layer import FleetLayer
 
 try:
@@ -432,6 +436,33 @@ class DSAIndexer(paddle.nn.Layer):
         return {
             "wq_b.weight": (ortho_per_head, {"heads": self.n_heads}),
         }
+
+    def gen_aoa_statements(
+        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+    ):
+        """Checkpoint -> model, with the phase-1 add branch.
+
+        Latent MQA keeps the MHA parameters byte-identical, so this indexer is
+        the whole parameter delta of ``hybrid_mla_attention="mqa_dsa"`` over a
+        phase-1 ``"mha"`` checkpoint. ``indexer_init_from_scratch`` says whether
+        that checkpoint has it; see
+        ``init_from_scratch_aoa.gen_init_from_scratch_aoa``. The inverse
+        direction is intentionally not overridden.
+        """
+        if not resolve_init_from_scratch(
+            self.config, "a DSA Indexer", 'hybrid_mla_attention="mqa_dsa"'
+        ):
+            return super().gen_aoa_statements(
+                ctx,
+                structured_name_prefix=structured_name_prefix,
+                aoa_name_scope=aoa_name_scope,
+            )
+        return gen_init_from_scratch_aoa(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            aoa_name_scope=aoa_name_scope,
+        )
 
     def _apply_rope(
         self, x: Tensor, freqs: Tensor, mscale: float = 1.0
