@@ -81,6 +81,7 @@ export PYTHONPATH="$work_dir${PYTHONPATH:+:$PYTHONPATH}"
 
 run_count=0
 failed_tests=()
+test_times=()
 for test_file in $(find $test_dir -type f -name "test_*.py"); do
     rel_path="${test_file#$work_dir/}"
     filename=$(basename "$test_file")
@@ -94,8 +95,12 @@ for test_file in $(find $test_dir -type f -name "test_*.py"); do
     echo "Running multi-card test: $test_file with $num_gpus GPUs ($gpus_arg)"
 
     run_count=$((run_count + 1))
+    start_time=$(date +%s)
     coverage run -m paddle.distributed.launch --gpus "$gpus_arg" "$test_file" | tee "./$(basename ${test_file%.*})_multi_card.log"
     check_exit_code=${PIPESTATUS[0]}
+    end_time=$(date +%s)
+    test_time=$((end_time - start_time))
+    test_times+=("$test_time|$test_file")
     if [ $check_exit_code -ne 0 ]; then
         echo "Test FAILED: $test_file, see log for details..."
         python $work_dir/ci/check_log_for_exitcode.py "./$(basename ${test_file%.*})_multi_card.log" "OK"
@@ -113,6 +118,11 @@ done
 
 echo "======================================"
 echo -e "\033[34mTests executed: $run_count\033[0m"
+echo -e "\033[34mMulti-card test time ranking (high to low):\033[0m"
+printf '%s\n' "${test_times[@]}" | sort -t'|' -k1,1nr | head -20 | while IFS='|' read -r test_time test_file; do
+    echo "${test_time}s  $test_file"
+done
+echo "======================================"
 if [ ${#failed_tests[@]} -eq 0 ]; then
     echo -e "\033[32mAll multi-card tests passed!\033[0m"
     echo "======================================"
