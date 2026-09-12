@@ -20,8 +20,8 @@ from __future__ import annotations
 import functools
 import logging
 import math
-from numbers import Real
 from dataclasses import dataclass
+from numbers import Real
 from typing import TYPE_CHECKING, Literal
 
 import paddle.nn.functional as F
