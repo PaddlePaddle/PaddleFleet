@@ -16,17 +16,17 @@
 
 set -euo pipefail
 
-PADDLEFORMERS_DIR=${PADDLEFORMERS_DIR:-.deps/PaddleFormers}
-PADDLEFORMERS_COMMIT=${PADDLEFORMERS_COMMIT:-12de383451cc795830de01032a3dd36a9af71796}
+PADDLEFLEET_DIR=${PADDLEFLEET_DIR:-.deps/PaddleFleet}
+PADDLEFLEET_COMMIT=${PADDLEFLEET_COMMIT:-12de383451cc795830de01032a3dd36a9af71796}
 PADDLE_EXTRA_INDEX_URL=${PADDLE_EXTRA_INDEX_URL:-https://www.paddlepaddle.org.cn/packages/nightly/cu129/}
 PADDLE_WHEEL=${PADDLE_WHEEL:-paddlepaddle-gpu==3.4.0.post20260417+616f7c19d12}
 
-rm -rf "${PADDLEFORMERS_DIR}"
-mkdir -p "$(dirname "${PADDLEFORMERS_DIR}")"
-git clone https://github.com/PaddlePaddle/PaddleFormers.git "${PADDLEFORMERS_DIR}"
-git -C "${PADDLEFORMERS_DIR}" checkout "${PADDLEFORMERS_COMMIT}"
+rm -rf "${PADDLEFLEET_DIR}"
+mkdir -p "$(dirname "${PADDLEFLEET_DIR}")"
+git clone https://github.com/PaddlePaddle/PaddleFleet.git "${PADDLEFLEET_DIR}"
+git -C "${PADDLEFLEET_DIR}" checkout "${PADDLEFLEET_COMMIT}"
 
-pip install -e "${PADDLEFORMERS_DIR}[paddlefleet]" --extra-index-url "${PADDLE_EXTRA_INDEX_URL}"
+pip install -e "${PADDLEFLEET_DIR}[paddlefleet]" --extra-index-url "${PADDLE_EXTRA_INDEX_URL}"
 
 # we recommend installing the latest paddlepaddle-gpu now
 pip install --pre paddlepaddle-gpu -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --force-reinstall

@@ -56,7 +56,7 @@ class TestMakeViewlessTensor(unittest.TestCase):
         x = paddle.randn([4, 8])
         with (
             mock.patch(
-                "paddlefleet.utils._kernel_make_viewless_tensor",
+                "paddlefleet.utils._fleet_utils._kernel_make_viewless_tensor",
                 return_value=x,
             ) as mock_kernel,
             mock.patch(
@@ -122,7 +122,7 @@ class TestMakeViewlessTensor(unittest.TestCase):
         type(x)._is_view = lambda self: True
         try:
             with mock.patch(
-                "paddlefleet.utils._kernel_make_viewless_tensor",
+                "paddlefleet.utils._fleet_utils._kernel_make_viewless_tensor",
                 return_value=x,
             ) as mock_kernel:
                 result = make_viewless_tensor(
@@ -150,7 +150,7 @@ class TestMakeViewlessTensorPyLayer(unittest.TestCase):
         inp = paddle.randn([4, 8])
 
         with mock.patch(
-            "paddlefleet.utils._kernel_make_viewless_tensor",
+            "paddlefleet.utils._fleet_utils._kernel_make_viewless_tensor",
             return_value=inp,
         ) as mock_kernel:
             result = MakeViewlessTensor.forward(mock_ctx, inp, False)
@@ -357,7 +357,9 @@ class TestPaddleVersionUtils(unittest.TestCase):
         """Test is_paddle_min_version raises when packaging not available."""
         from paddlefleet.utils import is_paddle_min_version
 
-        with mock.patch("paddlefleet.utils.HAVE_PACKAGING", False):  # noqa: SIM117
+        with mock.patch(
+            "paddlefleet.utils._fleet_utils.HAVE_PACKAGING", False
+        ):  # noqa: SIM117
             with self.assertRaises(ImportError):
                 is_paddle_min_version("3.0.0")
 
@@ -457,7 +459,7 @@ class TestNvtxDecorator(unittest.TestCase):
 
     def test_decorator_returns_function_when_disabled(self):
         """Test decorator returns original function when NVTX disabled."""
-        import paddlefleet.utils as utils_mod
+        import paddlefleet.utils._fleet_utils as utils_mod
         from paddlefleet.utils import nvtx_decorator
 
         original = utils_mod._nvtx_enabled
