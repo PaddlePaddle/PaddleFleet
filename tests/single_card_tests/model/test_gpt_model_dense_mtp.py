@@ -540,7 +540,9 @@ class TestMTPDepthSampling(unittest.TestCase):
             pass
         cls.strategy = strategy
 
-    def _cfg(self, mtp_depth_sampling, num_nextn=3):
+    def _cfg(
+        self, mtp_depth_sampling, num_nextn=3, train_mtp_only=False
+    ):
         return GPTConfig(
             num_hidden_layers=2,
             hidden_size=512,
@@ -571,6 +573,7 @@ class TestMTPDepthSampling(unittest.TestCase):
             num_nextn_predict_layers=num_nextn,
             use_dense_mtp=False,
             mtp_depth_sampling=mtp_depth_sampling,
+            train_mtp_only=train_mtp_only,
         )
 
     def _mtp0(self, model):
@@ -642,6 +645,21 @@ class TestMTPDepthSampling(unittest.TestCase):
         loss = self._run_step(model, cfg)
         assert loss is not None and not paddle.isnan(loss).any(), "loss NaN"
         assert getattr(mtp0, "_last_sampled_depth", None) == 3
+
+    def test_forward_backward_sampling_train_mtp_only_k1(self):
+        """Train-MTP-only mode must honor the sampled prefix length."""
+        cfg = self._cfg([1.0, 0.0, 0.0], train_mtp_only=True)
+        model = gpt_builder(cfg, num_stages=1)
+        mtp0 = self._mtp0(model)
+        loss = self._run_step(model, cfg)
+        assert loss is not None and not paddle.isnan(loss).any(), "loss NaN"
+        assert getattr(mtp0, "_last_sampled_depth", None) == 1
+
+    def test_sampling_rejects_non_finite_probability(self):
+        """NaN and infinity must fail at config construction, not sampling time."""
+        for probs in ([float("nan"), 0.0, 1.0], [float("inf"), 0.0, 0.0]):
+            with self.assertRaises(ValueError):
+                self._cfg(probs)
 
     def test_null_baseline_runs(self):
         """mtp_depth_sampling=None (default) trains normally (no skip path)."""

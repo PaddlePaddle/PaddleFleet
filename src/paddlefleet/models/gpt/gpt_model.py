@@ -327,11 +327,7 @@ class GPTModel(PipelineLayer):
           [MTP-SHARED-WEIGHTS-SKIP]      stage has < 2 MTP layers (nothing to share)
           [MTP-SHARED-WEIGHTS-WARN]      partial / shape-mismatched alias
         """
-        mtp_layers = [
-            layer
-            for layer in self.run_function
-            if isinstance(layer, MultiTokenPredictionLayer)
-        ]
+        mtp_layers = self._get_all_mtp_layers()
 
         if len(mtp_layers) < 2:
             warnings.warn(
@@ -383,6 +379,28 @@ class GPTModel(PipelineLayer):
                 "All MTP depths built from the same spec, so a clean run should "
                 "report aliased==total with missing=shape_mismatch=0."
             )
+
+    def _get_all_mtp_layers(self):
+        """Collect MTP layers from every virtual pipeline chunk on this rank."""
+        num_virtual_pipeline_stages = (
+            getattr(self, "_num_virtual_pipeline_stages", 1) or 1
+        )
+        if num_virtual_pipeline_stages > 1 and getattr(
+            self, "_model_chunks", None
+        ):
+            layers = []
+            for chunk in self._model_chunks:
+                layers.extend(
+                    layer
+                    for layer in chunk.run_function
+                    if isinstance(layer, MultiTokenPredictionLayer)
+                )
+            return layers
+        return [
+            layer
+            for layer in self.run_function
+            if isinstance(layer, MultiTokenPredictionLayer)
+        ]
 
     def _get_weight_only_params(self):
         """Get all parameters marked with is_weight_only_mtp flag."""

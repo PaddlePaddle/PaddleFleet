@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import functools
 import math
+from numbers import Real
 import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
@@ -1080,6 +1081,16 @@ class TransformerConfig(ModelParallelConfig):
                 "mtp_depth_sampling must be a list of length "
                 f"num_nextn_predict_layers={D}, got {self.mtp_depth_sampling}"
             )
+            if any(
+                isinstance(p, bool)
+                or not isinstance(p, Real)
+                or not math.isfinite(float(p))
+                for p in self.mtp_depth_sampling
+            ):
+                raise ValueError(
+                    "mtp_depth_sampling entries must be finite real numbers, "
+                    f"got {self.mtp_depth_sampling}"
+                )
             _s = float(sum(self.mtp_depth_sampling))
             assert abs(_s - 1.0) < 1e-3, (
                 f"mtp_depth_sampling must sum to 1.0 (P(K=k)), got sum={_s}"
