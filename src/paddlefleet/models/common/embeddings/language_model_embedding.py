@@ -73,11 +73,23 @@ class LanguageModelEmbedding(FleetLayer):
                 "must be set to True."
             )
         self.tp_group = get_tensor_model_parallel_group_if_none(tp_group)
+
+        # N-gram Embedding flags (read early for the reduce_scatter decision).
+        self.ngram_embedding_enabled = getattr(
+            config, "ngram_embedding_enabled", False
+        )
+        self.ngram_moe_enabled = getattr(config, "ngram_moe_enabled", False)
+
+        # The N-gram signal is produced in [b s h] and has to be fused into the
+        # word embedding before any transpose/scatter, so the early
+        # reduce_scatter inside VocabParallelEmbedding is disabled and the
+        # scatter happens later in forward().
         self.reduce_scatter_embeddings = (
             (not self.add_position_embedding)
             and self.num_tokentypes <= 0
             and self.sequence_parallel
             and self.scatter_to_sequence_parallel
+            and not self.ngram_embedding_enabled
         )
 
         # Word embeddings (parallel).
@@ -113,6 +125,26 @@ class LanguageModelEmbedding(FleetLayer):
                 )
         else:
             self.tokentype_embeddings = None
+
+        # N-gram Embedding: the plain K-split table, or the routed variant.
+        # Imported lazily so the baseline import graph is untouched.
+        if self.ngram_embedding_enabled:
+            if self.ngram_moe_enabled:
+                from paddlefleet.models.common.embeddings.ngram_moe_embedding import (
+                    NgramMoeEmbedding,
+                )
+
+                self.ngram_embedding = NgramMoeEmbedding(
+                    config=config, vocab_size=self.vocab_size
+                )
+            else:
+                from paddlefleet.models.common.embeddings.ngram_embedding import (
+                    NgramEmbedding,
+                )
+
+                self.ngram_embedding = NgramEmbedding(
+                    config=config, vocab_size=self.vocab_size
+                )
 
         # Embeddings dropout
         self.embedding_dropout = paddle.nn.Dropout(
@@ -151,6 +183,20 @@ class LanguageModelEmbedding(FleetLayer):
             Tensor: The output embeddings
         """
         embed_tokens = self.embed_tokens(input_ids)
+
+        # N-gram Embedding injection, in [b s h] before any transpose/scatter.
+        if self.ngram_embedding_enabled:
+            if self.ngram_moe_enabled:
+                ngram_signal = self.ngram_embedding(input_ids, embed_tokens)
+            else:
+                ngram_signal = self.ngram_embedding(input_ids)
+            # Averaging over the word embedding plus every n-gram embedder keeps
+            # the fused scale independent of ngram_emb_neighbor_num.
+            normalizer = 1 + self.ngram_embedding.num_embedders
+            embed_tokens = (
+                embed_tokens + ngram_signal.astype(embed_tokens.dtype)
+            ) / normalizer
+
         if self.add_position_embedding:
             position_embeddings = self.position_embeddings(position_ids)
             embeddings = embed_tokens + position_embeddings
