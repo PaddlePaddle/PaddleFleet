@@ -222,18 +222,122 @@ class TestRingTopology(_RingTestBase):
             out.numpy(), x.numpy() * 2.0, rtol=1e-6, atol=1e-6
         )
 
-    def test_fp8_dispatch_not_implemented(self):
+    def test_fp8_dispatch_is_accepted(self):
+        """fp8 dispatch is supported now (was NotImplementedError before).
+
+        The blocker was never the ring: MoELayer already validates
+        ``mid/EP % 128`` generically across the intermediate-sharded
+        dispatchers, and the ring quantizes per round via _RingFP8AllGather.
+        """
         from paddlefleet.transformer.moe.token_dispatcher import (
             RingMoETokenDispatcher,
         )
 
-        with self.assertRaises(NotImplementedError):
-            RingMoETokenDispatcher(
-                self.ep_group,
-                self.ep_size,
-                num_experts=self.num_experts,
-                fp8_dispatch=True,
-            )
+        disp = RingMoETokenDispatcher(
+            self.ep_group,
+            self.ep_size,
+            num_experts=self.num_experts,
+            fp8_dispatch=True,
+        )
+        self.assertTrue(disp.fp8_dispatch)
+
+    def test_degenerate_fp8_gather_preserves_input_gradient(self):
+        """The local FP8 path must use the same straight-through PyLayer."""
+        from paddlefleet.transformer.moe import token_dispatcher as td
+
+        disp = td.RingMoETokenDispatcher(
+            None,
+            1,
+            num_experts=self.num_experts,
+            fp8_dispatch=True,
+        )
+        x = self._tokens()
+        tok = x * 1.0
+        with (
+            mock.patch.object(
+                td,
+                "_quantize_and_pack_fp8",
+                return_value=(
+                    tok.detach().clone(),
+                    self.d_latent,
+                    self.d_latent,
+                    tok.dtype,
+                ),
+            ),
+            mock.patch.object(
+                td,
+                "_split_fused_fp8_gather",
+                side_effect=lambda fused, *_: (fused, None),
+            ),
+        ):
+            gathered, scale = disp._ag_tokens(tok, None)
+            gathered.sum().backward()
+
+        self.assertIsNone(scale)
+        self.assertIsNotNone(x.grad)
+        np.testing.assert_allclose(x.grad.numpy(), np.ones_like(x.numpy()))
+
+    def test_fp8_dispatch_accepts_ue8m0(self):
+        """``use_ue8m0`` must not gate fp8 dispatch.
+
+        AllGatherTokenDispatcher stores the flag and never reads it -- fp8
+        dispatch quantization always uses the int32-scale helper -- so the ring
+        must accept the same combination instead of blocking a config the flat
+        path runs fine. Production sets use_ue8m0=true.
+        """
+        from paddlefleet.transformer.moe.token_dispatcher import (
+            RingMoETokenDispatcher,
+        )
+
+        disp = RingMoETokenDispatcher(
+            self.ep_group,
+            self.ep_size,
+            num_experts=self.num_experts,
+            fp8_dispatch=True,
+            use_ue8m0=True,
+        )
+        self.assertTrue(disp.fp8_dispatch)
+
+    def test_calls_per_micro_batch_delays_fp8_weight_release(self):
+        """The ring calls the expert N times per micro batch.
+
+        SonicMoEExpert counts raw forward() calls, so without
+        _calls_per_micro_batch the fp8 weights would be released after the first
+        ring round of the last micro batch instead of the last round. Exercise
+        the property arithmetic directly -- building a real expert needs a full
+        TransformerConfig and the fused kernels.
+        """
+        from paddlefleet.transformer.moe.moe_expert import SonicMoEExpert
+
+        e = object.__new__(SonicMoEExpert)
+        e._num_micro_batches = 4
+        e._calls_per_micro_batch = 1
+        e._forward_counter = 3
+        self.assertTrue(e._is_last_micro_batch)  # flat path: 4th of 4 calls
+
+        # Ring with N=2: 8 calls total, so call #3 must NOT release.
+        e._calls_per_micro_batch = 2
+        self.assertFalse(e._is_last_micro_batch)
+        e._forward_counter = 6
+        self.assertFalse(e._is_last_micro_batch)
+        e._forward_counter = 7
+        self.assertTrue(e._is_last_micro_batch)
+
+    def test_set_calls_per_micro_batch_rejects_zero(self):
+        from paddlefleet.transformer.moe.moe_expert import SonicMoEExpert
+
+        e = object.__new__(SonicMoEExpert)
+        e._calls_per_micro_batch = 1
+        with self.assertRaises(ValueError):
+            SonicMoEExpert.set_calls_per_micro_batch(e, 0)
+
+    def test_bf16_path_returns_no_scale(self):
+        """``_ag_tokens`` must keep returning ``scale=None`` in bf16 mode."""
+        disp = _make_dispatcher(2, self.ep_group, self.num_experts)
+        x = self._tokens()
+        g_tok, g_scale = disp._ag_tokens(x, disp.intra_group)
+        self.assertIsNone(g_scale)
+        self.assertEqual(g_tok.shape[0], self.T_local * disp.G)
 
 
 class TestRingCollectives(_RingTestBase):
@@ -251,6 +355,47 @@ class TestRingCollectives(_RingTestBase):
             np.testing.assert_array_equal(out.numpy(), peer.numpy())
         out.sum().backward()
         self.assertEqual(x.grad.shape, [self.T_local, self.d_latent])
+
+    def test_fp8_all_gather_forward_and_backward(self):
+        """FP8 gather keeps its collective and ReduceScatter gradient dual."""
+        from paddlefleet.transformer.moe import token_dispatcher as td
+
+        disp = _make_dispatcher(2, self.ep_group, self.num_experts)
+        disp.fp8_dispatch = True
+        x = self._tokens()
+        tok = x * 1.0
+        with (
+            mock.patch.object(
+                td,
+                "_quantize_and_pack_fp8",
+                return_value=(
+                    tok.detach().clone(),
+                    self.d_latent,
+                    self.d_latent,
+                    tok.dtype,
+                ),
+            ),
+            mock.patch.object(
+                td,
+                "_split_fused_fp8_gather",
+                side_effect=lambda fused, *_: (fused, None),
+            ),
+        ):
+            gathered, scale = disp._ag_tokens(tok, disp.intra_group)
+            self.assertEqual(
+                gathered.shape,
+                [self.T_local * disp.G, self.d_latent],
+            )
+            gathered.sum().backward()
+
+        self.assertIsNone(scale)
+        self.assertIsNotNone(x.grad)
+        np.testing.assert_allclose(
+            x.grad.numpy(),
+            np.full_like(x.numpy(), disp.G),
+            rtol=1e-6,
+            atol=1e-6,
+        )
 
     def test_inter_ring_shift_rotates_rows(self):
         from paddlefleet.transformer.moe.token_dispatcher import _InterRingShift
@@ -376,6 +521,14 @@ class TestRingForward(_RingTestBase):
         x3 = x.reshape([2, self.T_local // 2, self.d_latent])
         out = self._run(disp, x3, idx, w)
         np.testing.assert_allclose(out.numpy(), flat.numpy(), rtol=1e-6)
+
+    def test_fp8_rejects_unaligned_hidden_width(self):
+        disp = _make_dispatcher(2, self.ep_group)
+        disp.fp8_dispatch = True
+        x = self._tokens()
+        idx, w = self._routing()
+        with self.assertRaisesRegex(ValueError, "multiple of 128"):
+            self._run(disp, x, idx, w)
 
     def test_equal_token_check_runs_once_per_dispatcher(self):
         disp = _make_dispatcher(1, self.ep_group)
@@ -622,11 +775,28 @@ class TestMoELayerRingBranches(unittest.TestCase):
             "moe_deep_gemm": False,
             "moe_intermediate_size": 256,
             "fp8": False,
+            # The real MoELayer always sets these two. The production
+            # allgather+fp8 baseline uses fp8_wgrad=False.
+            "fp8_wgrad": False,
+            "fp8_dispatch_bwd": False,
         }
         base.update(attrs)
         layer = self._layer(**base)
         MoELayer._validate_intermediate_ep_sharding_config(layer)
         return layer
+
+    def test_validation_accepts_fp8_regardless_of_wgrad(self):
+        """Both fp8_wgrad settings must pass validation.
+
+        The production allgather+fp8 baseline runs with fp8_wgrad=False, so the
+        ring must not reject it either. (The "dz storage freed but no bwd
+        prequant" failure seen on ringmoe+fp8 is caused by SonicMoE's global
+        single-slot prequant handoff versus the ring's N expert calls per micro
+        batch, not by this flag.)
+        """
+        for wgrad in (False, True):
+            layer = self._validate(fp8=True, fp8_wgrad=wgrad)
+            self.assertEqual(layer.fp8_wgrad, wgrad)
 
     def test_validation_names_the_configured_dispatcher(self):
         with self.assertRaises(ValueError) as ctx:

@@ -641,6 +641,19 @@ class MoELayer(nn.Layer):
                     fp8_dispatch=self.fp8_dispatch,
                     use_ue8m0=self.use_ue8m0,
                 )
+                if self.use_ring_moe and hasattr(
+                    getattr(self, "grouped_gemm_experts", None),
+                    "set_calls_per_micro_batch",
+                ):
+                    # The ring runs the expert once per round, so the expert's
+                    # fp8 weight-release counter (which counts forward() calls
+                    # against accumulate_steps) would fire N times too early and
+                    # drop the fp8 weights mid-step. No-op on the bf16 path.
+                    # Only SonicMoEExpert tracks this, and ringmoe already
+                    # requires using_sonic_moe, so the guard is defensive.
+                    self.grouped_gemm_experts.set_calls_per_micro_batch(
+                        self.token_dispatcher.N
+                    )
             else:
                 raise NotImplementedError(
                     f"Unsupported moe_token_dispatcher_type {self.moe_token_dispatcher_type}"
