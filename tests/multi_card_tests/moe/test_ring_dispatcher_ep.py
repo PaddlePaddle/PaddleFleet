@@ -356,6 +356,47 @@ class TestRingCollectives(_RingTestBase):
         out.sum().backward()
         self.assertEqual(x.grad.shape, [self.T_local, self.d_latent])
 
+    def test_fp8_all_gather_forward_and_backward(self):
+        """FP8 gather keeps its collective and ReduceScatter gradient dual."""
+        from paddlefleet.transformer.moe import token_dispatcher as td
+
+        disp = _make_dispatcher(2, self.ep_group, self.num_experts)
+        disp.fp8_dispatch = True
+        x = self._tokens()
+        tok = x * 1.0
+        with (
+            mock.patch.object(
+                td,
+                "_quantize_and_pack_fp8",
+                return_value=(
+                    tok.detach().clone(),
+                    self.d_latent,
+                    self.d_latent,
+                    tok.dtype,
+                ),
+            ),
+            mock.patch.object(
+                td,
+                "_split_fused_fp8_gather",
+                side_effect=lambda fused, *_: (fused, None),
+            ),
+        ):
+            gathered, scale = disp._ag_tokens(tok, disp.intra_group)
+            self.assertEqual(
+                gathered.shape,
+                [self.T_local * disp.G, self.d_latent],
+            )
+            gathered.sum().backward()
+
+        self.assertIsNone(scale)
+        self.assertIsNotNone(x.grad)
+        np.testing.assert_allclose(
+            x.grad.numpy(),
+            np.full_like(x.numpy(), disp.G),
+            rtol=1e-6,
+            atol=1e-6,
+        )
+
     def test_inter_ring_shift_rotates_rows(self):
         from paddlefleet.transformer.moe.token_dispatcher import _InterRingShift
 
@@ -480,6 +521,14 @@ class TestRingForward(_RingTestBase):
         x3 = x.reshape([2, self.T_local // 2, self.d_latent])
         out = self._run(disp, x3, idx, w)
         np.testing.assert_allclose(out.numpy(), flat.numpy(), rtol=1e-6)
+
+    def test_fp8_rejects_unaligned_hidden_width(self):
+        disp = _make_dispatcher(2, self.ep_group)
+        disp.fp8_dispatch = True
+        x = self._tokens()
+        idx, w = self._routing()
+        with self.assertRaisesRegex(ValueError, "multiple of 128"):
+            self._run(disp, x, idx, w)
 
     def test_equal_token_check_runs_once_per_dispatcher(self):
         disp = _make_dispatcher(1, self.ep_group)
