@@ -1939,7 +1939,10 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
         self.assertEqual(attn.q_head_dim, config.v_head_dim)
 
     def test_rope_base_varies_with_compress_ratio(self):
-        paddle.seed(_SEED)
+        # RowParallelLinear init forks the model-parallel-rng tracker; seed it
+        # here instead of relying on tracker state leaked by earlier tests
+        # (which made this test fail when run in isolation).
+        model_parallel_cuda_manual_seed(_SEED)
         ratios = [0, 4, 128, 4]
         config = _make_config(csa_compress_ratios=ratios)
 
@@ -1950,10 +1953,13 @@ class TestDSv4HybridAttentionConstructor(unittest.TestCase):
             )
             self.assertEqual(attn.core_attention.compress_ratio, ratio)
 
+            # B2: plain-rope layers read the single base field rope_theta
+            # (rotary_base is a deprecated, consistency-checked alias that is
+            # stripped from the instance after normalization).
             expected_base = (
                 config.csa_compress_rotary_base
                 if ratio > 1
-                else config.rotary_base
+                else config.rope_theta
             )
             dim = config.qk_pos_emb_head_dim
             expected_inv_freq = 1.0 / (
