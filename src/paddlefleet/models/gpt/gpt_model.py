@@ -286,11 +286,7 @@ class GPTModel(PipelineLayer):
           [MTP-SHARED-WEIGHTS-SKIP]      stage has < 2 MTP layers (nothing to share)
           [MTP-SHARED-WEIGHTS-WARN]      partial / shape-mismatched alias
         """
-        mtp_layers = [
-            layer
-            for layer in self.run_function
-            if isinstance(layer, MultiTokenPredictionLayer)
-        ]
+        mtp_layers = self._get_all_mtp_layers()
 
         if len(mtp_layers) < 2:
             warnings.warn(

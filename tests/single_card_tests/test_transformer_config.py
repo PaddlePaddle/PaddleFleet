@@ -707,6 +707,16 @@ class TestMTPDepthSamplingValidation(unittest.TestCase):
                 mtp_depth_sampling=[1.5, -0.5],
             )
 
+    def test_non_finite_probability_rejected(self):
+        for probs in ([float("nan"), 0.0], [float("inf"), 0.0]):
+            with self.assertRaisesRegex(
+                ValueError, r"must be finite real numbers"
+            ):
+                TransformerConfig(
+                    num_nextn_predict_layers=2,
+                    mtp_depth_sampling=probs,
+                )
+
     def test_conflicting_flag_rejected(self):
         with self.assertRaisesRegex(
             ValueError, r"requires mtp_distillation_loss=False"

@@ -20,6 +20,7 @@ from __future__ import annotations
 import functools
 import logging
 import math
+from numbers import Real
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
@@ -2236,6 +2237,16 @@ class TransformerConfig(ModelParallelConfig):
                     f"num_nextn_predict_layers={_d} holding P(K=k) for k=1..{_d}, "
                     f"got {self.mtp_depth_sampling!r} of length "
                     f"{len(self.mtp_depth_sampling) if isinstance(self.mtp_depth_sampling, (list, tuple)) else 'n/a'}"
+                )
+            if any(
+                isinstance(p, bool)
+                or not isinstance(p, Real)
+                or not math.isfinite(float(p))
+                for p in self.mtp_depth_sampling
+            ):
+                raise ValueError(
+                    "mtp_depth_sampling entries must be finite real numbers, "
+                    f"got {self.mtp_depth_sampling}"
                 )
             if any(p < 0.0 for p in self.mtp_depth_sampling):
                 raise ValueError(

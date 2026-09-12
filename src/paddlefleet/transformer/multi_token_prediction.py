@@ -1803,7 +1803,13 @@ class MultiTokenPredictionLayer(FleetLayer):
             )
 
         if self.config.train_mtp_only:
-            for i in range(self.config.num_nextn_predict_layers):
+            sampled_depth = dict_args.get(
+                "mtp_sampled_depth", self.config.num_nextn_predict_layers
+            )
+            num_depths = min(
+                self.config.num_nextn_predict_layers, sampled_depth
+            )
+            for i in range(num_depths):
                 tensor_list = paddle.split(
                     hidden_states_concat,
                     self.config.num_nextn_predict_layers + 1,

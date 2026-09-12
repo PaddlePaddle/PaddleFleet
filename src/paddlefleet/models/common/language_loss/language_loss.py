@@ -946,6 +946,11 @@ class LanguageLoss(FleetLayer):
 
             logs = get_global_training_logs()
             if logs is not None and hasattr(logs, "update"):
+                if hasattr(logs, "pop"):
+                    for _d in range(
+                        len(mtp_loss), self.config.num_nextn_predict_layers
+                    ):
+                        logs.pop(f"mtp_{_d + 1}_loss", None)
                 for i, loss_val in enumerate(mtp_loss):
                     logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
 
