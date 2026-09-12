@@ -1859,9 +1859,9 @@ class MoELayer(nn.Layer):
         _log_moe_md5(output, "moe_routed_output", layer_idx)
         output = inspect_tensor("moe_routed_output", layer_idx, output)
 
-        if self.training and self.router_aux_loss_coef and aux_loss is not None:
-            aux_loss = aux_loss * float(self.router_aux_loss_coef)
-            output = AddAuxiliaryLoss.apply(output, aux_loss)
+        # if self.training and self.router_aux_loss_coef and aux_loss is not None:
+        #     aux_loss = aux_loss * float(self.router_aux_loss_coef)
+        #     output = AddAuxiliaryLoss.apply(output, aux_loss)
 
         if self.training and z_loss is not None:
             output = AddAuxiliaryLoss.apply(output, z_loss)
