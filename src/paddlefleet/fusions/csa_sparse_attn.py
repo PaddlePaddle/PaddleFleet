@@ -559,6 +559,36 @@ class CSASparseAttention(paddle.autograd.PyLayer):
         # without that promise keeps its own (possibly holey) layout, so the
         # backward falls back to the guarded full-width path instead of
         # gathering ``mKV[-1]`` -- correct, just without the early-stop.
+        #
+        # ``topk_length`` contract, cuDNN backend. Each cell gives BOTH whether
+        # the path is COMPACTED -- i.e. rides the backward's UNGUARDED compact
+        # KV-load, so its indices must be hole-free -- and the resulting fwd /
+        # bwd ``topk_length`` ("sum" == the exact valid count
+        # ``(topk_idxs >= 0).sum(-1)``; a "not compacted" bwd is ALWAYS None, the
+        # guarded full-width path):
+        #
+        #   path (indexer_topk)            SM100                   SM90
+        #   -----------------------------  ----------------------  ----------------------
+        #   HCA (0)                        COMPACTED;              not compacted;
+        #                                    fwd = bwd = sum         fwd = bwd = None
+        #   CSA, indexer_topk == 0         COMPACTED;              not compacted;
+        #                                    fwd = bwd = sum         fwd = bwd = None
+        #   CSA, indexer_topk > 0 (fused)  not compacted;          not compacted;
+        #                                    fwd = bwd = None        fwd = bwd = None
+        #   MQALatentAttention (separate   not compacted;          not compacted;
+        #     _MQASparseAttention PyLayer,   fwd = trailing-bound,   fwd = trailing-bound,
+        #     mqa_sparse_attn.py)            bwd = None              bwd = None
+        #   _forward_mqa (compacted=True)  COMPACTED;              not compacted;
+        #                                    fwd = causal-bound,     fwd = causal-bound,
+        #                                    bwd = sum               bwd = None
+        #
+        # The backward NEVER uses a trailing/causal bound -- that bound is a
+        # FORWARD-ONLY early-stop hint (the kernel masks ``-1`` under it). It
+        # equals ``sum(valid)`` for a contiguous prefix and diverges only for a
+        # holey layout (MQALatentAttention's ``[top-k | window]``, which is why
+        # that path must NOT compact). For COMPACTED rows the forward reaches
+        # ``sum`` either by densifying (HCA/CSA) or via a bound equal to sum over
+        # its hole-free prefix (_forward_mqa's causal bound = i - doc_start + 1).
         ctx.compacted_idxs = (
             backend == "cudnn"
             and indexer_topk == 0
