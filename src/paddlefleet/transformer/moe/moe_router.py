@@ -55,7 +55,10 @@ from paddlefleet.parallel_state import (
 )
 from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
-from paddlefleet.transformer.transformer_config import dw_overlap_enabled
+from paddlefleet.transformer.transformer_config import (
+    dw_overlap_enabled,
+    w4a8_route_factor_post_w2_scale,
+)
 
 # MD5 logging for MoE router precision debugging
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
@@ -1359,7 +1362,11 @@ class StandardMoERouter(nn.Layer):
                 top_gate, top_idx, self.routed_scaling_factor_param
             )
         elif abs(self.routed_scaling_factor - 1.0) > 1e-6:
-            top_gate = top_gate * self.routed_scaling_factor
+            # Hash layers reach this fold and then return, never touching the fold in
+            # TopKRouter.forward, so the skip has to be repeated here. Both sites read
+            # the same helper, which is what keeps them from disagreeing.
+            if w4a8_route_factor_post_w2_scale(self.config) is None:
+                top_gate = top_gate * self.routed_scaling_factor
 
         return top_gate, top_idx
 
@@ -1925,7 +1932,11 @@ class TopKRouter(StandardMoERouter):
                 top_gate, top_idx, self.routed_scaling_factor_param
             )
         elif abs(self.routed_scaling_factor - 1.0) > 1e-6:
-            top_gate = top_gate * self.routed_scaling_factor
+            # Skipped when the factor is applied after the W4A8 down projection
+            # instead; see w4a8_route_factor_post_w2_scale for why the ordering
+            # matters under UE8M0 (power-of-two) activation scales.
+            if w4a8_route_factor_post_w2_scale(self.config) is None:
+                top_gate = top_gate * self.routed_scaling_factor
 
         # Reconstruct probs (combine weights in [S, E] sparse layout) from final top_gate.
         probs = paddle.zeros_like(gates, dtype=top_gate.dtype).put_along_axis_(

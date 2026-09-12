@@ -54,7 +54,10 @@ from paddlefleet.transformer.dw_overlap import (
     install_sonic_moe_dw_deferral,
 )
 from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
-from paddlefleet.transformer.transformer_config import dw_overlap_enabled
+from paddlefleet.transformer.transformer_config import (
+    dw_overlap_enabled,
+    w4a8_route_factor_post_w2_scale,
+)
 from paddlefleet.transformer.utils import profile
 
 from .fp8_utils import fused_stack_quant_without_cache
@@ -225,6 +228,9 @@ class MoELayer(nn.Layer):
         self.use_ue8m0 = config.use_ue8m0
         self.use_w4a8 = config.use_w4a8
         self.use_w4a8_fused_quant = config.use_w4a8_fused_quant
+        # Non-None means the router skipped folding routed_scaling_factor into probs
+        # and the fused expert node must apply it after the down projection instead.
+        self.w4a8_route_factor_post_w2 = w4a8_route_factor_post_w2_scale(config)
         # Two independent expert deferral points, one per expert weight:
         #   defer_expert_up_gate_dw -> w1 (up_gate_proj) weight grad
         #   defer_expert_down_dw    -> w2 (down_proj) weight grad, which
@@ -1368,6 +1374,7 @@ class MoELayer(nn.Layer):
                     ),
                     use_w4a8=self.use_w4a8,
                     use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+                    w4a8_route_factor_post_w2=self.w4a8_route_factor_post_w2,
                 )
 
         hidden_states = inspect_tensor(
@@ -1617,6 +1624,7 @@ class MoELayer(nn.Layer):
                     ),
                     use_w4a8=self.use_w4a8,
                     use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+                    w4a8_route_factor_post_w2=self.w4a8_route_factor_post_w2,
                 )
 
             if is_first_fwd:

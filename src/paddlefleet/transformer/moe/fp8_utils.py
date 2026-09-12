@@ -916,6 +916,7 @@ class ExpertsGroupGemmContiguousNode:
         use_accuracy_compatible=False,
         use_w4a8=False,
         use_w4a8_fused_quant=False,
+        w4a8_route_factor_post_w2=None,
     ):
         """
             Initializes the experts group gemm contiguous node.
@@ -1012,6 +1013,18 @@ class ExpertsGroupGemmContiguousNode:
         )
         self.use_w4a8 = use_w4a8
         self.use_w4a8_fused_quant = use_w4a8_fused_quant
+        # Scalar the router deliberately did not fold into probs; applied after
+        # the down projection so the FP8 activation quantizer sees the same
+        # tensor the inference stack quantizes. None means the router folded it.
+        self.w4a8_route_factor_post_w2 = w4a8_route_factor_post_w2
+        if w4a8_route_factor_post_w2 is not None and not use_w4a8:
+            # The router already dropped the factor from probs; only the W4A8
+            # down path puts it back. Any other path would silently emit
+            # outputs scaled down by routed_scaling_factor, so fail loudly.
+            raise ValueError(
+                "w4a8_route_factor_post_w2 is only supported on the W4A8 down "
+                f"path, but use_w4a8={use_w4a8}"
+            )
         if use_w4a8:
             assert moe_expert_fusion and moe_deep_gemm and use_fp8_mlp, (
                 "use_w4a8 需要 moe_expert_fusion + moe_deep_gemm + use_fp8_mlp"
@@ -1359,6 +1372,11 @@ class ExpertsGroupGemmContiguousNode:
             o3 = paddle.empty(o3_shape, dtype=paddle.bfloat16)
         if numpy.prod(o2_fp8.shape) != 0:
             self._w4a8_grouped_gemm(o2_fp8, o2_sf, w2_fp4, w2_sf, o3)
+        if self.w4a8_route_factor_post_w2 is not None:
+            # Mirrors the inference-side contract of applying
+            # routed_scaling_factor after the down projection. In place because
+            # o3 may be a caller-provided output buffer (see fwd_down's o3 arg).
+            o3.scale_(self.w4a8_route_factor_post_w2)
         return o3
 
     def _bwd_down_input_w4a8(
@@ -2856,6 +2874,18 @@ class ExpertsGroupGemmContiguousNode:
             )
         else:
             o1 = self.o1
+
+        if self.w4a8_route_factor_post_w2 is not None:
+            # Chain rule for the forward's post-w2 scale. This node hand-writes
+            # its backward, so the factor has to be applied explicitly, and it
+            # has to happen before out_grad fans out: it feeds both the dgrad
+            # (bwd_down_input_fp8) and the w2 wgrad (bf16_weight_grad /
+            # bwd_down_weight below). Scaling only one of them would leave the
+            # other short by routed_scaling_factor -- training still runs and the
+            # loss still looks sane, it just learns the wrong thing.
+            # In place because out_grad is later reused as the dx output buffer
+            # and the subbatch path asserts `tmp_dx is tmp_out_grad`.
+            out_grad.scale_(self.w4a8_route_factor_post_w2)
 
         # do2
         do1, o2_s, probs_grad = self.bwd_down_input_fp8(
