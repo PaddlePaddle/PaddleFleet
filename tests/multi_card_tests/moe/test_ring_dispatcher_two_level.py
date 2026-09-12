@@ -20,7 +20,8 @@ ReduceScatter running *inside* an inter-node rotation, and the deferred wait on
 the in-flight output reduce (``_RingReduceScatterAsync``), which degenerates to
 a no-op whenever ``intra_group`` is None.
 
-Four cards with ``_RING_GPUS_PER_NODE`` patched to 2 give G=2, N=2:
+With ``_RING_GPUS_PER_NODE`` patched to 2, any even world size of at least four
+exercises both levels. For four cards this gives G=2, N=2:
   intra groups [0,1] [2,3]   inter groups [0,2] [1,3]
 
 With an expert fn that is linear in the tokens, the ring's output is analytic:
@@ -47,19 +48,25 @@ _pg_collection = None
 
 
 def _ensure_fleet():
-    """Bring up a 4-rank EP-only topology (or reuse one already standing)."""
+    """Bring up a world-sized EP-only topology (or reuse one already standing)."""
     global _pg_collection
     if _pg_collection is not None:
         return _pg_collection
+    world_size = dist.get_world_size()
+    if world_size < 4 or world_size % 2 != 0:
+        raise RuntimeError(
+            "two-level RingMoE tests require an even world size of at least 4, "
+            f"got {world_size}"
+        )
     strategy = fleet.DistributedStrategy()
     strategy.hybrid_configs = {
         "dp_degree": 1,
         "mp_degree": 1,
         "pp_degree": 1,
-        "sharding_degree": 4,
+        "sharding_degree": world_size,
         "sep_degree": 1,
         "cp_degree": 1,
-        "ep_degree": 4,
+        "ep_degree": world_size,
         "moe_sharding_degree": 1,
         "order": [
             "sharding",
@@ -76,11 +83,12 @@ def _ensure_fleet():
         initialize_fleet(strategy=strategy)
     _pg_collection = ProcessGroupCollection.use_mpu_process_groups()
     ep = _pg_collection.ep
-    if ep is None or ep.nranks != 4:
-        # The G/N assertions below assume EP==4; reusing a foreign topology
-        # would silently test a different ring, so fail loudly.
+    if ep is None or ep.nranks != world_size:
+        # Reusing a foreign topology would silently test a different ring, so
+        # fail loudly.
         raise RuntimeError(
-            f"expected a 4-rank EP group, got {None if ep is None else ep.nranks}"
+            f"expected a {world_size}-rank EP group, got "
+            f"{None if ep is None else ep.nranks}"
         )
     return _pg_collection
 
@@ -160,11 +168,11 @@ class TestTwoLevelRing(unittest.TestCase):
 
     def test_topology_is_two_level(self):
         disp = _dispatcher(self.ep_group, self.num_experts)
-        self.assertEqual((disp.G, disp.N), (2, 2))
+        self.assertEqual((disp.G, disp.N), (2, self.ep_size // 2))
         self.assertIsNotNone(disp.intra_group)
         self.assertIsNotNone(disp.inter_group)
         self.assertEqual(disp.intra_group.nranks, 2)
-        self.assertEqual(disp.inter_group.nranks, 2)
+        self.assertEqual(disp.inter_group.nranks, self.ep_size // 2)
 
     def test_forward_returns_own_rows_scaled_by_ep(self):
         """intra RS sums G partials, inter RS sums N of them -> EP*scale*x."""
