@@ -1870,6 +1870,31 @@ class TransformerConfig(ModelParallelConfig):
     the switch otherwise rather than let it be a silent no-op.
     """
 
+    sparse_attn_forward_backend: str = "flash_mla"
+    """Which kernel runs the sparse-attention **forward**.
+
+    One of {"flash_mla", "cudnn"}:
+
+    * ``"flash_mla"`` (default): ``paddlefleet_ops.flash_mla.flash_mla_sparse_fwd``,
+      the historical path and the only one that covers every shape.
+    * ``"cudnn"``: cuDNN Frontend's own DSA sparse prefill, added upstream in
+      cudnn-frontend PR #569 (``cudnn.DSA.sparse_attention_forward_wrapper``).
+      Requires the SM100 family (10.0 / 10.3 / 10.7), bf16/fp16, ``d_v == 512``
+      and one of the ``(H, D_qk)`` variants ``(64, 512)`` / ``(64, 576)`` /
+      ``(128, 512)`` with a matching ``indexer_topk``. Unsupported shapes warn
+      once and fall back to FlashMLA rather than failing the run.
+
+    Measured numerically equivalent to FlashMLA at
+    ``S_q=16384, H=64, D_qk=576, K=2176, indexer_topk=2048`` on SM103: ``lse``
+    bitwise identical, ``lse_indexer`` within fp32 epsilon (1.2e-7 relative),
+    ``out`` within one bf16 ulp. Both backends return ``+inf`` ``lse_indexer``
+    on all-invalid (packing / CUDA-graph padding) rows, which the indexer loss
+    masks out either way.
+
+    Off by default: the swap is not a guaranteed win, so measure the shape in
+    question before enabling it.
+    """
+
     sparse_attn_global_kv_idx_remap_fusion: bool = False
     """Whether to fuse the per-batch-local -> flat-global KV column index remap
     (``idx + b * seqlen_kv``) consumed by the cuDNN / FlashMLA sparse-attention

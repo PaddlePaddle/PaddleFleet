@@ -94,9 +94,10 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
         sink_grad_fusion=False,
         global_kv_idx_remap_fusion=False,
         backward_backend="cudnn",
+        forward_backend="flash_mla",
     ):
         from paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn import (
-            flash_mla_sparse_attn,
+            sparse_attn_fwd,
         )
         from paddlefleet.fusions.csa_sparse_attn import _csa_compute_topk_length
 
@@ -172,7 +173,7 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
             token_indices.reshape([b * s, -1])
         )
 
-        out, lse, lse_indexer = flash_mla_sparse_attn(
+        out, lse, lse_indexer = sparse_attn_fwd(
             q_pad,
             kv,
             sink,
@@ -182,6 +183,7 @@ class _MQASparseAttention(paddle.autograd.PyLayer):
             topk_length=topk_len_flat.reshape([b, s]),
             indexer_topk=int(indexer_topk),
             global_kv_idx_remap_fusion=global_kv_idx_remap_fusion,
+            forward_backend=forward_backend,
         )  # out [b, s, 64, d_v], lse [b, s, 64]
         _MQASparseAttention._lse_indexer = lse_indexer
 
@@ -436,8 +438,9 @@ def mqa_sparse_attn(
     sink_grad_fusion=False,
     global_kv_idx_remap_fusion=False,
     backward_backend="cudnn",
+    forward_backend="flash_mla",
 ):
-    """Absorbed-MQA sparse attention (FlashMLA sparse fwd + selectable bwd).
+    """Absorbed-MQA sparse attention (selectable sparse fwd + selectable bwd).
 
     Args:
         query:         ``[b, s, h, d_qk]``, ``h <= 64``.
@@ -470,6 +473,11 @@ def mqa_sparse_attn(
                        ``sparse_attn_global_kv_idx_remap_fusion`` config field.
         backward_backend: ``"cudnn"`` (default, fast, non-deterministic dkv) or
                        ``"tilelang"`` (deterministic, ~14x slower on SM100).
+        forward_backend: ``"flash_mla"`` (default, every shape) or ``"cudnn"``
+                       (cudnn-frontend PR #569 DSA sparse prefill; only the
+                       ``(H, D_qk)`` variants in ``_CUDNN_FWD_VARIANTS``, other
+                       shapes warn once and fall back). Wired from the
+                       ``sparse_attn_forward_backend`` config field.
 
     Returns:
         ``[b, s, h * d_v]``, or ``(output, lse_indexer [b, s, 64] fp32)`` when
@@ -486,6 +494,7 @@ def mqa_sparse_attn(
         sink_grad_fusion,
         global_kv_idx_remap_fusion,
         str(backward_backend),
+        str(forward_backend),
     )
     lse_indexer = _MQASparseAttention._lse_indexer
     _MQASparseAttention._lse_indexer = None
