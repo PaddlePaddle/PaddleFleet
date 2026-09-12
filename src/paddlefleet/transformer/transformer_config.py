@@ -21,6 +21,7 @@ import functools
 import logging
 import math
 from dataclasses import dataclass
+from numbers import Real
 from typing import TYPE_CHECKING, Literal
 
 import paddle.nn.functional as F
@@ -188,6 +189,41 @@ class TransformerConfig(ModelParallelConfig):
 
     mtp_shared_last_layer: bool = False
     """When True, MTP layers share the last backbone TransformerLayer parameters."""
+
+    mtp_shared_weights: bool = False
+    """When True, all MTP depths share a single MultiTokenPredictionLayer's parameters
+    by aliasing depths 1..D-1 onto depth 0 (parameter-object aliasing, so the LayerDesc
+    tree is preserved and AOA still emits per-MTP checkpoint keys).
+
+    Composes with mtp_shared_last_layer:
+    - mtp_shared_last_layer=False: the whole MTP layer is shared across depths, i.e.
+      the internal transformer_layer body AND the per-depth fusion modules
+      (enorm / hnorm / eh_proj / norm).
+    - mtp_shared_last_layer=True: the transformer_layer body is already shared by
+      paddle's SharedLayerDesc machinery (all depths use the same "mtp_reuse_transformer"
+      key), so aliasing is restricted to the fusion modules and deliberately leaves
+      the SharedLayerDesc-managed body parameters untouched.
+
+    Cross-PP-stage sharing is NOT supported (parameter aliasing cannot bridge stages);
+    a rank holding fewer than two MTP layers logs a skip warning and does nothing.
+    No effect when num_nextn_predict_layers <= 1."""
+
+    mtp_depth_sampling: list | None = None
+    """Per-step random sampling of how many MTP depths to actually run, to keep MTP
+    compute close to num_nextn_predict_layers=1 while still training deeper depths
+    occasionally.
+    - None: disabled — always run all num_nextn_predict_layers depths (default).
+    - list[float] of length D=num_nextn_predict_layers: a probability distribution
+      P(K=k), k=1..D (must sum to 1). Each step samples a prefix length K and runs
+      only MTP depths 1..K; depths >K are skipped (no transformer_layer forward, no
+      vocab projection, no loss). The loss averages over the K computed depths, so
+      depth j's effective weight is w_j = E[1{K>=j}/K] and sum_j w_j == 1. K is
+      sampled once per micro-batch and broadcast from global rank 0 so that MoE
+      expert-parallel all-to-all stays consistent across ranks.
+    Requires pipeline_model_parallel_size == 1 (rejected otherwise in __post_init__):
+    MTP layers only land on the last pipeline stage, so the rank-0 broadcast would be
+    entered by a subset of the world group. Validated at single card; not yet validated
+    at expert_model_parallel_size>1."""
 
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
@@ -2183,6 +2219,78 @@ class TransformerConfig(ModelParallelConfig):
                     "mtp_load_weight_only=True. GPTEmbedding does not build the "
                     "shifted MTP embeddings in that mode, so separate_mtp_input "
                     "would silently do nothing."
+                )
+
+        if self.mtp_depth_sampling is not None:
+            # Raise, not assert: ``python -O`` strips assertions, and every check
+            # below guards a path that would otherwise fail silently (sampling
+            # accepted but never applied) or much later inside the loss.
+            for _flag in (
+                "enable_mtp_magic_send",
+                "separate_mtp_headloss",
+                "mtp_distillation_loss",
+                "use_erndata",
+            ):
+                if getattr(self, _flag, False):
+                    raise ValueError(
+                        f"mtp_depth_sampling={self.mtp_depth_sampling} requires "
+                        f"{_flag}=False, got {_flag}=True. Reasons per flag: "
+                        "enable_mtp_magic_send / separate_mtp_headloss route MTP "
+                        "logits through a different LM head that emits no None "
+                        "placeholders; mtp_distillation_loss iterates every entry "
+                        "of mtp_logits and would dereference those placeholders; "
+                        "use_erndata dispatches MultiTokenPredictionLayer.forward "
+                        "to _forward_megatron_style before the sampling hook, so "
+                        "depths would silently not be skipped."
+                    )
+            _d = self.num_nextn_predict_layers
+            if (
+                not isinstance(self.mtp_depth_sampling, (list, tuple))
+                or len(self.mtp_depth_sampling) != _d
+            ):
+                raise ValueError(
+                    "mtp_depth_sampling must be a list/tuple of length "
+                    f"num_nextn_predict_layers={_d} holding P(K=k) for k=1..{_d}, "
+                    f"got {self.mtp_depth_sampling!r} of length "
+                    f"{len(self.mtp_depth_sampling) if isinstance(self.mtp_depth_sampling, (list, tuple)) else 'n/a'}"
+                )
+            if any(
+                isinstance(p, bool)
+                or not isinstance(p, Real)
+                or not math.isfinite(float(p))
+                for p in self.mtp_depth_sampling
+            ):
+                raise ValueError(
+                    "mtp_depth_sampling entries must be finite real numbers, "
+                    f"got {self.mtp_depth_sampling}"
+                )
+            if any(p < 0.0 for p in self.mtp_depth_sampling):
+                raise ValueError(
+                    "mtp_depth_sampling entries are probabilities and must all be "
+                    f">= 0, got {self.mtp_depth_sampling}"
+                )
+            _s = float(sum(self.mtp_depth_sampling))
+            if abs(_s - 1.0) >= 1e-3:
+                raise ValueError(
+                    "mtp_depth_sampling must sum to 1.0 (it is the distribution "
+                    f"P(K=k)), got sum={_s} for {self.mtp_depth_sampling}"
+                )
+            if self.pipeline_model_parallel_size > 1:
+                raise ValueError(
+                    "mtp_depth_sampling requires pipeline_model_parallel_size == 1, "
+                    f"got pipeline_model_parallel_size="
+                    f"{self.pipeline_model_parallel_size}. Two independent reasons, "
+                    "both fatal rather than degraded: (1) K is broadcast from global "
+                    "rank 0 over the default (world) group inside "
+                    "MultiTokenPredictionLayer._sample_mtp_depth, but MTP layers are "
+                    "appended after the backbone and therefore only land on the last "
+                    "pipeline stage, so only those ranks reach the collective and the "
+                    "remaining ranks never join it -> hang; (2) K rides in dict_args "
+                    "as a plain int, and paddle's stage-boundary "
+                    "convert_tensor_dict_to_tuple() assigns `.key` on every dict "
+                    "value, which fails on a non-tensor. Supporting PP needs a "
+                    "dedicated communication group for the ranks that hold MTP plus "
+                    "a tensor-typed carrier; neither is implemented yet."
                 )
 
         if self.enable_mtp_magic_send:
