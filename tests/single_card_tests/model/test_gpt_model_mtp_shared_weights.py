@@ -293,9 +293,7 @@ class TestMTPDepthSampling(unittest.TestCase):
     def setUpClass(cls):
         cls.strategy = _init_fleet()
 
-    def _cfg(
-        self, mtp_depth_sampling, num_nextn=3, train_mtp_only=False
-    ):
+    def _cfg(self, mtp_depth_sampling, num_nextn=3, train_mtp_only=False):
         return GPTConfig(
             num_hidden_layers=2,
             hidden_size=512,
