@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING
 from ...utils.lazy_import import _LazyModule
 
 import_structure = {
-    "dpo_criterion": ["DPOCriterion"],
     "model_utils": ["PipelinePretrainedModel"],
     "configuration": ["Qwen3Config"],
     "modeling": [

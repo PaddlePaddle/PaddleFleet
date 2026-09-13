@@ -59,8 +59,6 @@ from paddlefleet.transformers import (
     AutoModelForConditionalGenerationPipe,
     AutoProcessor,
     AutoTokenizer,
-    Llama3Tokenizer,
-    LlamaTokenizer,
 )
 from paddlefleet.transformers.configuration_utils import (
     LlmMetaConfig,
@@ -428,9 +426,6 @@ def run_sft(
     # if using chat_template, data_args.eval_with_do_generation must be false
     if tokenizer.chat_template is not None:
         data_args.eval_with_do_generation = False
-
-    if isinstance(tokenizer, LlamaTokenizer) or isinstance(tokenizer, Llama3Tokenizer):
-        tokenizer.pad_token_id = tokenizer.eos_token_id
 
     processor = AutoProcessor.from_pretrained(model_args.model_name_or_path, use_fast=data_args.processor_use_fast)
     # The multimodal plugins read the resolution bounds off the processor

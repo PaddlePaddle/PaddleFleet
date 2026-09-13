@@ -33,25 +33,13 @@ __all__ = [
 
 CONFIG_MAPPING_NAMES = OrderedDict(
     [
-        ("deepseek_v3", "DeepseekV3Config"),
         ("deepseek_v32", "DeepseekV32Config"),
-        ("paligemma", "PaliGemma2Config"),
-        ("paligemma2", "PaliGemma2Config"),
-        ("diff_transformer", "DiffTransformerConfig"),
-        ("ernie4_5", "Ernie4_5Config"),
-        ("ernie4_5_moe", "Ernie4_5_MoeConfig"),
-        ("ernie4_5_moe_vl", "Ernie4_5_VLConfig"),
-        ("paddleocr_vl", "PaddleOCRVLConfig"),
-        ("llama", "LlamaConfig"),
         ("kimi_k2", "KimiK2Config"),
         ("kimi_k3", "KimiK3Config"),
         ("qwen2", "Qwen2Config"),
-        ("qwen2_5_vl", "Qwen2_5_VLConfig"),
-        ("qwen2_5_vl_text", "Qwen2_5_VLTextConfig"),
         ("qwen2_moe", "Qwen2MoeConfig"),
         ("qwen3", "Qwen3Config"),
         ("qwen3_moe", "Qwen3MoeConfig"),
-        ("qwen3_next", "Qwen3NextConfig"),
         ("qwen3_vl", "Qwen3VLConfig"),
         ("qwen3_vl_text", "Qwen3VLTextConfig"),
         ("qwen3_vl_moe", "Qwen3VLMoeConfig"),
@@ -59,26 +47,12 @@ CONFIG_MAPPING_NAMES = OrderedDict(
         ("glm4_moe", "Glm4MoeConfig"),
         ("glm_moe_dsa", "GlmMoeDsaConfig"),
         ("minimax_m2", "MiniMaxM2Config"),
-        ("minicpm", "MiniCPMConfig"),
-        ("minicpm4_1", "MiniCPM4_1Config"),
         ("deepseek_v4", "DeepseekV4Config"),
-        ("gpt_oss", "GptOssConfig"),
-        ("minicpm3", "MiniCPM3Config"),
-        ("phi3", "Phi3Config"),
-        ("granite", "GraniteConfig"),
-        ("gemma3_text", "Gemma3TextConfig"),
-        ("glm4v_moe", "Glm4vMoeConfig"),
-        ("glm_ocr", "GlmOcrConfig"),
         ("qwen3_5", "Qwen3_5Config"),
         ("qwen3_5_moe", "Qwen3_5MoEConfig"),
-        ("olmo2", "Olmo2Config"),
-        ("internlm3", "InternLM3Config"),
-        ("internlm2", "InternLM2Config"),
         # TODO(VL): When Gemma4 VL is implemented, "gemma4" should point to Gemma4Config (VL wrapper)
         ("gemma4_text", "Gemma4MoeConfig"),
         ("gemma4", "Gemma4MoeConfig"),  # Temporary: no standalone text ckpt, extract text_config in from_dict
-        ("phi4", "Phi4Config"),
-        ("phi4flash", "Phi4Config"),
         ("hyperencoder", "HyperEncoderConfig"),
     ]
 )
@@ -88,43 +62,21 @@ MODEL_NAMES_MAPPING = OrderedDict(
     # Base model mapping
     [
         ("deepseek_v2", "DeepseekV2"),
-        ("deepseek_v3", "DeepseekV3"),
-        ("paligemma", "PaliGemma2"),
-        ("paligemma2", "PaliGemma2"),
-        ("diff_transformer", "DiffTransformer"),
-        ("ernie4_5", "Ernie4_5"),
-        ("ernie4_5_moe", "Ernie4_5_Moe"),
-        ("ernie4_5_moe_vl", "Ernie4_5_VLMoeForConditionalGeneration"),
-        ("paddleocr_vl", "PaddleOCRVLForConditionalGeneration"),
-        ("llama", "Llama"),
         ("kimi_k3", "KimiK3"),
         ("qwen2", "Qwen2"),
-        ("qwen2_5_vl", "Qwen2_5_VL"),
-        ("qwen2_5_vl_text", "Qwen2_5_VL"),
         ("qwen2_moe", "Qwen2Moe"),
         ("qwen3", "Qwen3"),
         ("qwen3_moe", "Qwen3Moe"),
-        ("qwen3_next", "Qwen3Next"),
         ("qwen3_vl", "Qwen3VLModelPipe"),
         ("qwen3_vl_text", "Qwen3VL"),
         ("qwen3_vl_moe", "Qwen3VLMoe"),
         ("qwen3_vl_moe_text", "Qwen3VLMoeText"),
         ("hyperencoder", "HyperEncoderModelFleet"),
-        ("glm_ocr", "GlmOcrForConditionalGeneration"),
-        ("minicpm", "MiniCPM"),
-        ("minicpm4_1", "MiniCPM4_1"),
-        ("granite", "Granite"),
         ("qwen3_5_moe", "Qwen3_5MoEForConditionalGeneration"),
         ("qwen3_5", "Qwen3_5ForConditionalGeneration"),
-        ("minicpm3", "MiniCPM3Model"),
-        ("olmo2", "Olmo2ForCausalLM"),
-        ("internlm3", "InternLM3ForCausalLM"),
-        ("internlm2", "InternLM2"),
         ("gemma4_moe", "Gemma4MoeForCausalLM"),
         ("gemma4_text", "Gemma4MoeForCausalLM"),
         ("gemma4", "Gemma4MoeForCausalLM"),
-        ("phi4", "Phi4ForCausalLM"),
-        ("phi4flash", "Phi4ForCausalLM"),
     ]
 )
 
@@ -135,16 +87,11 @@ MULTI_MODELS_MAPPING = OrderedDict(
 
 SPECIAL_MODEL_TYPE_TO_MODULE_NAME = OrderedDict(
     [
-        ("paligemma", "paligemma2"),
-        ("qwen2_5_vl_text", "qwen2_5_vl"),
         ("qwen3_vl_text", "qwen3_vl"),
         ("qwen3_vl_moe_text", "qwen3_vl_moe"),
-        ("internlm3", "intern_lm3"),
-        ("internlm2", "intern"),
         # TODO(VL): Remove these when Gemma4 VL module (gemma4/) is created
         ("gemma4_text", "gemma4_moe"),
         ("gemma4", "gemma4_moe"),
-        ("phi4flash", "phi4"),
     ]
 )
 

@@ -41,7 +41,7 @@ repos:
         # make future PaddleFormers patches conflict.
         exclude: &paddleformers_derived |
           (?x)^(
-            src/paddlefleet/(cli|data|datasets|mergekit|nn|peft|quantization|trainer|transformers|triton_kernels)/|
+            src/paddlefleet/(cli|data|datasets|mergekit|nn|peft|quantization|trainer|transformers)/|
             src/paddlefleet/utils/(?!_fleet_utils\.py)
           )
   # For Python files

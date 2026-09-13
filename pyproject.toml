@@ -97,7 +97,6 @@ include = ["paddlefleet*"]
 [tool.setuptools.package-data]
 paddlefleet = [
     "datasets/reader/data_info.json",
-    "transformers/ernie4_5_moe_vl/*.ttf",
 ]
 
 [tool.setuptools.dynamic]
