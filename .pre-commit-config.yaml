@@ -42,8 +42,7 @@ repos:
         exclude: &paddleformers_derived |
           (?x)^(
             src/paddlefleet/(cli|data|datasets|mergekit|nn|peft|quantization|trainer|transformers|triton_kernels)/|
-            src/paddlefleet/utils/(?!_fleet_utils\.py)|
-            test/formers/
+            src/paddlefleet/utils/(?!_fleet_utils\.py)
           )
   # For Python files
   - repo: https://github.com/astral-sh/ruff-pre-commit
