@@ -41,9 +41,8 @@ repos:
         # make future PaddleFormers patches conflict.
         exclude: &paddleformers_derived |
           (?x)^(
-            src/paddlefleet/(cli|data|datasets|mergekit|nn|peft|quantization|trainer|transformers|triton_kernels)/|
-            src/paddlefleet/utils/(?!_fleet_utils\.py)|
-            test/formers/
+            src/paddlefleet/(cli|data|datasets|mergekit|nn|peft|quantization|trainer|transformers)/|
+            src/paddlefleet/utils/(?!_fleet_utils\.py)
           )
   # For Python files
   - repo: https://github.com/astral-sh/ruff-pre-commit
@@ -53,7 +52,6 @@ repos:
         args: [--fix, --exit-non-zero-on-fix, --no-cache]
         exclude: *paddleformers_derived
       - id: ruff-format
-        exclude: *paddleformers_derived
   # For C++ files
   - repo: https://github.com/pre-commit/mirrors-clang-format
     rev: v21.1.7

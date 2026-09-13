@@ -175,7 +175,9 @@ class GPTModelProvider(GPTConfig, ModelProviderMixin[GPTModel]):
 
     quantization_config = None
 
-    def provide(self, pre_process=None, post_process=None, vp_stage=None, loss_fn=None) -> GPTModel:
+    def provide(
+        self, pre_process=None, post_process=None, vp_stage=None, loss_fn=None
+    ) -> GPTModel:
         """Configure and instantiate a PaddleFleet GPT model based on this configuration.
 
         Args:
@@ -188,11 +190,12 @@ class GPTModelProvider(GPTConfig, ModelProviderMixin[GPTModel]):
         """
         pp_size = self.pipeline_model_parallel_size
 
-        is_pipeline_asymmetric = getattr(self, "account_for_embedding_in_pipeline_split", False) or getattr(
-            self, "account_for_loss_in_pipeline_split", False
-        )
+        is_pipeline_asymmetric = getattr(
+            self, "account_for_embedding_in_pipeline_split", False
+        ) or getattr(self, "account_for_loss_in_pipeline_split", False)
         is_pipeline_asymmetric |= (
-            getattr(self, "num_empty_layers_add_in_head", None) or getattr(self, "num_empty_layers_add_in_tail", None)
+            getattr(self, "num_empty_layers_add_in_head", None)
+            or getattr(self, "num_empty_layers_add_in_tail", None)
         ) is not None
 
         # Initialize model as meta data instead of allocating data on a device
@@ -227,7 +230,9 @@ class GPTModelProvider(GPTConfig, ModelProviderMixin[GPTModel]):
             if self.separate_mtp_headloss:
                 seg_method = "layer:TransformerLayer|EmptyLayer|MultiTokenPredictionLayer"
 
-            fleet_model = gpt_builder(self, num_stages=pp_size, seg_method=seg_method, loss_fn=loss_fn)
+            fleet_model = gpt_builder(
+                self, num_stages=pp_size, seg_method=seg_method, loss_fn=loss_fn
+            )
             # Convert original FleetGPTModel to our GPTModel to correctly inherit PretrainedModel methods
             model = GPTModel.__new__(GPTModel)
             # Manually copy all attributes
@@ -246,19 +251,37 @@ class GPTModelProvider(GPTConfig, ModelProviderMixin[GPTModel]):
 
         def make_serializable(obj):
             if isinstance(obj, dict):
-                return {k: make_serializable(v) for k, v in obj.items() if make_serializable(v) is not None}
+                return {
+                    k: make_serializable(v)
+                    for k, v in obj.items()
+                    if make_serializable(v) is not None
+                }
             elif isinstance(obj, (list, tuple)):
-                return [make_serializable(item) for item in obj if make_serializable(item) is not None]
+                return [
+                    make_serializable(item)
+                    for item in obj
+                    if make_serializable(item) is not None
+                ]
             elif isinstance(obj, (str, int, float, bool, type(None))):
                 return obj
             else:
                 return None
 
         serializable_config = make_serializable(config_dict)
-        return json.dumps(serializable_config, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+        return (
+            json.dumps(
+                serializable_config,
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
 
 
-def mtp_block_spec(config: "GPTModelProvider", vp_stage: Optional[int] = None) -> Optional[LayerSpec]:
+def mtp_block_spec(
+    config: "GPTModelProvider", vp_stage: Optional[int] = None
+) -> Optional[LayerSpec]:
     """Pass in the MTP block spec if model has MTP layers.
 
     Args:
@@ -268,10 +291,15 @@ def mtp_block_spec(config: "GPTModelProvider", vp_stage: Optional[int] = None) -
         LayerSpec: The MTP module specification
     """
     if getattr(config, "mtp_num_layers", None):
-        from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_mtp_block_spec
+        from paddlefleet.models.gpt.gpt_layer_specs import (
+            get_gpt_mtp_block_spec,
+        )
 
         if isinstance(config.transformer_layer_spec, Callable):
-            if "vp_stage" in inspect.signature(config.transformer_layer_spec).parameters:
+            if (
+                "vp_stage"
+                in inspect.signature(config.transformer_layer_spec).parameters
+            ):
                 spec = config.transformer_layer_spec(config, vp_stage=vp_stage)
             else:
                 spec = config.transformer_layer_spec(config)

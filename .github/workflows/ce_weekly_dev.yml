@@ -455,8 +455,6 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
-          sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
@@ -480,7 +478,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/preprocess.sh
+          bash -x PaddleFleet/tests/integration_test/preprocess.sh
           preprocess_exit_code=$?
           if [[ "$preprocess_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mPreprocess failed.\033[0m"
@@ -497,7 +495,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_single_card.sh
+          bash -x PaddleFleet/tests/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
             export case_name="glm45_single_card"
@@ -514,7 +512,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/qwen3_single_card.sh
+          bash -x PaddleFleet/tests/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
             export case_name="qwen3_single_card"
@@ -531,7 +529,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft_single_card.sh single
+          bash -x PaddleFleet/tests/integration_test/qwen3vl_sft_single_card.sh single
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_single_card"
@@ -671,7 +669,7 @@ jobs:
             pip install blinker==1.9.0 --ignore-installed
           fi
           cd PaddleFleet
-          cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
+          cp examples/glm45.json examples/glm45_fp8.json
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
@@ -699,7 +697,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/glm45_pt.sh
+          bash -x PaddleFleet/tests/integration_test/glm45_pt.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt"
@@ -716,7 +714,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/glm45_sft.sh
+          bash -x PaddleFleet/tests/integration_test/glm45_sft.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_sft"
@@ -736,7 +734,7 @@ jobs:
           conda activate python${PYTHON_VERSION}
           export COVERAGE_FILE=/workspace/PaddleFleet/coveragedata-multi/.coverage
           export COVERAGE_RCFILE=/workspace/PaddleFleet/ci/.coveragerc
-          bash -x PaddleFleet/test/formers/integration_test/glm45_sft_cp.sh
+          bash -x PaddleFleet/tests/integration_test/glm45_sft_cp.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_sft_cp"
@@ -753,7 +751,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/glm45_lora.sh
+          bash -x PaddleFleet/tests/integration_test/glm45_lora.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_lora"
@@ -770,7 +768,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/glm45_dpo.sh
+          bash -x PaddleFleet/tests/integration_test/glm45_dpo.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_dpo"
@@ -788,7 +786,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/glm45_dpo_lora.sh
+          bash -x PaddleFleet/tests/integration_test/glm45_dpo_lora.sh
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="glm45_dpo_lora"
@@ -809,7 +807,7 @@ jobs:
           fi
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_grouped_gemm.sh
+          bash -x PaddleFleet/tests/integration_test/glm45_pt_grouped_gemm.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt_grouped_gemm"
@@ -829,7 +827,7 @@ jobs:
           fi
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_fp8.sh
+          bash -x PaddleFleet/tests/integration_test/glm45_pt_fp8.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt_fp8"
@@ -846,7 +844,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_ep4.sh
+          bash -x PaddleFleet/tests/integration_test/glm45_pt_ep4.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             export case_name="glm45_pt_ep4"
@@ -863,7 +861,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/qwen.sh pt
+          bash -x PaddleFleet/tests/integration_test/qwen.sh pt
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen_pt"
@@ -880,7 +878,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/qwen.sh sft
+          bash -x PaddleFleet/tests/integration_test/qwen.sh sft
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen_sft"
@@ -897,7 +895,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/qwen.sh lora
+          bash -x PaddleFleet/tests/integration_test/qwen.sh lora
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen_lora"
@@ -915,7 +913,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh tp8 h20
+          bash -x PaddleFleet/tests/integration_test/qwen3vl_sft.sh tp8 h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_h20_tp8_multi_card"
@@ -933,7 +931,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_lora.sh h20
+          bash -x PaddleFleet/tests/integration_test/qwen3vl_lora.sh h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_lora_h20_multi_card"
@@ -951,7 +949,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh moe h20
+          bash -x PaddleFleet/tests/integration_test/qwen3vl_sft.sh moe h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_h20_moe_multi_card"
@@ -968,7 +966,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh fsdp h20
+          bash -x PaddleFleet/tests/integration_test/qwen3vl_sft.sh fsdp h20
           exit_code=$?
           if [[ "$exit_code" != "0" ]]; then
             export case_name="qwen3vl_sft_h20_fsdp_multi_card"
@@ -1112,8 +1110,6 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
-          sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
@@ -1137,7 +1133,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh pt
+          bash -x PaddleFleet/tests/integration_test/glm45_a100.sh pt
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_pt_multi_card_a100"
@@ -1154,7 +1150,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh sft
+          bash -x PaddleFleet/tests/integration_test/glm45_a100.sh sft
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_sft_multi_card_a100"
@@ -1171,7 +1167,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh lora
+          bash -x PaddleFleet/tests/integration_test/glm45_a100.sh lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_lora_multi_card_a100"
@@ -1188,7 +1184,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh dpo
+          bash -x PaddleFleet/tests/integration_test/glm45_a100.sh dpo
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_dpo_multi_card_a100"
@@ -1205,7 +1201,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh dpo_lora
+          bash -x PaddleFleet/tests/integration_test/glm45_a100.sh dpo_lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="glm45_dpo_lora_multi_card_a100"
@@ -1222,7 +1218,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/qwen3_a100.sh pt
+          bash -x PaddleFleet/tests/integration_test/qwen3_a100.sh pt
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_pt_multi_card_a100"
@@ -1239,7 +1235,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/qwen3_a100.sh sft
+          bash -x PaddleFleet/tests/integration_test/qwen3_a100.sh sft
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_sft_multi_card_a100"
@@ -1256,7 +1252,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/qwen3_a100.sh lora
+          bash -x PaddleFleet/tests/integration_test/qwen3_a100.sh lora
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen_lora_multi_card_a100"
@@ -1273,7 +1269,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh tp8 a100
+          bash -x PaddleFleet/tests/integration_test/qwen3vl_sft.sh tp8 a100
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen3vl_sft_a100_tp8_multi_card"
@@ -1290,7 +1286,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_lora.sh a100
+          bash -x PaddleFleet/tests/integration_test/qwen3vl_lora.sh a100
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen3vl_lora_a100_multi_card"
@@ -1307,7 +1303,7 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh moe a100
+          bash -x PaddleFleet/tests/integration_test/qwen3vl_sft.sh moe a100
           exit_code=$?
           if [ ${exit_code} -ne 0 ]; then
             export case_name="qwen3vl_sft_a100_moe_multi_card"

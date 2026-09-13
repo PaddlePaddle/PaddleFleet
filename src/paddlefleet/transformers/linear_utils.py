@@ -21,7 +21,10 @@ from paddle import nn
 from paddle.distributed.fleet.utils import sequence_parallel_utils
 
 from ..utils.tools import get_env_device
-from .mc2_parallel_linear import MC2ColumnSeqParallelLinear, MC2RowSeqParallelLinear
+from .mc2_parallel_linear import (
+    MC2ColumnSeqParallelLinear,
+    MC2RowSeqParallelLinear,
+)
 
 Linear = nn.Linear
 ColumnParallelLinear = mpu.ColumnParallelLinear
@@ -36,8 +39,12 @@ __all__ = [
 ]
 
 try:
-    ColumnSequenceParallelLinear = sequence_parallel_utils.ColumnSequenceParallelLinear
-    RowSequenceParallelLinear = sequence_parallel_utils.RowSequenceParallelLinear
+    ColumnSequenceParallelLinear = (
+        sequence_parallel_utils.ColumnSequenceParallelLinear
+    )
+    RowSequenceParallelLinear = (
+        sequence_parallel_utils.RowSequenceParallelLinear
+    )
 except:
 
     class ColumnSequenceParallelLinearPass(object):
@@ -60,14 +67,21 @@ except:
     RowSequenceParallelLinear = RowSequenceParallelLinearPass
 
 if get_env_device() == "npu":
-    if MC2ColumnSeqParallelLinear is not None and MC2RowSeqParallelLinear is not None:
+    if (
+        MC2ColumnSeqParallelLinear is not None
+        and MC2RowSeqParallelLinear is not None
+    ):
         ColumnSequenceParallelLinear = MC2ColumnSeqParallelLinear
         RowSequenceParallelLinear = MC2RowSeqParallelLinear
 elif get_env_device() == "xpu":
     try:
-        from paddle_xpu.layers.nn import ColumnParallelLinear as XPUColumnParallelLinear
+        from paddle_xpu.layers.nn import (
+            ColumnParallelLinear as XPUColumnParallelLinear,
+        )
         from paddle_xpu.layers.nn import Linear as XPULinear
-        from paddle_xpu.layers.nn import RowParallelLinear as XPURowParallelLinear
+        from paddle_xpu.layers.nn import (
+            RowParallelLinear as XPURowParallelLinear,
+        )
         from paddle_xpu.layers.nn.sequence_parallel import (
             XPUColumnSequenceParallelLinear,
             XPURowSequenceParallelLinear,

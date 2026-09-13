@@ -23,15 +23,9 @@ import_structure = {
     "tokenizer_fast": ["Qwen2TokenizerFast"],
     "configuration": ["Qwen2Config"],
     "modeling": [
-        "Qwen2Model",
         "Qwen2PretrainedModel",
         "Qwen2ForCausalLM",
         "Qwen2ForCausalLMPipe",
-        "Qwen2ForSequenceClassification",
-        "Qwen2ForTokenClassification",
-        "Qwen2SentenceEmbedding",
-        "Qwen2ForCausalLMDeprecated",
-        "Qwen2ForCausalLMPipeDeprecated",
     ],
 }
 

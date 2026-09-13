@@ -67,21 +67,21 @@ def infer_model_type(input_dir: Path) -> str:
 
 def get_model_class(model_type: str):
     if model_type == "llama":
-        from paddlefleet.transformers import LlamaForCausalLM
+        from paddleformers.transformers import LlamaForCausalLM
 
         return LlamaForCausalLM
     if model_type == "qwen":
-        from paddlefleet.transformers.qwen2.modeling import (
+        from paddleformers.transformers.qwen2.modeling import (
             Qwen2ForCausalLMDeprecated,
         )
 
         return Qwen2ForCausalLMDeprecated
     if model_type == "ernie":
-        from paddlefleet.transformers import Ernie4_5ForCausalLM
+        from paddleformers.transformers import Ernie4_5ForCausalLM
 
         return Ernie4_5ForCausalLM
     if model_type == "ernie_moe":
-        from paddlefleet.transformers.ernie4_5_moe.modeling import (
+        from paddleformers.transformers.ernie4_5_moe.modeling import (
             Ernie4_5_MoeForCausalLM,
         )
 

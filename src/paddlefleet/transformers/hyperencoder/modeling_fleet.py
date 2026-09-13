@@ -75,7 +75,12 @@ from ..model_provider import ModelProviderMixin
 from ..model_utils import PretrainedModel
 from .configuration import HyperEncoderConfig
 
-__all__ = ["HyperEncoderBlock", "HyperEncoderModel", "HyperEncoderProvider", "HyperEncoderModelFleet"]
+__all__ = [
+    "HyperEncoderBlock",
+    "HyperEncoderModel",
+    "HyperEncoderProvider",
+    "HyperEncoderModelFleet",
+]
 
 
 class HyperEncoderBlock(TransformerBlock):
@@ -97,9 +102,14 @@ class HyperEncoderBlock(TransformerBlock):
             attn_mask_startend_row_indices: path (2), FlashMask 4-column indices `[1,1,T',4]` int32.
             packed_seq_params: path (3) attaches `prefix_lm_layout` to it.
         """
-        from paddlefleet.transformer.prefix_lm_triton_core import PREFIX_LM_LAYOUT_ATTR
+        from paddlefleet.transformer.prefix_lm_triton_core import (
+            PREFIX_LM_LAYOUT_ATTR,
+        )
 
-        if attention_mask is not None and attn_mask_startend_row_indices is not None:
+        if (
+            attention_mask is not None
+            and attn_mask_startend_row_indices is not None
+        ):
             raise ValueError(
                 "attention_mask (dense) and attn_mask_startend_row_indices (FlashMask "
                 "column-sparse) cannot be passed together: the flashmask branch of "
@@ -110,15 +120,24 @@ class HyperEncoderBlock(TransformerBlock):
         # is entirely in `packed_seq_params.prefix_lm_layout`. So "pass nothing"
         # is only valid when a layout is attached -- otherwise it truly degrades
         # to no mask at all.
-        _has_layout = getattr(packed_seq_params, PREFIX_LM_LAYOUT_ATTR, None) is not None
-        if attention_mask is None and attn_mask_startend_row_indices is None and not _has_layout:
+        _has_layout = (
+            getattr(packed_seq_params, PREFIX_LM_LAYOUT_ATTR, None) is not None
+        )
+        if (
+            attention_mask is None
+            and attn_mask_startend_row_indices is None
+            and not _has_layout
+        ):
             raise ValueError(
                 "exactly one of attention_mask / attn_mask_startend_row_indices / "
                 f"packed_seq_params.{PREFIX_LM_LAYOUT_ATTR} must be provided -- "
                 "providing none silently degrades to no mask, losing the prefix-LM "
                 "three-region semantics without raising."
             )
-        if _has_layout and (attention_mask is not None or attn_mask_startend_row_indices is not None):
+        if _has_layout and (
+            attention_mask is not None
+            or attn_mask_startend_row_indices is not None
+        ):
             raise ValueError(
                 f"packed_seq_params.{PREFIX_LM_LAYOUT_ATTR} cannot be passed together "
                 "with a dense mask / FlashMask row indices: the three paths are "
@@ -142,7 +161,11 @@ class HyperEncoderBlock(TransformerBlock):
         if not self.pre_process:
             hidden_states = self.input_tensor
 
-        rng_context = tensor_parallel.get_cuda_rng_tracker().fork() if self.config.sequence_parallel else nullcontext()
+        rng_context = (
+            tensor_parallel.get_cuda_rng_tracker().fork()
+            if self.config.sequence_parallel
+            else nullcontext()
+        )
 
         with rng_context:
             dict_args = {
@@ -217,10 +240,24 @@ class HyperEncoderModel(FleetLayer):
         # ---- Front end ----
         # embed_tokens uses a plain Embedding rather than VocabParallelEmbedding:
         # the vocabulary is not sharded across TP (it is marked TP-replicated).
-        self.embed_tokens = paddle.nn.Embedding(config.vocab_size, config.hidden_size)
-        self.image_encoder = ImageEncoderConv(img_size=728, patch_size=14, in_chans=3, embed_dim=768, out_chans=256)
+        self.embed_tokens = paddle.nn.Embedding(
+            config.vocab_size, config.hidden_size
+        )
+        self.image_encoder = ImageEncoderConv(
+            img_size=728,
+            patch_size=14,
+            in_chans=3,
+            embed_dim=768,
+            out_chans=256,
+        )
         self.audio_encoder = AudioEncoderConv(num_mel_bins=128, embed_dim=768)
-        self.projector = MlpProjector({"projector_type": "linear", "input_dim": 768, "n_embed": config.hidden_size})
+        self.projector = MlpProjector(
+            {
+                "projector_type": "linear",
+                "input_dim": 768,
+                "n_embed": config.hidden_size,
+            }
+        )
         # Two query tables: built as nn.Embedding but never indexed -- only
         # `.weight` is used as a whole matrix. The Embedding form is kept so the
         # weight key matches (`query_short.weight`).
@@ -331,8 +368,15 @@ class HyperEncoderModel(FleetLayer):
             if pos.numel() > 0 and isinstance(imgs[i], paddle.Tensor):
                 feat = self.projector(self.image_encoder(imgs[i].unsqueeze(0)))
                 # [1,h',w',H] -> [h'*w', H]
-                feat = feat.transpose([0, 3, 1, 2]).flatten(2).transpose([0, 2, 1]).squeeze(0)
-                emb_i = paddle.concat([emb_i[: int(pos[0])], feat], axis=0)  # truncate and append
+                feat = (
+                    feat.transpose([0, 3, 1, 2])
+                    .flatten(2)
+                    .transpose([0, 2, 1])
+                    .squeeze(0)
+                )
+                emb_i = paddle.concat(
+                    [emb_i[: int(pos[0])], feat], axis=0
+                )  # truncate and append
             else:
                 dummy = paddle.zeros([1, 3, 128, 128], dtype=emb_i.dtype)
                 feat = self.projector(self.image_encoder(dummy))
@@ -341,7 +385,12 @@ class HyperEncoderModel(FleetLayer):
             pos = paddle.nonzero(ids_i == AUDIO_PATCH_TOKEN)
             if pos.numel() > 0 and isinstance(auds[i], paddle.Tensor):
                 feat = self.projector(self.audio_encoder(auds[i].unsqueeze(0)))
-                feat = feat.transpose([0, 3, 1, 2]).flatten(2).transpose([0, 2, 1]).squeeze(0)
+                feat = (
+                    feat.transpose([0, 3, 1, 2])
+                    .flatten(2)
+                    .transpose([0, 2, 1])
+                    .squeeze(0)
+                )
                 emb_i = paddle.concat([emb_i[: int(pos[0])], feat], axis=0)
             else:
                 dummy = paddle.zeros([1, 128, 10], dtype=emb_i.dtype)
@@ -357,7 +406,9 @@ class HyperEncoderModel(FleetLayer):
         Without this, that table's ``.grad`` is ``None``, and the set of
         parameters receiving gradients would be inconsistent between runs.
         """
-        unused = (self.query_short if use_long_query else self.query_long).weight.sum() * 0.0
+        unused = (
+            self.query_short if use_long_query else self.query_long
+        ).weight.sum() * 0.0
         return latents + unused.astype(latents.dtype)
 
     def forward_decoder(self, context_embeds, use_long_query: bool):
@@ -381,7 +432,9 @@ class HyperEncoderModel(FleetLayer):
             align=self.config.hyperencoder_seq_align,
         )
         if pad > 0:
-            x = paddle.concat([x, paddle.zeros([bs, pad, x.shape[-1]], dtype=x.dtype)], axis=1)
+            x = paddle.concat(
+                [x, paddle.zeros([bs, pad, x.shape[-1]], dtype=x.dtype)], axis=1
+            )
         mask = build_dense_mask([n_context], [n_queries], pad)
         # The mask is NOT sharded: with SP enabled, `linear_qkv` (ColumnParallel +
         # sequence_parallel) first all-gathers `[S/tp,B,H]` back to `[S,B,H]`, so
@@ -406,14 +459,18 @@ class HyperEncoderModel(FleetLayer):
             #     `[S,1,1,D]` broadcasts directly over `[S,B,ng,D]`.
             rope = rope.transpose([1, 0, 2, 3])
             h = self._sp_scatter(x)
-            h = self.block(hidden_states=h, attention_mask=mask, rotary_pos_emb=rope)
+            h = self.block(
+                hidden_states=h, attention_mask=mask, rotary_pos_emb=rope
+            )
             h = self._sp_gather(h)
             h = h[:seq_len].transpose([1, 0, 2])
         else:
             # Without SP, PaddleFleet's TransformerBlock expects `[B,S,H]`, so no
             # transpose here; a purely layout convention difference, no numerical
             # effect.
-            h = self.block(hidden_states=x, attention_mask=mask, rotary_pos_emb=rope)
+            h = self.block(
+                hidden_states=x, attention_mask=mask, rotary_pos_emb=rope
+            )
             h = h[:, :seq_len]  # non-packed path drops the padding
         return h[:, n_context:, :]  # take only the trailing Q rows
 
@@ -437,7 +494,9 @@ class HyperEncoderModel(FleetLayer):
         and Q=8192 segments into the same sequence.
         """
         from paddlefleet.transformer.prefix_lm_mask import prefix_lm_pad_len
-        from paddlefleet.transformer.prefix_lm_triton_core import PREFIX_LM_LAYOUT_ATTR
+        from paddlefleet.transformer.prefix_lm_triton_core import (
+            PREFIX_LM_LAYOUT_ATTR,
+        )
 
         # ``use_long_query`` may be a single **bool** (homogeneous pack, returns
         # ``[B,Q,H]``) or a **list[bool]** per segment (mixed short/long query
@@ -453,7 +512,9 @@ class HyperEncoderModel(FleetLayer):
         # cases stay bit-unchanged (the rectangular branch emits the same op
         # sequence as before).
         if isinstance(context_embeds, (list, tuple)):
-            seg_ctx = [c.squeeze(0) if c.ndim == 3 else c for c in context_embeds]  # each [C_i,H]
+            seg_ctx = [
+                c.squeeze(0) if c.ndim == 3 else c for c in context_embeds
+            ]  # each [C_i,H]
             n_contexts = [int(c.shape[0]) for c in seg_ctx]
             hidden = int(seg_ctx[0].shape[1])
         else:
@@ -469,7 +530,10 @@ class HyperEncoderModel(FleetLayer):
         else:
             uql = [bool(u) for u in use_long_query]
             if len(uql) != bs:
-                raise ValueError(f"use_long_query list length {len(uql)} does not match " f"segment count {bs}")
+                raise ValueError(
+                    f"use_long_query list length {len(uql)} does not match "
+                    f"segment count {bs}"
+                )
         # Per-segment query table
         qws = [(self.query_long if u else self.query_short).weight for u in uql]
         nq_list = [int(q.shape[0]) for q in qws]
@@ -490,7 +554,9 @@ class HyperEncoderModel(FleetLayer):
             align=self.config.hyperencoder_seq_align,
         )
         if pad > 0:
-            x = paddle.concat([x, paddle.zeros([1, pad, hidden], dtype=x.dtype)], axis=1)
+            x = paddle.concat(
+                [x, paddle.zeros([1, pad, hidden], dtype=x.dtype)], axis=1
+            )
 
         # ---- Per-segment sequence lengths: the last segment absorbs the pad ----
         # The pad is not a segment of its own: it is folded into the last
@@ -543,21 +609,28 @@ class HyperEncoderModel(FleetLayer):
             # transposed to `[T,1,1,D]`.
             rope = rope.transpose([1, 0, 2, 3])
             h = self._sp_scatter(x)
-            h = self.block(hidden_states=h, rotary_pos_emb=rope, packed_seq_params=psp)
+            h = self.block(
+                hidden_states=h, rotary_pos_emb=rope, packed_seq_params=psp
+            )
             h = self._sp_gather(h)
             # The packed path keeps the pad (slices to x's length, not to
             # seq_len), because per-segment row extraction uses offsets computed
             # against the pad-inclusive layout.
             h = h[: x.shape[1]].transpose([1, 0, 2])
         else:
-            h = self.block(hidden_states=x, rotary_pos_emb=rope, packed_seq_params=psp)
+            h = self.block(
+                hidden_states=x, rotary_pos_emb=rope, packed_seq_params=psp
+            )
 
         # ---- Extract the query suffix per segment ----
         # Equal-length (all nq identical, including the bool path): stack back to
         # `[B, Q, H]`, sharing the output loop with the non-packed path;
         # mixed (nq differs per segment): return a per-segment list
         # `list[[Q_i, H]]`, projected segment by segment by the caller.
-        outs = [h[0, s + nc : s + nc + nq] for s, nc, nq in zip(starts, n_contexts, nq_list)]
+        outs = [
+            h[0, s + nc : s + nc + nq]
+            for s, nc, nq in zip(starts, n_contexts, nq_list)
+        ]
         if len(set(nq_list)) == 1:
             return paddle.stack(outs, axis=0)
         return outs
@@ -620,13 +693,17 @@ class HyperEncoderModel(FleetLayer):
 
         return gather_from_sequence_parallel_region(h)
 
-    def forward(self, context_ids, image=None, audio=None, use_long_query: bool = False):
+    def forward(
+        self, context_ids, image=None, audio=None, use_long_query: bool = False
+    ):
         """``context_ids`` -> latent ``Z``, shape ``[B*Q, language_hidden_size]``.
 
         `use_long_query` is an explicit argument here. It selects the short vs
         long query table directly, rather than being inferred from a token stream.
         """
-        from paddlefleet.models.hyperencoder.attn_backend import use_packed_decoder
+        from paddlefleet.models.hyperencoder.attn_backend import (
+            use_packed_decoder,
+        )
 
         embeds = self.build_context_embeds(context_ids, image, audio)
         if use_packed_decoder(self.config):
@@ -804,7 +881,8 @@ class HyperEncoderProvider(GPTConfig, ModelProviderMixin["HyperEncoderModel"]):
         rg = getattr(self, "recompute_granularity", None)
         if rg not in (None, "full"):
             raise ValueError(
-                f"recompute_granularity={rg!r} is not supported; only 'full' is " "allowed, set None to disable."
+                f"recompute_granularity={rg!r} is not supported; only 'full' is "
+                "allowed, set None to disable."
             )
         if getattr(self, "sequence_parallel", False):
             raise ValueError(
@@ -817,7 +895,9 @@ class HyperEncoderProvider(GPTConfig, ModelProviderMixin["HyperEncoderModel"]):
 
         ql = tuple(int(v) for v in self.hyperencoder_query_lengths)
         if len(ql) != 2 or ql[0] <= 0 or ql[1] <= 0:
-            raise ValueError(f"hyperencoder_query_lengths must be two positive integers, got {ql}")
+            raise ValueError(
+                f"hyperencoder_query_lengths must be two positive integers, got {ql}"
+            )
         self.hyperencoder_query_lengths = ql
         # seq_length = max_position_embeddings = long_q + 8192.
         # This is distinct from the LLM-side --seq-length; also, the SFT workflow
@@ -832,7 +912,9 @@ class HyperEncoderProvider(GPTConfig, ModelProviderMixin["HyperEncoderModel"]):
         # a kernel launch. `use_packed_decoder` also validates the backend
         # (rejects "flex" / unknown, and packed-without-triton), reusing the same
         # logic the runtime path reads.
-        from paddlefleet.models.hyperencoder.attn_backend import use_packed_decoder
+        from paddlefleet.models.hyperencoder.attn_backend import (
+            use_packed_decoder,
+        )
 
         use_packed_decoder(self)
         for _name in (
@@ -845,11 +927,15 @@ class HyperEncoderProvider(GPTConfig, ModelProviderMixin["HyperEncoderModel"]):
         ):
             _v = int(getattr(self, _name))
             if _v <= 0:
-                raise ValueError(f"{_name} must be a positive integer, got {_v}")
+                raise ValueError(
+                    f"{_name} must be a positive integer, got {_v}"
+                )
             setattr(self, _name, _v)
         _cache = int(self.hyperencoder_triton_plan_cache_size)
         if _cache < 0:
-            raise ValueError(f"hyperencoder_triton_plan_cache_size must be >= 0, got {_cache}")
+            raise ValueError(
+                f"hyperencoder_triton_plan_cache_size must be >= 0, got {_cache}"
+            )
         self.hyperencoder_triton_plan_cache_size = _cache
         # block_m and block_n are independent knobs, but only block_m == block_n
         # is a validated configuration (block_m drives the softmax reduction tree
@@ -919,20 +1005,30 @@ class HyperEncoderProvider(GPTConfig, ModelProviderMixin["HyperEncoderModel"]):
             ("moe_ffn_hidden_size", self.moe_intermediate_size),
         ):
             if value % tp != 0:
-                raise ValueError(f"encoder {name}={value} must be divisible by encoder TP={tp}")
+                raise ValueError(
+                    f"encoder {name}={value} must be divisible by encoder TP={tp}"
+                )
         if self.n_routed_experts % ep != 0:
-            raise ValueError(f"encoder num_moe_experts={self.n_routed_experts} must be divisible by encoder EP={ep}")
+            raise ValueError(
+                f"encoder num_moe_experts={self.n_routed_experts} must be divisible by encoder EP={ep}"
+            )
         if pp != 1:
-            raise ValueError("HyperEncoder currently supports encoder PP=1 only")
+            raise ValueError(
+                "HyperEncoder currently supports encoder PP=1 only"
+            )
 
-    def provide(self, pre_process=None, post_process=None, vp_stage=None) -> "HyperEncoderModel":
+    def provide(
+        self, pre_process=None, post_process=None, vp_stage=None
+    ) -> "HyperEncoderModel":
         """Build the model. Signature matches ``ModelProviderMixin.provide``.
 
         The encoder currently only supports PP=1 (``_check_divisibility``), so
         ``pre_process`` / ``post_process`` / ``vp_stage`` are accepted but unused
         -- they are kept to satisfy the mixin contract.
         """
-        return HyperEncoderModel(self, language_hidden_size=self.language_hidden_size)
+        return HyperEncoderModel(
+            self, language_hidden_size=self.language_hidden_size
+        )
 
 
 class HyperEncoderModelFleet(PretrainedModel):
@@ -1028,24 +1124,32 @@ class HyperEncoderModelFleet(PretrainedModel):
         for L in range(n_layers):
             hf = f"{dec}.layers.{L}"
             me = f"block.layers.{L}"
-            st.append(f"{hf}.input_layernorm.weight -> {me}.input_layernorm.weight")
+            st.append(
+                f"{hf}.input_layernorm.weight -> {me}.input_layernorm.weight"
+            )
             # post_attention_layernorm is used as pre_mlp_layernorm; our key still
             # calls it post_attention
-            st.append(f"{hf}.post_attention_layernorm.weight -> {me}.post_attention_layernorm.weight")
+            st.append(
+                f"{hf}.post_attention_layernorm.weight -> {me}.post_attention_layernorm.weight"
+            )
             # QKV: interleave + transpose, reusing the fused_qkv tag (common to all MoE)
             st.append(
                 f"{hf}.self_attn.q_proj.weight^T, {hf}.self_attn.k_proj.weight^T, "
                 f"{hf}.self_attn.v_proj.weight^T -> {me}.self_attn.qkv_proj.weight, "
                 f"fused_qkv, num_heads={nh}, num_key_value_groups={kvh}"
             )
-            st.append(f"{hf}.self_attn.o_proj.weight^T -> {me}.self_attn.o_proj.weight")
+            st.append(
+                f"{hf}.self_attn.o_proj.weight^T -> {me}.self_attn.o_proj.weight"
+            )
             if L in dense_layers:
                 # dense layer
                 st.append(
                     f"{hf}.mlp.gate_proj.weight^T, {hf}.mlp.up_proj.weight^T -> "
                     f"{me}.mlp.up_gate_proj.weight, fused_ffn"
                 )
-                st.append(f"{hf}.mlp.down_proj.weight^T -> {me}.mlp.down_proj.weight")
+                st.append(
+                    f"{hf}.mlp.down_proj.weight^T -> {me}.mlp.down_proj.weight"
+                )
             else:
                 # MoE layer: router not transposed; shared + routed experts use fused_ffn
                 st.append(f"{hf}.mlp.gate.weight -> {me}.mlp.gate.weight")
@@ -1055,7 +1159,8 @@ class HyperEncoderModelFleet(PretrainedModel):
                     f"{me}.mlp.shared_experts.up_gate_proj.weight, fused_ffn"
                 )
                 st.append(
-                    f"{hf}.mlp.shared_experts.down_proj.weight^T -> " f"{me}.mlp.shared_experts.down_proj.weight"
+                    f"{hf}.mlp.shared_experts.down_proj.weight^T -> "
+                    f"{me}.mlp.shared_experts.down_proj.weight"
                 )
                 st.append(
                     f"{hf}.mlp.experts.$EXPERT_ID.gate_proj.weight^T, "

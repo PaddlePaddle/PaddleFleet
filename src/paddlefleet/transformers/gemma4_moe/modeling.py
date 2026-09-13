@@ -11,9 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Gemma4 MoE model provider and ForCausalLM entry.
+"""Gemma4 MoE model provider and ForCausalLM entry."""
 
-"""
 from __future__ import annotations
 
 import logging
@@ -45,8 +44,12 @@ def _patch_embedding_scale(embedding_layer, embed_scale):
 
     orig_forward = embedding_layer.forward.__func__
 
-    def _scaled_forward(self_inner, input_ids, position_ids, tokentype_ids=None):
-        result = orig_forward(self_inner, input_ids, position_ids, tokentype_ids)
+    def _scaled_forward(
+        self_inner, input_ids, position_ids, tokentype_ids=None
+    ):
+        result = orig_forward(
+            self_inner, input_ids, position_ids, tokentype_ids
+        )
         return result * embed_scale
 
     embedding_layer.forward = types.MethodType(_scaled_forward, embedding_layer)
@@ -131,7 +134,10 @@ class Gemma4MoeModelProvider(GPTModelProvider):
         super().__post_init__()
         if self.transformer_layer_spec is None:
             self.transformer_layer_spec = self._get_decoder_layers_spec
-        if not hasattr(self, "num_experts_per_tok") or self.num_experts_per_tok == 2:
+        if (
+            not hasattr(self, "num_experts_per_tok")
+            or self.num_experts_per_tok == 2
+        ):
             self.num_experts_per_tok = self.moe_router_topk
         # Gemma4 controls shared expert via moe_shared_expert_intermediate_size directly.
         # MoELayer needs n_shared_experts > 0 to create shared_experts.
@@ -161,11 +167,18 @@ class Gemma4MoeModelProvider(GPTModelProvider):
             for i in range(num_layers)
         ]
 
-    def provide(self, pre_process=None, post_process=None, vp_stage=None, loss_fn=None):
+    def provide(
+        self, pre_process=None, post_process=None, vp_stage=None, loss_fn=None
+    ):
         """Build Gemma4 model using standard GPT spec path with gemma4 attention type."""
-        from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
+        from paddle.distributed.fleet.meta_parallel import (
+            LayerSpec,
+            build_spec_layer,
+        )
         from paddlefleet.models.common.empty_layer import EmptyLayer
-        from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
+        from paddlefleet.models.common.language_loss.language_loss import (
+            LanguageLoss,
+        )
         from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_spec
 
         # Build layers via standard get_gpt_layer_local_spec path
@@ -245,10 +258,14 @@ class Gemma4MoeModelProvider(GPTModelProvider):
         else:
             # Fallback: search sublayers for GPTEmbedding with rotary_pos_emb
             logger.warning(
-                "[Gemma4] Could not find rotary_pos_emb via top-level or model.embedding. " "Searching sublayers..."
+                "[Gemma4] Could not find rotary_pos_emb via top-level or model.embedding. "
+                "Searching sublayers..."
             )
             for name, sublayer in model.named_sublayers():
-                if hasattr(sublayer, "rotary_pos_emb") and sublayer.rotary_pos_emb is not None:
+                if (
+                    hasattr(sublayer, "rotary_pos_emb")
+                    and sublayer.rotary_pos_emb is not None
+                ):
                     old_rpe = sublayer.rotary_pos_emb
                     sublayer.rotary_pos_emb = Gemma4DualRotaryEmbedding(self)
                     logger.info(
@@ -257,7 +274,9 @@ class Gemma4MoeModelProvider(GPTModelProvider):
                     )
                     break
             else:
-                logger.error("[Gemma4] FAILED to find any rotary_pos_emb to replace!")
+                logger.error(
+                    "[Gemma4] FAILED to find any rotary_pos_emb to replace!"
+                )
 
         # Logit Softcapping: patch GPTLMHead._forward to apply tanh softcapping.
         # Cannot use Gemma4OutputLayer wrapper because GPTModel (PipelineLayer)
@@ -284,7 +303,9 @@ class Gemma4MoeModelProvider(GPTModelProvider):
             for name, sublayer in model.named_sublayers():
                 if isinstance(sublayer, GPTLMHead):
                     orig_fwd = sublayer._forward.__func__
-                    sublayer._forward = types.MethodType(_make_softcapped_forward(orig_fwd, softcap), sublayer)
+                    sublayer._forward = types.MethodType(
+                        _make_softcapped_forward(orig_fwd, softcap), sublayer
+                    )
                     break
 
         # Embedding scale: Gemma4 multiplies embeddings by sqrt(hidden_size).
@@ -300,21 +321,29 @@ class Gemma4MoeModelProvider(GPTModelProvider):
                 if hasattr(gpt_emb, "embedding"):
                     _patch_embedding_scale(gpt_emb.embedding, embed_scale)
                     found_emb = True
-                    logger.info(f"[Gemma4] Applied embedding scale √{self.hidden_size} via model.embedding")
+                    logger.info(
+                        f"[Gemma4] Applied embedding scale √{self.hidden_size} via model.embedding"
+                    )
 
             # Fallback: search sublayers for GPTEmbedding with .embedding
             if not found_emb:
                 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 
                 for name, sublayer in model.named_sublayers():
-                    if isinstance(sublayer, GPTEmbedding) and hasattr(sublayer, "embedding"):
+                    if isinstance(sublayer, GPTEmbedding) and hasattr(
+                        sublayer, "embedding"
+                    ):
                         _patch_embedding_scale(sublayer.embedding, embed_scale)
                         found_emb = True
-                        logger.info(f"[Gemma4] Applied embedding scale √{self.hidden_size} via sublayer {name}")
+                        logger.info(
+                            f"[Gemma4] Applied embedding scale √{self.hidden_size} via sublayer {name}"
+                        )
                         break
 
             if not found_emb:
-                logger.error("[Gemma4] FAILED to find embedding layer for √hidden_size scaling!")
+                logger.error(
+                    "[Gemma4] FAILED to find embedding layer for √hidden_size scaling!"
+                )
 
         return model
 
@@ -328,7 +357,8 @@ class Gemma4MoeForCausalLM(Gemma4MoePreTrainedModel):
         num_hidden_layers = config.num_hidden_layers
         num_head_empty_layers = (
             config.num_empty_layers_add_in_head
-            if hasattr(config, "num_empty_layers_add_in_head") and config.num_empty_layers_add_in_head
+            if hasattr(config, "num_empty_layers_add_in_head")
+            and config.num_empty_layers_add_in_head
             else 0
         )
         aoa_config = {
@@ -347,9 +377,16 @@ class Gemma4MoeForCausalLM(Gemma4MoePreTrainedModel):
             pf = f"{model_prefix}layers.{lo}"
             # Heterogeneous attention: global layers have different kv_heads
             layer_types = getattr(config, "layer_types", None)
-            is_global = layer_types is not None and layer_types[layer_idx] == "full_attention"
+            is_global = (
+                layer_types is not None
+                and layer_types[layer_idx] == "full_attention"
+            )
             kv_heads = (
-                getattr(config, "num_global_key_value_heads", config.num_key_value_heads)
+                getattr(
+                    config,
+                    "num_global_key_value_heads",
+                    config.num_key_value_heads,
+                )
                 if is_global
                 else config.num_key_value_heads
             )
@@ -401,7 +438,8 @@ class Gemma4MoeForCausalLM(Gemma4MoePreTrainedModel):
         num_hidden_layers = config.num_hidden_layers
         num_head_empty_layers = (
             config.num_empty_layers_add_in_head
-            if hasattr(config, "num_empty_layers_add_in_head") and config.num_empty_layers_add_in_head
+            if hasattr(config, "num_empty_layers_add_in_head")
+            and config.num_empty_layers_add_in_head
             else 0
         )
         aoa_statements = [
@@ -416,9 +454,16 @@ class Gemma4MoeForCausalLM(Gemma4MoePreTrainedModel):
             hf = f"model.language_model.layers.{layer_idx}"
             pf = f"{model_prefix}layers.{lo}"
             layer_types = getattr(config, "layer_types", None)
-            is_global = layer_types is not None and layer_types[layer_idx] == "full_attention"
+            is_global = (
+                layer_types is not None
+                and layer_types[layer_idx] == "full_attention"
+            )
             kv_heads = (
-                getattr(config, "num_global_key_value_heads", config.num_key_value_heads)
+                getattr(
+                    config,
+                    "num_global_key_value_heads",
+                    config.num_key_value_heads,
+                )
                 if is_global
                 else config.num_key_value_heads
             )
@@ -432,7 +477,9 @@ class Gemma4MoeForCausalLM(Gemma4MoePreTrainedModel):
             ]
 
             # layer_scalar
-            aoa_statements.append(f"{pf}.layer_scalar -> {hf}.layer_scalar, dtype='bfloat16'")
+            aoa_statements.append(
+                f"{pf}.layer_scalar -> {hf}.layer_scalar, dtype='bfloat16'"
+            )
 
             # Attention: qkv_proj -> split q/k/v + transpose
             # Global layers (K=V tying): HF has no v_proj, skip v output
@@ -444,7 +491,9 @@ class Gemma4MoeForCausalLM(Gemma4MoePreTrainedModel):
                 f"{pf}.self_attn.k_proj.weight^T -> {hf}.self_attn.k_proj.weight",
             ]
             if not is_global:
-                aoa_statements.append(f"{pf}.self_attn.v_proj.weight^T -> {hf}.self_attn.v_proj.weight")
+                aoa_statements.append(
+                    f"{pf}.self_attn.v_proj.weight^T -> {hf}.self_attn.v_proj.weight"
+                )
             aoa_statements += [
                 f"{pf}.self_attn.o_proj.weight^T -> {hf}.self_attn.o_proj.weight",
                 f"{pf}.self_attn.q_norm.weight -> {hf}.self_attn.q_norm.weight",
@@ -487,10 +536,18 @@ class Gemma4MoeForCausalLM(Gemma4MoePreTrainedModel):
     is_fleet = True
 
     def __new__(cls, config):
-        config.tensor_model_parallel_size = max(getattr(config, "tensor_model_parallel_size", 1), 1)
-        config.pipeline_model_parallel_size = max(getattr(config, "pipeline_model_parallel_size", 1), 1)
-        config.expert_model_parallel_size = max(getattr(config, "expert_model_parallel_size", 1), 1)
-        config.context_parallel_size = max(getattr(config, "context_parallel_size", 1), 1)
+        config.tensor_model_parallel_size = max(
+            getattr(config, "tensor_model_parallel_size", 1), 1
+        )
+        config.pipeline_model_parallel_size = max(
+            getattr(config, "pipeline_model_parallel_size", 1), 1
+        )
+        config.expert_model_parallel_size = max(
+            getattr(config, "expert_model_parallel_size", 1), 1
+        )
+        config.context_parallel_size = max(
+            getattr(config, "context_parallel_size", 1), 1
+        )
         config.virtual_pipeline_model_parallel_size = max(
             getattr(config, "virtual_pipeline_model_parallel_size", 1), 1
         )

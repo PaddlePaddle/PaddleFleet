@@ -2,6 +2,8 @@
 # The following files will be excluded from spell check during commits
 extend-exclude = [
     "packages/paddlefleet_ops/third_party",
+    # Natural-language sample datasets; their prose is not ours to correct.
+    "tests/fixtures",
 ]
 
 [default]
@@ -33,6 +35,8 @@ Halfs = 'Halfs'
 kinf = 'kinf'
 # Part of the HuggingFace dataset name "DoclingMatix" used by CI fixtures
 Matix = 'Matix'
+# Chat-template suffix selecting ERNIE's non-reasoning mode
+nothink = 'nothink'
 operants = 'operants'
 Optin = 'Optin'
 padd = 'padd'

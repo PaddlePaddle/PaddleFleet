@@ -19,19 +19,12 @@ from typing import TYPE_CHECKING
 from ...utils.lazy_import import _LazyModule
 
 import_structure = {
-    "dpo_criterion": ["DPOCriterion"],
-    "model_utils": ["PipelinePretrainedModel"],
     "configuration": ["Qwen3Config"],
     "modeling": [
-        "Qwen3Model",
+        "Qwen3ModelProvider",
         "Qwen3PretrainedModel",
         "Qwen3ForCausalLM",
         "Qwen3ForCausalLMPipe",
-        "Qwen3ForSequenceClassification",
-        "Qwen3ForTokenClassification",
-        "Qwen3SentenceEmbedding",
-        "Qwen3ForCausalLMDeprecated",
-        "Qwen3ForCausalLMPipeDeprecated",
     ],
 }
 

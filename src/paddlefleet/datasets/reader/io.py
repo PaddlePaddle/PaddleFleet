@@ -41,7 +41,9 @@ def load_json(file_path):
                     raise ValueError(f"JSONL parse error at line {i}: {e}")
     finally:
         elapsed = time.perf_counter() - t_start
-        print(f"[load json] done. total: {count} lines, elapsed: {elapsed:.2f}s")
+        print(
+            f"[load json] done. total: {count} lines, elapsed: {elapsed:.2f}s"
+        )
 
 
 def load_txt(file_path):

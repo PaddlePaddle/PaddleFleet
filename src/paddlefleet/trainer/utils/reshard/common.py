@@ -31,7 +31,9 @@ except (ImportError, ModuleNotFoundError):
     MuonShardingOptimizer = None
 
 try:
-    from paddle.distributed.communication.batch_isend_irecv import _coalescing_manager
+    from paddle.distributed.communication.batch_isend_irecv import (
+        _coalescing_manager,
+    )
 except (ImportError, ModuleNotFoundError):
     _coalescing_manager = None
 
@@ -134,7 +136,9 @@ def convert_opt_name_to_tname(tensor_names, opt_names):
                 _find = True
                 break
             if t.endswith(s):
-                logger.info(f"{t}-{t[:-len(s)]}--{t[:-len(s)] in tensor_names}")
+                logger.info(
+                    f"{t}-{t[: -len(s)]}--{t[: -len(s)] in tensor_names}"
+                )
                 opt_to_t[t] = t[: -len(s)]
                 _find = True
                 break
@@ -166,7 +170,7 @@ class NodeModelState:
         self._add_kv(self._model_weights, k, v)
 
     def add_weights(self, model_state_dict, rank=None):
-        for (k, v) in model_state_dict.items():
+        for k, v in model_state_dict.items():
             if rank is not None:
                 k = (k, rank)
             self.add_weight(k, v)
@@ -198,7 +202,7 @@ class NodeModelState:
             opts.pop("LR_Scheduler")
             self.set_lr_scheduler(lr_scheduler)
 
-        for (k, v) in opts.items():
+        for k, v in opts.items():
             if rank is not None:
                 k = (k, rank)
             self.add_opt(k, v)
@@ -211,7 +215,7 @@ class NodeModelState:
         self._add_kv(self._master_weights, k, v)
 
     def add_master_weights(self, master, rank=None):
-        for (k, v) in master.items():
+        for k, v in master.items():
             if rank is not None:
                 k = (k, rank)
             self.add_master_weight(k, v)
@@ -242,7 +246,11 @@ class NodeModelState:
             packed = isinstance(key[0], tuple)
             structure_name, t_name = key[0] if packed else key
             t_name_new = map_func(structure_name, t_name)
-            key_new = ((structure_name, t_name_new), key[1]) if packed else (structure_name, t_name_new)
+            key_new = (
+                ((structure_name, t_name_new), key[1])
+                if packed
+                else (structure_name, t_name_new)
+            )
             return key_new
 
         def map_opt_key(key):
@@ -323,7 +331,7 @@ class NodeModelState:
             state_keys = list(tmp_state.keys())
             for key in state_keys:
                 assert len(key) == l
-                for (rank, items) in tmp_state[key]:
+                for rank, items in tmp_state[key]:
                     state[(key, rank)] = items
                 del tmp_state[key]
             return state
@@ -347,10 +355,16 @@ class NodeModelState:
         """
         # pack key for pp convert
         if structure_name_mapping is not None:
-            tname_to_structure_name = {v: k for (k, v) in structure_name_mapping.items()}
+            tname_to_structure_name = {
+                v: k for (k, v) in structure_name_mapping.items()
+            }
         else:
-            structure_name_mapping = {k: v.name for (k, v) in self._model_weights.items()}
-            tname_to_structure_name = {v: k for (k, v) in structure_name_mapping.items()}
+            structure_name_mapping = {
+                k: v.name for (k, v) in self._model_weights.items()
+            }
+            tname_to_structure_name = {
+                v: k for (k, v) in structure_name_mapping.items()
+            }
 
         tensor_names = list(tname_to_structure_name.keys())
         opt_names = list(self._opt_state.keys())
@@ -358,10 +372,15 @@ class NodeModelState:
 
         # model state
         model_weights_tmp = OrderedDict()
-        (self._model_weights, model_weights_tmp) = (model_weights_tmp, self._model_weights)
+        (self._model_weights, model_weights_tmp) = (
+            model_weights_tmp,
+            self._model_weights,
+        )
         for k in list(model_weights_tmp.keys()):
             t_name = structure_name_mapping[k]
-            self._model_weights[(k, t_name)] = paddle.to_tensor(model_weights_tmp[k], place=place)
+            self._model_weights[(k, t_name)] = paddle.to_tensor(
+                model_weights_tmp[k], place=place
+            )
             del model_weights_tmp[k]
 
         # opt
@@ -372,17 +391,24 @@ class NodeModelState:
             t_name = opt_name_to_tname[opt_name]
             assert t_name in tname_to_structure_name
             structure_name = tname_to_structure_name[t_name]
-            self._opt_state[(structure_name, t_name, opt_name)] = opt_tmp[opt_name].to(place)
+            self._opt_state[(structure_name, t_name, opt_name)] = opt_tmp[
+                opt_name
+            ].to(place)
             del opt_tmp[opt_name]
 
         # master weights
         master_weights_tmp = OrderedDict()
-        (self._master_weights, master_weights_tmp) = (master_weights_tmp, self._master_weights)
+        (self._master_weights, master_weights_tmp) = (
+            master_weights_tmp,
+            self._master_weights,
+        )
         for t_name in list(master_weights_tmp.keys()):
             assert t_name in tname_to_structure_name
             structure_name = tname_to_structure_name[t_name]
             master_name = getattr(master_weights_tmp[t_name], "name", "")
-            self._master_weights[(structure_name, t_name, master_name)] = master_weights_tmp[t_name].to(place)
+            self._master_weights[(structure_name, t_name, master_name)] = (
+                master_weights_tmp[t_name].to(place)
+            )
             del master_weights_tmp[t_name]
 
         return self
@@ -396,7 +422,10 @@ class NodeModelState:
         """
         # model weights
         model_weights_tmp = OrderedDict()
-        (self._model_weights, model_weights_tmp) = (model_weights_tmp, self._model_weights)
+        (self._model_weights, model_weights_tmp) = (
+            model_weights_tmp,
+            self._model_weights,
+        )
         for key in list(model_weights_tmp.keys()):
             structure_name, t_name = key
             self._model_weights[structure_name] = model_weights_tmp[key]
@@ -415,7 +444,10 @@ class NodeModelState:
 
         # master weights
         master_weights_tmp = OrderedDict()
-        (self._master_weights, master_weights_tmp) = (master_weights_tmp, self._master_weights)
+        (self._master_weights, master_weights_tmp) = (
+            master_weights_tmp,
+            self._master_weights,
+        )
         for key in list(master_weights_tmp.keys()):
             structure_name, t_name, master_name = key
             if structure_name in self._model_weights:
@@ -429,19 +461,19 @@ class NodeModelState:
         split this node state to multiple node state according to the passed in split_func
         """
         node_model_states = {}
-        for (k, v) in self._model_weights.items():
+        for k, v in self._model_weights.items():
             rank = split_func(k)
             if rank not in node_model_states:
                 node_model_states[rank] = NodeModelState()
             node_model_states[rank].add_weight(k, v)
 
-        for (k, v) in self._opt_state.items():
+        for k, v in self._opt_state.items():
             rank = split_func(k)
             if rank not in node_model_states:
                 node_model_states[rank] = NodeModelState()
             node_model_states[rank].add_opt(k, v)
 
-        for (k, v) in self._master_weights.items():
+        for k, v in self._master_weights.items():
             rank = split_func(k)
             if rank not in node_model_states:
                 node_model_states[rank] = NodeModelState()
@@ -461,20 +493,24 @@ class NodeModelState:
             return self
 
         def build_router(state_dict):
-            state_keys_list = all_gather_simple_object([(k, v.shape) for (k, v) in state_dict.items()], group)
+            state_keys_list = all_gather_simple_object(
+                [(k, v.shape) for (k, v) in state_dict.items()], group
+            )
 
             key_to_size = {}
             for l in state_keys_list:
-                for (k, shape) in l:
+                for k, shape in l:
                     key, rank = k
                     if key not in key_to_size:
                         key_to_size[key] = 0
                     key_to_size[key] = key_to_size[key] + np.prod(shape)
 
-            key_to_size = sorted(list(key_to_size.items()), key=lambda x: x[1], reverse=True)
+            key_to_size = sorted(
+                list(key_to_size.items()), key=lambda x: x[1], reverse=True
+            )
             node_distributed = [0 for _ in range(group.nranks)]
             key_to_rank = {}
-            for (k, v) in key_to_size:
+            for k, v in key_to_size:
                 min_val = min(node_distributed)
                 min_index = node_distributed.index(min_val)
                 key_to_rank[k] = min_index
@@ -483,7 +519,6 @@ class NodeModelState:
             return key_to_rank
 
         def distribute(state_dict):
-
             key_to_rank = build_router(state_dict)
 
             def filter_func(key):
@@ -503,9 +538,15 @@ class NodeModelState:
         reshard according to the passed in filter_func
         """
         group = self.group
-        self._model_weights = _all_gather_state_dict(self._model_weights, filter_func, group)
-        self._opt_state = _all_gather_state_dict(self._opt_state, filter_func, group)
-        self._master_weights = _all_gather_state_dict(self._master_weights, filter_func, group)
+        self._model_weights = _all_gather_state_dict(
+            self._model_weights, filter_func, group
+        )
+        self._opt_state = _all_gather_state_dict(
+            self._opt_state, filter_func, group
+        )
+        self._master_weights = _all_gather_state_dict(
+            self._master_weights, filter_func, group
+        )
         lr_schedulers = all_gather_simple_object(self._lr_scheduler, group)
         self._lr_scheduler = lr_schedulers[0]
         return self
@@ -565,7 +606,7 @@ class NodeModelState:
 
     def get_opt_state_dict(self):
         opt_state_dict = OrderedDict()
-        for (k, v) in self.opt_state.items():
+        for k, v in self.opt_state.items():
             opt_state_dict[k] = v
         if self._lr_scheduler is not None:
             opt_state_dict["LR_Scheduler"] = self._lr_scheduler
@@ -600,13 +641,19 @@ def split_opt_state(opt_state, group_getter):
             for kk, vv in v.items():
                 group = group_getter.get_group(kk)
                 if group.id not in res:
-                    res[group.id] = {"master_weights": OrderedDict(), "LR_Scheduler": lr_scheduler}
+                    res[group.id] = {
+                        "master_weights": OrderedDict(),
+                        "LR_Scheduler": lr_scheduler,
+                    }
                 res[group.id]["master_weights"][kk] = vv
         else:
             assert isinstance(v, paddle.Tensor), type(v)
             group = group_getter.get_group(k)
             if group.id not in res:
-                res[group.id] = {"master_weights": OrderedDict(), "LR_Scheduler": lr_scheduler}
+                res[group.id] = {
+                    "master_weights": OrderedDict(),
+                    "LR_Scheduler": lr_scheduler,
+                }
             res[group.id][k] = v
     return res
 
@@ -702,7 +749,9 @@ def _build_state_dict_broadcast_buckets(meta_list, bucket_size_bytes):
 
         for k, shape, numel in items:
             item_nbytes = numel * itemsize
-            if bucket_items and (bucket_numel * itemsize + item_nbytes > bucket_size_bytes):
+            if bucket_items and (
+                bucket_numel * itemsize + item_nbytes > bucket_size_bytes
+            ):
                 flush_bucket()
 
             begin = bucket_numel
@@ -733,7 +782,10 @@ def _iter_state_dict_bucket_chunks(buckets, chunk_size, max_chunk_bytes):
     chunk_bytes = 0
     for bucket in buckets:
         bucket_bytes = bucket["nbytes"]
-        if chunk and (len(chunk) >= chunk_size or chunk_bytes + bucket_bytes > max_chunk_bytes):
+        if chunk and (
+            len(chunk) >= chunk_size
+            or chunk_bytes + bucket_bytes > max_chunk_bytes
+        ):
             yield chunk
             chunk = []
             chunk_bytes = 0
@@ -757,7 +809,9 @@ class _HostStagingBuffer:
 
     def view(self, numel, np_dtype):
         nbytes = numel * np.dtype(np_dtype).itemsize
-        assert self._buf is not None and nbytes <= self._buf.nbytes, f"{nbytes} vs {self._buf}"
+        assert self._buf is not None and nbytes <= self._buf.nbytes, (
+            f"{nbytes} vs {self._buf}"
+        )
         return self._buf[:nbytes].view(np_dtype)
 
 
@@ -802,8 +856,12 @@ def _pack_state_dict_bucket_gpu(bucket, state_dict):
     return tensor
 
 
-def _unpack_state_dict_bucket(bucket, tensor, selected_keys, gathered, keep_on_gpu):
-    selected_items = [item for item in bucket["items"] if item[0] in selected_keys]
+def _unpack_state_dict_bucket(
+    bucket, tensor, selected_keys, gathered, keep_on_gpu
+):
+    selected_items = [
+        item for item in bucket["items"] if item[0] in selected_keys
+    ]
     if not selected_items:
         return
 
@@ -824,7 +882,9 @@ def _unpack_state_dict_bucket(bucket, tensor, selected_keys, gathered, keep_on_g
     # explicit clone or a handful of items would pin the whole bucket.
     for k, shape, begin, end in selected_items:
         piece = tensor[begin:end]
-        gathered[k] = (piece.clone() if keep_on_gpu else piece.cpu()).reshape(shape)
+        gathered[k] = (piece.clone() if keep_on_gpu else piece.cpu()).reshape(
+            shape
+        )
 
 
 def _broadcast_state_dict_chunk(gpu_buckets, group):
@@ -865,7 +925,9 @@ def set_broadcast_max_chunk_bytes(nbytes):
         return
     # A chunk must hold at least one full bucket, otherwise every bucket lands in
     # its own chunk and the broadcast coalescing is lost. Floor at bucket size.
-    _broadcast_max_chunk_bytes = max(nbytes, _STATE_DICT_BROADCAST_BUCKET_SIZE_BYTES)
+    _broadcast_max_chunk_bytes = max(
+        nbytes, _STATE_DICT_BROADCAST_BUCKET_SIZE_BYTES
+    )
 
 
 class AssignedMasterWeight:
@@ -980,7 +1042,9 @@ def _scatter_bucket_on_device(bucket, tensor, destinations, gathered):
             gathered[k] = AssignedMasterWeight(shape, bucket["dtype"])
 
 
-def all_gather_on_device(state_dict, group, param_sink=None, max_chunk_bytes=None):
+def all_gather_on_device(
+    state_dict, group, param_sink=None, max_chunk_bytes=None
+):
     """All-gather that never touches host memory.
 
     Same contract as ``all_gather_state_dict(state_dict, lambda k: True,
@@ -1003,8 +1067,12 @@ def all_gather_on_device(state_dict, group, param_sink=None, max_chunk_bytes=Non
     #    the data, so nothing is copied and nothing is freed here.
     local_meta = {}
     for k, v in state_dict.items():
-        assert isinstance(v, paddle.Tensor), f"{k}: expected a Tensor, got {type(v)}"
-        assert not v.place.is_cpu_place(), f"{k}: on host, all_gather_on_device expects device tensors"
+        assert isinstance(v, paddle.Tensor), (
+            f"{k}: expected a Tensor, got {type(v)}"
+        )
+        assert not v.place.is_cpu_place(), (
+            f"{k}: on host, all_gather_on_device expects device tensors"
+        )
         local_meta[k] = (str(v.dtype).split(".")[-1], list(v.shape), group_rank)
 
     # 2. Exchange descriptions -- Python objects, not tensor payloads -- and
@@ -1025,14 +1093,18 @@ def all_gather_on_device(state_dict, group, param_sink=None, max_chunk_bytes=Non
             destinations[k] = destination
 
     gathered = {}
-    buckets, empty_items = _build_state_dict_broadcast_buckets(meta_list, max_chunk_bytes)
+    buckets, empty_items = _build_state_dict_broadcast_buckets(
+        meta_list, max_chunk_bytes
+    )
     for k, (dtype, shape, rank) in empty_items:
         if rank == group_rank:
             assert k in state_dict
             del state_dict[k]
         gathered[k] = paddle.empty(shape, dtype=dtype)
 
-    for chunk in _iter_state_dict_bucket_chunks(buckets, _STATE_DICT_BROADCAST_CHUNK_SIZE, max_chunk_bytes):
+    for chunk in _iter_state_dict_bucket_chunks(
+        buckets, _STATE_DICT_BROADCAST_CHUNK_SIZE, max_chunk_bytes
+    ):
         gpu_buckets = []
         for bucket in chunk:
             if bucket["rank"] == group_rank:
@@ -1071,20 +1143,31 @@ def all_gather_state_dict(state_dict, filter_func, group):
             if not filter_func(k):
                 continue
             v = state_dict[k]
-            res[k] = v if isinstance(v, paddle.Tensor) else paddle.to_tensor(v, place=paddle.CPUPlace())
+            res[k] = (
+                v
+                if isinstance(v, paddle.Tensor)
+                else paddle.to_tensor(v, place=paddle.CPUPlace())
+            )
         return res
     group_rank = max(group.rank, 0)
 
     on_gpu_local = (
-        all(isinstance(v, paddle.Tensor) and v.place.is_gpu_place() for v in state_dict.values())
+        all(
+            isinstance(v, paddle.Tensor) and v.place.is_gpu_place()
+            for v in state_dict.values()
+        )
         if len(state_dict) > 0
         else None
     )
-    votes = [v for v in all_gather_simple_object(on_gpu_local, group) if v is not None]
+    votes = [
+        v
+        for v in all_gather_simple_object(on_gpu_local, group)
+        if v is not None
+    ]
     on_gpu = len(votes) > 0 and all(votes)
 
     meta_dict = {}
-    for (k, v) in state_dict.items():
+    for k, v in state_dict.items():
         shape = list(v.shape)
         if isinstance(v, paddle.Tensor):
             dtype = str(v.dtype).split(".")[-1]
@@ -1106,14 +1189,16 @@ def all_gather_state_dict(state_dict, filter_func, group):
 
     total_meta_dict = {}
     for meta_dict in meta_dict_list:
-        for (k, v) in meta_dict.items():
+        for k, v in meta_dict.items():
             assert k not in total_meta_dict
             total_meta_dict[k] = v
 
     meta_list = list(total_meta_dict.items())
     meta_list = sorted(meta_list, key=lambda x: (x[1][2], x[0]))
     selected_keys = {k for k, _ in meta_list if filter_func(k)}
-    buckets, empty_items = _build_state_dict_broadcast_buckets(meta_list, _STATE_DICT_BROADCAST_BUCKET_SIZE_BYTES)
+    buckets, empty_items = _build_state_dict_broadcast_buckets(
+        meta_list, _STATE_DICT_BROADCAST_BUCKET_SIZE_BYTES
+    )
     gathered = {}
 
     for k, (dtype, shape, rank) in empty_items:
@@ -1121,14 +1206,18 @@ def all_gather_state_dict(state_dict, filter_func, group):
             assert k in state_dict
             del state_dict[k]
         if k in selected_keys:
-            gathered[k] = paddle.empty(shape, dtype=dtype, device="gpu" if on_gpu else "cpu")
+            gathered[k] = paddle.empty(
+                shape, dtype=dtype, device="gpu" if on_gpu else "cpu"
+            )
 
     # When using the host route, a staging buffer is required. Iterate over all
     # buckets here to preallocate the buffer based on the largest bucket, then
     # reuse it for subsequent packing operations to improve performance.
     staging = None
     if not on_gpu:
-        host_staging_nbytes = max((b["nbytes"] for b in buckets if b["rank"] == group_rank), default=0)
+        host_staging_nbytes = max(
+            (b["nbytes"] for b in buckets if b["rank"] == group_rank), default=0
+        )
         staging = _HostStagingBuffer(host_staging_nbytes)
 
     if group_rank == 0:
@@ -1170,7 +1259,9 @@ def all_gather_state_dict(state_dict, filter_func, group):
                 if on_gpu:
                     tensor = _pack_state_dict_bucket_gpu(bucket, state_dict)
                 else:
-                    tensor = _pack_state_dict_bucket(bucket, state_dict, staging)
+                    tensor = _pack_state_dict_bucket(
+                        bucket, state_dict, staging
+                    )
             else:
                 tensor = paddle.empty([bucket["numel"]], dtype=bucket["dtype"])
             gpu_buckets.append((bucket, tensor))
@@ -1180,7 +1271,9 @@ def all_gather_state_dict(state_dict, filter_func, group):
 
         t2 = time.time()
         for bucket, tensor in gpu_buckets:
-            _unpack_state_dict_bucket(bucket, tensor, selected_keys, gathered, on_gpu)
+            _unpack_state_dict_bucket(
+                bucket, tensor, selected_keys, gathered, on_gpu
+            )
         # Release the chunk before packing the next one; keeping the list alive
         # would hold every bucket of this chunk in device memory. Note this only
         # caps residency on the host route: keeping the state on GPU hands out
@@ -1188,7 +1281,9 @@ def all_gather_state_dict(state_dict, filter_func, group):
         # through ``gathered`` and _broadcast_max_chunk_bytes no longer bounds
         # device memory -- the whole gathered state does.
         del gpu_buckets
-        _mark_mem(f"reshard/bucketed chunk{done_chunks} released, group_id={group.id}")
+        _mark_mem(
+            f"reshard/bucketed chunk{done_chunks} released, group_id={group.id}"
+        )
 
         t3 = time.time()
         pack_seconds += t1 - t0
@@ -1200,7 +1295,8 @@ def all_gather_state_dict(state_dict, filter_func, group):
         # This loop can run for minutes without emitting anything at large
         # nranks, which is indistinguishable from a hang. Report progress.
         if group_rank == 0 and (
-            done_buckets == len(buckets) or t3 - last_log >= _STATE_DICT_BROADCAST_LOG_INTERVAL_SECONDS
+            done_buckets == len(buckets)
+            or t3 - last_log >= _STATE_DICT_BROADCAST_LOG_INTERVAL_SECONDS
         ):
             last_log = t3
             elapsed = t3 - start
@@ -1222,18 +1318,24 @@ def all_gather_state_dict(state_dict, filter_func, group):
         )
 
     assert not state_dict
-    _mark_mem(f"reshard/bucketed done: {len(buckets)} buckets, group_id={group.id}")
-    return OrderedDict((k, gathered[k]) for k, _ in meta_list if k in selected_keys)
+    _mark_mem(
+        f"reshard/bucketed done: {len(buckets)} buckets, group_id={group.id}"
+    )
+    return OrderedDict(
+        (k, gathered[k]) for k, _ in meta_list if k in selected_keys
+    )
 
 
 def _all_gather_state_dict(state_dict, filter_func, group):
-    remote_state_dict_keys = [k for k in state_dict.keys() if not filter_func(k)]
+    remote_state_dict_keys = [
+        k for k in state_dict.keys() if not filter_func(k)
+    ]
     tmp_state_dict = OrderedDict()
     for k in remote_state_dict_keys:
         tmp_state_dict[k] = state_dict[k]
         state_dict.pop(k)
     tmp_state_dict = all_gather_state_dict(tmp_state_dict, filter_func, group)
-    for (k, v) in tmp_state_dict.items():
+    for k, v in tmp_state_dict.items():
         state_dict[k] = v
     return state_dict
 
@@ -1258,7 +1360,9 @@ def get_param_sharding_group(param, hcg=None):
     color = getattr(param, "color")
     if isinstance(color, dict):
         group = color.get("group", default_group)
-        assert group is default_group or group is ep_sharding_group, f"unsupported group: {group}"
+        assert group is default_group or group is ep_sharding_group, (
+            f"unsupported group: {group}"
+        )
         return group
     else:
         return default_group

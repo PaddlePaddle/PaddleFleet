@@ -21,7 +21,11 @@ import numpy as np
 import paddle
 
 from ..utils.log import logger
-from .image_processing_utils import BaseImageProcessor, BatchFeature, get_size_dict
+from .image_processing_utils import (
+    BaseImageProcessor,
+    BatchFeature,
+    get_size_dict,
+)
 from .image_transforms import (
     convert_to_rgb,
     get_resize_output_image_size,
@@ -85,13 +89,19 @@ def validate_fast_preprocess_arguments(
     )
     # Extra checks for ImageProcessorFast
     if return_tensors is not None and return_tensors != "pd":
-        raise ValueError("Only returning Paddle tensors is currently supported.")
+        raise ValueError(
+            "Only returning Paddle tensors is currently supported."
+        )
 
     if data_format != ChannelDimension.FIRST:
-        raise ValueError("Only channel first data format is currently supported.")
+        raise ValueError(
+            "Only channel first data format is currently supported."
+        )
 
 
-def safe_squeeze(tensor: "paddle.Tensor", axis: Optional[int] = None) -> "paddle.Tensor":
+def safe_squeeze(
+    tensor: "paddle.Tensor", axis: Optional[int] = None
+) -> "paddle.Tensor":
     """
     Squeezes a tensor, but only if the axis specified has dim 1.
     """
@@ -195,14 +205,27 @@ class BaseImageProcessorFast(BaseImageProcessor):
         kwargs = self.filter_out_unused_kwargs(kwargs)
         size = kwargs.pop("size", self.size)
         self.size = (
-            get_size_dict(size=size, default_to_square=kwargs.pop("default_to_square", self.default_to_square))
+            get_size_dict(
+                size=size,
+                default_to_square=kwargs.pop(
+                    "default_to_square", self.default_to_square
+                ),
+            )
             if size is not None
             else None
         )
         crop_size = kwargs.pop("crop_size", self.crop_size)
-        self.crop_size = get_size_dict(crop_size, param_name="crop_size") if crop_size is not None else None
+        self.crop_size = (
+            get_size_dict(crop_size, param_name="crop_size")
+            if crop_size is not None
+            else None
+        )
         pad_size = kwargs.pop("pad_size", self.pad_size)
-        self.pad_size = get_size_dict(size=pad_size, param_name="pad_size") if pad_size is not None else None
+        self.pad_size = (
+            get_size_dict(size=pad_size, param_name="pad_size")
+            if pad_size is not None
+            else None
+        )
 
         for key in self.valid_kwargs.__annotations__:
             kwarg = kwargs.pop(key, None)
@@ -212,7 +235,9 @@ class BaseImageProcessorFast(BaseImageProcessor):
                 setattr(self, key, deepcopy(getattr(self, key, None)))
 
         # get valid kwargs names
-        self._valid_kwargs_names = list(self.valid_kwargs.__annotations__.keys())
+        self._valid_kwargs_names = list(
+            self.valid_kwargs.__annotations__.keys()
+        )
 
     @property
     def is_fast(self) -> bool:
@@ -254,12 +279,16 @@ class BaseImageProcessorFast(BaseImageProcessor):
         """
         if pad_size is not None:
             if not (pad_size.height and pad_size.width):
-                raise ValueError(f"Pad size must contain 'height' and 'width' keys only. Got pad_size={pad_size}.")
+                raise ValueError(
+                    f"Pad size must contain 'height' and 'width' keys only. Got pad_size={pad_size}."
+                )
             pad_size = (pad_size.height, pad_size.width)
         else:
             pad_size = get_max_height_width(images)
 
-        grouped_images, grouped_images_index = group_images_by_shape(images, disable_grouping=disable_grouping)
+        grouped_images, grouped_images_index = group_images_by_shape(
+            images, disable_grouping=disable_grouping
+        )
         processed_images_grouped = {}
         processed_masks_grouped = {}
         for shape, stacked_images in grouped_images.items():
@@ -273,18 +302,29 @@ class BaseImageProcessorFast(BaseImageProcessor):
                 )
             if image_size != pad_size:
                 padding = (0, 0, padding_width, padding_height)
-                stacked_images = paddle_pad(stacked_images, padding, fill=fill_value, padding_mode=padding_mode)
+                stacked_images = paddle_pad(
+                    stacked_images,
+                    padding,
+                    fill=fill_value,
+                    padding_mode=padding_mode,
+                )
             processed_images_grouped[shape] = stacked_images
 
             if return_mask:
                 # keep only one from the channel dimension in pixel mask
-                stacked_masks = paddle.zeros_like(stacked_images, dtype=paddle.int64)[..., 0, :, :]
+                stacked_masks = paddle.zeros_like(
+                    stacked_images, dtype=paddle.int64
+                )[..., 0, :, :]
                 stacked_masks[..., : image_size[0], : image_size[1]] = 1
                 processed_masks_grouped[shape] = stacked_masks
 
-        processed_images = reorder_images(processed_images_grouped, grouped_images_index)
+        processed_images = reorder_images(
+            processed_images_grouped, grouped_images_index
+        )
         if return_mask:
-            processed_masks = reorder_images(processed_masks_grouped, grouped_images_index)
+            processed_masks = reorder_images(
+                processed_masks_grouped, grouped_images_index
+            )
             return processed_images, processed_masks
 
         return processed_images
@@ -312,7 +352,9 @@ class BaseImageProcessorFast(BaseImageProcessor):
             `paddle.Tensor`: The resized image.
         """
 
-        interpolation = interpolation if interpolation is not None else "bilinear"
+        interpolation = (
+            interpolation if interpolation is not None else "bilinear"
+        )
         if size.shortest_edge and size.longest_edge:
             # Resize the image so that the shortest edge or the longest edge is of the given size
             # while maintaining the aspect ratio of the original image.
@@ -329,7 +371,9 @@ class BaseImageProcessorFast(BaseImageProcessor):
                 input_data_format=ChannelDimension.FIRST,
             )
         elif size.max_height and size.max_width:
-            new_size = get_image_size_for_max_height_width(image.size()[-2:], size.max_height, size.max_width)
+            new_size = get_image_size_for_max_height_width(
+                image.size()[-2:], size.max_height, size.max_width
+            )
         elif size.height and size.width:
             new_size = (size.height, size.width)
         else:
@@ -338,7 +382,9 @@ class BaseImageProcessorFast(BaseImageProcessor):
                 f" {size}."
             )
 
-        return paddle_resize(image, new_size, interpolation=interpolation, antialias=antialias)
+        return paddle_resize(
+            image, new_size, interpolation=interpolation, antialias=antialias
+        )
 
     @staticmethod
     def compile_friendly_resize(
@@ -353,13 +399,23 @@ class BaseImageProcessorFast(BaseImageProcessor):
         if image.dtype == paddle.uint8:
             # 256 is used on purpose instead of 255 to avoid numerical differences
             image = image.float() / 256
-            image = paddle_resize(image, new_size, interpolation=interpolation, antialias=antialias)
+            image = paddle_resize(
+                image,
+                new_size,
+                interpolation=interpolation,
+                antialias=antialias,
+            )
             image = image * 256
             image = paddle.where(image > 255, 255, image)
             image = paddle.where(image < 0, 0, image)
             image = image.round().to(paddle.uint8)
         else:
-            image = paddle_resize(image, new_size, interpolation=interpolation, antialias=antialias)
+            image = paddle_resize(
+                image,
+                new_size,
+                interpolation=interpolation,
+                antialias=antialias,
+            )
         return image
 
     def rescale(
@@ -427,16 +483,20 @@ class BaseImageProcessorFast(BaseImageProcessor):
         """
         Rescale and normalize images.
         """
-        image_mean, image_std, do_rescale = self._fuse_mean_std_and_rescale_factor(
-            do_normalize=do_normalize,
-            image_mean=image_mean,
-            image_std=image_std,
-            do_rescale=do_rescale,
-            rescale_factor=rescale_factor,
+        image_mean, image_std, do_rescale = (
+            self._fuse_mean_std_and_rescale_factor(
+                do_normalize=do_normalize,
+                image_mean=image_mean,
+                image_std=image_std,
+                do_rescale=do_rescale,
+                rescale_factor=rescale_factor,
+            )
         )
         # if/elif as we use fused rescale and normalize if both are set to True
         if do_normalize:
-            images = self.normalize(images.astype("float32"), image_mean, image_std)
+            images = self.normalize(
+                images.astype("float32"), image_mean, image_std
+            )
         elif do_rescale:
             images = self.rescale(images, rescale_factor)
 
@@ -463,18 +523,30 @@ class BaseImageProcessorFast(BaseImageProcessor):
             `paddle.Tensor`: The center cropped image.
         """
         if size.height is None or size.width is None:
-            raise ValueError(f"The size dictionary must have keys 'height' and 'width'. Got {size.keys()}")
+            raise ValueError(
+                f"The size dictionary must have keys 'height' and 'width'. Got {size.keys()}"
+            )
         image_height, image_width = image.shape[-2:]
         crop_height, crop_width = size.height, size.width
 
         if crop_width > image_width or crop_height > image_height:
             padding_ltrb = [
-                (crop_width - image_width) // 2 if crop_width > image_width else 0,
-                (crop_height - image_height) // 2 if crop_height > image_height else 0,
-                (crop_width - image_width + 1) // 2 if crop_width > image_width else 0,
-                (crop_height - image_height + 1) // 2 if crop_height > image_height else 0,
+                (crop_width - image_width) // 2
+                if crop_width > image_width
+                else 0,
+                (crop_height - image_height) // 2
+                if crop_height > image_height
+                else 0,
+                (crop_width - image_width + 1) // 2
+                if crop_width > image_width
+                else 0,
+                (crop_height - image_height + 1) // 2
+                if crop_height > image_height
+                else 0,
             ]
-            image = paddle_pad(image, padding_ltrb, fill=0)  # PIL uses fill value 0
+            image = paddle_pad(
+                image, padding_ltrb, fill=0
+            )  # PIL uses fill value 0
             image_height, image_width = image.shape[-2:]
             if crop_width == image_width and crop_height == image_height:
                 return image
@@ -508,7 +580,9 @@ class BaseImageProcessorFast(BaseImageProcessor):
 
         for kwarg_name in self.unused_kwargs:
             if kwarg_name in kwargs:
-                logger.warning_once(f"This processor does not use the `{kwarg_name}` parameter. It will be ignored.")
+                logger.warning_once(
+                    f"This processor does not use the `{kwarg_name}` parameter. It will be ignored."
+                )
                 kwargs.pop(kwarg_name)
         return kwargs
 
@@ -596,17 +670,27 @@ class BaseImageProcessorFast(BaseImageProcessor):
         """
 
         # Get structured images (potentially nested)
-        images = self._prepare_images_structure(images, expected_ndims=expected_ndims)
+        images = self._prepare_images_structure(
+            images, expected_ndims=expected_ndims
+        )
 
         process_image_partial = partial(
-            self._process_image, do_convert_rgb=do_convert_rgb, input_data_format=input_data_format, device=device
+            self._process_image,
+            do_convert_rgb=do_convert_rgb,
+            input_data_format=input_data_format,
+            device=device,
         )
 
         # Check if we have nested structure, assuming the nesting is consistent
-        has_nested_structure = len(images) > 0 and isinstance(images[0], (list, tuple))
+        has_nested_structure = len(images) > 0 and isinstance(
+            images[0], (list, tuple)
+        )
 
         if has_nested_structure:
-            processed_images = [[process_image_partial(img) for img in nested_list] for nested_list in images]
+            processed_images = [
+                [process_image_partial(img) for img in nested_list]
+                for nested_list in images
+            ]
         else:
             processed_images = [process_image_partial(img) for img in images]
 
@@ -630,11 +714,17 @@ class BaseImageProcessorFast(BaseImageProcessor):
         if kwargs is None:
             kwargs = {}
         if size is not None:
-            size = SizeDict(**get_size_dict(size=size, default_to_square=default_to_square))
+            size = SizeDict(
+                **get_size_dict(size=size, default_to_square=default_to_square)
+            )
         if crop_size is not None:
-            crop_size = SizeDict(**get_size_dict(crop_size, param_name="crop_size"))
+            crop_size = SizeDict(
+                **get_size_dict(crop_size, param_name="crop_size")
+            )
         if pad_size is not None:
-            pad_size = SizeDict(**get_size_dict(size=pad_size, param_name="pad_size"))
+            pad_size = SizeDict(
+                **get_size_dict(size=pad_size, param_name="pad_size")
+            )
         if isinstance(image_mean, list):
             image_mean = tuple(image_mean)
         if isinstance(image_std, list):
@@ -651,7 +741,9 @@ class BaseImageProcessorFast(BaseImageProcessor):
 
         resample = kwargs.pop("resample")
         kwargs["interpolation"] = (
-            pil_paddle_interpolation_mapping[resample] if isinstance(resample, (PILImageResampling, int)) else resample
+            pil_paddle_interpolation_mapping[resample]
+            if isinstance(resample, (PILImageResampling, int))
+            else resample
         )
 
         return kwargs
@@ -690,12 +782,25 @@ class BaseImageProcessorFast(BaseImageProcessor):
             data_format=data_format,
         )
 
-    def __call__(self, images: ImageInput, *args, **kwargs: Unpack[DefaultFastImageProcessorKwargs]) -> BatchFeature:
+    def __call__(
+        self,
+        images: ImageInput,
+        *args,
+        **kwargs: Unpack[DefaultFastImageProcessorKwargs],
+    ) -> BatchFeature:
         return self.preprocess(images, *args, **kwargs)
 
-    def preprocess(self, images: ImageInput, *args, **kwargs: Unpack[DefaultFastImageProcessorKwargs]) -> BatchFeature:
+    def preprocess(
+        self,
+        images: ImageInput,
+        *args,
+        **kwargs: Unpack[DefaultFastImageProcessorKwargs],
+    ) -> BatchFeature:
         # args are not validated, but their order in the `preprocess` and `_preprocess` signatures must be the same
-        validate_kwargs(captured_kwargs=kwargs.keys(), valid_processor_keys=self._valid_kwargs_names)
+        validate_kwargs(
+            captured_kwargs=kwargs.keys(),
+            valid_processor_keys=self._valid_kwargs_names,
+        )
         # Set default kwargs from self. This ensures that if a kwarg is not provided
         # by the user, it gets its default value from the instance, or is set to None.
         for kwarg_name in self._valid_kwargs_names:
@@ -716,7 +821,12 @@ class BaseImageProcessorFast(BaseImageProcessor):
         kwargs.pop("data_format")
 
         return self._preprocess_image_like_inputs(
-            images, *args, do_convert_rgb=do_convert_rgb, input_data_format=input_data_format, device=device, **kwargs
+            images,
+            *args,
+            do_convert_rgb=do_convert_rgb,
+            input_data_format=input_data_format,
+            device=device,
+            **kwargs,
         )
 
     def _preprocess_image_like_inputs(
@@ -735,7 +845,10 @@ class BaseImageProcessorFast(BaseImageProcessor):
         """
         # Prepare input images
         images = self._prepare_image_like_inputs(
-            images=images, do_convert_rgb=do_convert_rgb, input_data_format=input_data_format, device=device
+            images=images,
+            do_convert_rgb=do_convert_rgb,
+            input_data_format=input_data_format,
+            device=device,
         )
         return self._preprocess(images, *args, **kwargs)
 
@@ -759,33 +872,58 @@ class BaseImageProcessorFast(BaseImageProcessor):
         **kwargs,
     ) -> BatchFeature:
         # Group images by size for batched resizing
-        grouped_images, grouped_images_index = group_images_by_shape(images, disable_grouping=disable_grouping)
+        grouped_images, grouped_images_index = group_images_by_shape(
+            images, disable_grouping=disable_grouping
+        )
         resized_images_grouped = {}
         for shape, stacked_images in grouped_images.items():
             if do_resize:
-                stacked_images = self.resize(image=stacked_images, size=size, interpolation=interpolation)
+                stacked_images = self.resize(
+                    image=stacked_images, size=size, interpolation=interpolation
+                )
             resized_images_grouped[shape] = stacked_images
-        resized_images = reorder_images(resized_images_grouped, grouped_images_index)
+        resized_images = reorder_images(
+            resized_images_grouped, grouped_images_index
+        )
 
         # Group images by size for further processing
         # Needed in case do_resize is False, or resize returns images with different sizes
-        grouped_images, grouped_images_index = group_images_by_shape(resized_images, disable_grouping=disable_grouping)
+        grouped_images, grouped_images_index = group_images_by_shape(
+            resized_images, disable_grouping=disable_grouping
+        )
         processed_images_grouped = {}
         for shape, stacked_images in grouped_images.items():
             if do_center_crop:
                 stacked_images = self.center_crop(stacked_images, crop_size)
             # Fused rescale and normalize
             stacked_images = self.rescale_and_normalize(
-                stacked_images, do_rescale, rescale_factor, do_normalize, image_mean, image_std
+                stacked_images,
+                do_rescale,
+                rescale_factor,
+                do_normalize,
+                image_mean,
+                image_std,
             )
             processed_images_grouped[shape] = stacked_images
-        processed_images = reorder_images(processed_images_grouped, grouped_images_index)
+        processed_images = reorder_images(
+            processed_images_grouped, grouped_images_index
+        )
 
         if do_pad:
-            processed_images = self.pad(processed_images, pad_size=pad_size, disable_grouping=disable_grouping)
+            processed_images = self.pad(
+                processed_images,
+                pad_size=pad_size,
+                disable_grouping=disable_grouping,
+            )
 
-        processed_images = paddle.stack(processed_images, axis=0) if return_tensors else processed_images
-        return BatchFeature(data={"pixel_values": processed_images}, tensor_type=return_tensors)
+        processed_images = (
+            paddle.stack(processed_images, axis=0)
+            if return_tensors
+            else processed_images
+        )
+        return BatchFeature(
+            data={"pixel_values": processed_images}, tensor_type=return_tensors
+        )
 
     def to_dict(self):
         encoder_dict = super().to_dict()

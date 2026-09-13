@@ -18,6 +18,7 @@ PF_HOME              -->  the root directory for storing PaddleFleet related dat
 ├─ MODEL_HOME              -->  Store model files.
 └─ DATA_HOME         -->  Store automatically downloaded datasets.
 """
+
 import os
 import re
 
@@ -37,7 +38,11 @@ def _get_pf_home():
             if os.path.isdir(home_path):
                 return home_path
             else:
-                raise RuntimeError("The environment variable PF_HOME {} is not a directory.".format(home_path))
+                raise RuntimeError(
+                    "The environment variable PF_HOME {} is not a directory.".format(
+                        home_path
+                    )
+                )
         else:
             return home_path
     return os.path.join(_get_user_home(), ".paddlefleet")

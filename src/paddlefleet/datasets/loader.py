@@ -44,7 +44,9 @@ def create_dataset(**dataset_config: Dict[str, Any]):
     return train_dataset
 
 
-def create_indexed_dataset(data_file_prefix, skip_warmup=True, warmup_only_rank0=False):
+def create_indexed_dataset(
+    data_file_prefix, skip_warmup=True, warmup_only_rank0=False
+):
     """Create indexed dataset from raw data files.
 
     Args:

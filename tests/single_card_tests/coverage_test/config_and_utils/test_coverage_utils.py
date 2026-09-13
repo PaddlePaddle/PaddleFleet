@@ -659,7 +659,9 @@ class TestGetBatchOnThisCpRank(unittest.TestCase):
             "labels": mock_labels,
             "other_key": "not_scattered",
         }
-        with patch("paddlefleet.utils._fleet_utils.ContextParallelScatterOp") as mock_cp_op:
+        with patch(
+            "paddlefleet.utils._fleet_utils.ContextParallelScatterOp"
+        ) as mock_cp_op:
             mock_cp_op.apply.side_effect = lambda x, **kw: x
             result = get_batch_on_this_cp_rank(inputs)
         self.assertIn("input_ids", result)
@@ -670,7 +672,9 @@ class TestGetBatchOnThisCpRank(unittest.TestCase):
         from paddlefleet.utils import get_batch_on_this_cp_rank
 
         t = paddle.randn([2, 4])
-        with patch("paddlefleet.utils._fleet_utils.ContextParallelScatterOp") as mock_cp_op:
+        with patch(
+            "paddlefleet.utils._fleet_utils.ContextParallelScatterOp"
+        ) as mock_cp_op:
             mock_cp_op.apply.return_value = t
             result = get_batch_on_this_cp_rank(t)
         self.assertIsNotNone(result)

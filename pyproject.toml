@@ -97,7 +97,6 @@ include = ["paddlefleet*"]
 [tool.setuptools.package-data]
 paddlefleet = [
     "datasets/reader/data_info.json",
-    "transformers/ernie4_5_moe_vl/*.ttf",
 ]
 
 [tool.setuptools.dynamic]
@@ -201,8 +200,8 @@ url = "https://www.paddlepaddle.org.cn/packages/nightly/xpu-p800/"
 explicit = true
 
 [tool.pytest.ini_options]
-pythonpath = [".", "test"]
-testpaths = ["tests", "test/formers"]
+pythonpath = ["."]
+testpaths = ["tests"]
 filterwarnings = [
     "ignore::UserWarning",
     "ignore::DeprecationWarning",

@@ -91,7 +91,14 @@ import_structure = {
     "infohub": ["infohub", "InfoHub"],
     "memory_utils": ["empty_device_cache"],
     "moe_hybrid_parallel_optimizer": ["MoEHybridParallelOptimizer"],
-    "paddle_patch": ["enhance_set_value", "new_repr", "_numel", "_numpy", "enhance_init", "enhance_to_tensor"],
+    "paddle_patch": [
+        "enhance_set_value",
+        "new_repr",
+        "_numel",
+        "_numpy",
+        "enhance_init",
+        "enhance_to_tensor",
+    ],
     "serialization": [
         "seek_by_string",
         "load_torch_inner",

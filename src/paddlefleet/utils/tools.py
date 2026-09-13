@@ -20,7 +20,6 @@ from .log import logger
 
 
 def dispatch_to(dispatch_fn, *, cond=None):
-
     if cond is None:
         cond = lambda self, *args, **kwargs: True  # noqa: E731
 
@@ -89,7 +88,9 @@ def dygraph_params_to_static(model, dygraph_tensor_dict, topo=None):
                 if parm.shape[dim] != v:
                     break
 
-            splited = np.split(tensor, topo.mp_info.size, axis=dim)[topo.mp_info.rank]
+            splited = np.split(tensor, topo.mp_info.size, axis=dim)[
+                topo.mp_info.rank
+            ]
             ret_dict[parm.name] = splited
         else:
             ret_dict[parm.name] = tensor
@@ -269,7 +270,9 @@ def device_guard(device="cpu", dev_id=0):
     @contextlib.contextmanager
     def _device_guard():
         if not is_paddle_available():
-            raise ImportError("PaddlePaddle is not available. Please install it first.")
+            raise ImportError(
+                "PaddlePaddle is not available. Please install it first."
+            )
         import paddle
 
         origin_device = paddle.device.get_device()
@@ -339,7 +342,9 @@ class PaddleDeviceWrapper:
         if func is not None:
             return func
         else:
-            hardware_func = self.get_nested_attr(self.paddle_device_hardware, name)
+            hardware_func = self.get_nested_attr(
+                self.paddle_device_hardware, name
+            )
             if hardware_func is not None:
                 return hardware_func
             else:

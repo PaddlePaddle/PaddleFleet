@@ -22,7 +22,12 @@ import numpy as np
 import paddle
 
 from ..image_processing_utils import BatchFeature
-from ..image_utils import ChannelDimension, PILImageResampling, SizeDict, get_image_size
+from ..image_utils import (
+    ChannelDimension,
+    PILImageResampling,
+    SizeDict,
+    get_image_size,
+)
 from ..processing_utils import VideosKwargs
 from ..video_processing_utils import BaseVideoProcessor
 from ..video_utils import VideoMetadata, group_videos_by_shape, reorder_videos
@@ -38,7 +43,9 @@ def smart_resize(
     max_pixels: int = 16 * 16 * 2 * 2 * 2 * 6144,
 ):
     if height < factor or width < factor:
-        raise ValueError(f"height:{height} or width:{width} must be larger than factor:{factor}")
+        raise ValueError(
+            f"height:{height} or width:{width} must be larger than factor:{factor}"
+        )
     elif max(height, width) / min(height, width) > 200:
         raise ValueError(
             f"absolute aspect ratio must be smaller than 200, got {max(height, width) / min(height, width)}"
@@ -89,17 +96,24 @@ class Qwen3VLVideoProcessor(BaseVideoProcessor):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         if self.size is not None and (
-            self.size.get("shortest_edge", None) is None or self.size.get("longest_edge", None) is None
+            self.size.get("shortest_edge", None) is None
+            or self.size.get("longest_edge", None) is None
         ):
-            raise ValueError("size must contain 'shortest_edge' and 'longest_edge' keys.")
+            raise ValueError(
+                "size must contain 'shortest_edge' and 'longest_edge' keys."
+            )
 
     def _further_process_kwargs(
         self,
         size: Optional[SizeDict] = None,
         **kwargs,
     ) -> dict:
-        if size is not None and ("shortest_edge" not in size or "longest_edge" not in size):
-            raise ValueError("size must contain 'shortest_edge' and 'longest_edge' keys.")
+        if size is not None and (
+            "shortest_edge" not in size or "longest_edge" not in size
+        ):
+            raise ValueError(
+                "size must contain 'shortest_edge' and 'longest_edge' keys."
+            )
         return super()._further_process_kwargs(size=size, **kwargs)
 
     def sample_frames(
@@ -110,7 +124,9 @@ class Qwen3VLVideoProcessor(BaseVideoProcessor):
         **kwargs,
     ):
         if fps is not None and num_frames is not None:
-            raise ValueError("`num_frames` and `fps` are mutually exclusive arguments, please use only one!")
+            raise ValueError(
+                "`num_frames` and `fps` are mutually exclusive arguments, please use only one!"
+            )
 
         total_num_frames = metadata.total_num_frames
         fps = fps if fps is not None else self.fps
@@ -119,12 +135,20 @@ class Qwen3VLVideoProcessor(BaseVideoProcessor):
             if metadata.fps is None:
                 metadata.fps = 24
             num_frames = int(total_num_frames / metadata.fps * fps)
-            num_frames = min(max(num_frames, self.min_frames), self.max_frames, total_num_frames)
+            num_frames = min(
+                max(num_frames, self.min_frames),
+                self.max_frames,
+                total_num_frames,
+            )
 
         if num_frames is None:
-            num_frames = min(max(total_num_frames, self.min_frames), self.max_frames)
+            num_frames = min(
+                max(total_num_frames, self.min_frames), self.max_frames
+            )
 
-        indices = np.linspace(0, total_num_frames - 1, num_frames).round().astype(int)
+        indices = (
+            np.linspace(0, total_num_frames - 1, num_frames).round().astype(int)
+        )
         return indices
 
     def _preprocess(
@@ -167,16 +191,27 @@ class Qwen3VLVideoProcessor(BaseVideoProcessor):
                     interpolation=interpolation,
                 )
             resized_videos_grouped[shape] = stacked_videos
-        resized_videos = reorder_videos(resized_videos_grouped, grouped_videos_index)
+        resized_videos = reorder_videos(
+            resized_videos_grouped, grouped_videos_index
+        )
 
-        grouped_videos, grouped_videos_index = group_videos_by_shape(resized_videos)
+        grouped_videos, grouped_videos_index = group_videos_by_shape(
+            resized_videos
+        )
         processed_videos_grouped = {}
         processed_grids = {}
         for shape, stacked_videos in grouped_videos.items():
-            resized_height, resized_width = get_image_size(stacked_videos[0], channel_dim=ChannelDimension.FIRST)
+            resized_height, resized_width = get_image_size(
+                stacked_videos[0], channel_dim=ChannelDimension.FIRST
+            )
 
             stacked_videos = self.rescale_and_normalize(
-                stacked_videos, do_rescale, rescale_factor, do_normalize, image_mean, image_std
+                stacked_videos,
+                do_rescale,
+                rescale_factor,
+                do_normalize,
+                image_mean,
+                image_std,
             )
             patches = stacked_videos
 
@@ -188,7 +223,10 @@ class Qwen3VLVideoProcessor(BaseVideoProcessor):
 
             batch_size, grid_t, channel = patches.shape[:3]
             grid_t = grid_t // temporal_patch_size
-            grid_h, grid_w = resized_height // patch_size, resized_width // patch_size
+            grid_h, grid_w = (
+                resized_height // patch_size,
+                resized_width // patch_size,
+            )
 
             # Paddle 9-dim fix
             bg_dim = batch_size * grid_t
@@ -205,7 +243,9 @@ class Qwen3VLVideoProcessor(BaseVideoProcessor):
                     patch_size,
                 ]
             )
-            patches = patches.transpose([0, 3, 6, 4, 7, 2, 1, 5, 8]).contiguous()
+            patches = patches.transpose(
+                [0, 3, 6, 4, 7, 2, 1, 5, 8]
+            ).contiguous()
             # In order to alleviate the issue of unit test ci hang, an additional reshaping was performed
             patches = patches.reshape(
                 [
@@ -227,7 +267,9 @@ class Qwen3VLVideoProcessor(BaseVideoProcessor):
             processed_videos_grouped[shape] = flatten_patches
             processed_grids[shape] = [[grid_t, grid_h, grid_w]] * batch_size
 
-        processed_videos = reorder_videos(processed_videos_grouped, grouped_videos_index)
+        processed_videos = reorder_videos(
+            processed_videos_grouped, grouped_videos_index
+        )
         processed_grids = reorder_videos(processed_grids, grouped_videos_index)
 
         pixel_values_videos = paddle.cat(processed_videos, dim=0)

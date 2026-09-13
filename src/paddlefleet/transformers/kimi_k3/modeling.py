@@ -60,7 +60,9 @@ class KimiK3ModelProvider(GPTModelProvider):
 
     def __post_init__(self):
         if self.attn_res_block_size is None or self.attn_res_block_size <= 0:
-            raise ValueError("Kimi-K3 attn_res_block_size must be a positive integer.")
+            raise ValueError(
+                "Kimi-K3 attn_res_block_size must be a positive integer."
+            )
         self.block_attention_residuals = True
         # Fleet counts attention and MLP as two residual sublayers, while the
         # source value counts decoder layers, so double it.
@@ -82,7 +84,9 @@ class KimiK3PretrainedModel(PretrainedModel):
         if layer_idx < first_dense:
             return False
         if first_dense:
-            return not frequency or (layer_idx - first_dense + 1) % frequency == 0
+            return (
+                not frequency or (layer_idx - first_dense + 1) % frequency == 0
+            )
         return layer_idx % frequency == 0
 
     @classmethod
@@ -100,7 +104,10 @@ class KimiK3PretrainedModel(PretrainedModel):
         """
         return {
             "schema_version": 1,
-            "component_pairing": {"weight_suffix": ".weight_packed", "scale_suffix": ".weight_scale"},
+            "component_pairing": {
+                "weight_suffix": ".weight_packed",
+                "scale_suffix": ".weight_scale",
+            },
             "logic_name_suffix": ".weight",
             "groups": [
                 {
@@ -126,9 +133,13 @@ class KimiK3PretrainedModel(PretrainedModel):
         num_layers = config.num_hidden_layers
         num_experts = config.n_routed_experts
         num_mtp_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
-        params_dtype = getattr(config, "params_dtype", getattr(config, "dtype", "bfloat16"))
+        params_dtype = getattr(
+            config, "params_dtype", getattr(config, "dtype", "bfloat16")
+        )
         layer_types = config.layer_types
-        num_head_empty_layers = getattr(config, "num_empty_layers_add_in_head", 0) or 0
+        num_head_empty_layers = (
+            getattr(config, "num_empty_layers_add_in_head", 0) or 0
+        )
 
         src_model = "language_model.model"
         statements = [
@@ -190,7 +201,9 @@ class KimiK3PretrainedModel(PretrainedModel):
                     ]
                 )
             else:
-                raise ValueError(f"Unsupported Kimi-K3 attention layer type: {attention_type}")
+                raise ValueError(
+                    f"Unsupported Kimi-K3 attention layer type: {attention_type}"
+                )
 
         def add_attention_residual(src, dst):
             statements.extend(
@@ -251,10 +264,12 @@ class KimiK3PretrainedModel(PretrainedModel):
                 )
             if getattr(config, "moe_expert_fusion", False):
                 weight1 = ",".join(
-                    f"{dst_moe}.experts.{expert_idx}.up_gate_proj.weight" for expert_idx in range(num_experts)
+                    f"{dst_moe}.experts.{expert_idx}.up_gate_proj.weight"
+                    for expert_idx in range(num_experts)
                 )
                 weight2 = ",".join(
-                    f"{dst_moe}.experts.{expert_idx}.down_proj.weight" for expert_idx in range(num_experts)
+                    f"{dst_moe}.experts.{expert_idx}.down_proj.weight"
+                    for expert_idx in range(num_experts)
                 )
                 statements.extend(
                     [
@@ -327,7 +342,10 @@ class KimiK3PretrainedModel(PretrainedModel):
                             f"_ -> {dst_moe}.latent_norm.weight",
                         ]
                     )
-                    if getattr(config, "topk_method", None) == "quantile_balancing":
+                    if (
+                        getattr(config, "topk_method", None)
+                        == "quantile_balancing"
+                    ):
                         statements.extend(
                             [
                                 f"_ -> {dst_moe}.gate.qb_bin_min",
@@ -369,9 +387,13 @@ class KimiK3PretrainedModel(PretrainedModel):
         num_experts = config.n_routed_experts
         num_mtp_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
         layer_types = config.layer_types
-        num_head_empty_layers = getattr(config, "num_empty_layers_add_in_head", 0) or 0
+        num_head_empty_layers = (
+            getattr(config, "num_empty_layers_add_in_head", 0) or 0
+        )
         if getattr(config, "moe_expert_fusion", False):
-            raise ValueError("Kimi-K3 HF export does not support fused expert weights.")
+            raise ValueError(
+                "Kimi-K3 HF export does not support fused expert weights."
+            )
 
         hf_model = "language_model.model"
         statements = [
@@ -386,8 +408,12 @@ class KimiK3PretrainedModel(PretrainedModel):
             head_dim = config.linear_key_head_dim
             use_full_rank_gate = config.linear_use_full_rank_gate
             num_chunks = (4 if use_full_rank_gate else 3) * head_dim + 1
-            chunks = [f"aoa_tmp.kda.{src}.in_proj.{idx}" for idx in range(num_chunks)]
-            statements.append(f"{src}.self_attn.in_proj.weight -> {','.join(chunks)}, axis=1")
+            chunks = [
+                f"aoa_tmp.kda.{src}.in_proj.{idx}" for idx in range(num_chunks)
+            ]
+            statements.append(
+                f"{src}.self_attn.in_proj.weight -> {','.join(chunks)}, axis=1"
+            )
 
             offset = 0
             for name in ("q", "k", "v"):
@@ -399,7 +425,9 @@ class KimiK3PretrainedModel(PretrainedModel):
                     ]
                 )
                 offset += head_dim
-            statements.append(f"{chunks[offset]}^T -> {dst}.self_attn.b_proj.weight")
+            statements.append(
+                f"{chunks[offset]}^T -> {dst}.self_attn.b_proj.weight"
+            )
             offset += 1
             if use_full_rank_gate:
                 component = f"aoa_tmp.kda.{src}.g_proj.weight"
@@ -417,7 +445,10 @@ class KimiK3PretrainedModel(PretrainedModel):
                     ]
                 )
 
-            conv_parts = [f"aoa_tmp.kda.{src}.{name}_conv1d.weight" for name in ("q", "k", "v")]
+            conv_parts = [
+                f"aoa_tmp.kda.{src}.{name}_conv1d.weight"
+                for name in ("q", "k", "v")
+            ]
             statements.extend(
                 [
                     f"{src}.self_attn.f_a_proj.weight^T -> {dst}.self_attn.f_a_proj.weight",
@@ -456,7 +487,9 @@ class KimiK3PretrainedModel(PretrainedModel):
                     ]
                 )
             else:
-                raise ValueError(f"Unsupported Kimi-K3 attention layer type: {attention_type}")
+                raise ValueError(
+                    f"Unsupported Kimi-K3 attention layer type: {attention_type}"
+                )
 
         def add_attention_residual(src, dst):
             statements.extend(
@@ -571,7 +604,12 @@ class KimiK3PretrainedModel(PretrainedModel):
             else:
                 mtp_keys.extend(
                     f"{transformer}.self_attn.{name}"
-                    for name in ("qkv_proj.weight", "q_norm.weight", "k_norm.weight", "o_proj.weight")
+                    for name in (
+                        "qkv_proj.weight",
+                        "q_norm.weight",
+                        "k_norm.weight",
+                        "o_proj.weight",
+                    )
                 )
             if cls._is_moe_layer(config, num_layers - 1):
                 mlp = f"{transformer}.mlp"
@@ -621,13 +659,21 @@ def _build_text_model(model_class, config):
     text_config = config.get_text_config()
 
     # Parallelism config safeguards
-    text_config.tensor_model_parallel_size = max(getattr(text_config, "tensor_model_parallel_size", 1), 1)
-    text_config.context_parallel_size = max(getattr(text_config, "context_parallel_size", 1), 1)
-    text_config.pipeline_model_parallel_size = max(getattr(text_config, "pipeline_model_parallel_size", 1), 1)
+    text_config.tensor_model_parallel_size = max(
+        getattr(text_config, "tensor_model_parallel_size", 1), 1
+    )
+    text_config.context_parallel_size = max(
+        getattr(text_config, "context_parallel_size", 1), 1
+    )
+    text_config.pipeline_model_parallel_size = max(
+        getattr(text_config, "pipeline_model_parallel_size", 1), 1
+    )
     text_config.virtual_pipeline_model_parallel_size = max(
         getattr(text_config, "virtual_pipeline_model_parallel_size", 1), 1
     )
-    text_config.expert_model_parallel_size = max(getattr(text_config, "expert_model_parallel_size", 1), 1)
+    text_config.expert_model_parallel_size = max(
+        getattr(text_config, "expert_model_parallel_size", 1), 1
+    )
 
     model_provider = KimiK3ModelProvider.from_config(text_config)
     gpt_model = model_provider.provide()
@@ -708,7 +754,9 @@ class KimiK3CriterionPipe(CriterionLayer):
 
     def forward(self, logits, labels, loss_mask=None, **kwargs):
         if isinstance(logits, list):
-            return super().forward(logits[0], labels, loss_mask, mtp_logits=logits[1:], **kwargs)
+            return super().forward(
+                logits[0], labels, loss_mask, mtp_logits=logits[1:], **kwargs
+            )
         return super().forward(logits, labels, loss_mask, **kwargs)
 
 
@@ -719,7 +767,9 @@ def _prepare_kimi_k3_pipeline_inputs(inputs, gather_pp_need_data=True):
     function always returns the ``(inputs, labels)`` tuple.
     """
     if isinstance(inputs, dict):
-        first_stage_batch = {k: inputs[k] for k in _PIPELINE_FIRST_STAGE_KEYS if k in inputs}
+        first_stage_batch = {
+            k: inputs[k] for k in _PIPELINE_FIRST_STAGE_KEYS if k in inputs
+        }
         return (first_stage_batch, inputs.get("labels", None))
 
     first_stage_batch = {}
@@ -752,12 +802,18 @@ class KimiK3VisionMergeLayer(paddle.nn.Layer):
                     "pixel_values were provided without `image_grid_thw`; the Kimi-K3 "
                     "vision tower needs the per-image [T, H, W] patch grid."
                 )
-            output = self.vision_model.forward({"pixel_values": pixel_values, "grid_thws": grid_thws})
+            output = self.vision_model.forward(
+                {"pixel_values": pixel_values, "grid_thws": grid_thws}
+            )
             features = output["hidden_states"]
             if not isinstance(features, (list, tuple)):
                 features = [features]
             dict_args["image_embeds"] = paddle.concat(
-                [feature.reshape([-1, feature.shape[-1]]) for feature in features], axis=0
+                [
+                    feature.reshape([-1, feature.shape[-1]])
+                    for feature in features
+                ],
+                axis=0,
             )
         for key in ("pixel_values", "image_grid_thw"):
             dict_args.pop(key, None)
@@ -781,13 +837,16 @@ def _build_vl_model(config, criterion):
         setattr(text_config, name, max(getattr(text_config, name, 1), 1))
 
     pp_size = getattr(text_config, "pipeline_model_parallel_size", 1) or 1
-    is_first_stage = pp_size == 1 or fleet.get_hybrid_communicate_group().get_stage_id() == 0
+    is_first_stage = (
+        pp_size == 1 or fleet.get_hybrid_communicate_group().get_stage_id() == 0
+    )
 
     vision_model = None
     if is_first_stage:
         vision_model, _ = build_kimi_k3_vision_tower(
             vision_config,
-            params_dtype=getattr(text_config, "params_dtype", None) or getattr(text_config, "dtype", None),
+            params_dtype=getattr(text_config, "params_dtype", None)
+            or getattr(text_config, "dtype", None),
         )
     language_provider = KimiK3ModelProvider.from_config(text_config)
     language_provider.multimodal_embedding = True
@@ -811,14 +870,26 @@ def _build_vl_model(config, criterion):
     else:
         language_model.vision_merge = None
 
-    language_model._prepare_pipeline_inputs_func = _prepare_kimi_k3_pipeline_inputs
+    language_model._prepare_pipeline_inputs_func = (
+        _prepare_kimi_k3_pipeline_inputs
+    )
     language_model.config_to_save = config
     language_model.is_fleet = True
-    language_model._gen_aoa_config = lambda _=None: KimiK3ForConditionalGeneration._gen_aoa_config(config)
-    language_model._gen_inv_aoa_config = lambda _=None: KimiK3ForConditionalGeneration._gen_inv_aoa_config(config)
-    language_model._gen_hf_quan_config = KimiK3ForConditionalGeneration._gen_hf_quan_config
+    language_model._gen_aoa_config = (
+        lambda _=None: KimiK3ForConditionalGeneration._gen_aoa_config(config)
+    )
+    language_model._gen_inv_aoa_config = (
+        lambda _=None: KimiK3ForConditionalGeneration._gen_inv_aoa_config(
+            config
+        )
+    )
+    language_model._gen_hf_quan_config = (
+        KimiK3ForConditionalGeneration._gen_hf_quan_config
+    )
     language_model.can_generate = lambda: False
-    language_model.save_pretrained = types.MethodType(PretrainedModel.save_pretrained, language_model)
+    language_model.save_pretrained = types.MethodType(
+        PretrainedModel.save_pretrained, language_model
+    )
     return language_model
 
 
@@ -836,13 +907,21 @@ class KimiK3ForConditionalGeneration(KimiK3PretrainedModel):
         """
         text_config = config.get_text_config()
         vision_config = config.vision_config
-        dtype = getattr(text_config, "dtype", None) or getattr(config, "dtype", None)
+        dtype = getattr(text_config, "dtype", None) or getattr(
+            config, "dtype", None
+        )
         cast = f", dtype='{dtype}'" if dtype else ""
         vt_layers = vision_config.vt_num_hidden_layers
         vt_heads = vision_config.vt_num_attention_heads
         visual_prefix = "model.vision_model."
-        aoa_config = {"aoa_statements": list(KimiK3PretrainedModel._gen_aoa_config(config)["aoa_statements"])}
-        if (getattr(vision_config, "pipeline_model_parallel_size", 1) or 1) != 1:
+        aoa_config = {
+            "aoa_statements": list(
+                KimiK3PretrainedModel._gen_aoa_config(config)["aoa_statements"]
+            )
+        }
+        if (
+            getattr(vision_config, "pipeline_model_parallel_size", 1) or 1
+        ) != 1:
             raise NotImplementedError(
                 "Kimi-K3 vision AOA statements only cover the single-stage tower; "
                 "pipeline-parallel vision re-numbers the child layers."
@@ -891,7 +970,13 @@ class KimiK3ForConditionalGeneration(KimiK3PretrainedModel):
         visual_prefix = "model.vision_model."
 
         # language model: the Fleet names on the left are already the text-only names.
-        aoa_config = {"aoa_statements": list(KimiK3PretrainedModel._gen_inv_aoa_config(config)["aoa_statements"])}
+        aoa_config = {
+            "aoa_statements": list(
+                KimiK3PretrainedModel._gen_inv_aoa_config(config)[
+                    "aoa_statements"
+                ]
+            )
+        }
 
         # visual model
         aoa_config["aoa_statements"] += [
@@ -946,7 +1031,9 @@ class KimiK3ForConditionalGeneration(KimiK3PretrainedModel):
             value = max(getattr(config, name, 1) or 1, 1)
             setattr(config, name, value)
             setattr(text_config, name, value)
-        text_config.sequence_parallel = getattr(config, "sequence_parallel", False)
+        text_config.sequence_parallel = getattr(
+            config, "sequence_parallel", False
+        )
 
         criterion = None
         if have_criterion:

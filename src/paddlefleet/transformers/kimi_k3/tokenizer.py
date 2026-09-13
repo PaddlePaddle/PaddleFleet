@@ -100,7 +100,9 @@ class KimiK3TikTokenTokenizer(PreTrainedTokenizer):
             ]
 
         if added_tokens_decoder:
-            special_tokens_mapping = {i: added_tokens_decoder[i].content for i in added_tokens_decoder}
+            special_tokens_mapping = {
+                i: added_tokens_decoder[i].content for i in added_tokens_decoder
+            }
         else:
             special_tokens_mapping = {}
 
@@ -109,7 +111,10 @@ class KimiK3TikTokenTokenizer(PreTrainedTokenizer):
         num_base_tokens = len(mergeable_ranks)
         self.special_tokens = {
             special_tokens_mapping.get(i, f"<|reserved_token_{i}|>"): i
-            for i in range(num_base_tokens, num_base_tokens + self.num_reserved_special_tokens)
+            for i in range(
+                num_base_tokens,
+                num_base_tokens + self.num_reserved_special_tokens,
+            )
         }
 
         self.model = tiktoken.Encoding(
@@ -124,7 +129,9 @@ class KimiK3TikTokenTokenizer(PreTrainedTokenizer):
         # BOS / EOS token IDs
         self.bos_id: int = self.special_tokens[str(bos_token)]
         self.eos_id: int = self.special_tokens[str(eos_token)]
-        logger.info(f"#words: {self.n_words} - BOS ID: {self.bos_id} - EOS ID: {self.eos_id}")
+        logger.info(
+            f"#words: {self.n_words} - BOS ID: {self.bos_id} - EOS ID: {self.eos_id}"
+        )
 
         self.pad_id: int = self.special_tokens[str(pad_token)]
         self.unk_id: int = self.special_tokens[str(unk_token)]
@@ -136,7 +143,12 @@ class KimiK3TikTokenTokenizer(PreTrainedTokenizer):
         for i in range(self.n_words):
             # Taken from https://gist.github.com/xenova/a452a6474428de0182b17605a98631ee
             decoding = "".join(
-                [self.byte_encoder[ord(char)] for char in self.model.decode_single_token_bytes(i).decode("latin-1")]
+                [
+                    self.byte_encoder[ord(char)]
+                    for char in self.model.decode_single_token_bytes(i).decode(
+                        "latin-1"
+                    )
+                ]
             )
             self.decoder[i] = decoding
 
@@ -156,7 +168,9 @@ class KimiK3TikTokenTokenizer(PreTrainedTokenizer):
         )
         self.all_special_ids_set = set(self.all_special_ids)
 
-    def _encode_text_piece(self, text: str, allow_special_tokens: bool = True) -> List[int]:
+    def _encode_text_piece(
+        self, text: str, allow_special_tokens: bool = True
+    ) -> List[int]:
         # The tiktoken tokenizer can handle <=400k chars without
         # pyo3_runtime.PanicException.
         TIKTOKEN_MAX_ENCODE_CHARS = 400_000
@@ -191,7 +205,9 @@ class KimiK3TikTokenTokenizer(PreTrainedTokenizer):
 
         return t
 
-    def encode(self, text: str, allow_special_tokens: bool = True, **kwargs) -> List[int]:
+    def encode(
+        self, text: str, allow_special_tokens: bool = True, **kwargs
+    ) -> List[int]:
         """
         Encodes a string into a list of token IDs.
 
@@ -210,7 +226,9 @@ class KimiK3TikTokenTokenizer(PreTrainedTokenizer):
             return super().encode(text, **kwargs)
 
         assert type(text) is str
-        return self._encode_text_piece(text, allow_special_tokens=allow_special_tokens)
+        return self._encode_text_piece(
+            text, allow_special_tokens=allow_special_tokens
+        )
 
     def decode(self, token_ids: Union[int, List[int]], **kwargs) -> str:
         """
@@ -233,7 +251,9 @@ class KimiK3TikTokenTokenizer(PreTrainedTokenizer):
         return self.model.decode(cast(List[int], token_ids))
 
     @staticmethod
-    def _split_whitespaces_or_nonwhitespaces(s: str, max_consecutive_slice_len: int) -> Iterator[str]:
+    def _split_whitespaces_or_nonwhitespaces(
+        s: str, max_consecutive_slice_len: int
+    ) -> Iterator[str]:
         """
         Splits the string `s` so that each substring contains no more than `max_consecutive_slice_len`
         consecutive whitespaces or consecutive non-whitespaces.
@@ -280,17 +300,27 @@ class KimiK3TikTokenTokenizer(PreTrainedTokenizer):
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
         text = "".join(tokens)
-        text = bytearray([self.byte_decoder[c] for c in text]).decode("utf-8", "replace")
+        text = bytearray([self.byte_decoder[c] for c in text]).decode(
+            "utf-8", "replace"
+        )
         return text
 
-    def save_vocabulary(self, save_directory: str, filename_prefix: Optional[str] = None) -> Tuple[str]:
+    def save_vocabulary(
+        self, save_directory: str, filename_prefix: Optional[str] = None
+    ) -> Tuple[str]:
         if not os.path.isdir(save_directory):
-            raise ValueError(f"vocabulary path ({save_directory}) should be a directory")
+            raise ValueError(
+                f"vocabulary path ({save_directory}) should be a directory"
+            )
         out_vocab_file = os.path.join(
-            save_directory, (filename_prefix + "-" if filename_prefix else "") + VOCAB_FILES_NAMES["vocab_file"]
+            save_directory,
+            (filename_prefix + "-" if filename_prefix else "")
+            + VOCAB_FILES_NAMES["vocab_file"],
         )
 
-        if os.path.abspath(self.vocab_file) != os.path.abspath(out_vocab_file) and os.path.isfile(self.vocab_file):
+        if os.path.abspath(self.vocab_file) != os.path.abspath(
+            out_vocab_file
+        ) and os.path.isfile(self.vocab_file):
             copyfile(self.vocab_file, out_vocab_file)
 
         return (out_vocab_file,)

@@ -53,10 +53,15 @@ def _write_shared_memory(value: paddle.Tensor, meta: TensorMeta, buffer):
     if value.numel() == 0:
         return
     shm_numpy = np.frombuffer(
-        buffer, dtype=dtype_mapping[value.dtype], count=int(value.numel()), offset=int(meta.offset)
+        buffer,
+        dtype=dtype_mapping[value.dtype],
+        count=int(value.numel()),
+        offset=int(meta.offset),
     )
     with device_guard("cpu"):
-        shm_tensor = paddle.Tensor(shm_numpy, zero_copy=True).reshape(value.shape)
+        shm_tensor = paddle.Tensor(shm_numpy, zero_copy=True).reshape(
+            value.shape
+        )
     shm_tensor.copy_(value, False)
 
 

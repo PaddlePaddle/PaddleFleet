@@ -96,7 +96,9 @@ class FlexAsyncSaver:
         """
         if self._done_event.is_set():
             return  # No save in progress
-        logger.info("[FlexAsyncSaver] Waiting for previous async save to complete...")
+        logger.info(
+            "[FlexAsyncSaver] Waiting for previous async save to complete..."
+        )
         start = time.time()
         self._done_event.wait(timeout=timeout)
         elapsed = time.time() - start
@@ -105,7 +107,9 @@ class FlexAsyncSaver:
         if self._error:
             err = self._error
             self._error = None
-            raise RuntimeError(f"[FlexAsyncSaver] Background save failed: {err}") from err
+            raise RuntimeError(
+                f"[FlexAsyncSaver] Background save failed: {err}"
+            ) from err
 
     def save_async(self, trainer, output_dir: str):
         """Main entry point: plan (synchronous) + execute (asynchronous).
@@ -144,7 +148,9 @@ class FlexAsyncSaver:
         )
 
         plan = FlexSavePlan(
-            saved_signal_path=os.path.join(output_dir, f"saved_signal_{dist.get_rank()}"),
+            saved_signal_path=os.path.join(
+                output_dir, f"saved_signal_{dist.get_rank()}"
+            ),
             save_replicas=trainer.args.replicate_saved_into_local,
         )
 
@@ -156,8 +162,8 @@ class FlexAsyncSaver:
 
         plan.model_path = os.path.join(output_dir, MODEL_STATE_DIC)
         os.makedirs(plan.model_path, exist_ok=True)
-        plan.model_local_state, plan.model_metadata, plan.model_file_name = self._coordinate(
-            model_sharded, plan.model_path, plan.save_replicas
+        plan.model_local_state, plan.model_metadata, plan.model_file_name = (
+            self._coordinate(model_sharded, plan.model_path, plan.save_replicas)
         )
 
         # Copy model tensors from GPU to CPU pinned memory
@@ -169,7 +175,9 @@ class FlexAsyncSaver:
 
         # --- Optimizer State: zero-copy reference (already on CPU pinned) ---
         model_sharded_for_opt = trainer.model.sharded_state_dict()
-        opt_sharded = trainer.optimizer.sharded_state_dict(model_sharded_for_opt)
+        opt_sharded = trainer.optimizer.sharded_state_dict(
+            model_sharded_for_opt
+        )
 
         opt_states = {}
         mw_states = {}
@@ -181,7 +189,11 @@ class FlexAsyncSaver:
 
         plan.optimizer_path = os.path.join(output_dir, OPTIMIZER_STATE_DIC)
         os.makedirs(plan.optimizer_path, exist_ok=True)
-        plan.optimizer_local_state, plan.optimizer_metadata, plan.optimizer_file_name = self._coordinate(
+        (
+            plan.optimizer_local_state,
+            plan.optimizer_metadata,
+            plan.optimizer_file_name,
+        ) = self._coordinate(
             opt_states, plan.optimizer_path, plan.save_replicas
         )
 
@@ -191,7 +203,9 @@ class FlexAsyncSaver:
             plan.master_weights_local_state,
             plan.master_weights_metadata,
             plan.master_weights_file_name,
-        ) = self._coordinate(mw_states, plan.master_weights_path, plan.save_replicas)
+        ) = self._coordinate(
+            mw_states, plan.master_weights_path, plan.save_replicas
+        )
 
         return plan
 
@@ -253,21 +267,33 @@ class FlexAsyncSaver:
         global_storage_metadata = []
         global_flatten_mapping = []
         if use_dist:
-            dist.all_gather_object(global_state_dict_metadata, local_state_dict_metadata)
-            dist.all_gather_object(global_storage_metadata, local_storage_metadata)
+            dist.all_gather_object(
+                global_state_dict_metadata, local_state_dict_metadata
+            )
+            dist.all_gather_object(
+                global_storage_metadata, local_storage_metadata
+            )
             dist.all_gather_object(global_flatten_mapping, mapping)
         else:
             global_state_dict_metadata.append(local_state_dict_metadata)
             global_storage_metadata.append(local_storage_metadata)
             global_flatten_mapping.append(mapping)
 
-        metadata.state_dict_metadata = merge_state_dict_metadata(global_state_dict_metadata)
-        metadata.storage_metadata = balanced_dedup_key_in_dict(global_storage_metadata, save_replicas=save_replicas)
+        metadata.state_dict_metadata = merge_state_dict_metadata(
+            global_state_dict_metadata
+        )
+        metadata.storage_metadata = balanced_dedup_key_in_dict(
+            global_storage_metadata, save_replicas=save_replicas
+        )
         metadata.flat_mapping = dedup_key_in_dict(global_flatten_mapping)
 
         # Dedup: remove tensors assigned to other ranks
         if not save_replicas:
-            dedup_tensor(local_state_dict, local_storage_metadata, metadata.storage_metadata)
+            dedup_tensor(
+                local_state_dict,
+                local_storage_metadata,
+                metadata.storage_metadata,
+            )
 
         return local_state_dict, metadata, file_name
 
@@ -276,12 +302,20 @@ class FlexAsyncSaver:
         try:
             # Write model state
             if plan.model_local_state:
-                self._write_shard(plan.model_local_state, plan.model_path, plan.model_metadata, plan.model_file_name)
+                self._write_shard(
+                    plan.model_local_state,
+                    plan.model_path,
+                    plan.model_metadata,
+                    plan.model_file_name,
+                )
 
             # Write optimizer state
             if plan.optimizer_local_state:
                 self._write_shard(
-                    plan.optimizer_local_state, plan.optimizer_path, plan.optimizer_metadata, plan.optimizer_file_name
+                    plan.optimizer_local_state,
+                    plan.optimizer_path,
+                    plan.optimizer_metadata,
+                    plan.optimizer_file_name,
                 )
 
             # Write master weights
@@ -297,7 +331,9 @@ class FlexAsyncSaver:
             with open(plan.saved_signal_path, "w") as f:
                 f.write("1")
 
-            logger.info("[FlexAsyncSaver] Background save completed successfully.")
+            logger.info(
+                "[FlexAsyncSaver] Background save completed successfully."
+            )
 
         except Exception as e:
             logger.error(f"[FlexAsyncSaver] Background save failed: {e}")
@@ -322,5 +358,7 @@ class FlexAsyncSaver:
 
         max_id = get_max_id(path)
         unique_id = 0 if max_id is None else max_id
-        write_to_file_if_empty(metadata, os.path.join(path, f"{unique_id}.metadata"))
+        write_to_file_if_empty(
+            metadata, os.path.join(path, f"{unique_id}.metadata")
+        )
         paddle.save(local_state_dict, os.path.join(path, file_name))
