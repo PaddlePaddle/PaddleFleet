@@ -65,6 +65,10 @@ def modelscope_download(
             f"Cannot find the requested file {filename} in {repo_id}, please make sure the {filename} under the repo {repo_id}"
         )
     except HTTPError as err:
-        raise EnvironmentError(f"There was a specific connection error when trying to load {repo_id}:\n{err}")
+        raise EnvironmentError(
+            f"There was a specific connection error when trying to load {repo_id}:\n{err}"
+        )
     except Exception:
-        raise EnvironmentError(f"Please make sure the {filename} under the repo {repo_id}")
+        raise EnvironmentError(
+            f"Please make sure the {filename} under the repo {repo_id}"
+        )

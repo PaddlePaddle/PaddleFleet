@@ -41,9 +41,14 @@ class TestKtoPreprocessInputs(unittest.TestCase):
         mock_self = MagicMock()
         logits = paddle.randn([2, 4, 8])
         labels = paddle.randint(0, 8, [2, 4])
-        result_logits, result_labels, hidden_states, lm_head_weight, lm_head_bias, transpose_y = kto_preprocess_inputs(
-            mock_self, logits, labels
-        )
+        (
+            result_logits,
+            result_labels,
+            hidden_states,
+            lm_head_weight,
+            lm_head_bias,
+            transpose_y,
+        ) = kto_preprocess_inputs(mock_self, logits, labels)
         self.assertTrue(paddle.allclose(result_logits, logits).item())
         self.assertTrue(paddle.allclose(result_labels, labels).item())
         self.assertIsNone(hidden_states)
@@ -62,7 +67,9 @@ class TestKtoPreprocessInputs(unittest.TestCase):
         ty = True
         logits_tuple = (hidden, weight, bias, ty)
         labels = paddle.randint(0, 16, [2, 4])
-        result_logits, result_labels, hs, w, b, t = kto_preprocess_inputs(mock_self, logits_tuple, labels)
+        result_logits, result_labels, hs, w, b, t = kto_preprocess_inputs(
+            mock_self, logits_tuple, labels
+        )
         self.assertIsNone(result_logits)
         self.assertTrue(paddle.allclose(hs, hidden).item())
         self.assertTrue(paddle.allclose(w, weight).item())
@@ -75,7 +82,9 @@ class TestKtoPreprocessInputs(unittest.TestCase):
         inner = paddle.randn([2, 4, 8])
         logits_tuple = (inner,)
         labels = paddle.randint(0, 8, [2, 4])
-        result_logits, _, _, _, _, _ = kto_preprocess_inputs(mock_self, logits_tuple, labels)
+        result_logits, _, _, _, _, _ = kto_preprocess_inputs(
+            mock_self, logits_tuple, labels
+        )
         self.assertTrue(paddle.allclose(result_logits, inner).item())
 
 
@@ -127,7 +136,10 @@ class TestKtoLoss(unittest.TestCase):
         mock_self.config.kto_config.desirable_weight = 1.0
         mock_self.config.kto_config.undesirable_weight = 1.0
 
-        with patch("paddlefleet.nn.criterion.kto_loss.dist.get_world_size", return_value=1):
+        with patch(
+            "paddlefleet.nn.criterion.kto_loss.dist.get_world_size",
+            return_value=1,
+        ):
             loss, kl = kto_loss(
                 mock_self,
                 policy_chosen_logps=paddle.randn([4]),
@@ -149,7 +161,10 @@ class TestKtoLoss(unittest.TestCase):
         mock_self.config.kto_config.desirable_weight = 1.0
         mock_self.config.kto_config.undesirable_weight = 1.0
 
-        with patch("paddlefleet.nn.criterion.kto_loss.dist.get_world_size", return_value=1):
+        with patch(
+            "paddlefleet.nn.criterion.kto_loss.dist.get_world_size",
+            return_value=1,
+        ):
             loss, kl = kto_loss(
                 mock_self,
                 policy_chosen_logps=paddle.zeros([0]),
@@ -170,7 +185,10 @@ class TestKtoLoss(unittest.TestCase):
         mock_self.config.kto_config.desirable_weight = 1.0
         mock_self.config.kto_config.undesirable_weight = 1.0
 
-        with patch("paddlefleet.nn.criterion.kto_loss.dist.get_world_size", return_value=1):
+        with patch(
+            "paddlefleet.nn.criterion.kto_loss.dist.get_world_size",
+            return_value=1,
+        ):
             loss, kl = kto_loss(
                 mock_self,
                 policy_chosen_logps=paddle.randn([4]),
@@ -191,7 +209,10 @@ class TestKtoLoss(unittest.TestCase):
         mock_self.config.kto_config.desirable_weight = 2.0
         mock_self.config.kto_config.undesirable_weight = 0.5
 
-        with patch("paddlefleet.nn.criterion.kto_loss.dist.get_world_size", return_value=1):
+        with patch(
+            "paddlefleet.nn.criterion.kto_loss.dist.get_world_size",
+            return_value=1,
+        ):
             loss, kl = kto_loss(
                 mock_self,
                 policy_chosen_logps=paddle.randn([4]),

@@ -48,7 +48,13 @@ PADDLE_METADATA_FILE_NAME = "flex-ckpt.auto_generated.metadata"
 HF_CONFIG_FILE_NAME = "config.json"
 SAFETENSORS_FILE_NAME = "model-00001-of-00001.safetensors"
 # Byte width of every safetensors storage format used below.
-SAFETENSORS_ITEM_SIZE = {"F8_E4M3": 1, "F8_E8M0": 1, "I8": 1, "U8": 1, "BF16": 2}
+SAFETENSORS_ITEM_SIZE = {
+    "F8_E4M3": 1,
+    "F8_E8M0": 1,
+    "I8": 1,
+    "U8": 1,
+    "BF16": 2,
+}
 
 WEIGHT_SUFFIX = ".weight"
 SCALE_SUFFIX = ".scale"
@@ -95,7 +101,10 @@ def descriptor_dict(*group_dicts, **overrides):
     """Build a descriptor payload; defaults to a single fp8_block group."""
     payload = {
         "schema_version": 1,
-        "component_pairing": {"weight_suffix": WEIGHT_SUFFIX, "scale_suffix": SCALE_SUFFIX},
+        "component_pairing": {
+            "weight_suffix": WEIGHT_SUFFIX,
+            "scale_suffix": SCALE_SUFFIX,
+        },
         "logic_name_suffix": WEIGHT_SUFFIX,
         "groups": list(group_dicts) or [fp8_group()],
     }
@@ -123,7 +132,9 @@ def physical_metadata(entries):
 
 def fp8_physical_metadata(weight_shape=(4, 4), scale_shape=(2, 2)):
     """Physical metadata for one fp8_block weight/scale pair."""
-    return physical_metadata({FP8_WEIGHT: (weight_shape, "uint8"), FP8_SCALE: (scale_shape, "uint8")})
+    return physical_metadata(
+        {FP8_WEIGHT: (weight_shape, "uint8"), FP8_SCALE: (scale_shape, "uint8")}
+    )
 
 
 def fp8_group_spec(block_axes=(0, 1), block_shape=(2, 2)):
@@ -135,20 +146,29 @@ def fp8_group_spec(block_axes=(0, 1), block_shape=(2, 2)):
         value_format="e4m3",
         scale_format="ue8m0",
         block_shape=tuple(block_shape),
-        dequantizer=get_checkpoint_dequantizer("fp8_block").configure_formats("e4m3", "ue8m0"),
+        dequantizer=get_checkpoint_dequantizer("fp8_block").configure_formats(
+            "e4m3", "ue8m0"
+        ),
     )
     if block_axes is not None:
         spec.configure_geometry(block_axes)
     return spec
 
 
-def fp8_weight_spec(logical_shape=(4, 4), components=None, group_name="fp8", logical_name=FP8_WEIGHT):
+def fp8_weight_spec(
+    logical_shape=(4, 4),
+    components=None,
+    group_name="fp8",
+    logical_name=FP8_WEIGHT,
+):
     """Build a weight relation directly, bypassing descriptor parsing."""
     return HFQuantizedWeightSpec(
         group_name=group_name,
         logical_name=logical_name,
         logical_shape=tuple(logical_shape),
-        components={"qweight": FP8_WEIGHT, "scale": FP8_SCALE} if components is None else components,
+        components={"qweight": FP8_WEIGHT, "scale": FP8_SCALE}
+        if components is None
+        else components,
     )
 
 
@@ -174,7 +194,9 @@ def write_safetensors(path, tensors):
         file.write(bytes(offset))
 
 
-def configured_dequantizer(method, value_format, scale_format, block_axes, block_shape):
+def configured_dequantizer(
+    method, value_format, scale_format, block_axes, block_shape
+):
     """Fully configure a registered dequantizer prototype."""
     return (
         get_checkpoint_dequantizer(method)
@@ -209,48 +231,76 @@ class TestRawFormatDecoding(CPUDequantTestCase):
 
     def test_e4m3_decodes_zero_subnormal_normal_max_and_nan(self):
         """0x00/0x01/0x38/0x7E/0xFE/0x7F cover every interesting e4m3 region."""
-        qweight = paddle.to_tensor([[0x00, 0x01, E4M3_ONE, 0x7E, 0xFE, 0x7F]], dtype="uint8")
+        qweight = paddle.to_tensor(
+            [[0x00, 0x01, E4M3_ONE, 0x7E, 0xFE, 0x7F]], dtype="uint8"
+        )
         scale = paddle.to_tensor([[UE8M0_ONE]], dtype="uint8")
-        dequantizer = configured_dequantizer("fp8_block", "e4m3", "ue8m0", (0, 1), (1, 6))
+        dequantizer = configured_dequantizer(
+            "fp8_block", "e4m3", "ue8m0", (0, 1), (1, 6)
+        )
 
-        output = dequantizer.dequantize({"qweight": qweight, "scale": scale}, paddle.float32).numpy()
+        output = dequantizer.dequantize(
+            {"qweight": qweight, "scale": scale}, paddle.float32
+        ).numpy()
 
-        np.testing.assert_array_equal(output[0, :5], [0.0, 2.0**-9, 1.0, 448.0, -448.0])
+        np.testing.assert_array_equal(
+            output[0, :5], [0.0, 2.0**-9, 1.0, 448.0, -448.0]
+        )
         self.assertTrue(np.isnan(output[0, 5]))
 
     def test_ue8m0_scale_codes_decode_to_powers_of_two(self):
         """Every scale element is a biased exponent, so codes 125..129 give 0.25 .. 4.0."""
         qweight = paddle.full([1, 5], E4M3_ONE, dtype="uint8")
         scale = paddle.to_tensor([[125, 126, 127, 128, 129]], dtype="uint8")
-        dequantizer = configured_dequantizer("fp8_block", "e4m3", "ue8m0", (0, 1), (1, 1))
+        dequantizer = configured_dequantizer(
+            "fp8_block", "e4m3", "ue8m0", (0, 1), (1, 1)
+        )
 
-        output = dequantizer.dequantize({"qweight": qweight, "scale": scale}, paddle.float32)
+        output = dequantizer.dequantize(
+            {"qweight": qweight, "scale": scale}, paddle.float32
+        )
 
-        np.testing.assert_array_equal(output.numpy(), [[0.25, 0.5, 1.0, 2.0, 4.0]])
+        np.testing.assert_array_equal(
+            output.numpy(), [[0.25, 0.5, 1.0, 2.0, 4.0]]
+        )
 
     def test_int8_storage_is_reinterpreted_as_unsigned_codes(self):
         """Safetensors I8 tensors deliver codes >= 128 as negative int8 values."""
-        qweight = paddle.to_tensor([[E4M3_ONE, -2]], dtype="int8")  # -2 is the byte 0xFE
+        qweight = paddle.to_tensor(
+            [[E4M3_ONE, -2]], dtype="int8"
+        )  # -2 is the byte 0xFE
         scale = paddle.full([1, 2], UE8M0_ONE, dtype="uint8")
-        dequantizer = configured_dequantizer("fp8_block", "e4m3", "ue8m0", (0, 1), (1, 1))
+        dequantizer = configured_dequantizer(
+            "fp8_block", "e4m3", "ue8m0", (0, 1), (1, 1)
+        )
 
-        output = dequantizer.dequantize({"qweight": qweight, "scale": scale}, paddle.float32)
+        output = dequantizer.dequantize(
+            {"qweight": qweight, "scale": scale}, paddle.float32
+        )
 
         np.testing.assert_array_equal(output.numpy(), [[1.0, -448.0]])
 
     def test_e2m1_unpacks_the_low_nibble_before_the_high_nibble(self):
         """0x21 holds codes (1, 2); 0xA9 holds codes (9, 10), i.e. the negative half."""
-        qweight = paddle.to_tensor([[0x21, -87]], dtype="int8")  # -87 is the byte 0xA9
+        qweight = paddle.to_tensor(
+            [[0x21, -87]], dtype="int8"
+        )  # -87 is the byte 0xA9
         scale = paddle.to_tensor([[127, 128]], dtype="uint8")
-        dequantizer = configured_dequantizer("mxfp4_group", "e2m1", "ue8m0", (1,), (2,))
+        dequantizer = configured_dequantizer(
+            "mxfp4_group", "e2m1", "ue8m0", (1,), (2,)
+        )
 
-        output = dequantizer.dequantize({"qweight": qweight, "scale": scale}, paddle.float32)
+        output = dequantizer.dequantize(
+            {"qweight": qweight, "scale": scale}, paddle.float32
+        )
 
         np.testing.assert_array_equal(output.numpy(), [[0.5, 1.0, -1.0, -2.0]])
 
     def test_non_8bit_qweight_storage_is_rejected(self):
         """A float qweight means the safetensors reader lost the raw bytes."""
-        dequantizer = configured_dequantizer("fp8_block", "e4m3", "ue8m0", (0, 1), (1, 1))
+        dequantizer = configured_dequantizer(
+            "fp8_block", "e4m3", "ue8m0", (0, 1), (1, 1)
+        )
 
         with self.assertRaisesRegex(TypeError, "raw uint8/int8 storage"):
             dequantizer.dequantize(
@@ -267,31 +317,43 @@ class TestFP8BlockDequantizer(CPUDequantTestCase):
 
     def setUp(self):
         super().setUp()
-        self.dequantizer = configured_dequantizer("fp8_block", "e4m3", "ue8m0", (0, 1), (2, 2))
+        self.dequantizer = configured_dequantizer(
+            "fp8_block", "e4m3", "ue8m0", (0, 1), (2, 2)
+        )
 
     def test_block_scales_are_broadcast_across_each_block(self):
         """A (1, 2) scale grid covers a 2x4 weight in two 2x2 blocks."""
         qweight = paddle.full([2, 4], E4M3_ONE, dtype="uint8")
         scale = paddle.to_tensor([[127, 128]], dtype="uint8")
 
-        output = self.dequantizer.dequantize({"qweight": qweight, "scale": scale}, paddle.float32)
+        output = self.dequantizer.dequantize(
+            {"qweight": qweight, "scale": scale}, paddle.float32
+        )
 
-        np.testing.assert_array_equal(output.numpy(), [[1.0, 1.0, 2.0, 2.0], [1.0, 1.0, 2.0, 2.0]])
+        np.testing.assert_array_equal(
+            output.numpy(), [[1.0, 1.0, 2.0, 2.0], [1.0, 1.0, 2.0, 2.0]]
+        )
 
     def test_partial_trailing_block_is_cropped(self):
         """A 3x3 weight needs a 2x2 grid; the expanded grid is cropped back to 3x3."""
         qweight = paddle.full([3, 3], E4M3_ONE, dtype="uint8")
         scale = paddle.to_tensor([[127, 128], [129, 130]], dtype="uint8")
 
-        output = self.dequantizer.dequantize({"qweight": qweight, "scale": scale}, paddle.float32)
+        output = self.dequantizer.dequantize(
+            {"qweight": qweight, "scale": scale}, paddle.float32
+        )
 
-        np.testing.assert_array_equal(output.numpy(), [[1.0, 1.0, 2.0], [1.0, 1.0, 2.0], [4.0, 4.0, 8.0]])
+        np.testing.assert_array_equal(
+            output.numpy(), [[1.0, 1.0, 2.0], [1.0, 1.0, 2.0], [4.0, 4.0, 8.0]]
+        )
 
     def test_output_dtype_follows_the_request(self):
         qweight = paddle.full([2, 2], E4M3_ONE, dtype="uint8")
         scale = paddle.full([1, 1], UE8M0_ONE, dtype="uint8")
 
-        output = self.dequantizer.dequantize({"qweight": qweight, "scale": scale}, paddle.bfloat16)
+        output = self.dequantizer.dequantize(
+            {"qweight": qweight, "scale": scale}, paddle.bfloat16
+        )
 
         self.assertEqual(output.dtype, paddle.bfloat16)
 
@@ -316,12 +378,19 @@ class TestFP8BlockDequantizer(CPUDequantTestCase):
             )
 
     def test_missing_scale_component_is_rejected(self):
-        with self.assertRaisesRegex(KeyError, "Missing checkpoint quantization components"):
-            self.dequantizer.dequantize({"qweight": paddle.full([2, 2], E4M3_ONE, dtype="uint8")}, paddle.float32)
+        with self.assertRaisesRegex(
+            KeyError, "Missing checkpoint quantization components"
+        ):
+            self.dequantizer.dequantize(
+                {"qweight": paddle.full([2, 2], E4M3_ONE, dtype="uint8")},
+                paddle.float32,
+            )
 
     def test_dequantize_requires_block_geometry(self):
         """Formats alone are not enough; block geometry is inferred from the checkpoint."""
-        without_geometry = get_checkpoint_dequantizer("fp8_block").configure_formats("e4m3", "ue8m0")
+        without_geometry = get_checkpoint_dequantizer(
+            "fp8_block"
+        ).configure_formats("e4m3", "ue8m0")
 
         with self.assertRaisesRegex(ValueError, "requires block geometry"):
             without_geometry.dequantize(
@@ -344,16 +413,25 @@ class TestFP8BlockDequantizer(CPUDequantTestCase):
         """The registry hands out shared singletons, so configuration must copy."""
         prototype = get_checkpoint_dequantizer("fp8_block")
 
-        configured = prototype.configure_formats("E4M3 ", " UE8M0").configure_geometry((0, 1), (2, 2))
+        configured = prototype.configure_formats(
+            "E4M3 ", " UE8M0"
+        ).configure_geometry((0, 1), (2, 2))
 
         self.assertIsNot(configured, prototype)
         self.assertIsNone(prototype.value_format)
         self.assertIsNone(prototype.block_axes)
-        self.assertEqual((configured.value_format, configured.scale_format), ("e4m3", "ue8m0"))
-        self.assertEqual((configured.block_axes, configured.block_shape), ((0, 1), (2, 2)))
+        self.assertEqual(
+            (configured.value_format, configured.scale_format),
+            ("e4m3", "ue8m0"),
+        )
+        self.assertEqual(
+            (configured.block_axes, configured.block_shape), ((0, 1), (2, 2))
+        )
 
     def test_invalid_block_geometry_is_rejected(self):
-        prototype = get_checkpoint_dequantizer("fp8_block").configure_formats("e4m3", "ue8m0")
+        prototype = get_checkpoint_dequantizer("fp8_block").configure_formats(
+            "e4m3", "ue8m0"
+        )
         cases = [
             ((), ()),  # no axes at all
             ((0,), (2, 2)),  # axis count and block count disagree
@@ -364,7 +442,9 @@ class TestFP8BlockDequantizer(CPUDequantTestCase):
 
         for block_axes, block_shape in cases:
             with self.subTest(block_axes=block_axes, block_shape=block_shape):
-                with self.assertRaisesRegex(ValueError, "Invalid block geometry"):
+                with self.assertRaisesRegex(
+                    ValueError, "Invalid block geometry"
+                ):
                     prototype.configure_geometry(block_axes, block_shape)
 
     def test_shard_alignment_allows_block_edges_and_tensor_bounds(self):
@@ -374,23 +454,36 @@ class TestFP8BlockDequantizer(CPUDequantTestCase):
             ((2, 0), (2, 4), True),
             ((2, 2), (2, 2), True),
             ((0, 0), (4, 4), True),
-            ((0, 0), (3, 4), False),  # end 3 is neither a block edge nor the bound
+            (
+                (0, 0),
+                (3, 4),
+                False,
+            ),  # end 3 is neither a block edge nor the bound
             ((1, 0), (2, 4), False),  # unaligned start
             ((0, 0), (4, 3), False),  # unaligned end on the last axis
         ]
 
         for global_offset, local_shape, expected in cases:
-            with self.subTest(global_offset=global_offset, local_shape=local_shape):
+            with self.subTest(
+                global_offset=global_offset, local_shape=local_shape
+            ):
                 self.assertEqual(
-                    self.dequantizer.logical_shard_is_aligned((4, 4), local_shape, global_offset),
+                    self.dequantizer.logical_shard_is_aligned(
+                        (4, 4), local_shape, global_offset
+                    ),
                     expected,
                 )
 
     def test_logical_and_physical_shapes_are_identical(self):
         """FP8 stores one byte per logical value, unlike the packed MXFP4 layout."""
         self.assertEqual(self.dequantizer.logical_shape((4, 4)), (4, 4))
-        self.assertEqual(self.dequantizer.physical_qweight_shape((4, 4)), (4, 4))
-        self.assertEqual(self.dequantizer.physical_qweight_slice((2, 0), (2, 4)), ((2, 0), (2, 4)))
+        self.assertEqual(
+            self.dequantizer.physical_qweight_shape((4, 4)), (4, 4)
+        )
+        self.assertEqual(
+            self.dequantizer.physical_qweight_slice((2, 0), (2, 4)),
+            ((2, 0), (2, 4)),
+        )
 
 
 class TestMXFP4GroupDequantizer(CPUDequantTestCase):
@@ -398,7 +491,9 @@ class TestMXFP4GroupDequantizer(CPUDequantTestCase):
 
     def setUp(self):
         super().setUp()
-        self.dequantizer = configured_dequantizer("mxfp4_group", "e2m1", "ue8m0", (1,), (2,))
+        self.dequantizer = configured_dequantizer(
+            "mxfp4_group", "e2m1", "ue8m0", (1,), (2,)
+        )
 
     def test_logical_shape_doubles_the_packed_axis(self):
         self.assertEqual(self.dequantizer.logical_shape((2, 3)), (2, 6))
@@ -407,43 +502,72 @@ class TestMXFP4GroupDequantizer(CPUDequantTestCase):
             self.dequantizer.logical_shape(())
 
     def test_physical_qweight_shape_halves_the_packed_axis(self):
-        self.assertEqual(self.dequantizer.physical_qweight_shape((2, 6)), (2, 3))
+        self.assertEqual(
+            self.dequantizer.physical_qweight_shape((2, 6)), (2, 3)
+        )
 
-        with self.assertRaisesRegex(ValueError, "Invalid MXFP4 logical weight shape"):
+        with self.assertRaisesRegex(
+            ValueError, "Invalid MXFP4 logical weight shape"
+        ):
             self.dequantizer.physical_qweight_shape((2, 5))
 
     def test_physical_qweight_slice_halves_the_packed_axis(self):
-        self.assertEqual(self.dequantizer.physical_qweight_slice((0, 4), (2, 4)), ((0, 2), (2, 2)))
+        self.assertEqual(
+            self.dequantizer.physical_qweight_slice((0, 4), (2, 4)),
+            ((0, 2), (2, 2)),
+        )
 
-        with self.assertRaisesRegex(ValueError, "even last-axis offsets and sizes"):
+        with self.assertRaisesRegex(
+            ValueError, "even last-axis offsets and sizes"
+        ):
             self.dequantizer.physical_qweight_slice((0, 1), (2, 4))
 
     def test_shard_alignment_also_requires_even_packed_bounds(self):
-        self.assertTrue(self.dequantizer.logical_shard_is_aligned((2, 8), (2, 4), (0, 0)))
-        self.assertFalse(self.dequantizer.logical_shard_is_aligned((2, 8), (2, 3), (0, 0)))
+        self.assertTrue(
+            self.dequantizer.logical_shard_is_aligned((2, 8), (2, 4), (0, 0))
+        )
+        self.assertFalse(
+            self.dequantizer.logical_shard_is_aligned((2, 8), (2, 3), (0, 0))
+        )
 
     def test_group_scales_are_applied_after_unpacking(self):
         """Each stored byte yields two logical values, and every group of 2 shares a scale."""
         qweight = paddle.to_tensor([[0x21, 0x43], [0x21, 0x43]], dtype="uint8")
         scale = paddle.to_tensor([[127, 128], [128, 127]], dtype="uint8")
 
-        output = self.dequantizer.dequantize({"qweight": qweight, "scale": scale}, paddle.float32)
+        output = self.dequantizer.dequantize(
+            {"qweight": qweight, "scale": scale}, paddle.float32
+        )
 
-        np.testing.assert_array_equal(output.numpy(), [[0.5, 1.0, 3.0, 4.0], [1.0, 2.0, 1.5, 2.0]])
+        np.testing.assert_array_equal(
+            output.numpy(), [[0.5, 1.0, 3.0, 4.0], [1.0, 2.0, 1.5, 2.0]]
+        )
 
 
 class TestDequantizerRegistry(unittest.TestCase):
     """Method lookup and registration contracts."""
 
     def test_lookup_returns_the_prototype_of_each_registered_method(self):
-        self.assertIsInstance(get_checkpoint_dequantizer("fp8_block"), FP8BlockCheckpointDequantizer)
-        self.assertIsInstance(get_checkpoint_dequantizer("mxfp4_group"), MXFP4GroupCheckpointDequantizer)
+        self.assertIsInstance(
+            get_checkpoint_dequantizer("fp8_block"),
+            FP8BlockCheckpointDequantizer,
+        )
+        self.assertIsInstance(
+            get_checkpoint_dequantizer("mxfp4_group"),
+            MXFP4GroupCheckpointDequantizer,
+        )
 
     def test_lookup_normalizes_the_method_name(self):
-        self.assertIs(get_checkpoint_dequantizer("  FP8_Block "), get_checkpoint_dequantizer("fp8_block"))
+        self.assertIs(
+            get_checkpoint_dequantizer("  FP8_Block "),
+            get_checkpoint_dequantizer("fp8_block"),
+        )
 
     def test_unknown_method_reports_the_registered_methods(self):
-        with self.assertRaisesRegex(ValueError, "Unsupported checkpoint quantization method 'int4_block'"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "Unsupported checkpoint quantization method 'int4_block'",
+        ):
             get_checkpoint_dequantizer("int4_block")
 
     def test_invalid_method_names_are_rejected(self):
@@ -452,24 +576,36 @@ class TestDequantizerRegistry(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "must not be empty"):
             get_checkpoint_dequantizer("   ")
 
-    def test_registration_makes_a_method_available_under_its_normalized_name(self):
+    def test_registration_makes_a_method_available_under_its_normalized_name(
+        self,
+    ):
         dequantizer = FP8BlockCheckpointDequantizer()
         # There is no public unregister hook, so restore the global registry explicitly.
-        self.addCleanup(checkpoint_dequant._CHECKPOINT_DEQUANTIZERS.pop, "fp8_block_probe", None)
+        self.addCleanup(
+            checkpoint_dequant._CHECKPOINT_DEQUANTIZERS.pop,
+            "fp8_block_probe",
+            None,
+        )
 
         register_checkpoint_dequantizer("  FP8_Block_Probe ", dequantizer)
 
-        self.assertIs(get_checkpoint_dequantizer("fp8_block_probe"), dequantizer)
+        self.assertIs(
+            get_checkpoint_dequantizer("fp8_block_probe"), dequantizer
+        )
 
     def test_duplicate_registration_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "is already registered"):
-            register_checkpoint_dequantizer("fp8_block", FP8BlockCheckpointDequantizer())
+            register_checkpoint_dequantizer(
+                "fp8_block", FP8BlockCheckpointDequantizer()
+            )
 
     def test_object_without_a_dequantize_method_is_rejected(self):
         with self.assertRaisesRegex(TypeError, "callable dequantize"):
             register_checkpoint_dequantizer("not_a_dequantizer", object())
 
-        self.assertNotIn("not_a_dequantizer", checkpoint_dequant._CHECKPOINT_DEQUANTIZERS)
+        self.assertNotIn(
+            "not_a_dequantizer", checkpoint_dequant._CHECKPOINT_DEQUANTIZERS
+        )
 
 
 class TestQuanDescriptorValidation(unittest.TestCase):
@@ -481,7 +617,9 @@ class TestQuanDescriptorValidation(unittest.TestCase):
         self.assertEqual(QuanDescriptor.from_dict(payload).to_dict(), payload)
 
     def test_targets_without_the_re_prefix_are_matched_literally(self):
-        descriptor = QuanDescriptor.from_dict(descriptor_dict(fp8_group(targets=[FP8_WEIGHT])))
+        descriptor = QuanDescriptor.from_dict(
+            descriptor_dict(fp8_group(targets=[FP8_WEIGHT]))
+        )
 
         metadata = descriptor.build_metadata(fp8_physical_metadata())
 
@@ -493,12 +631,18 @@ class TestQuanDescriptorValidation(unittest.TestCase):
             (
                 "extra prefix on the checkpoint key",
                 FP8_WEIGHT,
-                {"prefix." + FP8_WEIGHT: ((4, 4), "uint8"), "prefix." + FP8_SCALE: ((2, 2), "uint8")},
+                {
+                    "prefix." + FP8_WEIGHT: ((4, 4), "uint8"),
+                    "prefix." + FP8_SCALE: ((2, 2), "uint8"),
+                },
             ),
             (
                 "layer indices sharing a numeric prefix",
                 "layers.1",
-                {"layers.11.attn.wq_a.weight": ((4, 4), "uint8"), "layers.11.attn.wq_a.scale": ((2, 2), "uint8")},
+                {
+                    "layers.11.attn.wq_a.weight": ((4, 4), "uint8"),
+                    "layers.11.attn.wq_a.scale": ((2, 2), "uint8"),
+                },
             ),
             (
                 "target stopping short of the weight suffix",
@@ -509,42 +653,115 @@ class TestQuanDescriptorValidation(unittest.TestCase):
 
         for name, target, entries in cases:
             with self.subTest(name):
-                descriptor = QuanDescriptor.from_dict(descriptor_dict(fp8_group(targets=[target])))
+                descriptor = QuanDescriptor.from_dict(
+                    descriptor_dict(fp8_group(targets=[target]))
+                )
 
-                with self.assertRaisesRegex(ValueError, "did not match all quantized weight/scale pairs"):
+                with self.assertRaisesRegex(
+                    ValueError, "did not match all quantized weight/scale pairs"
+                ):
                     descriptor.build_metadata(physical_metadata(entries))
 
     def test_invalid_descriptors_are_rejected(self):
         cases = [
-            ("unsupported schema version", descriptor_dict(schema_version=2), "schema_version"),
-            ("empty groups", descriptor_dict(groups=[]), "non-empty groups list"),
-            ("missing component_pairing", descriptor_dict(component_pairing=None), "component_pairing as an object"),
+            (
+                "unsupported schema version",
+                descriptor_dict(schema_version=2),
+                "schema_version",
+            ),
+            (
+                "empty groups",
+                descriptor_dict(groups=[]),
+                "non-empty groups list",
+            ),
+            (
+                "missing component_pairing",
+                descriptor_dict(component_pairing=None),
+                "component_pairing as an object",
+            ),
             (
                 "non-string suffix",
-                descriptor_dict(component_pairing={"weight_suffix": 1, "scale_suffix": SCALE_SUFFIX}),
+                descriptor_dict(
+                    component_pairing={
+                        "weight_suffix": 1,
+                        "scale_suffix": SCALE_SUFFIX,
+                    }
+                ),
                 "string weight_suffix and scale_suffix",
             ),
             (
                 "empty suffix",
-                descriptor_dict(component_pairing={"weight_suffix": "", "scale_suffix": SCALE_SUFFIX}),
+                descriptor_dict(
+                    component_pairing={
+                        "weight_suffix": "",
+                        "scale_suffix": SCALE_SUFFIX,
+                    }
+                ),
                 "non-empty strings",
             ),
-            ("empty logic_name_suffix", descriptor_dict(logic_name_suffix=""), "logic_name_suffix"),
+            (
+                "empty logic_name_suffix",
+                descriptor_dict(logic_name_suffix=""),
+                "logic_name_suffix",
+            ),
             (
                 "duplicate group names",
-                descriptor_dict(fp8_group(), fp8_group(targets=[r"re:.*\.attn\.wq_b\.weight$"])),
+                descriptor_dict(
+                    fp8_group(),
+                    fp8_group(targets=[r"re:.*\.attn\.wq_b\.weight$"]),
+                ),
                 "group names must be unique",
             ),
-            ("blank group name", descriptor_dict(fp8_group(name=" ")), "non-empty name"),
-            ("missing quant_method", descriptor_dict(fp8_group(quant_method="")), "must define quant_method"),
-            ("missing value_format", descriptor_dict(fp8_group(value_format="")), "must define value_format"),
-            ("missing scale_format", descriptor_dict(fp8_group(scale_format="")), "must define scale_format"),
-            ("unknown quant_method", descriptor_dict(fp8_group(quant_method="int4")), "Invalid quan_desc formats"),
-            ("unsupported value_format", descriptor_dict(fp8_group(value_format="e2m1")), "Invalid quan_desc formats"),
-            ("empty block_shape", descriptor_dict(fp8_group(block_shape=[])), "positive integer block_shape"),
-            ("zero block size", descriptor_dict(fp8_group(block_shape=[2, 0])), "positive integer block_shape"),
-            ("empty targets", descriptor_dict(fp8_group(targets=[])), "non-empty string targets list"),
-            ("broken target regex", descriptor_dict(fp8_group(targets=["re:["])), "Invalid quan_desc target pattern"),
+            (
+                "blank group name",
+                descriptor_dict(fp8_group(name=" ")),
+                "non-empty name",
+            ),
+            (
+                "missing quant_method",
+                descriptor_dict(fp8_group(quant_method="")),
+                "must define quant_method",
+            ),
+            (
+                "missing value_format",
+                descriptor_dict(fp8_group(value_format="")),
+                "must define value_format",
+            ),
+            (
+                "missing scale_format",
+                descriptor_dict(fp8_group(scale_format="")),
+                "must define scale_format",
+            ),
+            (
+                "unknown quant_method",
+                descriptor_dict(fp8_group(quant_method="int4")),
+                "Invalid quan_desc formats",
+            ),
+            (
+                "unsupported value_format",
+                descriptor_dict(fp8_group(value_format="e2m1")),
+                "Invalid quan_desc formats",
+            ),
+            (
+                "empty block_shape",
+                descriptor_dict(fp8_group(block_shape=[])),
+                "positive integer block_shape",
+            ),
+            (
+                "zero block size",
+                descriptor_dict(fp8_group(block_shape=[2, 0])),
+                "positive integer block_shape",
+            ),
+            (
+                "empty targets",
+                descriptor_dict(fp8_group(targets=[])),
+                "non-empty string targets list",
+            ),
+            (
+                "broken target regex",
+                descriptor_dict(fp8_group(targets=["re:["])),
+                "Invalid quan_desc target pattern",
+            ),
         ]
 
         for name, payload, message in cases:
@@ -558,7 +775,9 @@ class TestQuanDescriptorMetadata(unittest.TestCase):
 
     def build(self, entries, *group_dicts, output_dtype=paddle.bfloat16):
         descriptor = QuanDescriptor.from_dict(descriptor_dict(*group_dicts))
-        return descriptor.build_metadata(physical_metadata(entries), output_dtype=output_dtype)
+        return descriptor.build_metadata(
+            physical_metadata(entries), output_dtype=output_dtype
+        )
 
     def test_block_axes_are_inferred_from_the_scale_grid(self):
         """The descriptor only states block sizes; axes come from the stored scale shape."""
@@ -593,7 +812,9 @@ class TestQuanDescriptorMetadata(unittest.TestCase):
         w1 = metadata.relations["layers.0.mlp.experts.0.w1.weight"]
         w2 = metadata.relations["layers.0.mlp.experts.0.w2.weight"]
         self.assertEqual((w1.group_name, w2.group_name), ("mxfp4", "mxfp4"))
-        self.assertIs(metadata.groups[w1.group_name], metadata.groups[w2.group_name])
+        self.assertIs(
+            metadata.groups[w1.group_name], metadata.groups[w2.group_name]
+        )
         self.assertEqual(
             w1.components,
             {
@@ -629,7 +850,9 @@ class TestQuanDescriptorMetadata(unittest.TestCase):
             self.build({FP8_WEIGHT: ((2, 4), "uint8")})
 
     def test_weight_matching_two_groups_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "matches multiple quan_desc groups"):
+        with self.assertRaisesRegex(
+            ValueError, "matches multiple quan_desc groups"
+        ):
             self.build(
                 {FP8_WEIGHT: ((2, 4), "uint8"), FP8_SCALE: ((1, 2), "uint8")},
                 fp8_group(),
@@ -649,16 +872,22 @@ class TestQuanDescriptorMetadata(unittest.TestCase):
             )
 
     def test_descriptor_matching_nothing_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "matched no quantized weight/scale pairs"):
+        with self.assertRaisesRegex(
+            ValueError, "matched no quantized weight/scale pairs"
+        ):
             self.build({UNQUANTIZED_WEIGHT: ((4,), "bfloat16")})
 
     def test_scale_grid_that_fits_no_axis_layout_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Cannot infer block axes"):
-            self.build({FP8_WEIGHT: ((2, 4), "uint8"), FP8_SCALE: ((1, 3), "uint8")})
+            self.build(
+                {FP8_WEIGHT: ((2, 4), "uint8"), FP8_SCALE: ((1, 3), "uint8")}
+            )
 
     def test_empty_checkpoint_metadata_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "contains no physical tensors"):
-            QuanDescriptor.from_dict(descriptor_dict()).build_metadata(physical_metadata({}))
+            QuanDescriptor.from_dict(descriptor_dict()).build_metadata(
+                physical_metadata({})
+            )
 
 
 class TestQuanMetadataValidation(unittest.TestCase):
@@ -679,29 +908,46 @@ class TestQuanMetadataValidation(unittest.TestCase):
 
     def test_relation_key_must_match_the_logical_name(self):
         with self.assertRaisesRegex(ValueError, "does not match logical_name"):
-            self.quan_metadata(fp8_weight_spec(), relation_key="layers.0.attn.wq_b.weight")
+            self.quan_metadata(
+                fp8_weight_spec(), relation_key="layers.0.attn.wq_b.weight"
+            )
 
     def test_invalid_logical_shapes_are_rejected(self):
         for logical_shape in ((), (4, 0), (4, -1)):
             with self.subTest(logical_shape=logical_shape):
-                with self.assertRaisesRegex(ValueError, "Invalid logical shape"):
-                    self.quan_metadata(fp8_weight_spec(logical_shape=logical_shape))
+                with self.assertRaisesRegex(
+                    ValueError, "Invalid logical shape"
+                ):
+                    self.quan_metadata(
+                        fp8_weight_spec(logical_shape=logical_shape)
+                    )
 
     def test_relation_without_a_qweight_component_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "does not define a qweight component"):
+        with self.assertRaisesRegex(
+            ValueError, "does not define a qweight component"
+        ):
             self.quan_metadata(fp8_weight_spec(components={"scale": FP8_SCALE}))
 
     def test_empty_component_source_key_is_rejected(self):
-        with self.assertRaisesRegex(ValueError, "empty component role or source key"):
-            self.quan_metadata(fp8_weight_spec(components={"qweight": FP8_WEIGHT, "scale": ""}))
+        with self.assertRaisesRegex(
+            ValueError, "empty component role or source key"
+        ):
+            self.quan_metadata(
+                fp8_weight_spec(components={"qweight": FP8_WEIGHT, "scale": ""})
+            )
 
     def test_group_without_block_axes_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "does not define block_axes"):
-            self.quan_metadata(fp8_weight_spec(), group=fp8_group_spec(block_axes=None))
+            self.quan_metadata(
+                fp8_weight_spec(), group=fp8_group_spec(block_axes=None)
+            )
 
     def test_block_axes_outside_the_logical_rank_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "outside logical shape"):
-            self.quan_metadata(fp8_weight_spec(logical_shape=(4,)), group=fp8_group_spec(block_axes=(0, 1)))
+            self.quan_metadata(
+                fp8_weight_spec(logical_shape=(4,)),
+                group=fp8_group_spec(block_axes=(0, 1)),
+            )
 
 
 class TestHFDequantLoadTransform(CPUDequantTestCase):
@@ -710,7 +956,9 @@ class TestHFDequantLoadTransform(CPUDequantTestCase):
     def setUp(self):
         super().setUp()
         self.transform = HFDequantLoadTransform(
-            QuanDescriptor.from_dict(descriptor_dict()).build_metadata(fp8_physical_metadata())
+            QuanDescriptor.from_dict(descriptor_dict()).build_metadata(
+                fp8_physical_metadata()
+            )
         )
 
     def test_logical_metadata_is_returned_as_a_copy(self):
@@ -722,86 +970,133 @@ class TestHFDequantLoadTransform(CPUDequantTestCase):
         self.assertEqual(set(self.transform.logical_metadata()), {FP8_WEIGHT})
 
     def test_source_keys_list_the_qweight_before_the_scale(self):
-        self.assertEqual(self.transform.source_keys(FP8_WEIGHT), [FP8_WEIGHT, FP8_SCALE])
+        self.assertEqual(
+            self.transform.source_keys(FP8_WEIGHT), [FP8_WEIGHT, FP8_SCALE]
+        )
 
     def test_unmanaged_logical_key_is_rejected(self):
-        with self.assertRaisesRegex(KeyError, "is not managed by this load transform"):
+        with self.assertRaisesRegex(
+            KeyError, "is not managed by this load transform"
+        ):
             self.transform.source_keys("layers.0.attn.wq_b.weight")
 
     def test_block_aligned_shard_reads_local_slices(self):
-        plan = self.transform.read_plan(FP8_WEIGHT, target_shard((4, 4), (2, 4), (0, 0)))
+        plan = self.transform.read_plan(
+            FP8_WEIGHT, target_shard((4, 4), (2, 4), (0, 0))
+        )
 
         self.assertEqual(plan.mode, "local")
         self.assertEqual(plan.logical_global_shape, (4, 4))
         self.assertEqual(plan.logical_local_shape, (2, 4))
         self.assertEqual(plan.logical_global_offset, (0, 0))
         qweight = plan.source_slices[FP8_WEIGHT]
-        self.assertEqual((tuple(qweight.global_offset), tuple(qweight.local_shape)), ((0, 0), (2, 4)))
+        self.assertEqual(
+            (tuple(qweight.global_offset), tuple(qweight.local_shape)),
+            ((0, 0), (2, 4)),
+        )
         # Two logical rows map onto a single row of the 2x2 scale grid.
         scale = plan.source_slices[FP8_SCALE]
         self.assertEqual(tuple(scale.global_shape), (2, 2))
-        self.assertEqual((tuple(scale.global_offset), tuple(scale.local_shape)), ((0, 0), (1, 2)))
+        self.assertEqual(
+            (tuple(scale.global_offset), tuple(scale.local_shape)),
+            ((0, 0), (1, 2)),
+        )
 
     def test_offset_shard_maps_onto_the_matching_scale_rows(self):
-        plan = self.transform.read_plan(FP8_WEIGHT, target_shard((4, 4), (2, 4), (2, 0)))
+        plan = self.transform.read_plan(
+            FP8_WEIGHT, target_shard((4, 4), (2, 4), (2, 0))
+        )
 
         self.assertEqual(plan.mode, "local")
         scale = plan.source_slices[FP8_SCALE]
-        self.assertEqual((tuple(scale.global_offset), tuple(scale.local_shape)), ((1, 0), (1, 2)))
+        self.assertEqual(
+            (tuple(scale.global_offset), tuple(scale.local_shape)),
+            ((1, 0), (1, 2)),
+        )
 
     def test_whole_tensor_shard_uses_global_mode(self):
-        plan = self.transform.read_plan(FP8_WEIGHT, target_shard((4, 4), (4, 4), (0, 0)))
+        plan = self.transform.read_plan(
+            FP8_WEIGHT, target_shard((4, 4), (4, 4), (0, 0))
+        )
 
         self.assertEqual(plan.mode, "global")
-        self.assertEqual(tuple(plan.source_slices[FP8_SCALE].local_shape), (2, 2))
+        self.assertEqual(
+            tuple(plan.source_slices[FP8_SCALE].local_shape), (2, 2)
+        )
 
     def test_unaligned_shard_falls_back_to_global_mode(self):
         """An unaligned shard has no well-defined scale origin, so the full tensor is read."""
-        plan = self.transform.read_plan(FP8_WEIGHT, target_shard((4, 4), (2, 4), (1, 0)))
+        plan = self.transform.read_plan(
+            FP8_WEIGHT, target_shard((4, 4), (2, 4), (1, 0))
+        )
 
         self.assertEqual(plan.mode, "global")
         self.assertEqual(plan.logical_local_shape, (4, 4))
         self.assertEqual(plan.logical_global_offset, (0, 0))
-        self.assertEqual(tuple(plan.source_slices[FP8_WEIGHT].local_shape), (4, 4))
+        self.assertEqual(
+            tuple(plan.source_slices[FP8_WEIGHT].local_shape), (4, 4)
+        )
 
     def test_force_global_overrides_an_aligned_shard(self):
-        plan = self.transform.read_plan(FP8_WEIGHT, target_shard((4, 4), (2, 4), (0, 0)), force_global=True)
+        plan = self.transform.read_plan(
+            FP8_WEIGHT, target_shard((4, 4), (2, 4), (0, 0)), force_global=True
+        )
 
         self.assertEqual(plan.mode, "global")
 
     def test_shard_with_the_wrong_global_shape_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "Target shape mismatch"):
-            self.transform.read_plan(FP8_WEIGHT, target_shard((8, 4), (2, 4), (0, 0)))
+            self.transform.read_plan(
+                FP8_WEIGHT, target_shard((8, 4), (2, 4), (0, 0))
+            )
 
     def test_checkpoint_shape_disagreeing_with_the_descriptor_is_rejected(self):
         transform = HFDequantLoadTransform(
             QuanMetadata(
                 groups={"fp8": fp8_group_spec()},
                 relations={FP8_WEIGHT: fp8_weight_spec()},
-                logical_metadata={FP8_WEIGHT: target_shard((4, 4), (4, 4), (0, 0))},
+                logical_metadata={
+                    FP8_WEIGHT: target_shard((4, 4), (4, 4), (0, 0))
+                },
                 physical_metadata=fp8_physical_metadata(scale_shape=(4, 4)),
             )
         )
 
         with self.assertRaisesRegex(ValueError, "Read plan shape mismatch"):
-            transform.read_plan(FP8_WEIGHT, target_shard((4, 4), (4, 4), (0, 0)))
+            transform.read_plan(
+                FP8_WEIGHT, target_shard((4, 4), (4, 4), (0, 0))
+            )
 
     def test_mxfp4_plan_halves_the_packed_axis(self):
         transform = HFDequantLoadTransform(
-            QuanDescriptor.from_dict(descriptor_dict(mxfp4_group())).build_metadata(
-                physical_metadata({MXFP4_WEIGHT: ((2, 2), "int8"), MXFP4_SCALE: ((2, 2), "uint8")})
+            QuanDescriptor.from_dict(
+                descriptor_dict(mxfp4_group())
+            ).build_metadata(
+                physical_metadata(
+                    {
+                        MXFP4_WEIGHT: ((2, 2), "int8"),
+                        MXFP4_SCALE: ((2, 2), "uint8"),
+                    }
+                )
             )
         )
 
-        plan = transform.read_plan(MXFP4_WEIGHT, target_shard((2, 4), (1, 4), (0, 0)))
+        plan = transform.read_plan(
+            MXFP4_WEIGHT, target_shard((2, 4), (1, 4), (0, 0))
+        )
 
         self.assertEqual(plan.mode, "local")
         qweight = plan.source_slices[MXFP4_WEIGHT]
         self.assertEqual(tuple(qweight.global_shape), (2, 2))
-        self.assertEqual((tuple(qweight.global_offset), tuple(qweight.local_shape)), ((0, 0), (1, 2)))
+        self.assertEqual(
+            (tuple(qweight.global_offset), tuple(qweight.local_shape)),
+            ((0, 0), (1, 2)),
+        )
 
     def test_apply_dequantizes_the_whole_tensor(self):
-        self.transform.read_plan(FP8_WEIGHT, target_shard((4, 4), (4, 4), (0, 0)))
+        self.transform.read_plan(
+            FP8_WEIGHT, target_shard((4, 4), (4, 4), (0, 0))
+        )
 
         output = self.transform.apply(
             FP8_WEIGHT,
@@ -812,10 +1107,14 @@ class TestHFDequantLoadTransform(CPUDequantTestCase):
             paddle.float32,
         )
 
-        np.testing.assert_array_equal(output.numpy(), np.full((4, 4), 2.0, dtype="float32"))
+        np.testing.assert_array_equal(
+            output.numpy(), np.full((4, 4), 2.0, dtype="float32")
+        )
 
     def test_apply_dequantizes_a_local_shard(self):
-        self.transform.read_plan(FP8_WEIGHT, target_shard((4, 4), (2, 4), (0, 0)))
+        self.transform.read_plan(
+            FP8_WEIGHT, target_shard((4, 4), (2, 4), (0, 0))
+        )
 
         output = self.transform.apply(
             FP8_WEIGHT,
@@ -826,11 +1125,15 @@ class TestHFDequantLoadTransform(CPUDequantTestCase):
             paddle.float32,
         )
 
-        np.testing.assert_array_equal(output.numpy(), np.full((2, 4), 2.0, dtype="float32"))
+        np.testing.assert_array_equal(
+            output.numpy(), np.full((2, 4), 2.0, dtype="float32")
+        )
 
     def test_apply_without_a_plan_expects_the_whole_logical_tensor(self):
         """No cached plan means no local read happened, so a shard is a bug."""
-        with self.assertRaisesRegex(ValueError, "expected \\(4, 4\\), got \\(2, 4\\)"):
+        with self.assertRaisesRegex(
+            ValueError, "expected \\(4, 4\\), got \\(2, 4\\)"
+        ):
             self.transform.apply(
                 FP8_WEIGHT,
                 {
@@ -841,7 +1144,9 @@ class TestHFDequantLoadTransform(CPUDequantTestCase):
             )
 
     def test_apply_rejects_sources_that_contradict_the_cached_plan(self):
-        self.transform.read_plan(FP8_WEIGHT, target_shard((4, 4), (2, 4), (0, 0)))
+        self.transform.read_plan(
+            FP8_WEIGHT, target_shard((4, 4), (2, 4), (0, 0))
+        )
 
         with self.assertRaisesRegex(ValueError, "Invalid dequantized shape"):
             self.transform.apply(
@@ -862,7 +1167,11 @@ class TestHFCheckpointIsQuantized(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.checkpoint_path, True)
 
     def write_hf_config(self, config):
-        with open(os.path.join(self.checkpoint_path, HF_CONFIG_FILE_NAME), "w", encoding="utf-8") as file:
+        with open(
+            os.path.join(self.checkpoint_path, HF_CONFIG_FILE_NAME),
+            "w",
+            encoding="utf-8",
+        ) as file:
             json.dump(config, file)
 
     def test_fp8_block_checkpoint_is_detected(self):
@@ -960,7 +1269,9 @@ class TestBuildHFDequantLoadTransform(unittest.TestCase):
         self.write_checkpoint()
         self.write_paddle_metadata()
 
-        transform = build_hf_dequant_load_transform(self.checkpoint_path, descriptor_dict())
+        transform = build_hf_dequant_load_transform(
+            self.checkpoint_path, descriptor_dict()
+        )
 
         self.assertIsInstance(transform, HFDequantLoadTransform)
         logical = transform.logical_metadata()
@@ -977,7 +1288,9 @@ class TestBuildHFDequantLoadTransform(unittest.TestCase):
 
         # No safetensors file was ever written, so the build can only have come
         # from the metadata file.
-        transform = build_hf_dequant_load_transform(self.checkpoint_path, descriptor_dict())
+        transform = build_hf_dequant_load_transform(
+            self.checkpoint_path, descriptor_dict()
+        )
 
         self.assertEqual(set(transform.logical_metadata()), {FP8_WEIGHT})
 
@@ -985,8 +1298,12 @@ class TestBuildHFDequantLoadTransform(unittest.TestCase):
         self.write_checkpoint([(UNQUANTIZED_WEIGHT, "BF16", (4,))])
         self.write_paddle_metadata({UNQUANTIZED_WEIGHT: ((4,), "bfloat16")})
 
-        with self.assertRaisesRegex(ValueError, "matched no quantized weight/scale pairs"):
-            build_hf_dequant_load_transform(self.checkpoint_path, descriptor_dict())
+        with self.assertRaisesRegex(
+            ValueError, "matched no quantized weight/scale pairs"
+        ):
+            build_hf_dequant_load_transform(
+                self.checkpoint_path, descriptor_dict()
+            )
 
 
 if __name__ == "__main__":

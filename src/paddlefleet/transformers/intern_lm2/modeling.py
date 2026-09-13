@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Paddle InternLM2 model."""
+"""Paddle InternLM2 model."""
+
 import logging
 import math
 import warnings
@@ -36,7 +37,9 @@ from .configuration import InternLM2Config
 
 logger = logging.getLogger(__name__)
 try:
-    from paddle.nn.functional.flash_attention import flash_attention as flash_attn_func
+    from paddle.nn.functional.flash_attention import (
+        flash_attention as flash_attn_func,
+    )
     from paddle.nn.functional.flash_attention import (
         flash_attn_unpadded as flash_attn_varlen_func,
     )
@@ -51,7 +54,9 @@ def _get_unpad_data(attention_mask):
     seqlens_in_batch = attention_mask.sum(axis=-1, dtype="int32")
     indices = paddle.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
     max_seqlen_in_batch = seqlens_in_batch.max().item()
-    cu_seqlens = F.pad(paddle.cumsum(seqlens_in_batch, axis=0, dtype=paddle.int32), (1, 0))
+    cu_seqlens = F.pad(
+        paddle.cumsum(seqlens_in_batch, axis=0, dtype=paddle.int32), (1, 0)
+    )
     return (
         indices,
         cu_seqlens,
@@ -64,14 +69,18 @@ def index_first_axis(tensor, index):
 
 
 def pad_input(hidden_states, indices, batch, seqlen):
-    output = paddle.zeros([batch * seqlen, *hidden_states.shape[1:]], dtype=hidden_states.dtype)
+    output = paddle.zeros(
+        [batch * seqlen, *hidden_states.shape[1:]], dtype=hidden_states.dtype
+    )
     output = paddle.scatter(output, indices, hidden_states)
     return output.reshape([batch, seqlen, *hidden_states.shape[1:]])
 
 
 def unpad_input(hidden_states, attention_mask):
     indices, cu_seqlens, max_seqlen = _get_unpad_data(attention_mask)
-    hidden_states = index_first_axis(hidden_states.reshape([-1, *hidden_states.shape[2:]]), indices)
+    hidden_states = index_first_axis(
+        hidden_states.reshape([-1, *hidden_states.shape[2:]]), indices
+    )
     return hidden_states, indices, cu_seqlens, max_seqlen
 
 
@@ -80,31 +89,55 @@ def masked_fill(x, mask, value):
     return paddle.where(mask, y, x)
 
 
-def _make_causal_mask(input_ids_shape: list, dtype: paddle.dtype, past_key_values_length: int = 0):
+def _make_causal_mask(
+    input_ids_shape: list, dtype: paddle.dtype, past_key_values_length: int = 0
+):
     """
     Make causal mask used for bi-directional self-attention.
     """
     bsz, tgt_len = input_ids_shape
-    mask = paddle.full(shape=(tgt_len, tgt_len), fill_value=paddle.finfo(dtype).min)
+    mask = paddle.full(
+        shape=(tgt_len, tgt_len), fill_value=paddle.finfo(dtype).min
+    )
     mask_cond = paddle.arange(end=mask.shape[-1])
 
-    mask = masked_fill(mask, mask_cond < (mask_cond + 1).reshape([mask.shape[-1], 1]), 0)
+    mask = masked_fill(
+        mask, mask_cond < (mask_cond + 1).reshape([mask.shape[-1], 1]), 0
+    )
     mask = mask.astype(dtype)
     if past_key_values_length > 0:
-        mask = paddle.concat(x=[paddle.zeros(shape=[tgt_len, past_key_values_length], dtype=dtype), mask], axis=-1)
-    return mask[(None), (None), :, :].expand(shape=[bsz, 1, tgt_len, tgt_len + past_key_values_length])
+        mask = paddle.concat(
+            x=[
+                paddle.zeros(
+                    shape=[tgt_len, past_key_values_length], dtype=dtype
+                ),
+                mask,
+            ],
+            axis=-1,
+        )
+    return mask[(None), (None), :, :].expand(
+        shape=[bsz, 1, tgt_len, tgt_len + past_key_values_length]
+    )
 
 
-def _expand_mask(mask: paddle.Tensor, dtype: paddle.dtype, tgt_len: Optional[int] = None):
+def _expand_mask(
+    mask: paddle.Tensor, dtype: paddle.dtype, tgt_len: Optional[int] = None
+):
     """
     Expands attention_mask from `[bsz, seq_len]` to `[bsz, 1, tgt_seq_len, src_seq_len]`.
     """
     bsz, src_len = mask.shape
     tgt_len = tgt_len if tgt_len is not None else src_len
-    expanded_mask = mask[:, (None), (None), :].expand(shape=[bsz, 1, tgt_len, src_len]).astype(dtype)
+    expanded_mask = (
+        mask[:, (None), (None), :]
+        .expand(shape=[bsz, 1, tgt_len, src_len])
+        .astype(dtype)
+    )
     inverted_mask = 1.0 - expanded_mask
 
-    return masked_fill(inverted_mask, inverted_mask.astype("bool"), paddle.finfo(dtype).min)
+    return masked_fill(
+        inverted_mask, inverted_mask.astype("bool"), paddle.finfo(dtype).min
+    )
 
 
 class InternLM2RMSNorm(nn.Layer):
@@ -116,7 +149,9 @@ class InternLM2RMSNorm(nn.Layer):
         out_2 = paddle.create_parameter(
             shape=paddle.ones(shape=hidden_size).shape,
             dtype=paddle.ones(shape=hidden_size).numpy().dtype,
-            default_initializer=paddle.nn.initializer.Assign(paddle.ones(shape=hidden_size)),
+            default_initializer=paddle.nn.initializer.Assign(
+                paddle.ones(shape=hidden_size)
+            ),
         )
         out_2.stop_gradient = not True
         self.weight = out_2
@@ -126,7 +161,9 @@ class InternLM2RMSNorm(nn.Layer):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.to(paddle.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * paddle.rsqrt(variance + self.variance_epsilon)
+        hidden_states = hidden_states * paddle.rsqrt(
+            variance + self.variance_epsilon
+        )
         return self.weight * hidden_states.to(input_dtype)
 
 
@@ -137,11 +174,18 @@ class InternLM2RotaryEmbedding(nn.Layer):
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
-        inv_freq = 1.0 / (self.base ** (paddle.arange(0, self.dim, 2).cast("float32") / self.dim))
-        self.register_buffer("inv_freq", inv_freq, persistable=False)  # persistent=False)
+        inv_freq = 1.0 / (
+            self.base
+            ** (paddle.arange(0, self.dim, 2).cast("float32") / self.dim)
+        )
+        self.register_buffer(
+            "inv_freq", inv_freq, persistable=False
+        )  # persistent=False)
 
         # Build here to make `torch.jit.trace` work.
-        self._set_cos_sin_cache(seq_len=max_position_embeddings, dtype=paddle.get_default_dtype())
+        self._set_cos_sin_cache(
+            seq_len=max_position_embeddings, dtype=paddle.get_default_dtype()
+        )
 
     def _set_cos_sin_cache(self, seq_len, dtype):
         self.max_seq_len_cached = seq_len
@@ -150,8 +194,12 @@ class InternLM2RotaryEmbedding(nn.Layer):
         freqs = paddle.einsum("i,j->ij", t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = paddle.concat((freqs, freqs), axis=-1)
-        self.register_buffer("cos_cached", emb.cos().to(dtype), persistable=False)  # persistent=False)
-        self.register_buffer("sin_cached", emb.sin().to(dtype), persistable=False)  # persistent=False)
+        self.register_buffer(
+            "cos_cached", emb.cos().to(dtype), persistable=False
+        )  # persistent=False)
+        self.register_buffer(
+            "sin_cached", emb.sin().to(dtype), persistable=False
+        )  # persistent=False)
 
     def forward(self, x, seq_len=None):
         # x: [bs, num_attention_heads, seq_len, head_size]
@@ -167,7 +215,9 @@ class InternLM2RotaryEmbedding(nn.Layer):
 class InternLM2LinearScalingRotaryEmbedding(InternLM2RotaryEmbedding):
     """InternLM2RotaryEmbedding extended with linear scaling. Credits to the Reddit user /u/kaiokendev"""
 
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, scaling_factor=1.0):
+    def __init__(
+        self, dim, max_position_embeddings=2048, base=10000, scaling_factor=1.0
+    ):
         self.scaling_factor = scaling_factor
         super().__init__(dim, max_position_embeddings, base)
 
@@ -179,8 +229,12 @@ class InternLM2LinearScalingRotaryEmbedding(InternLM2RotaryEmbedding):
         freqs = paddle.einsum("i,j->ij", t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = paddle.concat((freqs, freqs), axis=-1)
-        self.register_buffer("cos_cached", emb.cos().to(dtype), persistable=False)  # persistent=False)
-        self.register_buffer("sin_cached", emb.sin().to(dtype), persistable=False)  # persistent=False)
+        self.register_buffer(
+            "cos_cached", emb.cos().to(dtype), persistable=False
+        )  # persistent=False)
+        self.register_buffer(
+            "sin_cached", emb.sin().to(dtype), persistable=False
+        )  # persistent=False)
 
 
 class InternLM2DynamicNTKScalingRotaryEmbedding(InternLM2RotaryEmbedding):
@@ -188,7 +242,9 @@ class InternLM2DynamicNTKScalingRotaryEmbedding(InternLM2RotaryEmbedding):
     Credits to the Reddit users /u/bloc97 and /u/emozilla.
     """
 
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, scaling_factor=1.0):
+    def __init__(
+        self, dim, max_position_embeddings=2048, base=10000, scaling_factor=1.0
+    ):
         self.scaling_factor = scaling_factor
         super().__init__(dim, max_position_embeddings, base)
 
@@ -197,18 +253,28 @@ class InternLM2DynamicNTKScalingRotaryEmbedding(InternLM2RotaryEmbedding):
 
         if seq_len > self.max_position_embeddings:
             base = self.base * (
-                (self.scaling_factor * seq_len / self.max_position_embeddings) - (self.scaling_factor - 1)
+                (self.scaling_factor * seq_len / self.max_position_embeddings)
+                - (self.scaling_factor - 1)
             ) ** (self.dim / (self.dim - 2))
-            inv_freq = 1.0 / (base ** (paddle.arange(0, self.dim, 2).cast("float32") / self.dim))
-            self.register_buffer("inv_freq", inv_freq, persistable=False)  # persistent=False)
+            inv_freq = 1.0 / (
+                base
+                ** (paddle.arange(0, self.dim, 2).cast("float32") / self.dim)
+            )
+            self.register_buffer(
+                "inv_freq", inv_freq, persistable=False
+            )  # persistent=False)
 
         t = paddle.arange(self.max_seq_len_cached).to(dtype=self.inv_freq.dtype)
 
         freqs = paddle.einsum("i,j->ij", t, self.inv_freq)
         # Different from paper, but it uses a different permutation in order to obtain the same calculation
         emb = paddle.concat((freqs, freqs), axis=-1)
-        self.register_buffer("cos_cached", emb.cos().to(dtype), persistable=False)  # persistent=False)
-        self.register_buffer("sin_cached", emb.sin().to(dtype), persistable=False)  # persistent=False)
+        self.register_buffer(
+            "cos_cached", emb.cos().to(dtype), persistable=False
+        )  # persistent=False)
+        self.register_buffer(
+            "sin_cached", emb.sin().to(dtype), persistable=False
+        )  # persistent=False)
 
 
 def rotate_half(x):
@@ -233,9 +299,15 @@ class InternLM2MLP(nn.Layer):
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.w1 = nn.Linear(self.hidden_size, self.intermediate_size, bias_attr=False)
-        self.w3 = nn.Linear(self.hidden_size, self.intermediate_size, bias_attr=False)
-        self.w2 = nn.Linear(self.intermediate_size, self.hidden_size, bias_attr=False)
+        self.w1 = nn.Linear(
+            self.hidden_size, self.intermediate_size, bias_attr=False
+        )
+        self.w3 = nn.Linear(
+            self.hidden_size, self.intermediate_size, bias_attr=False
+        )
+        self.w2 = nn.Linear(
+            self.intermediate_size, self.hidden_size, bias_attr=False
+        )
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
@@ -251,8 +323,12 @@ def repeat_kv(hidden_states: paddle.Tensor, n_rep: int) -> paddle.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(shape=[batch, num_key_value_heads, n_rep, slen, head_dim])
-    return hidden_states.reshape([batch, num_key_value_heads * n_rep, slen, head_dim])
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        shape=[batch, num_key_value_heads, n_rep, slen, head_dim]
+    )
+    return hidden_states.reshape(
+        [batch, num_key_value_heads * n_rep, slen, head_dim]
+    )
 
 
 # Modified from transformers.model.llama.modeling_llama.LlamaAttention
@@ -282,7 +358,11 @@ class InternLM2Attention(nn.Layer):
             bias_attr=config.bias,
         )
 
-        self.wo = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias_attr=config.bias)
+        self.wo = nn.Linear(
+            self.num_heads * self.head_dim,
+            self.hidden_size,
+            bias_attr=config.bias,
+        )
         self._init_rope()
 
     def _init_rope(self):
@@ -310,11 +390,15 @@ class InternLM2Attention(nn.Layer):
                     scaling_factor=scaling_factor,
                 )
             else:
-                raise ValueError("Currently we only support rotary embedding's type being 'dynamic' or 'linear'.")
+                raise ValueError(
+                    "Currently we only support rotary embedding's type being 'dynamic' or 'linear'."
+                )
         return self.rotary_emb
 
     def _shape(self, tensor: paddle.Tensor, seq_len: int, bsz: int):
-        return tensor.reshape([bsz, seq_len, self.num_heads, self.head_dim]).transpose([0, 2, 1, 3])
+        return tensor.reshape(
+            [bsz, seq_len, self.num_heads, self.head_dim]
+        ).transpose([0, 2, 1, 3])
 
     def forward(
         self,
@@ -325,7 +409,9 @@ class InternLM2Attention(nn.Layer):
         output_attentions: bool = False,
         use_cache: bool = False,
         **kwargs,
-    ) -> Tuple[paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]]:
+    ) -> Tuple[
+        paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]
+    ]:
         if "padding_mask" in kwargs:
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. "
@@ -363,19 +449,25 @@ class InternLM2Attention(nn.Layer):
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
 
         # [1, 16, 1847, 128] [1, 8, 1847, 128] [1847, 128] [1847, 128] [1, 1847]
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin, position_ids
+        )
 
         if past_key_value is not None:
             # reuse k, v, self_attention
             key_states = paddle.concat([past_key_value[0], key_states], axis=2)
-            value_states = paddle.concat([past_key_value[1], value_states], axis=2)
+            value_states = paddle.concat(
+                [past_key_value[1], value_states], axis=2
+            )
 
         past_key_value = (key_states, value_states) if use_cache else None
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = paddle.matmul(query_states, key_states.transpose([0, 1, 3, 2])) / math.sqrt(self.head_dim)
+        attn_weights = paddle.matmul(
+            query_states, key_states.transpose([0, 1, 3, 2])
+        ) / math.sqrt(self.head_dim)
 
         if attn_weights.shape != [bsz, self.num_heads, q_len, kv_seq_len]:
             raise ValueError(
@@ -390,7 +482,9 @@ class InternLM2Attention(nn.Layer):
             attn_weights = attn_weights + attention_mask
 
         # upcast attention to fp32
-        attn_weights = nn.functional.softmax(attn_weights, axis=-1, dtype=paddle.float32).to(query_states.dtype)
+        attn_weights = nn.functional.softmax(
+            attn_weights, axis=-1, dtype=paddle.float32
+        ).to(query_states.dtype)
         attn_output = paddle.matmul(attn_weights, value_states)
 
         if attn_output.shape != [bsz, self.num_heads, q_len, self.head_dim]:
@@ -425,8 +519,10 @@ class InternLM2FlashAttention2(InternLM2Attention):
         past_key_value: Optional[Tuple[paddle.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
-        **kwargs
-    ) -> Tuple[paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]]:
+        **kwargs,
+    ) -> Tuple[
+        paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]
+    ]:
         # InternLM2FlashAttention2 attention does not support output_attentions
         if "padding_mask" in kwargs:
             warnings.warn(
@@ -467,12 +563,18 @@ class InternLM2FlashAttention2(InternLM2Attention):
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
 
         # real:[1, 16, 1847, 128] [1, 8, 1847, 128] [1847, 128] [1847, 128] [1, 1847]
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin, position_ids
+        )
 
         if past_key_value is not None:
             # reuse k, v, self_attention
-            key_states = paddle.concat(x=[past_key_value[0], key_states], axis=2)
-            value_states = paddle.concat(x=[past_key_value[1], value_states], axis=2)
+            key_states = paddle.concat(
+                x=[past_key_value[0], key_states], axis=2
+            )
+            value_states = paddle.concat(
+                x=[past_key_value[1], value_states], axis=2
+            )
 
         past_key_value = (key_states, value_states) if use_cache else None
 
@@ -485,7 +587,9 @@ class InternLM2FlashAttention2(InternLM2Attention):
         key_states = key_states.astype("bfloat16")
         value_states = value_states.astype("bfloat16")
         # return tuple 0 is output, 1 is softmax return
-        attn_output = self._flash_attention_forward(query_states, key_states, value_states, attention_mask, q_len)
+        attn_output = self._flash_attention_forward(
+            query_states, key_states, value_states, attention_mask, q_len
+        )
         attn_output = attn_output.astype(original_dtype)
         attn_output = attn_output.reshape([bsz, q_len, self.hidden_size])
         attn_output = self.wo(attn_output)
@@ -496,7 +600,14 @@ class InternLM2FlashAttention2(InternLM2Attention):
         return attn_output, attn_weights, past_key_value
 
     def _flash_attention_forward(
-        self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None
+        self,
+        query_states,
+        key_states,
+        value_states,
+        attention_mask,
+        query_length,
+        dropout=0.0,
+        softmax_scale=None,
     ):
         """
         Calls the forward method of Flash Attention - if the input hidden states contain at least one padding token
@@ -526,27 +637,42 @@ class InternLM2FlashAttention2(InternLM2Attention):
         if attention_mask is not None:
             batch_size = query_states.shape[0]  # [2, 3383, 16, 128]
 
-            query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = self._unpad_input(
-                query_states, key_states, value_states, attention_mask, query_length
+            (
+                query_states,
+                key_states,
+                value_states,
+                indices_q,
+                cu_seq_lens,
+                max_seq_lens,
+            ) = self._unpad_input(
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                query_length,
             )
 
             cu_seqlens_q, cu_seqlens_k = cu_seq_lens
             max_seqlen_in_batch_q, max_seqlen_in_batch_k = max_seq_lens
 
-            attn_output_unpad = flash_attn_varlen_func(  # TODO: flash_attn_unpadded
-                query_states,  # [5998, 16, 128]
-                key_states,  # [5998, 8, 128]
-                value_states,  # [5998, 8, 128]
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k=cu_seqlens_k,
-                max_seqlen_q=max_seqlen_in_batch_q,
-                max_seqlen_k=max_seqlen_in_batch_k,
-                scale=softmax_scale,  # not softmax_scale=
-                dropout=dropout,
-                causal=causal,
-            )[0]
+            attn_output_unpad = (
+                flash_attn_varlen_func(  # TODO: flash_attn_unpadded
+                    query_states,  # [5998, 16, 128]
+                    key_states,  # [5998, 8, 128]
+                    value_states,  # [5998, 8, 128]
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=max_seqlen_in_batch_q,
+                    max_seqlen_k=max_seqlen_in_batch_k,
+                    scale=softmax_scale,  # not softmax_scale=
+                    dropout=dropout,
+                    causal=causal,
+                )[0]
+            )
 
-            attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
+            attn_output = pad_input(
+                attn_output_unpad, indices_q, batch_size, query_length
+            )
         else:
             attn_output = flash_attn_func(
                 query_states,
@@ -558,20 +684,33 @@ class InternLM2FlashAttention2(InternLM2Attention):
 
         return attn_output
 
-    def _unpad_input(self, query_layer, key_layer, value_layer, attention_mask, query_length):
-        indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
+    def _unpad_input(
+        self, query_layer, key_layer, value_layer, attention_mask, query_length
+    ):
+        indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(
+            attention_mask
+        )
         batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
 
         key_layer = index_first_axis(
-            key_layer.reshape([batch_size * kv_seq_len, num_key_value_heads, head_dim]), indices_k
+            key_layer.reshape(
+                [batch_size * kv_seq_len, num_key_value_heads, head_dim]
+            ),
+            indices_k,
         )
         value_layer = index_first_axis(
-            value_layer.reshape([batch_size * kv_seq_len, num_key_value_heads, head_dim]), indices_k
+            value_layer.reshape(
+                [batch_size * kv_seq_len, num_key_value_heads, head_dim]
+            ),
+            indices_k,
         )
 
         if query_length == kv_seq_len:
             query_layer = index_first_axis(
-                query_layer.reshape([batch_size * kv_seq_len, self.num_heads, head_dim]), indices_k
+                query_layer.reshape(
+                    [batch_size * kv_seq_len, self.num_heads, head_dim]
+                ),
+                indices_k,
             )
             cu_seqlens_q = cu_seqlens_k
             max_seqlen_in_batch_q = max_seqlen_in_batch_k
@@ -586,7 +725,9 @@ class InternLM2FlashAttention2(InternLM2Attention):
         else:
             # The -q_len: slice assumes left padding.
             attention_mask = attention_mask[:, -query_length:]
-            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(query_layer, attention_mask)
+            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = (
+                unpad_input(query_layer, attention_mask)
+            )
 
         return (
             query_layer,
@@ -611,11 +752,17 @@ class InternLM2DecoderLayer(nn.Layer):
         super().__init__()
         self.hidden_size = config.hidden_size
 
-        self.attention = INTERNLM2_ATTENTION_CLASSES[config.attn_implementation](config=config)
+        self.attention = INTERNLM2_ATTENTION_CLASSES[
+            config.attn_implementation
+        ](config=config)
 
         self.feed_forward = InternLM2MLP(config)
-        self.attention_norm = InternLM2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.ffn_norm = InternLM2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.attention_norm = InternLM2RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.ffn_norm = InternLM2RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -625,7 +772,7 @@ class InternLM2DecoderLayer(nn.Layer):
         past_key_value: Optional[Tuple[paddle.Tensor]] = None,
         output_attentions: Optional[bool] = False,
         use_cache: Optional[bool] = False,
-        **kwargs
+        **kwargs,
     ) -> Tuple[paddle.Tensor, Optional[Tuple[paddle.Tensor, paddle.Tensor]]]:
         """
         Args:
@@ -708,7 +855,9 @@ class InternLM2PretrainedModel(PretrainedModel):
 
     @classmethod
     def _gen_aoa_config(cls, config: InternLM2Config):
-        model_prefix = cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        model_prefix = (
+            cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        )
         aoa_statements = [
             f"model.tok_embeddings.weight -> {model_prefix}tok_embeddings.weight",
             f"model.norm.weight -> {model_prefix}norm.weight",
@@ -725,14 +874,18 @@ class InternLM2PretrainedModel(PretrainedModel):
             )
         if cls != cls.base_model_class:
             if config.tie_word_embeddings:
-                aoa_statements.append("model.tok_embeddings.weight -> output.weight")
+                aoa_statements.append(
+                    "model.tok_embeddings.weight -> output.weight"
+                )
             else:
                 aoa_statements.append("output.weight^T -> output.weight")
         return {"aoa_statements": aoa_statements}
 
     @classmethod
     def _gen_inv_aoa_config(cls, config: InternLM2Config):
-        model_prefix = cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        model_prefix = (
+            cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        )
         aoa_statements = [
             f"{model_prefix}tok_embeddings.weight -> model.tok_embeddings.weight",
             f"{model_prefix}norm.weight -> model.norm.weight",
@@ -770,12 +923,23 @@ class InternLM2Model(InternLM2PretrainedModel):
         self.config = config
         if not has_flash_attn:
             self.config.attn_implementation = "eager"
-            logger.warning_once("Warning: Flash attention is not available, using eager attention instead.")
+            logger.warning_once(
+                "Warning: Flash attention is not available, using eager attention instead."
+            )
 
-        self.tok_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        self.tok_embeddings = nn.Embedding(
+            config.vocab_size, config.hidden_size, self.padding_idx
+        )
 
-        self.layers = nn.LayerList([InternLM2DecoderLayer(config) for _ in range(config.num_hidden_layers)])
-        self.norm = InternLM2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.layers = nn.LayerList(
+            [
+                InternLM2DecoderLayer(config)
+                for _ in range(config.num_hidden_layers)
+            ]
+        )
+        self.norm = InternLM2RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
         self.enable_recompute = False
         # Initialize weights and apply final processing
@@ -787,7 +951,9 @@ class InternLM2Model(InternLM2PretrainedModel):
     def set_input_embeddings(self, value):
         self.tok_embeddings = value
 
-    def _prepare_decoder_attention_mask(self, attention_mask, input_shape, inputs_embeds, past_key_values_length):
+    def _prepare_decoder_attention_mask(
+        self, attention_mask, input_shape, inputs_embeds, past_key_values_length
+    ):
         # create causal mask
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
         combined_attention_mask = None
@@ -800,9 +966,13 @@ class InternLM2Model(InternLM2PretrainedModel):
 
         if attention_mask is not None:
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            expanded_attn_mask = _expand_mask(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1])
+            expanded_attn_mask = _expand_mask(
+                attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]
+            )
             combined_attention_mask = (
-                expanded_attn_mask if combined_attention_mask is None else expanded_attn_mask + combined_attention_mask
+                expanded_attn_mask
+                if combined_attention_mask is None
+                else expanded_attn_mask + combined_attention_mask
             )
 
         return combined_attention_mask
@@ -818,25 +988,41 @@ class InternLM2Model(InternLM2PretrainedModel):
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
-        **kwargs
+        **kwargs,
     ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
         )
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        use_cache = (
+            use_cache if use_cache is not None else self.config.use_cache
+        )
 
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
 
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
+            raise ValueError(
+                "You cannot specify both input_ids and inputs_embeds at the same time"
+            )
         elif input_ids is not None:
             batch_size, seq_length = input_ids.shape[:2]
         elif inputs_embeds is not None:
             batch_size, seq_length = inputs_embeds.shape[:2]
         else:
-            raise ValueError("You have to specify either input_ids or inputs_embeds")
+            raise ValueError(
+                "You have to specify either input_ids or inputs_embeds"
+            )
 
         seq_length_with_past = seq_length
         past_key_values_length = 0
@@ -857,12 +1043,21 @@ class InternLM2Model(InternLM2PretrainedModel):
 
         if self.config.attn_implementation == "flash_attention_2":
             # 2d mask is passed through the layers
-            attention_mask = attention_mask if (attention_mask is not None and 0 in attention_mask.numpy()) else None
+            attention_mask = (
+                attention_mask
+                if (attention_mask is not None and 0 in attention_mask.numpy())
+                else None
+            )
         else:
             if attention_mask is None:
-                attention_mask = paddle.ones((batch_size, seq_length_with_past), dtype=paddle.bool)
+                attention_mask = paddle.ones(
+                    (batch_size, seq_length_with_past), dtype=paddle.bool
+                )
             attention_mask = self._prepare_decoder_attention_mask(
-                attention_mask, (batch_size, seq_length), inputs_embeds, past_key_values_length
+                attention_mask,
+                (batch_size, seq_length),
+                inputs_embeds,
+                past_key_values_length,
             )
 
         # embed positions
@@ -884,7 +1079,9 @@ class InternLM2Model(InternLM2PretrainedModel):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
 
-            past_key_value = past_key_values[idx] if past_key_values is not None else None
+            past_key_value = (
+                past_key_values[idx] if past_key_values is not None else None
+            )
 
             has_gradient = not hidden_states.stop_gradient
             if self.enable_recompute and has_gradient and self.training:
@@ -910,7 +1107,9 @@ class InternLM2Model(InternLM2PretrainedModel):
             hidden_states = layer_outputs[0]
 
             if use_cache:
-                next_decoder_cache += (layer_outputs[2 if output_attentions else 1],)
+                next_decoder_cache += (
+                    layer_outputs[2 if output_attentions else 1],
+                )
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
@@ -923,7 +1122,16 @@ class InternLM2Model(InternLM2PretrainedModel):
 
         next_cache = next_decoder_cache if use_cache else None
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+            return tuple(
+                v
+                for v in [
+                    hidden_states,
+                    next_cache,
+                    all_hidden_states,
+                    all_self_attns,
+                ]
+                if v is not None
+            )
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
@@ -942,7 +1150,9 @@ class InternLM2ForCausalLM(InternLM2PretrainedModel):
         super().__init__(config)
         self.model = InternLM2Model(config)
         self.vocab_size = config.vocab_size
-        self.output = nn.Linear(config.hidden_size, config.vocab_size, bias_attr=False)
+        self.output = nn.Linear(
+            config.hidden_size, config.vocab_size, bias_attr=False
+        )
 
         # Initialize weights and apply final processing
         # self.post_init()
@@ -1004,11 +1214,21 @@ class InternLM2ForCausalLM(InternLM2PretrainedModel):
         "Hey, are you conscious? Can you talk to me?\nI'm not conscious, but I can talk to you."
         ```"""
 
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
@@ -1052,7 +1272,12 @@ class InternLM2ForCausalLM(InternLM2PretrainedModel):
         return output
 
     def prepare_inputs_for_generation(
-        self, input_ids, past_key_values=None, attention_mask=None, inputs_embeds=None, **kwargs
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        **kwargs,
     ):
         if past_key_values is not None:
             past_length = past_key_values[0][0].shape[2]
@@ -1072,7 +1297,11 @@ class InternLM2ForCausalLM(InternLM2PretrainedModel):
             attention_mask_int64 = attention_mask.cast("int64")
             position_ids = attention_mask_int64.cumsum(-1) - 1
             # position_ids.masked_fill_(attention_mask == 0, 1)
-            position_ids = paddle.where(attention_mask_int64 == 0, paddle.ones_like(position_ids), position_ids)
+            position_ids = paddle.where(
+                attention_mask_int64 == 0,
+                paddle.ones_like(position_ids),
+                position_ids,
+            )
             if past_key_values:
                 position_ids = position_ids[:, -input_ids.shape[1] :]
 
@@ -1097,11 +1326,20 @@ class InternLM2ForCausalLM(InternLM2PretrainedModel):
         reordered_past = ()
         for layer_past in past_key_values:
             reordered_past += (
-                tuple(paddle.index_select(past_state, index=beam_idx, axis=0) for past_state in layer_past),
+                tuple(
+                    paddle.index_select(past_state, index=beam_idx, axis=0)
+                    for past_state in layer_past
+                ),
             )
         return reordered_past
 
-    def build_inputs(self, tokenizer, query: str, history: List[Tuple[str, str]] = None, meta_instruction=""):
+    def build_inputs(
+        self,
+        tokenizer,
+        query: str,
+        history: List[Tuple[str, str]] = None,
+        meta_instruction="",
+    ):
         if history is None:
             history = []
         if tokenizer.add_bos_token:
@@ -1112,7 +1350,9 @@ class InternLM2ForCausalLM(InternLM2PretrainedModel):
             prompt += f"""<|im_start|>system\n{meta_instruction}<|im_end|>\n"""
         for record in history:
             prompt += f"""<|im_start|>user\n{record[0]}<|im_end|>\n<|im_start|>assistant\n{record[1]}<|im_end|>\n"""
-        prompt += f"""<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n"""
+        prompt += (
+            f"""<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n"""
+        )
         return tokenizer([prompt], return_tensors="pd")
 
     @paddle.no_grad()
@@ -1134,7 +1374,10 @@ class InternLM2ForCausalLM(InternLM2PretrainedModel):
         inputs = self.build_inputs(tokenizer, query, history, meta_instruction)
         inputs = {k: v for k, v in inputs.items() if paddle.is_tensor(v)}
         # also add end-of-assistant token in eos token id to avoid unnecessary generation
-        eos_token_id = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids(["<|im_end|>"])[0]]
+        eos_token_id = [
+            tokenizer.eos_token_id,
+            tokenizer.convert_tokens_to_ids(["<|im_end|>"])[0],
+        ]
         outputs = self.generate(
             **inputs,
             streamer=streamer,
@@ -1153,13 +1396,17 @@ class InternLM2ForCausalLM(InternLM2PretrainedModel):
 
     def resize_token_embeddings(self, new_num_tokens):
         old_embeddings = self.get_input_embeddings()
-        new_embeddings = self._get_resized_embeddings(old_embeddings, new_num_tokens)
+        new_embeddings = self._get_resized_embeddings(
+            old_embeddings, new_num_tokens
+        )
         self.set_input_embeddings(new_embeddings)
         new_num_tokens = new_embeddings.weight.shape[0]
 
         old_output_embeddings = self.get_output_embeddings()
         if old_output_embeddings is not None:
-            new_output_embeddings = self._get_resized_embeddings(old_output_embeddings, new_num_tokens)
+            new_output_embeddings = self._get_resized_embeddings(
+                old_output_embeddings, new_num_tokens
+            )
             self.set_output_embeddings(new_output_embeddings)
         return self.get_input_embeddings()
 
@@ -1171,7 +1418,9 @@ class InternLM2ForSequenceClassification(InternLM2PretrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.model = InternLM2Model(config)
-        self.score = nn.Linear(config.hidden_size, self.num_labels, bias_attr=False)
+        self.score = nn.Linear(
+            config.hidden_size, self.num_labels, bias_attr=False
+        )
 
     def get_input_embeddings(self):
         return self.model.tok_embeddings
@@ -1192,7 +1441,11 @@ class InternLM2ForSequenceClassification(InternLM2PretrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
 
         transformer_outputs = self.model(
             input_ids,
@@ -1214,12 +1467,19 @@ class InternLM2ForSequenceClassification(InternLM2PretrainedModel):
             batch_size = inputs_embeds.shape[0]
 
         if self.config.pad_token_id is None and batch_size != 1:
-            raise ValueError("Cannot handle batch sizes > 1 if no padding token is defined.")
+            raise ValueError(
+                "Cannot handle batch sizes > 1 if no padding token is defined."
+            )
         if self.config.pad_token_id is None:
             sequence_lengths = -1
         else:
             if input_ids is not None:
-                sequence_lengths = paddle.equal(input_ids, self.config.pad_token_id).astype("int32").argmax(-1) - 1
+                sequence_lengths = (
+                    paddle.equal(input_ids, self.config.pad_token_id)
+                    .astype("int32")
+                    .argmax(-1)
+                    - 1
+                )
                 sequence_lengths = sequence_lengths % input_ids.shape[-1]
                 sequence_lengths = sequence_lengths.to(logits.place)
             else:
@@ -1233,7 +1493,9 @@ class InternLM2ForSequenceClassification(InternLM2PretrainedModel):
             if self.config.problem_type is None:
                 if self.num_labels == 1:
                     self.config.problem_type = "regression"
-                elif self.num_labels > 1 and (labels.dtype in (paddle.int64, paddle.int32)):
+                elif self.num_labels > 1 and (
+                    labels.dtype in (paddle.int64, paddle.int32)
+                ):
                     self.config.problem_type = "single_label_classification"
                 else:
                     self.config.problem_type = "multi_label_classification"
@@ -1246,7 +1508,10 @@ class InternLM2ForSequenceClassification(InternLM2PretrainedModel):
                     loss = loss_fct(pooled_logits, labels)
             elif self.config.problem_type == "single_label_classification":
                 loss_fct = CrossEntropyLoss()
-                loss = loss_fct(pooled_logits.reshape(-1, self.num_labels), labels.reshape(-1))
+                loss = loss_fct(
+                    pooled_logits.reshape(-1, self.num_labels),
+                    labels.reshape(-1),
+                )
             elif self.config.problem_type == "multi_label_classification":
                 loss_fct = BCEWithLogitsLoss()
                 loss = loss_fct(pooled_logits, labels)
@@ -1291,7 +1556,11 @@ class InternLM2ForQuestionAnswering(InternLM2PretrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, QuestionAnsweringModelOutput]:
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
 
         outputs = self.transformer(
             input_ids,
@@ -1307,14 +1576,18 @@ class InternLM2ForQuestionAnswering(InternLM2PretrainedModel):
         sequence_output = outputs[0]
 
         logits = self.qa_outputs(sequence_output)
-        start_logits, end_logits = paddle.split(logits, num_or_sections=2, axis=-1)
+        start_logits, end_logits = paddle.split(
+            logits, num_or_sections=2, axis=-1
+        )
         start_logits = start_logits.squeeze(-1)
         end_logits = end_logits.squeeze(-1)
 
         total_loss = None
         if start_positions is not None and end_positions is not None:
             if len(start_positions.shape) > 1:
-                start_positions = start_positions.squeeze(-1).to(start_logits.place)
+                start_positions = start_positions.squeeze(-1).to(
+                    start_logits.place
+                )
             if len(end_positions.shape) > 1:
                 end_positions = end_positions.squeeze(-1).to(end_logits.place)
             ignored_index = start_logits.shape[1]
@@ -1328,7 +1601,9 @@ class InternLM2ForQuestionAnswering(InternLM2PretrainedModel):
 
         if not return_dict:
             output = (start_logits, end_logits) + outputs[2:]
-            return ((total_loss,) + output) if total_loss is not None else output
+            return (
+                ((total_loss,) + output) if total_loss is not None else output
+            )
 
         return QuestionAnsweringModelOutput(
             loss=total_loss,
@@ -1374,7 +1649,11 @@ class InternLM2ForTokenClassification(InternLM2PretrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
 
         outputs = self.model(
             input_ids,
@@ -1394,7 +1673,9 @@ class InternLM2ForTokenClassification(InternLM2PretrainedModel):
         loss = None
         if labels is not None:
             loss_fct = CrossEntropyLoss()
-            loss = loss_fct(logits.reshape(-1, self.num_labels), labels.reshape(-1))
+            loss = loss_fct(
+                logits.reshape(-1, self.num_labels), labels.reshape(-1)
+            )
 
         if not return_dict:
             output = (logits,) + outputs[2:]

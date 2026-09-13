@@ -91,9 +91,12 @@ def normalize_accuracy_target(value: AccuracyTarget) -> AccuracyTarget:
         if target in _FALSE_WORDS:
             return False
         raise ValueError(
-            f"use_accuracy_compatible must be False, True, or one of " f"{list(ACCURACY_TARGETS)}; got {value!r}."
+            f"use_accuracy_compatible must be False, True, or one of "
+            f"{list(ACCURACY_TARGETS)}; got {value!r}."
         )
-    raise TypeError(f"use_accuracy_compatible must be a bool or str, got {type(value).__name__}.")
+    raise TypeError(
+        f"use_accuracy_compatible must be a bool or str, got {type(value).__name__}."
+    )
 
 
 def targets_hf(value: AccuracyTarget) -> bool:

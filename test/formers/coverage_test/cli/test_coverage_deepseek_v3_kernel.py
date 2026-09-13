@@ -58,7 +58,16 @@ _TRITON_FP8E4NV_AVAILABLE = _triton_supports_fp8e4nv()
 
 # Direct import to avoid __init__.py triggering workflow.py which requires AutoTokenizer
 _MODULE_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "..", "src", "paddlefleet", "cli", "train", "deepseek_v3_pretrain"
+    os.path.dirname(__file__),
+    "..",
+    "..",
+    "..",
+    "..",
+    "src",
+    "paddlefleet",
+    "cli",
+    "train",
+    "deepseek_v3_pretrain",
 )
 _MODULE_DIR = os.path.abspath(_MODULE_DIR)
 
@@ -111,7 +120,8 @@ class TestKernelModule(unittest.TestCase):
 
 @unittest.skipIf(not _TRITON_AVAILABLE, "Triton GPU driver not available")
 @unittest.skipIf(
-    not _TRITON_FP8E4NV_AVAILABLE, "Triton fp8e4nv not supported on this GPU architecture (requires sm89+)"
+    not _TRITON_FP8E4NV_AVAILABLE,
+    "Triton fp8e4nv not supported on this GPU architecture (requires sm89+)",
 )
 class TestActQuant(unittest.TestCase):
     """Test act_quant function."""
@@ -145,7 +155,8 @@ class TestActQuant(unittest.TestCase):
 
 @unittest.skipIf(not _TRITON_AVAILABLE, "Triton GPU driver not available")
 @unittest.skipIf(
-    not _TRITON_FP8E4NV_AVAILABLE, "Triton fp8e4nv not supported on this GPU architecture (requires sm89+)"
+    not _TRITON_FP8E4NV_AVAILABLE,
+    "Triton fp8e4nv not supported on this GPU architecture (requires sm89+)",
 )
 class TestWeightDequant(unittest.TestCase):
     """Test weight_dequant function."""

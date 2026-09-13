@@ -32,7 +32,9 @@ class TestSerialization(unittest.TestCase):
         self.assertEqual(result, "hello")
 
     def test_storage_type_to_dtype_to_map(self):
-        from paddlefleet.utils.serialization import _storage_type_to_dtype_to_map
+        from paddlefleet.utils.serialization import (
+            _storage_type_to_dtype_to_map,
+        )
 
         mapping = _storage_type_to_dtype_to_map()
         self.assertEqual(mapping["FloatStorage"].__name__, "float32")
@@ -103,7 +105,9 @@ class TestSerialization(unittest.TestCase):
     def test_rebuild_parameter_with_state(self):
         import numpy as np
 
-        from paddlefleet.utils.serialization import _rebuild_parameter_with_state
+        from paddlefleet.utils.serialization import (
+            _rebuild_parameter_with_state,
+        )
 
         data = np.array([1.0, 2.0, 3.0])
         result = _rebuild_parameter_with_state(data, False, [], None)

@@ -68,12 +68,21 @@ class InternLM2PretrainedModel(PretrainedModel):
         # Read config first (without instantiating) to decide the version,
         # then delegate to the real implementation class's from_pretrained.
         cfg_kwargs = {}
-        for k in ("download_hub", "cache_dir", "subfolder", "trust_remote_code"):
+        for k in (
+            "download_hub",
+            "cache_dir",
+            "subfolder",
+            "trust_remote_code",
+        ):
             if k in kwargs:
                 cfg_kwargs[k] = kwargs[k]
-        config = InternLM2Config.from_pretrained(pretrained_model_name_or_path, **cfg_kwargs)
+        config = InternLM2Config.from_pretrained(
+            pretrained_model_name_or_path, **cfg_kwargs
+        )
         impl_cls = _select_impl_cls(cls.__name__, config)
-        return impl_cls.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+        return impl_cls.from_pretrained(
+            pretrained_model_name_or_path, *args, **kwargs
+        )
 
     @classmethod
     def _gen_aoa_config(cls, config):

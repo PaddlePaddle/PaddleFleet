@@ -41,7 +41,9 @@ class TestDispatching(unittest.TestCase):
             paddle.randint(0, num_experts * capacity, [8]),
             paddle.randint(0, num_experts * capacity, [8]),
         ]
-        result = dispatching(x, dispatch_mask, scatter_index, num_experts, capacity)
+        result = dispatching(
+            x, dispatch_mask, scatter_index, num_experts, capacity
+        )
         self.assertEqual(result.shape, [num_experts * capacity, 4])
 
     def test_dispatching_with_tensor_scatter_index(self):
@@ -60,7 +62,9 @@ class TestDispatching(unittest.TestCase):
             ],
             axis=1,
         )
-        result = dispatching(x, dispatch_mask, scatter_index, num_experts, capacity)
+        result = dispatching(
+            x, dispatch_mask, scatter_index, num_experts, capacity
+        )
         self.assertEqual(result.shape, [num_experts * capacity, 4])
 
     def test_dispatching_output_dtype_matches_input(self):
@@ -75,7 +79,9 @@ class TestDispatching(unittest.TestCase):
             paddle.randint(0, num_experts * capacity, [8]),
             paddle.randint(0, num_experts * capacity, [8]),
         ]
-        result = dispatching(x, dispatch_mask, scatter_index, num_experts, capacity)
+        result = dispatching(
+            x, dispatch_mask, scatter_index, num_experts, capacity
+        )
         self.assertEqual(result.dtype, paddle.float32)
 
 

@@ -23,7 +23,10 @@ import unittest
 import paddle
 import paddle.nn.functional as F
 
-from paddlefleet.transformers.moe_gate_auto import MoEGateMixin, PretrainedMoEGate
+from paddlefleet.transformers.moe_gate_auto import (
+    MoEGateMixin,
+    PretrainedMoEGate,
+)
 
 
 class _MockConfig:
@@ -32,8 +35,12 @@ class _MockConfig:
     def __init__(self, **kwargs):
         self.scoring_func = kwargs.get("scoring_func", None)
         self.seq_length = kwargs.get("seq_length", 128)
-        self.moe_subbatch_token_num_before_dispatch = kwargs.get("moe_subbatch_token_num_before_dispatch", 0)
-        self.tensor_model_parallel_size = kwargs.get("tensor_model_parallel_size", 1)
+        self.moe_subbatch_token_num_before_dispatch = kwargs.get(
+            "moe_subbatch_token_num_before_dispatch", 0
+        )
+        self.tensor_model_parallel_size = kwargs.get(
+            "tensor_model_parallel_size", 1
+        )
         self.sequence_parallel = kwargs.get("sequence_parallel", False)
         self.seq_aux = kwargs.get("seq_aux", False)
 
@@ -88,7 +95,9 @@ class TestMoEGateMixinAutoGateScoreFunc(unittest.TestCase):
         gate = self._make_gate("unknown")
         logits = paddle.randn([4, 8], dtype="float32")
         scores = gate.gate_score_func(logits)
-        self.assertTrue(paddle.allclose(scores.sum(axis=-1), paddle.ones([4]), atol=1e-5))
+        self.assertTrue(
+            paddle.allclose(scores.sum(axis=-1), paddle.ones([4]), atol=1e-5)
+        )
 
 
 class TestMoEGateMixinAutoHelpers(unittest.TestCase):
@@ -145,7 +154,9 @@ class TestMoEGateMixinAutoHelpers(unittest.TestCase):
         gate = self._make_gate(num_experts=4)
         # Create a weight parameter for the gate
         gate.weight = paddle.create_parameter(
-            shape=[32, 4], dtype="float32", default_initializer=paddle.nn.initializer.Uniform()
+            shape=[32, 4],
+            dtype="float32",
+            default_initializer=paddle.nn.initializer.Uniform(),
         )
         loss = gate._cal_orthogonal_loss()
         self.assertEqual(loss.shape, [])
@@ -210,7 +221,9 @@ class TestPretrainedMoEGateAutoTopkGroupLimitedGreedy(unittest.TestCase):
             topk_group=2,
         )
         scores = paddle.randn([4, 8])
-        topk_weight, topk_idx = gate._topk_group_limited_greedy(scores, k=2, n_group=4, topk_group=2)
+        topk_weight, topk_idx = gate._topk_group_limited_greedy(
+            scores, k=2, n_group=4, topk_group=2
+        )
         self.assertEqual(topk_weight.shape, [4, 2])
         self.assertEqual(topk_idx.shape, [4, 2])
 
@@ -227,7 +240,9 @@ class TestPretrainedMoEGateAutoTop1Gating(unittest.TestCase):
             use_rts=False,
         )
         logits = paddle.randn([16, 8])
-        capacity, combine_weights, dispatch_mask, exp_counts, l_aux, l_zloss = gate.top1gating(logits)
+        capacity, combine_weights, dispatch_mask, exp_counts, l_aux, l_zloss = (
+            gate.top1gating(logits)
+        )
         self.assertIsInstance(capacity, int)
         self.assertTrue(capacity > 0)
         self.assertEqual(combine_weights.shape, [16, 8, capacity])
@@ -245,7 +260,9 @@ class TestPretrainedMoEGateAutoTop2Gating(unittest.TestCase):
             top2_2nd_expert_sampling=False,
         )
         logits = paddle.randn([16, 8])
-        capacity, combine_weights, dispatch_mask, exp_counts, l_aux, l_zloss = gate.top2gating(logits)
+        capacity, combine_weights, dispatch_mask, exp_counts, l_aux, l_zloss = (
+            gate.top2gating(logits)
+        )
         self.assertIsInstance(capacity, int)
         self.assertTrue(capacity > 0)
         self.assertEqual(combine_weights.shape, [16, 8, capacity])
@@ -264,7 +281,9 @@ class TestPretrainedMoEGateAutoTopkGating(unittest.TestCase):
             topk_method="greedy",
         )
         gates = paddle.randn([2, 16, 8])
-        capacity, combine_weights, dispatch_mask, exp_counts, l_aux, l_zloss = gate.topkgating(gates)
+        capacity, combine_weights, dispatch_mask, exp_counts, l_aux, l_zloss = (
+            gate.topkgating(gates)
+        )
         self.assertIsInstance(capacity, int)
 
     def test_topkgating_with_norm_topk_prob(self):
@@ -278,7 +297,9 @@ class TestPretrainedMoEGateAutoTopkGating(unittest.TestCase):
             norm_topk_prob=True,
         )
         gates = paddle.randn([2, 16, 8])
-        capacity, combine_weights, dispatch_mask, exp_counts, l_aux, l_zloss = gate.topkgating(gates)
+        capacity, combine_weights, dispatch_mask, exp_counts, l_aux, l_zloss = (
+            gate.topkgating(gates)
+        )
         self.assertIsInstance(capacity, int)
 
     def test_topkgating_group_limited_greedy(self):
@@ -293,7 +314,9 @@ class TestPretrainedMoEGateAutoTopkGating(unittest.TestCase):
             topk_group=2,
         )
         gates = paddle.randn([2, 16, 8])
-        capacity, combine_weights, dispatch_mask, exp_counts, l_aux, l_zloss = gate.topkgating(gates)
+        capacity, combine_weights, dispatch_mask, exp_counts, l_aux, l_zloss = (
+            gate.topkgating(gates)
+        )
         self.assertIsInstance(capacity, int)
 
 

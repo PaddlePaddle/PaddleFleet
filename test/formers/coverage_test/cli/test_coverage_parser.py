@@ -49,7 +49,9 @@ class TestReadArgs(unittest.TestCase):
         from paddlefleet.cli.hparams.parser import read_args
 
         yaml_content = "model_name_or_path: /tmp/model\nstage: SFT\n"
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
             f.write(yaml_content)
             yaml_path = f.name
 
@@ -67,7 +69,9 @@ class TestReadArgs(unittest.TestCase):
         from paddlefleet.cli.hparams.parser import read_args
 
         yaml_content = "model_name_or_path: /tmp/model\n"
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False) as f:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yml", delete=False
+        ) as f:
             f.write(yaml_content)
             yml_path = f.name
 
@@ -84,7 +88,9 @@ class TestReadArgs(unittest.TestCase):
         from paddlefleet.cli.hparams.parser import read_args
 
         config = {"model_name_or_path": "/tmp/model", "stage": "SFT"}
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False
+        ) as f:
             json.dump(config, f)
             json_path = f.name
 
@@ -100,7 +106,9 @@ class TestReadArgs(unittest.TestCase):
         """Test read_args raises ValueError for .py config files."""
         from paddlefleet.cli.hparams.parser import read_args
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False
+        ) as f:
             f.write("# config\n")
             py_path = f.name
 
@@ -116,7 +124,9 @@ class TestReadArgs(unittest.TestCase):
         """Test read_args returns remaining argv as list for non-config files."""
         from paddlefleet.cli.hparams.parser import read_args
 
-        with patch("sys.argv", ["prog", "train", "--model_name_or_path", "/tmp/model"]):
+        with patch(
+            "sys.argv", ["prog", "train", "--model_name_or_path", "/tmp/model"]
+        ):
             result = read_args()
             self.assertIsInstance(result, list)
             self.assertEqual(result, ["--model_name_or_path", "/tmp/model"])
@@ -126,7 +136,9 @@ class TestReadArgs(unittest.TestCase):
         from paddlefleet.cli.hparams.parser import read_args
 
         yaml_content = "stage: SFT\n"
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", delete=False
+        ) as f:
             f.write(yaml_content)
             yaml_path = f.name
 
@@ -148,7 +160,9 @@ class TestLoadCustomTemplate(unittest.TestCase):
         from paddlefleet.cli.hparams.parser import _load_custom_template
 
         template_code = "custom_value = 42\n"
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False
+        ) as f:
             f.write(template_code)
             template_path = f.name
 
@@ -177,10 +191,16 @@ class TestParseArgs(unittest.TestCase):
         from paddlefleet.cli.hparams.parser import _parse_args
 
         mock_parser = MagicMock()
-        mock_parser.parse_dict.return_value = ([MagicMock()], {"unknown_key": "value"})
+        mock_parser.parse_dict.return_value = (
+            [MagicMock()],
+            {"unknown_key": "value"},
+        )
 
         with self.assertRaises(ValueError) as ctx:
-            _parse_args(mock_parser, {"model_name_or_path": "/tmp", "unknown_key": "value"})
+            _parse_args(
+                mock_parser,
+                {"model_name_or_path": "/tmp", "unknown_key": "value"},
+            )
         self.assertIn("not used by the PdArgumentParser", str(ctx.exception))
 
     @patch("paddlefleet.cli.hparams.parser.is_env_enabled", return_value=False)
@@ -189,11 +209,16 @@ class TestParseArgs(unittest.TestCase):
         from paddlefleet.cli.hparams.parser import _parse_args
 
         mock_parser = MagicMock()
-        mock_parser.parse_args_into_dataclasses.return_value = ([MagicMock()], ["--unknown_arg"])
+        mock_parser.parse_args_into_dataclasses.return_value = (
+            [MagicMock()],
+            ["--unknown_arg"],
+        )
         mock_parser.format_help.return_value = "help text"
 
         with self.assertRaises(ValueError) as ctx:
-            _parse_args(mock_parser, ["--model_name_or_path", "/tmp", "--unknown_arg"])
+            _parse_args(
+                mock_parser, ["--model_name_or_path", "/tmp", "--unknown_arg"]
+            )
         self.assertIn("not used by the PdArgumentParser", str(ctx.exception))
 
     @patch("paddlefleet.cli.hparams.parser.is_env_enabled", return_value=False)
@@ -203,9 +228,16 @@ class TestParseArgs(unittest.TestCase):
 
         mock_parser = MagicMock()
         mock_parsed = MagicMock()
-        mock_parser.parse_args_into_dataclasses.return_value = (mock_parsed, ["--unknown_arg"])
+        mock_parser.parse_args_into_dataclasses.return_value = (
+            mock_parsed,
+            ["--unknown_arg"],
+        )
 
-        result = _parse_args(mock_parser, ["--model_name_or_path", "/tmp", "--unknown_arg"], allow_extra_keys=True)
+        result = _parse_args(
+            mock_parser,
+            ["--model_name_or_path", "/tmp", "--unknown_arg"],
+            allow_extra_keys=True,
+        )
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0], mock_parsed)
 

@@ -60,16 +60,23 @@ class TestReshardCombineWeightForward(unittest.TestCase):
 
         ctx = MagicMock()
         # Create input with some zeros (mask positions)
-        x = paddle.to_tensor([[1.0, 2.0], [0.0, 0.0], [3.0, 4.0]], dtype="float32")
+        x = paddle.to_tensor(
+            [[1.0, 2.0], [0.0, 0.0], [3.0, 4.0]], dtype="float32"
+        )
 
-        mock_result = paddle.to_tensor([[1.0, 2.0], [3.0, 4.0]], dtype="float32")
+        mock_result = paddle.to_tensor(
+            [[1.0, 2.0], [3.0, 4.0]], dtype="float32"
+        )
         with patch(
-            "paddlefleet.nn.moe.moe_allgather_layer.reduce_scatter_group", return_value=mock_result
+            "paddlefleet.nn.moe.moe_allgather_layer.reduce_scatter_group",
+            return_value=mock_result,
         ) as mock_rs:
             ReshardCombineWeight.forward(ctx, x, group=None)
             mock_rs.assert_called_once_with(x, group=None)
             # Check mask was computed
-            expected_mask = paddle.to_tensor([[False, False], [True, True], [False, False]])
+            expected_mask = paddle.to_tensor(
+                [[False, False], [True, True], [False, False]]
+            )
             np.testing.assert_allclose(ctx.mask.numpy(), expected_mask.numpy())
             self.assertIsNone(ctx.group)
 
@@ -82,7 +89,10 @@ class TestReshardCombineWeightForward(unittest.TestCase):
         mock_group = MagicMock()
         mock_result = paddle.randn([4, 8], dtype="float32")
 
-        with patch("paddlefleet.nn.moe.moe_allgather_layer.reduce_scatter_group", return_value=mock_result):
+        with patch(
+            "paddlefleet.nn.moe.moe_allgather_layer.reduce_scatter_group",
+            return_value=mock_result,
+        ):
             ReshardCombineWeight.forward(ctx, x, group=mock_group)
             self.assertIs(ctx.group, mock_group)
 
@@ -94,7 +104,10 @@ class TestReshardCombineWeightForward(unittest.TestCase):
         x = paddle.randn([4, 8], dtype="float32")
         mock_result = paddle.randn([2, 8], dtype="float32")
 
-        with patch("paddlefleet.nn.moe.moe_allgather_layer.reduce_scatter_group", return_value=mock_result):
+        with patch(
+            "paddlefleet.nn.moe.moe_allgather_layer.reduce_scatter_group",
+            return_value=mock_result,
+        ):
             result = ReshardCombineWeight.forward(ctx, x, group=None)
             np.testing.assert_allclose(result.numpy(), mock_result.numpy())
 
@@ -106,14 +119,20 @@ class TestReshardCombineWeightForward(unittest.TestCase):
         # All zeros
         x_all_zeros = paddle.zeros([3, 4], dtype="float32")
         mock_result = paddle.randn([3, 4], dtype="float32")
-        with patch("paddlefleet.nn.moe.moe_allgather_layer.reduce_scatter_group", return_value=mock_result):
+        with patch(
+            "paddlefleet.nn.moe.moe_allgather_layer.reduce_scatter_group",
+            return_value=mock_result,
+        ):
             ReshardCombineWeight.forward(ctx, x_all_zeros, group=None)
             self.assertTrue(ctx.mask.numpy().all())
 
         # No zeros
         ctx2 = MagicMock()
         x_no_zeros = paddle.ones([3, 4], dtype="float32") * 2.0
-        with patch("paddlefleet.nn.moe.moe_allgather_layer.reduce_scatter_group", return_value=mock_result):
+        with patch(
+            "paddlefleet.nn.moe.moe_allgather_layer.reduce_scatter_group",
+            return_value=mock_result,
+        ):
             ReshardCombineWeight.forward(ctx2, x_no_zeros, group=None)
             self.assertFalse(ctx2.mask.numpy().any())
 
@@ -127,12 +146,17 @@ class TestReshardCombineWeightBackward(unittest.TestCase):
 
         ctx = MagicMock()
         ctx.group = None
-        ctx.mask = paddle.to_tensor([[False, True], [True, False]], dtype="bool")
+        ctx.mask = paddle.to_tensor(
+            [[False, True], [True, False]], dtype="bool"
+        )
         grad = paddle.randn([2, 2], dtype="float32")
         # gathered must have same shape as mask for masked_fill to work
         mock_gathered = paddle.randn([2, 2], dtype="float32")
 
-        with patch("paddlefleet.nn.moe.moe_allgather_layer.all_gather_group", return_value=mock_gathered) as mock_ag:
+        with patch(
+            "paddlefleet.nn.moe.moe_allgather_layer.all_gather_group",
+            return_value=mock_gathered,
+        ) as mock_ag:
             ReshardCombineWeight.backward(ctx, grad)
             mock_ag.assert_called_once_with(grad, group=None)
 
@@ -142,14 +166,21 @@ class TestReshardCombineWeightBackward(unittest.TestCase):
 
         ctx = MagicMock()
         ctx.group = None
-        mask = paddle.to_tensor([[False, True], [True, False], [False, False]], dtype="bool")
+        mask = paddle.to_tensor(
+            [[False, True], [True, False], [False, False]], dtype="bool"
+        )
         ctx.mask = mask
 
         gathered = paddle.ones([3, 2], dtype="float32")
         gathered.clone()
 
-        with patch("paddlefleet.nn.moe.moe_allgather_layer.all_gather_group", return_value=gathered):
-            result = ReshardCombineWeight.backward(ctx, paddle.randn([3, 2], dtype="float32"))
+        with patch(
+            "paddlefleet.nn.moe.moe_allgather_layer.all_gather_group",
+            return_value=gathered,
+        ):
+            result = ReshardCombineWeight.backward(
+                ctx, paddle.randn([3, 2], dtype="float32")
+            )
 
         # Masked positions should be zero
         self.assertEqual(result[mask].numpy()[0], 0.0)
@@ -165,7 +196,8 @@ class TestReshardCombineWeightBackward(unittest.TestCase):
         grad = paddle.randn([2, 2], dtype="float32")
 
         with patch(
-            "paddlefleet.nn.moe.moe_allgather_layer.all_gather_group", return_value=paddle.randn([2, 2])
+            "paddlefleet.nn.moe.moe_allgather_layer.all_gather_group",
+            return_value=paddle.randn([2, 2]),
         ) as mock_ag:
             ReshardCombineWeight.backward(ctx, grad)
             mock_ag.assert_called_once_with(grad, group=mock_group)
@@ -174,9 +206,17 @@ class TestReshardCombineWeightBackward(unittest.TestCase):
 class TestMOEAllGatherLayerV2Init(unittest.TestCase):
     """Tests for MOEAllGatherLayerV2 initialization."""
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_init_basic(self, mock_rank, mock_ws):
         """Test basic initialization of MOEAllGatherLayerV2."""
         from paddlefleet.nn.moe.moe_allgather_layer import MOEAllGatherLayerV2
@@ -213,9 +253,17 @@ class TestMOEAllGatherLayerV2Init(unittest.TestCase):
         self.assertIsNone(layer.send_rank)
         self.assertIsNone(layer.local_expert_id)
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_init_custom_params(self, mock_rank, mock_ws):
         """Test initialization with custom parameters."""
         from paddlefleet.nn.moe.moe_allgather_layer import MOEAllGatherLayerV2
@@ -253,9 +301,17 @@ class TestMOEAllGatherLayerV2Init(unittest.TestCase):
         self.assertFalse(layer.use_expert_out_alltoall)
         self.assertEqual(layer.dense_token_type, 5)
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_init_multimodal_experts_tuple(self, mock_rank, mock_ws):
         """Test multimodal_experts detection with tuple of expert counts."""
         from paddlefleet.nn.moe.moe_allgather_layer import MOEAllGatherLayerV2
@@ -287,9 +343,17 @@ class TestMOEAllGatherLayerV2Init(unittest.TestCase):
         )
         self.assertTrue(layer.multimodal_experts)
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_init_multimodal_experts_single(self, mock_rank, mock_ws):
         """Test multimodal_experts is False with single-element list."""
         from paddlefleet.nn.moe.moe_allgather_layer import MOEAllGatherLayerV2
@@ -321,9 +385,17 @@ class TestMOEAllGatherLayerV2Init(unittest.TestCase):
         )
         self.assertFalse(layer.multimodal_experts)
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_init_zero_tensor_dtype(self, mock_rank, mock_ws):
         """Test that self.zero tensor has correct dtype."""
         from paddlefleet.nn.moe.moe_allgather_layer import MOEAllGatherLayerV2
@@ -347,7 +419,9 @@ class TestMOEAllGatherLayerV2Init(unittest.TestCase):
             p.expert = False
             p.no_sync = False
 
-        layer = MOEAllGatherLayerV2(gate=mock_gate, experts=experts, layer_idx=0)
+        layer = MOEAllGatherLayerV2(
+            gate=mock_gate, experts=experts, layer_idx=0
+        )
         self.assertEqual(layer.zero.dtype, paddle.float32)
 
 
@@ -383,10 +457,20 @@ class TestMOEAllGatherLayerV2ForwardExperts(unittest.TestCase):
         def forward(self, x):
             return self.down_proj(x)
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
-    def _make_layer(self, mock_rank, mock_ws, multimodal=False, moe_num_experts=None):
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
+    def _make_layer(
+        self, mock_rank, mock_ws, multimodal=False, moe_num_experts=None
+    ):
         """Helper to create an MOEAllGatherLayerV2 for forward_experts tests."""
         from paddlefleet.nn.moe.moe_allgather_layer import MOEAllGatherLayerV2
 
@@ -462,9 +546,17 @@ class TestMOEAllGatherLayerV2ForwardExperts(unittest.TestCase):
 class TestMOEAllGatherLayerV2CalcRouterLoss(unittest.TestCase):
     """Tests for calc_router_loss_and_logging of MOEAllGatherLayerV2."""
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_calc_router_loss_llm_path(self, mock_rank, mock_ws):
         """Test calc_router_loss_and_logging in LLM path (no token_type_ids)."""
         from paddlefleet.nn.moe.moe_allgather_layer import MOEAllGatherLayerV2
@@ -488,7 +580,9 @@ class TestMOEAllGatherLayerV2CalcRouterLoss(unittest.TestCase):
             p.expert = False
             p.no_sync = False
 
-        layer = MOEAllGatherLayerV2(gate=mock_gate, experts=experts, layer_idx=0)
+        layer = MOEAllGatherLayerV2(
+            gate=mock_gate, experts=experts, layer_idx=0
+        )
 
         router_loss = paddle.zeros([1], dtype="float32")
         gate_logits = paddle.randn([4, 4], dtype="float32")
@@ -496,7 +590,9 @@ class TestMOEAllGatherLayerV2CalcRouterLoss(unittest.TestCase):
         combine_weights = paddle.randn([4, 2], dtype="float32")
         dispatch_mask = paddle.randn([4], dtype="float32")
 
-        with patch.object(layer, "_calc_router_loss", return_value=0.1) as mock_calc:
+        with patch.object(
+            layer, "_calc_router_loss", return_value=0.1
+        ) as mock_calc:
             result = layer.calc_router_loss_and_logging(
                 router_loss,
                 gate_logits,
@@ -515,9 +611,17 @@ class TestMOEAllGatherLayerV2CalcRouterLoss(unittest.TestCase):
 class TestMOEAllGatherLayerV2FusedGateLogitsProcessFused(unittest.TestCase):
     """Tests for fused_gate_logits_process_fused method."""
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def _make_layer(self, mock_rank, mock_ws):
         """Helper to create MOEAllGatherLayerV2 for gate logits tests."""
         from paddlefleet.nn.moe.moe_allgather_layer import MOEAllGatherLayerV2
@@ -558,7 +662,9 @@ class TestMOEAllGatherLayerV2FusedGateLogitsProcessFused(unittest.TestCase):
         gate_logits_lm = paddle.randn([4, 8], dtype="float32")
 
         result = layer.fused_gate_logits_process_fused(gate_logits_lm)
-        self.assertEqual(len(result), 3)  # (weight_and_expert_id, prob_flat, None)
+        self.assertEqual(
+            len(result), 3
+        )  # (weight_and_expert_id, prob_flat, None)
         self.assertIsNone(result[2])  # gate_prob_mm should be None
 
     def test_fused_gate_logits_process_fused_with_mm_logits(self):
@@ -572,7 +678,9 @@ class TestMOEAllGatherLayerV2FusedGateLogitsProcessFused(unittest.TestCase):
             "paddlefleet.nn.moe.moe_allgather_layer.expand_modality_expert_id",
             return_value=paddle.randint(0, 4, [4, 2]),
         ):
-            result = layer.fused_gate_logits_process_fused(gate_logits_lm, gate_logits_mm, token_type_ids)
+            result = layer.fused_gate_logits_process_fused(
+                gate_logits_lm, gate_logits_mm, token_type_ids
+            )
             self.assertEqual(len(result), 3)
             self.assertIsNotNone(result[2])  # gate_prob_mm should not be None
 

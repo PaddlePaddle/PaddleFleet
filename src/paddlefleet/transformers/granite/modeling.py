@@ -28,7 +28,11 @@ from ...nn.embedding import Embedding as GeneralEmbedding
 from ...nn.linear import Linear as GeneralLinear
 from ...nn.lm_head import LMHead as GeneralLMHead
 from ...nn.mlp import MLP
-from ...nn.pp_model import EmbeddingPipe, GeneralModelForCausalLMPipe, LMHeadPipe
+from ...nn.pp_model import (
+    EmbeddingPipe,
+    GeneralModelForCausalLMPipe,
+    LMHeadPipe,
+)
 from ..cache_utils import Cache, DynamicCache
 from ..masking_utils import create_causal_mask_and_row_indices
 from ..model_outputs import BaseModelOutputWithPast, CausalLMOutputWithPast
@@ -63,8 +67,12 @@ def repeat_kv(hidden_states: paddle.Tensor, n_rep: int) -> paddle.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand([batch, num_key_value_heads, n_rep, slen, head_dim])
-    return hidden_states.reshape([batch, num_key_value_heads * n_rep, slen, head_dim])
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        [batch, num_key_value_heads, n_rep, slen, head_dim]
+    )
+    return hidden_states.reshape(
+        [batch, num_key_value_heads * n_rep, slen, head_dim]
+    )
 
 
 class GraniteRMSNorm(nn.Layer):
@@ -80,7 +88,9 @@ class GraniteRMSNorm(nn.Layer):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.astype("float32")
         variance = hidden_states.pow(2).mean(axis=-1, keepdim=True)
-        hidden_states = hidden_states * paddle.rsqrt(variance + self.variance_epsilon)
+        hidden_states = hidden_states * paddle.rsqrt(
+            variance + self.variance_epsilon
+        )
         return self.weight * hidden_states.astype(input_dtype)
 
 
@@ -91,7 +101,9 @@ class GraniteRotaryEmbedding(nn.Layer):
         self.original_max_seq_len = config.max_position_embeddings
         self.config = config
         rope_parameters = config.rope_parameters
-        self.rope_type = rope_parameters.get("rope_type", rope_parameters.get("type", "default"))
+        self.rope_type = rope_parameters.get(
+            "rope_type", rope_parameters.get("type", "default")
+        )
         rope_init_fn = self.compute_default_rope_parameters
         if self.rope_type != "default":
             rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_type]
@@ -107,16 +119,35 @@ class GraniteRotaryEmbedding(nn.Layer):
     ) -> tuple[paddle.Tensor, float]:
         del seq_len
         base = config.rope_parameters["rope_theta"]
-        dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
-        inv_freq = 1.0 / (base ** (paddle.arange(0, dim, 2, dtype=paddle.int64).astype("float32").to(device) / dim))
+        dim = (
+            getattr(config, "head_dim", None)
+            or config.hidden_size // config.num_attention_heads
+        )
+        inv_freq = 1.0 / (
+            base
+            ** (
+                paddle.arange(0, dim, 2, dtype=paddle.int64)
+                .astype("float32")
+                .to(device)
+                / dim
+            )
+        )
         return inv_freq, 1.0
 
     @dynamic_rope_update
-    def forward(self, x: paddle.Tensor, position_ids: paddle.Tensor) -> Tuple[paddle.Tensor, paddle.Tensor]:
+    def forward(
+        self, x: paddle.Tensor, position_ids: paddle.Tensor
+    ) -> Tuple[paddle.Tensor, paddle.Tensor]:
         with paddle.amp.auto_cast(enable=False):
-            inv_freq_expanded = self.inv_freq[None, :, None].astype("float32").expand([position_ids.shape[0], -1, 1])
+            inv_freq_expanded = (
+                self.inv_freq[None, :, None]
+                .astype("float32")
+                .expand([position_ids.shape[0], -1, 1])
+            )
             position_ids_expanded = position_ids[:, None, :].astype("float32")
-            freqs = (inv_freq_expanded @ position_ids_expanded).transpose(perm=[0, 2, 1])
+            freqs = (inv_freq_expanded @ position_ids_expanded).transpose(
+                perm=[0, 2, 1]
+            )
             emb = paddle.concat((freqs, freqs), axis=-1)
             cos = emb.cos() * self.attention_scaling
             sin = emb.sin() * self.attention_scaling
@@ -133,8 +164,12 @@ class GraniteAttention(nn.Layer):
         self.num_key_value_heads = config.num_key_value_heads
         if config.tensor_model_parallel_size > 1:
             self.num_heads = self.num_heads // config.tensor_model_parallel_size
-            self.num_key_value_heads = self.num_key_value_heads // config.tensor_model_parallel_size
-        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+            self.num_key_value_heads = (
+                self.num_key_value_heads // config.tensor_model_parallel_size
+            )
+        self.num_key_value_groups = (
+            config.num_attention_heads // config.num_key_value_heads
+        )
         self.scaling = config.attention_multiplier
         self.attention_dropout = config.attention_dropout
 
@@ -198,13 +233,24 @@ class GraniteAttention(nn.Layer):
         key = key.transpose(1, 2)
         value = value.transpose(1, 2)
 
-        if attn_mask_startend_row_indices is not None and attn_mask_startend_row_indices.ndim == 3:
-            attn_mask_startend_row_indices = attn_mask_startend_row_indices.unsqueeze(-1)
+        if (
+            attn_mask_startend_row_indices is not None
+            and attn_mask_startend_row_indices.ndim == 3
+        ):
+            attn_mask_startend_row_indices = (
+                attn_mask_startend_row_indices.unsqueeze(-1)
+            )
 
         is_causal = query.shape[1] > 1
-        if attn_mask_startend_row_indices is not None and attn_mask_startend_row_indices.shape[-1] == 1:
+        if (
+            attn_mask_startend_row_indices is not None
+            and attn_mask_startend_row_indices.shape[-1] == 1
+        ):
             is_causal = True
-        if attn_mask_startend_row_indices is not None and attn_mask_startend_row_indices.shape[-1] == 4:
+        if (
+            attn_mask_startend_row_indices is not None
+            and attn_mask_startend_row_indices.shape[-1] == 4
+        ):
             is_causal = False
 
         attn_output = flashmask_attention(
@@ -235,26 +281,40 @@ class GraniteAttention(nn.Layer):
         del use_cache, kwargs
         if self.config.sequence_parallel:
             seq_len = self.config.max_sequence_length
-            batch_size = hidden_states.shape[0] * self.config.tensor_model_parallel_size // seq_len
+            batch_size = (
+                hidden_states.shape[0]
+                * self.config.tensor_model_parallel_size
+                // seq_len
+            )
             input_shape = (batch_size, seq_len)
         else:
             input_shape = hidden_states.shape[:-1]
 
         query_states = (
-            self.q_proj(hidden_states).reshape([*input_shape, self.num_heads, self.head_dim]).transpose(1, 2)
+            self.q_proj(hidden_states)
+            .reshape([*input_shape, self.num_heads, self.head_dim])
+            .transpose(1, 2)
         )
         key_states = (
-            self.k_proj(hidden_states).reshape([*input_shape, self.num_key_value_heads, self.head_dim]).transpose(1, 2)
+            self.k_proj(hidden_states)
+            .reshape([*input_shape, self.num_key_value_heads, self.head_dim])
+            .transpose(1, 2)
         )
         value_states = (
-            self.v_proj(hidden_states).reshape([*input_shape, self.num_key_value_heads, self.head_dim]).transpose(1, 2)
+            self.v_proj(hidden_states)
+            .reshape([*input_shape, self.num_key_value_heads, self.head_dim])
+            .transpose(1, 2)
         )
 
         cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin
+        )
 
         if past_key_values is not None:
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+            key_states, value_states = past_key_values.update(
+                key_states, value_states, self.layer_idx
+            )
 
         dropout = 0.0 if not self.training else self.attention_dropout
         if self.config._attn_implementation == "flashmask":
@@ -267,7 +327,9 @@ class GraniteAttention(nn.Layer):
                 scaling=self.scaling,
             )
         else:
-            attention_interface: Callable = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+            attention_interface: Callable = ALL_ATTENTION_FUNCTIONS[
+                self.config._attn_implementation
+            ]
             attn_output, attn_weights = attention_interface(
                 self,
                 query=query_states,
@@ -289,8 +351,12 @@ class GraniteDecoderLayer(nn.Layer):
         super().__init__()
         self.self_attn = GraniteAttention(config=config, layer_idx=layer_idx)
         self.mlp = MLP(config, has_bias=config.mlp_bias)
-        self.input_layernorm = GraniteRMSNorm(config.hidden_size, config.rms_norm_eps)
-        self.post_attention_layernorm = GraniteRMSNorm(config.hidden_size, config.rms_norm_eps)
+        self.input_layernorm = GraniteRMSNorm(
+            config.hidden_size, config.rms_norm_eps
+        )
+        self.post_attention_layernorm = GraniteRMSNorm(
+            config.hidden_size, config.rms_norm_eps
+        )
         self.residual_multiplier = config.residual_multiplier
 
     def forward(
@@ -299,7 +365,9 @@ class GraniteDecoderLayer(nn.Layer):
         attention_mask: Optional[paddle.Tensor] = None,
         attn_mask_startend_row_indices: Optional[paddle.Tensor] = None,
         position_ids: Optional[paddle.Tensor] = None,
-        position_embeddings: Optional[Tuple[paddle.Tensor, paddle.Tensor]] = None,
+        position_embeddings: Optional[
+            Tuple[paddle.Tensor, paddle.Tensor]
+        ] = None,
         past_key_values: Optional[Cache] = None,
         use_cache: bool = False,
     ) -> Union[Tuple[paddle.Tensor], paddle.Tensor]:
@@ -330,10 +398,20 @@ class GranitePretrainedModel(PretrainedModel):
     _skip_keys_device_placement = ["past_key_values"]
     _supports_flash_attn = True
     _supports_sdpa = True
-    transpose_weight_keys = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    transpose_weight_keys = [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
 
     @classmethod
-    def _get_tensor_parallel_mappings(cls, config: GraniteConfig, is_split=True):
+    def _get_tensor_parallel_mappings(
+        cls, config: GraniteConfig, is_split=True
+    ):
         from ..conversion_utils import split_or_merge_func
 
         fn = split_or_merge_func(
@@ -350,30 +428,60 @@ class GranitePretrainedModel(PretrainedModel):
 
         for layer_idx in range(config.num_hidden_layers):
             layer_prefix = f"layers.{layer_idx}"
-            actions[f"{layer_prefix}.self_attn.q_proj.weight"] = partial(fn, is_column=True)
-            actions[f"{layer_prefix}.self_attn.k_proj.weight"] = partial(fn, is_column=True)
-            actions[f"{layer_prefix}.self_attn.v_proj.weight"] = partial(fn, is_column=True)
-            actions[f"{layer_prefix}.self_attn.o_proj.weight"] = partial(fn, is_column=False)
-            actions[f"{layer_prefix}.mlp.gate_proj.weight"] = partial(fn, is_column=True)
-            actions[f"{layer_prefix}.mlp.up_proj.weight"] = partial(fn, is_column=True)
-            actions[f"{layer_prefix}.mlp.down_proj.weight"] = partial(fn, is_column=False)
+            actions[f"{layer_prefix}.self_attn.q_proj.weight"] = partial(
+                fn, is_column=True
+            )
+            actions[f"{layer_prefix}.self_attn.k_proj.weight"] = partial(
+                fn, is_column=True
+            )
+            actions[f"{layer_prefix}.self_attn.v_proj.weight"] = partial(
+                fn, is_column=True
+            )
+            actions[f"{layer_prefix}.self_attn.o_proj.weight"] = partial(
+                fn, is_column=False
+            )
+            actions[f"{layer_prefix}.mlp.gate_proj.weight"] = partial(
+                fn, is_column=True
+            )
+            actions[f"{layer_prefix}.mlp.up_proj.weight"] = partial(
+                fn, is_column=True
+            )
+            actions[f"{layer_prefix}.mlp.down_proj.weight"] = partial(
+                fn, is_column=False
+            )
 
             if config.attention_bias:
-                actions[f"{layer_prefix}.self_attn.q_proj.bias"] = partial(fn, is_column=True)
-                actions[f"{layer_prefix}.self_attn.k_proj.bias"] = partial(fn, is_column=True)
-                actions[f"{layer_prefix}.self_attn.v_proj.bias"] = partial(fn, is_column=True)
-                actions[f"{layer_prefix}.self_attn.o_proj.bias"] = partial(fn, is_column=False)
+                actions[f"{layer_prefix}.self_attn.q_proj.bias"] = partial(
+                    fn, is_column=True
+                )
+                actions[f"{layer_prefix}.self_attn.k_proj.bias"] = partial(
+                    fn, is_column=True
+                )
+                actions[f"{layer_prefix}.self_attn.v_proj.bias"] = partial(
+                    fn, is_column=True
+                )
+                actions[f"{layer_prefix}.self_attn.o_proj.bias"] = partial(
+                    fn, is_column=False
+                )
 
             if config.mlp_bias:
-                actions[f"{layer_prefix}.mlp.gate_proj.bias"] = partial(fn, is_column=True)
-                actions[f"{layer_prefix}.mlp.up_proj.bias"] = partial(fn, is_column=True)
-                actions[f"{layer_prefix}.mlp.down_proj.bias"] = partial(fn, is_column=False)
+                actions[f"{layer_prefix}.mlp.gate_proj.bias"] = partial(
+                    fn, is_column=True
+                )
+                actions[f"{layer_prefix}.mlp.up_proj.bias"] = partial(
+                    fn, is_column=True
+                )
+                actions[f"{layer_prefix}.mlp.down_proj.bias"] = partial(
+                    fn, is_column=False
+                )
 
         return actions
 
     @classmethod
     def _gen_aoa_config(cls, config: GraniteConfig):
-        model_prefix = cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        model_prefix = (
+            cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        )
         aoa_statements = [
             f"model.embed_tokens.weight -> {model_prefix}embed_tokens.weight",
             f"model.norm.weight -> {model_prefix}norm.weight",
@@ -408,14 +516,18 @@ class GranitePretrainedModel(PretrainedModel):
             )
         if cls != cls.base_model_class:
             if config.tie_word_embeddings:
-                aoa_statements.append("model.embed_tokens.weight -> lm_head.weight")
+                aoa_statements.append(
+                    "model.embed_tokens.weight -> lm_head.weight"
+                )
             else:
                 aoa_statements.append("lm_head.weight -> lm_head.weight")
         return {"aoa_statements": aoa_statements}
 
     @classmethod
     def _gen_inv_aoa_config(cls, config: GraniteConfig):
-        model_prefix = cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        model_prefix = (
+            cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        )
         aoa_statements = [
             f"{model_prefix}embed_tokens.weight -> model.embed_tokens.weight",
             f"{model_prefix}norm.weight -> model.norm.weight",
@@ -466,7 +578,10 @@ class GraniteModel(GranitePretrainedModel):
             padding_idx=config.pad_token_id,
         )
         self.layers = nn.LayerList(
-            [GraniteDecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [
+                GraniteDecoderLayer(config, layer_idx)
+                for layer_idx in range(config.num_hidden_layers)
+            ]
         )
         self.norm = GraniteRMSNorm(config.hidden_size, config.rms_norm_eps)
         self.rotary_emb = GraniteRotaryEmbedding(config=config)
@@ -484,20 +599,34 @@ class GraniteModel(GranitePretrainedModel):
         output_hidden_states: Optional[bool] = None,
         attn_mask_startend_row_indices: Optional[paddle.Tensor] = None,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        use_cache = (
+            use_cache if use_cache is not None else self.config.use_cache
+        )
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
 
         if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time.")
+            raise ValueError(
+                "You cannot specify both input_ids and inputs_embeds at the same time."
+            )
         if input_ids is None and inputs_embeds is None:
-            raise ValueError("You have to specify either input_ids or inputs_embeds.")
+            raise ValueError(
+                "You have to specify either input_ids or inputs_embeds."
+            )
 
         if inputs_embeds is None:
             batch_size, seq_length = input_ids.shape
-            inputs_embeds = self.embed_tokens(input_ids).astype(self.embed_tokens.weight.dtype)
+            inputs_embeds = self.embed_tokens(input_ids).astype(
+                self.embed_tokens.weight.dtype
+            )
         else:
             batch_size, seq_length = inputs_embeds.shape[:2]
 
@@ -510,9 +639,15 @@ class GraniteModel(GranitePretrainedModel):
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
 
-        cache_length = past_key_values.get_seq_length() if past_key_values is not None else 0
+        cache_length = (
+            past_key_values.get_seq_length()
+            if past_key_values is not None
+            else 0
+        )
         if position_ids is None:
-            position_ids = paddle.arange(cache_length, cache_length + seq_length, dtype="int64").unsqueeze(0)
+            position_ids = paddle.arange(
+                cache_length, cache_length + seq_length, dtype="int64"
+            ).unsqueeze(0)
             position_ids = position_ids.expand([batch_size, seq_length])
 
         mask_kwargs = {
@@ -525,10 +660,14 @@ class GraniteModel(GranitePretrainedModel):
             "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
             "prepare_decoder_attention_mask": self._prepare_decoder_attention_mask,
         }
-        causal_mask, attn_mask_startend_row_indices = create_causal_mask_and_row_indices(**mask_kwargs)
+        causal_mask, attn_mask_startend_row_indices = (
+            create_causal_mask_and_row_indices(**mask_kwargs)
+        )
 
         hidden_states = inputs_embeds
-        position_embeddings = self.rotary_emb(hidden_states, position_ids=position_ids)
+        position_embeddings = self.rotary_emb(
+            hidden_states, position_ids=position_ids
+        )
         all_hidden_states = [] if output_hidden_states else None
 
         for decoder_layer in self.layers:
@@ -543,7 +682,11 @@ class GraniteModel(GranitePretrainedModel):
                 past_key_values=past_key_values,
                 use_cache=use_cache,
             )
-            hidden_states = layer_outputs[0] if isinstance(layer_outputs, (tuple, list)) else layer_outputs
+            hidden_states = (
+                layer_outputs[0]
+                if isinstance(layer_outputs, (tuple, list))
+                else layer_outputs
+            )
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
@@ -590,7 +733,11 @@ class GraniteForCausalLM(GranitePretrainedModel):
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         del kwargs
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -645,7 +792,9 @@ class GraniteEmbeddingPipe(EmbeddingPipe):
         if getattr(self.embed_tokens, "_granite_scales_embeddings", False):
             return outputs
         if isinstance(outputs, tuple):
-            return (outputs[0] * self.config.embedding_multiplier,) + outputs[1:]
+            return (outputs[0] * self.config.embedding_multiplier,) + outputs[
+                1:
+            ]
         return outputs * self.config.embedding_multiplier
 
 

@@ -29,7 +29,10 @@ import tempfile
 import unittest
 
 from paddlefleet.trainer import Trainer, TrainingArguments
-from tests.trainer.trainer_utils import RegressionModelConfig, RegressionPretrainedModel
+from tests.trainer.trainer_utils import (
+    RegressionModelConfig,
+    RegressionPretrainedModel,
+)
 
 
 class TestAccuracyTargetGradClip(unittest.TestCase):
@@ -43,7 +46,9 @@ class TestAccuracyTargetGradClip(unittest.TestCase):
         config = RegressionModelConfig()
         config.use_accuracy_compatible = accuracy_target
         model = RegressionPretrainedModel(config)
-        args = TrainingArguments(self.output_dir, report_to=[], bf16=True, **kwargs)
+        args = TrainingArguments(
+            self.output_dir, report_to=[], bf16=True, **kwargs
+        )
         return Trainer(model=model, args=args).args.max_grad_norm
 
     def test_megatron_target_disables_clipping(self):
@@ -56,11 +61,15 @@ class TestAccuracyTargetGradClip(unittest.TestCase):
 
     def test_explicit_threshold_is_still_overridden(self):
         """Alignment beats an explicit threshold; the warning says so."""
-        self.assertEqual(self._max_grad_norm("megatron", max_grad_norm=5.0), 0.0)
+        self.assertEqual(
+            self._max_grad_norm("megatron", max_grad_norm=5.0), 0.0
+        )
 
     def test_already_off_is_left_alone(self):
         """``MinimaxV2.5_EP2.yaml`` spells this out; it must not error."""
-        self.assertEqual(self._max_grad_norm("megatron", max_grad_norm=0.0), 0.0)
+        self.assertEqual(
+            self._max_grad_norm("megatron", max_grad_norm=0.0), 0.0
+        )
 
     def test_hf_target_keeps_clipping(self):
         """torch's reference clips, so zeroing this would drop the aligned step."""
@@ -77,7 +86,9 @@ class TestAccuracyTargetGradClip(unittest.TestCase):
         self.assertIs(config.use_accuracy_compatible, False)
         model = RegressionPretrainedModel(config)
         args = TrainingArguments(self.output_dir, report_to=[], bf16=True)
-        self.assertEqual(Trainer(model=model, args=args).args.max_grad_norm, 1.0)
+        self.assertEqual(
+            Trainer(model=model, args=args).args.max_grad_norm, 1.0
+        )
 
 
 if __name__ == "__main__":

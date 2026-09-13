@@ -35,7 +35,9 @@ class MockQuantizationConfig:
         self.group_size = group_size
         self.qlora_weight_double_quant = qlora_weight_double_quant
         self.qlora_weight_blocksize = qlora_weight_blocksize
-        self.qlora_weight_double_quant_block_size = qlora_weight_double_quant_block_size
+        self.qlora_weight_double_quant_block_size = (
+            qlora_weight_double_quant_block_size
+        )
         self.llm_int8_threshold = llm_int8_threshold
         self.apply_hadamard = False
 

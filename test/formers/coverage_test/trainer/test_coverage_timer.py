@@ -33,7 +33,10 @@ class TestTimerBasic(unittest.TestCase):
 
     def test_start_and_stop(self):
         timer = _Timer("test")
-        with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+        with (
+            patch("paddle.device.get_device", return_value="gpu:0"),
+            patch("paddle.device.synchronize"),
+        ):
             timer.start()
             self.assertTrue(timer.started_)
             timer.stop()
@@ -42,7 +45,10 @@ class TestTimerBasic(unittest.TestCase):
 
     def test_start_twice_raises(self):
         timer = _Timer("test")
-        with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+        with (
+            patch("paddle.device.get_device", return_value="gpu:0"),
+            patch("paddle.device.synchronize"),
+        ):
             timer.start()
             with self.assertRaises(AssertionError):
                 timer.start()
@@ -54,7 +60,10 @@ class TestTimerBasic(unittest.TestCase):
 
     def test_reset(self):
         timer = _Timer("test")
-        with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+        with (
+            patch("paddle.device.get_device", return_value="gpu:0"),
+            patch("paddle.device.synchronize"),
+        ):
             timer.start()
             timer.stop()
             self.assertGreater(timer.elapsed_, 0.0)
@@ -64,7 +73,10 @@ class TestTimerBasic(unittest.TestCase):
 
     def test_elapsed_with_reset(self):
         timer = _Timer("test")
-        with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+        with (
+            patch("paddle.device.get_device", return_value="gpu:0"),
+            patch("paddle.device.synchronize"),
+        ):
             timer.start()
             timer.stop()
             elapsed = timer.elapsed(reset=True)
@@ -73,7 +85,10 @@ class TestTimerBasic(unittest.TestCase):
 
     def test_elapsed_without_reset(self):
         timer = _Timer("test")
-        with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+        with (
+            patch("paddle.device.get_device", return_value="gpu:0"),
+            patch("paddle.device.synchronize"),
+        ):
             timer.start()
             timer.stop()
             elapsed = timer.elapsed(reset=False)
@@ -82,7 +97,10 @@ class TestTimerBasic(unittest.TestCase):
 
     def test_elapsed_while_running(self):
         timer = _Timer("test")
-        with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+        with (
+            patch("paddle.device.get_device", return_value="gpu:0"),
+            patch("paddle.device.synchronize"),
+        ):
             timer.start()
             elapsed = timer.elapsed(reset=True)
             self.assertGreater(elapsed, 0.0)
@@ -91,7 +109,10 @@ class TestTimerBasic(unittest.TestCase):
 
     def test_elapsed_while_running_no_reset(self):
         timer = _Timer("test")
-        with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+        with (
+            patch("paddle.device.get_device", return_value="gpu:0"),
+            patch("paddle.device.synchronize"),
+        ):
             timer.start()
             elapsed = timer.elapsed(reset=False)
             self.assertGreater(elapsed, 0.0)
@@ -116,14 +137,20 @@ class TestRuntimeTimer(unittest.TestCase):
 
     def test_start_and_stop(self):
         rt = RuntimeTimer("rt")
-        with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+        with (
+            patch("paddle.device.get_device", return_value="gpu:0"),
+            patch("paddle.device.synchronize"),
+        ):
             rt.start("phase1")
             self.assertEqual(rt.timer.name, "phase1")
             rt.stop()
 
     def test_log(self):
         rt = RuntimeTimer("rt")
-        with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+        with (
+            patch("paddle.device.get_device", return_value="gpu:0"),
+            patch("paddle.device.synchronize"),
+        ):
             rt.start("test_phase")
             rt.stop()
             result = rt.log()
@@ -134,7 +161,10 @@ class TestRuntimeTimer(unittest.TestCase):
 
     def test_log_while_running(self):
         rt = RuntimeTimer("rt")
-        with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+        with (
+            patch("paddle.device.get_device", return_value="gpu:0"),
+            patch("paddle.device.synchronize"),
+        ):
             rt.start("running_phase")
             # Don't stop - log should handle running timer
             result = rt.log()
@@ -165,8 +195,9 @@ class TestTimers(unittest.TestCase):
 
     def test_call_with_event_timer(self):
         timers = Timers()
-        with patch("paddle.is_compiled_with_cuda", return_value=True), patch(
-            "paddlefleet.trainer.plugins.timer._GPUEventTimer", _Timer
+        with (
+            patch("paddle.is_compiled_with_cuda", return_value=True),
+            patch("paddlefleet.trainer.plugins.timer._GPUEventTimer", _Timer),
         ):
             timer = timers("event_timer", use_event=True)
         self.assertIsNotNone(timer)
@@ -202,10 +233,15 @@ class TestTimers(unittest.TestCase):
         mock_writer = MagicMock()
         with patch("paddle.is_compiled_with_cuda", return_value=False):
             timer = timers("write_test")
-            with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+            with (
+                patch("paddle.device.get_device", return_value="gpu:0"),
+                patch("paddle.device.synchronize"),
+            ):
                 timer.start()
                 timer.stop()
-            timers.write(["write_test"], mock_writer, iteration=5, normalizer=1.0)
+            timers.write(
+                ["write_test"], mock_writer, iteration=5, normalizer=1.0
+            )
         mock_writer.add_scalar.assert_called_once()
         args = mock_writer.add_scalar.call_args
         self.assertIn("write_test", args[0][0])
@@ -215,10 +251,15 @@ class TestTimers(unittest.TestCase):
         mock_writer = MagicMock()
         with patch("paddle.is_compiled_with_cuda", return_value=False):
             timer = timers("norm_test")
-            with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+            with (
+                patch("paddle.device.get_device", return_value="gpu:0"),
+                patch("paddle.device.synchronize"),
+            ):
                 timer.start()
                 timer.stop()
-            timers.write(["norm_test"], mock_writer, iteration=1, normalizer=2.0)
+            timers.write(
+                ["norm_test"], mock_writer, iteration=1, normalizer=2.0
+            )
         mock_writer.add_scalar.assert_called_once()
 
     def test_write_asserts_positive_normalizer(self):
@@ -237,7 +278,10 @@ class TestTimers(unittest.TestCase):
         timers = Timers()
         with patch("paddle.is_compiled_with_cuda", return_value=False):
             timer = timers("log_test")
-            with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+            with (
+                patch("paddle.device.get_device", return_value="gpu:0"),
+                patch("paddle.device.synchronize"),
+            ):
                 timer.start()
                 timer.stop()
             result = timers.log(["log_test"], normalizer=1.0)
@@ -249,10 +293,15 @@ class TestTimers(unittest.TestCase):
         with patch("paddle.is_compiled_with_cuda", return_value=False):
             for name in ["timer_a", "timer_b", "timer_c"]:
                 timer = timers(name)
-                with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+                with (
+                    patch("paddle.device.get_device", return_value="gpu:0"),
+                    patch("paddle.device.synchronize"),
+                ):
                     timer.start()
                     timer.stop()
-            result = timers.log(["timer_a", "timer_b", "timer_c"], normalizer=1.0)
+            result = timers.log(
+                ["timer_a", "timer_b", "timer_c"], normalizer=1.0
+            )
         # Should contain all timers
         self.assertIn("timer_a", result)
         self.assertIn("timer_b", result)
@@ -267,7 +316,10 @@ class TestTimers(unittest.TestCase):
         timers = Timers()
         with patch("paddle.is_compiled_with_cuda", return_value=False):
             timer = timers("info_test")
-            with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+            with (
+                patch("paddle.device.get_device", return_value="gpu:0"),
+                patch("paddle.device.synchronize"),
+            ):
                 timer.start()
                 timer.stop()
             result = timers.info(["info_test"], normalizer=1.0)
@@ -279,7 +331,10 @@ class TestTimers(unittest.TestCase):
         with patch("paddle.is_compiled_with_cuda", return_value=False):
             for name in ["charlie", "alpha", "bravo"]:
                 timer = timers(name)
-                with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+                with (
+                    patch("paddle.device.get_device", return_value="gpu:0"),
+                    patch("paddle.device.synchronize"),
+                ):
                     timer.start()
                     timer.stop()
             result = timers.info(["charlie", "alpha", "bravo"], normalizer=1.0)
@@ -296,7 +351,10 @@ class TestTimers(unittest.TestCase):
         timers = Timers()
         with patch("paddle.is_compiled_with_cuda", return_value=False):
             timer = timers("reset_info")
-            with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+            with (
+                patch("paddle.device.get_device", return_value="gpu:0"),
+                patch("paddle.device.synchronize"),
+            ):
                 timer.start()
                 timer.stop()
             result = timers.info(["reset_info"], normalizer=1.0, reset=True)
@@ -307,11 +365,20 @@ class TestTimers(unittest.TestCase):
         mock_writer = MagicMock()
         with patch("paddle.is_compiled_with_cuda", return_value=False):
             timer = timers("no_reset")
-            with patch("paddle.device.get_device", return_value="gpu:0"), patch("paddle.device.synchronize"):
+            with (
+                patch("paddle.device.get_device", return_value="gpu:0"),
+                patch("paddle.device.synchronize"),
+            ):
                 timer.start()
                 timer.stop()
                 timer.elapsed_
-            timers.write(["no_reset"], mock_writer, iteration=1, normalizer=1.0, reset=False)
+            timers.write(
+                ["no_reset"],
+                mock_writer,
+                iteration=1,
+                normalizer=1.0,
+                reset=False,
+            )
             # After write with reset=False, timer should still have time
             self.assertGreater(timer.elapsed_, 0.0)
 

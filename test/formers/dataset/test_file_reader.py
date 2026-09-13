@@ -21,7 +21,10 @@ from formers.testing_utils import get_tests_dir
 output_data = {
     "messages": [
         {"role": "user", "content": "针对产品发布提出五种营销策略。"},
-        {"role": "assistant", "content": "1. 社交媒体活动。\n2. 电子邮件营销。\n3. 在线和离线广告。\n4. 推荐和评论。\n5. 合作名人推销。"},
+        {
+            "role": "assistant",
+            "content": "1. 社交媒体活动。\n2. 电子邮件营销。\n3. 在线和离线广告。\n4. 推荐和评论。\n5. 合作名人推销。",
+        },
     ],
     "label": [1],
     "system": "",

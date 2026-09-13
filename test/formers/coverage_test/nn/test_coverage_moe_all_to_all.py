@@ -135,7 +135,9 @@ class TestAlltoAllAsync(unittest.TestCase):
 
     @patch("paddlefleet.nn.moe.all_to_all.manual_backward")
     @patch("paddlefleet.nn.moe.all_to_all.dist.get_world_size", return_value=1)
-    def test_forward_single_world_manual_backward_called(self, mock_ws, mock_mb):
+    def test_forward_single_world_manual_backward_called(
+        self, mock_ws, mock_mb
+    ):
         """Test forward with world_size=1 calls manual_backward."""
         cls = self._get_cls()
         mock_fn = MagicMock()
@@ -188,7 +190,9 @@ class TestAlltoAllAsync(unittest.TestCase):
     @patch("paddlefleet.nn.moe.all_to_all.stream.alltoall_single")
     @patch("paddlefleet.nn.moe.all_to_all.manual_backward")
     @patch("paddlefleet.nn.moe.all_to_all.dist.get_world_size", return_value=4)
-    def test_forward_multi_world_output_no_stop_gradient(self, mock_ws, mock_mb, mock_alltoall):
+    def test_forward_multi_world_output_no_stop_gradient(
+        self, mock_ws, mock_mb, mock_alltoall
+    ):
         """Test that forward output has stop_gradient=False in multi-world mode."""
         cls = self._get_cls()
         mock_task = MagicMock()
@@ -219,7 +223,9 @@ class TestAlltoAllAsync(unittest.TestCase):
         x = paddle.randn([4, 8])
         fn_arg1 = paddle.randn([4, 8])
         fn_arg2 = paddle.randn([4, 8])
-        cls.apply(x, fn_arg1, fn_arg2, group=None, fn=mock_fn, is_first_fwd=True)
+        cls.apply(
+            x, fn_arg1, fn_arg2, group=None, fn=mock_fn, is_first_fwd=True
+        )
         mock_mb.assert_called_once_with(mock_fn, True, fn_arg1, fn_arg2)
 
 

@@ -80,14 +80,20 @@ class Phi4Config(PretrainedConfig):
             self.sliding_window = sliding_window
         else:
             self.sliding_window = [
-                sliding_window if layer_idx < num_hidden_layers // 2 and layer_idx % 2 == 1 else None
+                sliding_window
+                if layer_idx < num_hidden_layers // 2 and layer_idx % 2 == 1
+                else None
                 for layer_idx in range(num_hidden_layers)
             ]
 
         self.mamba_d_state = mamba_d_state
         self.mamba_d_conv = mamba_d_conv
         self.mamba_expand = mamba_expand
-        self.mamba_dt_rank = math.ceil(self.hidden_size / 16) if mamba_dt_rank == "auto" else mamba_dt_rank
+        self.mamba_dt_rank = (
+            math.ceil(self.hidden_size / 16)
+            if mamba_dt_rank == "auto"
+            else mamba_dt_rank
+        )
         self.mamba_conv_bias = mamba_conv_bias
         self.mamba_proj_bias = mamba_proj_bias
 
@@ -104,7 +110,11 @@ class Phi4Config(PretrainedConfig):
         layer_block_types = []
         for i in range(self.num_hidden_layers):
             if i % 2 == 1:
-                layer_block_type = "attention" if i <= (self.num_hidden_layers // 2 + 1) else "shared_attention"
+                layer_block_type = (
+                    "attention"
+                    if i <= (self.num_hidden_layers // 2 + 1)
+                    else "shared_attention"
+                )
             else:
                 layer_block_type = "mamba"
             layer_block_types.append(layer_block_type)

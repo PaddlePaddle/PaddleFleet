@@ -89,7 +89,9 @@ class TestParseArgs(unittest.TestCase):
         x = paddle.randn([2, 4])
         mask = paddle.randn([2, 4])
         pos = paddle.randint(0, 10, [2, 4], dtype="int64")
-        hidden, attention_mask, position_ids, pe, nbatch = parse_args((x, mask, pos), is_embed=True)
+        hidden, attention_mask, position_ids, pe, nbatch = parse_args(
+            (x, mask, pos), is_embed=True
+        )
         self.assertIs(hidden, x)
         self.assertIs(attention_mask, mask)
         self.assertIs(position_ids, pos)
@@ -102,7 +104,9 @@ class TestParseArgs(unittest.TestCase):
         x = paddle.randn([2, 4])
         mask = paddle.randn([2, 4])
         offset = paddle.randn([2, 4])
-        hidden, attention_mask, position_ids, pe, nbatch = parse_args((x, mask, offset), mtp_enable=True)
+        hidden, attention_mask, position_ids, pe, nbatch = parse_args(
+            (x, mask, offset), mtp_enable=True
+        )
         self.assertIs(hidden, x)
         self.assertIs(attention_mask, mask)
         # mtp_enable with 3 args: hidden_states, attention_mask, nbatch_pack_offset
@@ -118,7 +122,9 @@ class TestParseArgs(unittest.TestCase):
         x = paddle.randn([2, 4])
         pos = paddle.randint(0, 10, [2, 4], dtype="int64")
         pe = paddle.randn([2, 4])
-        hidden, mask, position_ids, position_embeddings, nbatch = parse_args((x, pos, pe))
+        hidden, mask, position_ids, position_embeddings, nbatch = parse_args(
+            (x, pos, pe)
+        )
         self.assertIs(hidden, x)
         self.assertIsNone(mask)
         self.assertIs(position_ids, pos)
@@ -132,7 +138,9 @@ class TestParseArgs(unittest.TestCase):
         mask = paddle.randn([2, 4])
         pos = paddle.randint(0, 10, [2, 4], dtype="int64")
         pe = paddle.randn([2, 4])
-        hidden, attention_mask, position_ids, position_embeddings, nbatch = parse_args((x, mask, pos, pe))
+        hidden, attention_mask, position_ids, position_embeddings, nbatch = (
+            parse_args((x, mask, pos, pe))
+        )
         self.assertIs(hidden, x)
         self.assertIs(attention_mask, mask)
         self.assertIs(position_ids, pos)
@@ -147,7 +155,13 @@ class TestParseArgs(unittest.TestCase):
         pos = paddle.randint(0, 10, [2, 4], dtype="int64")
         pe = paddle.randn([2, 4])
         nbatch = paddle.randn([2, 4])
-        hidden, attention_mask, position_ids, position_embeddings, nbatch_out = parse_args((x, mask, pos, pe, nbatch))
+        (
+            hidden,
+            attention_mask,
+            position_ids,
+            position_embeddings,
+            nbatch_out,
+        ) = parse_args((x, mask, pos, pe, nbatch))
         self.assertIs(hidden, x)
         self.assertIs(attention_mask, mask)
         self.assertIs(position_ids, pos)
@@ -170,7 +184,13 @@ class TestParseArgs(unittest.TestCase):
         pe.stop_gradient = False
         nbatch.stop_gradient = False
 
-        hidden, attention_mask, position_ids, position_embeddings, nbatch_out = parse_args((x, mask, pos, pe, nbatch))
+        (
+            hidden,
+            attention_mask,
+            position_ids,
+            position_embeddings,
+            nbatch_out,
+        ) = parse_args((x, mask, pos, pe, nbatch))
         # position_ids should have stop_gradient=True
         self.assertTrue(position_ids.stop_gradient)
         self.assertTrue(position_embeddings.stop_gradient)
@@ -428,7 +448,9 @@ class TestRotaryEmbedding(unittest.TestCase):
         cls = self._get_cls()
         emb = cls(config)
         x = paddle.randn([2, 8, 16])
-        position_ids = paddle.arange(0, 8, dtype="int64").unsqueeze(0).expand([2, 8])
+        position_ids = (
+            paddle.arange(0, 8, dtype="int64").unsqueeze(0).expand([2, 8])
+        )
         cos, sin = emb(x, position_ids)
         # cos and sin shape should be [2, 8, 16]
         self.assertEqual(cos.shape, [2, 8, 16])
@@ -489,9 +511,12 @@ class TestGeneralModelForCausalLMPipe(unittest.TestCase):
         config.hidden_size = 64
         config.moe_group = "dummy"
 
-        with patch("paddlefleet.nn.pp_model.get_hcg") as mock_hcg, patch(
-            "paddlefleet.nn.pp_model.get_pp_vp_split_layers"
-        ) as mock_split:
+        with (
+            patch("paddlefleet.nn.pp_model.get_hcg") as mock_hcg,
+            patch(
+                "paddlefleet.nn.pp_model.get_pp_vp_split_layers"
+            ) as mock_split,
+        ):
             mock_topo = MagicMock()
             mock_topo.get_dim_size.return_value = 1
             mock_hcg.return_value.get_pipe_parallel_world_size.return_value = 4
@@ -523,10 +548,19 @@ class TestGeneralModelForCausalLMPipe(unittest.TestCase):
         )
 
         self.assertEqual(GeneralModelForCausalLMPipe.config_class, DummyConfig)
-        self.assertEqual(GeneralModelForCausalLMPipe._get_tensor_parallel_mappings, "tp_mappings")
-        self.assertEqual(GeneralModelForCausalLMPipe._init_weights, "init_weights")
-        self.assertEqual(GeneralModelForCausalLMPipe._keep_in_fp32_modules, ["layernorm"])
-        self.assertEqual(GeneralModelForCausalLMPipe.transpose_weight_keys, ["weight"])
+        self.assertEqual(
+            GeneralModelForCausalLMPipe._get_tensor_parallel_mappings,
+            "tp_mappings",
+        )
+        self.assertEqual(
+            GeneralModelForCausalLMPipe._init_weights, "init_weights"
+        )
+        self.assertEqual(
+            GeneralModelForCausalLMPipe._keep_in_fp32_modules, ["layernorm"]
+        )
+        self.assertEqual(
+            GeneralModelForCausalLMPipe.transpose_weight_keys, ["weight"]
+        )
 
     def test_register_cls_attr_partial(self):
         """Test register_cls_attr with only config_class."""
@@ -552,7 +586,10 @@ class TestGeneralModelForCausalLMPipe(unittest.TestCase):
             config_class=DummyConfig3,
             pretrained_model_class=DummyModel3,
         )
-        self.assertEqual(GeneralModelForCausalLMPipe._get_fuse_or_split_param_mappings, "fuse_split")
+        self.assertEqual(
+            GeneralModelForCausalLMPipe._get_fuse_or_split_param_mappings,
+            "fuse_split",
+        )
 
     def test_prepare_pipeline_inputs_func_dict(self):
         """Test _prepare_pipeline_inputs_func with dict input containing attention_mask."""
@@ -564,7 +601,9 @@ class TestGeneralModelForCausalLMPipe(unittest.TestCase):
             "position_ids": paddle.randint(0, 8, [2, 8], dtype="int64"),
             "labels": paddle.randint(0, 100, [2, 8]),
         }
-        result = GeneralModelForCausalLMPipe._prepare_pipeline_inputs_func(inputs)
+        result = GeneralModelForCausalLMPipe._prepare_pipeline_inputs_func(
+            inputs
+        )
         self.assertEqual(len(result), 2)
 
     def test_prepare_pipeline_inputs_func_dict_attn_mask_startend(self):
@@ -573,11 +612,15 @@ class TestGeneralModelForCausalLMPipe(unittest.TestCase):
 
         inputs = {
             "input_ids": paddle.randint(0, 100, [2, 8]),
-            "attn_mask_startend_row_indices": paddle.randint(0, 8, [2, 2, 8], dtype="int32"),
+            "attn_mask_startend_row_indices": paddle.randint(
+                0, 8, [2, 2, 8], dtype="int32"
+            ),
             "position_ids": paddle.randint(0, 8, [2, 8], dtype="int64"),
             "labels": paddle.randint(0, 100, [2, 8]),
         }
-        result = GeneralModelForCausalLMPipe._prepare_pipeline_inputs_func(inputs)
+        result = GeneralModelForCausalLMPipe._prepare_pipeline_inputs_func(
+            inputs
+        )
         self.assertEqual(len(result), 2)
 
     def test_prepare_pipeline_inputs_func_dict_default(self):
@@ -586,10 +629,14 @@ class TestGeneralModelForCausalLMPipe(unittest.TestCase):
 
         inputs = {
             "input_ids": paddle.randint(0, 100, [2, 8]),
-            "attn_mask_startend_row_indices": paddle.randint(0, 8, [2, 2, 8], dtype="int32"),
+            "attn_mask_startend_row_indices": paddle.randint(
+                0, 8, [2, 2, 8], dtype="int32"
+            ),
             "labels": paddle.randint(0, 100, [2, 8]),
         }
-        result = GeneralModelForCausalLMPipe._prepare_pipeline_inputs_func(inputs)
+        result = GeneralModelForCausalLMPipe._prepare_pipeline_inputs_func(
+            inputs
+        )
         self.assertEqual(len(result), 2)
 
     def test_prepare_pipeline_inputs_func_list(self):
@@ -599,16 +646,22 @@ class TestGeneralModelForCausalLMPipe(unittest.TestCase):
         inputs = [
             {
                 "input_ids": paddle.randint(0, 100, [2, 8]),
-                "attention_mask": paddle.randint(0, 2, [2, 8]).astype("float32"),
+                "attention_mask": paddle.randint(0, 2, [2, 8]).astype(
+                    "float32"
+                ),
                 "labels": paddle.randint(0, 100, [2, 8]),
             },
             {
                 "input_ids": paddle.randint(0, 100, [2, 8]),
-                "attention_mask": paddle.randint(0, 2, [2, 8]).astype("float32"),
+                "attention_mask": paddle.randint(0, 2, [2, 8]).astype(
+                    "float32"
+                ),
                 "labels": paddle.randint(0, 100, [2, 8]),
             },
         ]
-        result = GeneralModelForCausalLMPipe._prepare_pipeline_inputs_func(inputs)
+        result = GeneralModelForCausalLMPipe._prepare_pipeline_inputs_func(
+            inputs
+        )
         self.assertEqual(len(result), 2)
 
     def test_prepare_pipeline_inputs_func_ordered_dict(self):
@@ -623,14 +676,18 @@ class TestGeneralModelForCausalLMPipe(unittest.TestCase):
             "attention_mask": paddle.randint(0, 2, [2, 8]).astype("float32"),
             "labels": paddle.randint(0, 100, [2, 8]),
         }
-        result = GeneralModelForCausalLMPipe._prepare_pipeline_inputs_func(inputs)
+        result = GeneralModelForCausalLMPipe._prepare_pipeline_inputs_func(
+            inputs
+        )
         self.assertEqual(len(result), 2)
 
     def test_tied_weights_keys(self):
         """Test that _tied_weights_keys is set correctly."""
         from paddlefleet.nn.pp_model import GeneralModelForCausalLMPipe
 
-        self.assertEqual(GeneralModelForCausalLMPipe._tied_weights_keys, ["lm_head.weight"])
+        self.assertEqual(
+            GeneralModelForCausalLMPipe._tied_weights_keys, ["lm_head.weight"]
+        )
 
 
 class TestRMSNormPipe(unittest.TestCase):
@@ -697,7 +754,9 @@ class TestLMHeadPipe(unittest.TestCase):
         # Create a mock layer that has a weight attribute
         weight_tensor = paddle.randn([100, 64])
 
-        with patch("paddlefleet.nn.pp_model.get_attr", return_value=weight_tensor):
+        with patch(
+            "paddlefleet.nn.pp_model.get_attr", return_value=weight_tensor
+        ):
             head = LMHeadPipe.__new__(LMHeadPipe)
             result = head.embedding_weight
             self.assertIsNotNone(result)
@@ -732,7 +791,13 @@ class TestMakeDecoderLayerPipe(unittest.TestCase):
                 super().__init__()
                 self.config = config
 
-            def forward(self, hidden_states, attention_mask=None, position_ids=None, **kwargs):
+            def forward(
+                self,
+                hidden_states,
+                attention_mask=None,
+                position_ids=None,
+                **kwargs,
+            ):
                 return hidden_states * 2
 
         config = MagicMock()
@@ -754,7 +819,13 @@ class TestMakeDecoderLayerPipe(unittest.TestCase):
                 super().__init__()
                 self.config = config
 
-            def forward(self, hidden_states, attention_mask=None, attn_mask_startend_row_indices=None, **kwargs):
+            def forward(
+                self,
+                hidden_states,
+                attention_mask=None,
+                attn_mask_startend_row_indices=None,
+                **kwargs,
+            ):
                 return hidden_states
 
         config = MagicMock()
@@ -787,7 +858,9 @@ class TestCriterionLayerPipe(unittest.TestCase):
 
         # CriterionLayerPipe sets self.return_tuple = False in __init__
         # We need to mock the parent __init__ to avoid full init
-        with patch("paddlefleet.nn.pp_model.CriterionLayer.__init__", return_value=None):
+        with patch(
+            "paddlefleet.nn.pp_model.CriterionLayer.__init__", return_value=None
+        ):
             layer = CriterionLayerPipe(config)
             self.assertFalse(layer.return_tuple)
 

@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" InternLM2.5 model configuration"""
+"""InternLM2.5 model configuration"""
 
 from paddlefleet.transformers.configuration_utils import PretrainedConfig
 
@@ -101,10 +101,15 @@ class InternLM25Config(PretrainedConfig):
             return
 
         if not isinstance(self.rope_scaling, dict):
-            raise ValueError(f"`rope_scaling` must be a dictionary, got {self.rope_scaling}")
+            raise ValueError(
+                f"`rope_scaling` must be a dictionary, got {self.rope_scaling}"
+            )
         rope_scaling_type = self.rope_scaling.get("type", None)
         rope_scaling_factor = self.rope_scaling.get("factor", None)
-        if rope_scaling_type is None or rope_scaling_type not in ["linear", "dynamic"]:
+        if rope_scaling_type is None or rope_scaling_type not in [
+            "linear",
+            "dynamic",
+        ]:
             raise ValueError(
                 f"`rope_scaling`'s type field must be one of ['linear', 'dynamic'], got {rope_scaling_type}"
             )

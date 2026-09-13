@@ -35,7 +35,6 @@ class LossType(Enum):
 
 @dataclass
 class LossConfig:
-
     name: str
     loss_type: LossType
     weight: float = 0.0
@@ -53,7 +52,7 @@ class LossFunction(Protocol):
         routing_weights: paddle.Tensor,
         selected_experts: paddle.Tensor,
         gate_logits: Optional[paddle.Tensor] = None,
-        **kwargs
+        **kwargs,
     ) -> paddle.Tensor:
         pass
 
@@ -80,7 +79,9 @@ class AddAuxiliaryLoss(paddle.autograd.PyLayer):
 
 
 class LossCombiner(Protocol):
-    def __call__(self, losses: Dict[str, paddle.Tensor], configs: Dict[str, LossConfig]) -> paddle.Tensor:
+    def __call__(
+        self, losses: Dict[str, paddle.Tensor], configs: Dict[str, LossConfig]
+    ) -> paddle.Tensor:
         pass
 
 
@@ -128,9 +129,11 @@ class LossRegistry:
         routing_weights: paddle.Tensor,
         selected_experts: paddle.Tensor,
         gate_logits: Optional[paddle.Tensor] = None,
-        **kwargs
+        **kwargs,
     ) -> paddle.Tensor:
-        num_experts = kwargs.get("num_experts", selected_experts.max().item() + 1)
+        num_experts = kwargs.get(
+            "num_experts", selected_experts.max().item() + 1
+        )
         expert_usage = paddle.zeros([num_experts], dtype=routing_weights.dtype)
 
         for i in range(selected_experts.shape[0]):
@@ -147,7 +150,7 @@ class LossRegistry:
         routing_weights: paddle.Tensor,
         selected_experts: paddle.Tensor,
         gate_logits: Optional[paddle.Tensor] = None,
-        **kwargs
+        **kwargs,
     ) -> paddle.Tensor:
         if gate_logits is None:
             return paddle.to_tensor(0.0)
@@ -158,7 +161,7 @@ class LossRegistry:
         routing_weights: paddle.Tensor,
         selected_experts: paddle.Tensor,
         gate_logits: Optional[paddle.Tensor] = None,
-        **kwargs
+        **kwargs,
     ) -> paddle.Tensor:
         """Entropy loss - encourage the diversity of routing weights"""
         return -paddle.sum(routing_weights * paddle.log(routing_weights + 1e-8))
@@ -168,10 +171,12 @@ class LossRegistry:
         routing_weights: paddle.Tensor,
         selected_experts: paddle.Tensor,
         gate_logits: Optional[paddle.Tensor] = None,
-        **kwargs
+        **kwargs,
     ) -> paddle.Tensor:
         """Sparsety loss - encourage the sparsity of expert selection"""
-        num_experts = kwargs.get("num_experts", selected_experts.max().item() + 1)
+        num_experts = kwargs.get(
+            "num_experts", selected_experts.max().item() + 1
+        )
         expert_usage = paddle.zeros([num_experts])
 
         for i in range(selected_experts.shape[0]):
@@ -186,10 +191,12 @@ class LossRegistry:
         routing_weights: paddle.Tensor,
         selected_experts: paddle.Tensor,
         gate_logits: Optional[paddle.Tensor] = None,
-        **kwargs
+        **kwargs,
     ) -> paddle.Tensor:
         """Diversity loss - encourage the diversity of expert selection"""
-        num_experts = kwargs.get("num_experts", selected_experts.max().item() + 1)
+        num_experts = kwargs.get(
+            "num_experts", selected_experts.max().item() + 1
+        )
         expert_counts = paddle.zeros([num_experts])
 
         for i in range(selected_experts.shape[0]):
@@ -199,7 +206,9 @@ class LossRegistry:
 
         uniform_dist = paddle.ones_like(expert_counts) / expert_counts.shape[0]
         diversity_loss = paddle.nn.functional.kl_div(
-            paddle.log(expert_counts + 1e-8), paddle.log(uniform_dist + 1e-8), reduction="sum"
+            paddle.log(expert_counts + 1e-8),
+            paddle.log(uniform_dist + 1e-8),
+            reduction="sum",
         )
         return diversity_loss
 
@@ -219,7 +228,9 @@ class LossRegistry:
     ) -> paddle.Tensor:
         combined_loss = paddle.to_tensor(0.0)
         enabled_losses = [
-            loss for name, loss in losses.items() if configs.get(name, LossConfig("", LossType.CUSTOM)).enabled
+            loss
+            for name, loss in losses.items()
+            if configs.get(name, LossConfig("", LossType.CUSTOM)).enabled
         ]
 
         if len(enabled_losses) > 1:
@@ -231,7 +242,9 @@ class LossRegistry:
         for name, loss_value in losses.items():
             config = configs.get(name)
             if config and config.enabled:
-                adaptive_weight = config.weight * (1 + adaptation_factor * loss_std)
+                adaptive_weight = config.weight * (
+                    1 + adaptation_factor * loss_std
+                )
                 combined_loss += adaptive_weight * loss_value
 
         return combined_loss

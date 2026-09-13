@@ -35,8 +35,12 @@ class KimiK3Processor(ProcessorMixin):
     image_processor_class = "AutoImageProcessor"
     tokenizer_class = "AutoTokenizer"
 
-    def __init__(self, image_processor=None, tokenizer=None, chat_template=None, **kwargs):
-        super().__init__(image_processor, tokenizer, chat_template=chat_template)
+    def __init__(
+        self, image_processor=None, tokenizer=None, chat_template=None, **kwargs
+    ):
+        super().__init__(
+            image_processor, tokenizer, chat_template=chat_template
+        )
 
     def batch_decode(self, *args, **kwargs):
         return self.tokenizer.batch_decode(*args, **kwargs)

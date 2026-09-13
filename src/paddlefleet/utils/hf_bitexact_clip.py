@@ -237,7 +237,9 @@ def _hf_global_norm(total_sq: paddle.Tensor) -> paddle.Tensor:
     return _bf16(paddle.sqrt(paddle.cast(total_sq, "float32")))
 
 
-def _hf_clip_coef(global_norm: paddle.Tensor, clip_norm: float) -> paddle.Tensor:
+def _hf_clip_coef(
+    global_norm: paddle.Tensor, clip_norm: float
+) -> paddle.Tensor:
     """Torch's coefficient: ``min(bf16(max / bf16(norm + 1e-6)), 1.0)``.
 
     One rounding per torch kernel, then the unconditional clamp -- torch
@@ -285,7 +287,11 @@ class HFBitexactClipGradByGlobalNorm(nn.ClipGradByGlobalNorm):
     # -- the clip itself -----------------------------------------------------
     @paddle.no_grad()
     def _dygraph_clip(self, params_grads):
-        selected = [(p, g) for p, g in params_grads if g is not None and getattr(p, "need_clip", True)]
+        selected = [
+            (p, g)
+            for p, g in params_grads
+            if g is not None and getattr(p, "need_clip", True)
+        ]
         if not selected:
             return params_grads
 
@@ -297,7 +303,9 @@ class HFBitexactClipGradByGlobalNorm(nn.ClipGradByGlobalNorm):
 
         # (2) global norm over the BF16 per-tensor norms: FP32 accumulate -> sqrt -> BF16.
         stacked = paddle.stack(per_tensor).astype("float32")
-        global_norm = _hf_global_norm(paddle.sum(stacked * stacked, dtype="float32"))
+        global_norm = _hf_global_norm(
+            paddle.sum(stacked * stacked, dtype="float32")
+        )
 
         # (3) coefficient, one rounding per torch kernel, then the unconditional clamp.
         clip_coef = _hf_clip_coef(global_norm, self.clip_norm)

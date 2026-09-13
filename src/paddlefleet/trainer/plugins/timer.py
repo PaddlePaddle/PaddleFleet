@@ -94,7 +94,9 @@ class RuntimeTimer:
             self.timer.stop()
         self.timer.reset()
 
-        string = "[timelog] {}: {:.2f}s ({}) ".format(self.timer.name, runtime, time.strftime("%Y-%m-%d %H:%M:%S"))
+        string = "[timelog] {}: {:.2f}s ({}) ".format(
+            self.timer.name, runtime, time.strftime("%Y-%m-%d %H:%M:%S")
+        )
         return string
 
 
@@ -105,13 +107,19 @@ class Timers:
         self.timers = {}
 
     def __call__(self, name, use_event=False):
-        clazz = _GPUEventTimer if use_event and paddle.is_compiled_with_cuda() else _Timer
+        clazz = (
+            _GPUEventTimer
+            if use_event and paddle.is_compiled_with_cuda()
+            else _Timer
+        )
         timer = self.timers.get(name)
         if timer is None:
             timer = clazz(name)
             self.timers[name] = timer
         else:
-            assert type(timer) == clazz, f"Invalid timer type: {clazz} vs {type(timer)}"
+            assert type(timer) == clazz, (
+                f"Invalid timer type: {clazz} vs {type(timer)}"
+            )
         return timer
 
     def write(self, names, writer, iteration, normalizer=1.0, reset=True):
@@ -130,7 +138,9 @@ class Timers:
 
         time_dict = {}
         for name in names:
-            time_dict[name] = self.timers[name].elapsed(reset=reset) * 1000.0 / normalizer
+            time_dict[name] = (
+                self.timers[name].elapsed(reset=reset) * 1000.0 / normalizer
+            )
 
         # total_time = sum(list(time_dict.values()))
         # string += " | total_time : {:.2f} ".format(total_time)
@@ -147,8 +157,12 @@ class Timers:
         assert normalizer > 0.0
         time_dict = {}
         for name in names:
-            time_dict[name] = self.timers[name].elapsed(reset=reset) * 1000.0 / normalizer
-        time_dict = dict(sorted(time_dict.items(), key=lambda x: x[0], reverse=False))
+            time_dict[name] = (
+                self.timers[name].elapsed(reset=reset) * 1000.0 / normalizer
+            )
+        time_dict = dict(
+            sorted(time_dict.items(), key=lambda x: x[0], reverse=False)
+        )
         return time_dict
 
 

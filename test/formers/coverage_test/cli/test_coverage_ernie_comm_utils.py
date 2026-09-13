@@ -151,7 +151,9 @@ class TestSubbatch(unittest.TestCase):
         def fn_with_kwargs(x, scale=1.0):
             return x * scale
 
-        wrapped = subbatch(fn_with_kwargs, arg_idx=[0], axis=[0], bs=100, out_idx=0)
+        wrapped = subbatch(
+            fn_with_kwargs, arg_idx=[0], axis=[0], bs=100, out_idx=0
+        )
         x = paddle.randn([10, 4])
         result = wrapped(x, scale=2.0)
         expected = x * 2.0
@@ -169,7 +171,9 @@ class TestProfile(unittest.TestCase):
             x = 1 + 1
         self.assertEqual(x, 2)
 
-    @unittest.skip("get_timers module-level reference cannot be reliably patched in CI generator context")
+    @unittest.skip(
+        "get_timers module-level reference cannot be reliably patched in CI generator context"
+    )
     def test_profile_with_timers(self):
         """Test profile when get_timers returns a callable."""
         import paddlefleet.cli.train.ernie_pretrain.models.comm_utils as comm_utils_mod
@@ -177,7 +181,9 @@ class TestProfile(unittest.TestCase):
         mock_timer = MagicMock()
         original_get_timers = comm_utils_mod.get_timers
         try:
-            comm_utils_mod.get_timers = lambda: (lambda name, use_event=True: mock_timer)
+            comm_utils_mod.get_timers = lambda: (
+                lambda name, use_event=True: mock_timer
+            )
 
             with comm_utils_mod.profile("test_op"):
                 pass

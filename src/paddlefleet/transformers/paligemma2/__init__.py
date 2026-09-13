@@ -18,7 +18,11 @@ from typing import TYPE_CHECKING
 from ...utils.lazy_import import _LazyModule
 
 import_structure = {
-    "configuration": ["PaliGemma2Config", "SiglipVisionConfig", "Gemma2TextConfig"],
+    "configuration": [
+        "PaliGemma2Config",
+        "SiglipVisionConfig",
+        "Gemma2TextConfig",
+    ],
     "image_processor": ["PaliGemmaImageProcessor"],
     "processor": ["PaliGemmaProcessor"],
     "modeling": [
@@ -29,7 +33,11 @@ import_structure = {
 }
 
 if TYPE_CHECKING:
-    from .configuration import Gemma2TextConfig, PaliGemma2Config, SiglipVisionConfig
+    from .configuration import (
+        Gemma2TextConfig,
+        PaliGemma2Config,
+        SiglipVisionConfig,
+    )
     from .image_processor import PaliGemmaImageProcessor
     from .modeling import (
         PaliGemma2ForCausalLM,

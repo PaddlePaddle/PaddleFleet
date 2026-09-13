@@ -19,15 +19,23 @@ import unittest
 import numpy as np
 
 from paddlefleet.datasets.loader import create_dataset
-from paddlefleet.datasets.template.template import get_template_and_fix_tokenizer
+from paddlefleet.datasets.template.template import (
+    get_template_and_fix_tokenizer,
+)
 from paddlefleet.transformers import AutoTokenizer
 from formers.testing_utils import get_tests_dir
 
 MODEL_NAME = "/home/models/PaddleFormers/tiny-random-qwen3"
 
 
-def _make_base_config(tokenizer, *, packing=False, binpacking=False, mix_strategy="concat", is_valid=False):
-
+def _make_base_config(
+    tokenizer,
+    *,
+    packing=False,
+    binpacking=False,
+    mix_strategy="concat",
+    is_valid=False,
+):
     cfg = {
         "tokenizer": tokenizer,
         "max_seq_len": 512,
@@ -68,7 +76,11 @@ class TestMapSFTDatasetBasic(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        cls.dataset_path = os.path.join(get_tests_dir(os.path.join("fixtures", "dummy")), "sft", "train.jsonl")
+        cls.dataset_path = os.path.join(
+            get_tests_dir(os.path.join("fixtures", "dummy")),
+            "sft",
+            "train.jsonl",
+        )
 
     def _create_dataset(self, **extra):
         cfg = _make_base_config(self.tokenizer, **extra)
@@ -181,10 +193,16 @@ class TestMapSFTDatasetPacking(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        cls.dataset_path = os.path.join(get_tests_dir(os.path.join("fixtures", "dummy")), "sft", "train.jsonl")
+        cls.dataset_path = os.path.join(
+            get_tests_dir(os.path.join("fixtures", "dummy")),
+            "sft",
+            "train.jsonl",
+        )
 
     def _create_packed_dataset(self, **extra):
-        cfg = _make_base_config(self.tokenizer, packing=True, binpacking=True, **extra)
+        cfg = _make_base_config(
+            self.tokenizer, packing=True, binpacking=True, **extra
+        )
         return create_dataset(
             task_group=self.dataset_path,
             task_group_prob="1.0",
@@ -257,10 +275,16 @@ class TestMapSFTDatasetPackedIdxCache(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-        cls.dataset_path = os.path.join(get_tests_dir(os.path.join("fixtures", "dummy")), "sft", "train.jsonl")
+        cls.dataset_path = os.path.join(
+            get_tests_dir(os.path.join("fixtures", "dummy")),
+            "sft",
+            "train.jsonl",
+        )
 
     def _make_cfg(self, cache_dir, is_valid=False):
-        cfg = _make_base_config(self.tokenizer, packing=True, binpacking=True, is_valid=is_valid)
+        cfg = _make_base_config(
+            self.tokenizer, packing=True, binpacking=True, is_valid=is_valid
+        )
         cfg["packed_idx_cache_dir"] = cache_dir
         return cfg
 
@@ -275,7 +299,10 @@ class TestMapSFTDatasetPackedIdxCache(unittest.TestCase):
                 **cfg,
             )
             expected_cache = os.path.join(tmpdir, "train_packed_idx.npz")
-            self.assertTrue(os.path.isfile(expected_cache), f"Cache file not found: {expected_cache}")
+            self.assertTrue(
+                os.path.isfile(expected_cache),
+                f"Cache file not found: {expected_cache}",
+            )
 
     def test_cache_loaded_on_second_init(self):
         """Second init with same cache_dir should load from cache and produce identical packed_idx."""
@@ -307,7 +334,10 @@ class TestMapSFTDatasetPackedIdxCache(unittest.TestCase):
                 **cfg,
             )
             expected_cache = os.path.join(tmpdir, "eval_packed_idx.npz")
-            self.assertTrue(os.path.isfile(expected_cache), f"Eval cache file not found: {expected_cache}")
+            self.assertTrue(
+                os.path.isfile(expected_cache),
+                f"Eval cache file not found: {expected_cache}",
+            )
 
     def test_corrupt_cache_falls_back_to_recompute(self):
         """A corrupt .npz cache should be silently ignored and packed_idx recomputed."""

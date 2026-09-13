@@ -112,7 +112,10 @@ class TestModelConfig(unittest.TestCase):
         ModelConfig()
         for f in fields(ModelConfig):
             self.assertTrue(
-                f.default is not None or f.default_factory is not None or f.default is False or f.default == 0,
+                f.default is not None
+                or f.default_factory is not None
+                or f.default is False
+                or f.default == 0,
                 f"Field {f.name} may not have a default",
             )
 
@@ -124,7 +127,9 @@ class TestModelConfig(unittest.TestCase):
 
     def test_lora_params(self):
         """Test LoRA-related parameters."""
-        config = ModelConfig(lora=True, lora_rank=32, use_quick_lora=True, rslora=True)
+        config = ModelConfig(
+            lora=True, lora_rank=32, use_quick_lora=True, rslora=True
+        )
         self.assertTrue(config.lora)
         self.assertEqual(config.lora_rank, 32)
         self.assertTrue(config.use_quick_lora)

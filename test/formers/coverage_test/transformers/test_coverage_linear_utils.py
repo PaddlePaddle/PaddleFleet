@@ -54,7 +54,10 @@ class TestLinearUtils(unittest.TestCase):
         self.assertIsNotNone(ColumnSequenceParallelLinear)
         self.assertIsNotNone(RowSequenceParallelLinear)
 
-    @patch("paddlefleet.transformers.linear_utils.get_env_device", return_value="npu")
+    @patch(
+        "paddlefleet.transformers.linear_utils.get_env_device",
+        return_value="npu",
+    )
     def test_npu_device_uses_mc2(self, mock_device):
         from paddlefleet.transformers.linear_utils import (
             ColumnSequenceParallelLinear,
@@ -66,7 +69,10 @@ class TestLinearUtils(unittest.TestCase):
         self.assertIsNotNone(ColumnSequenceParallelLinear)
         self.assertIsNotNone(RowSequenceParallelLinear)
 
-    @patch("paddlefleet.transformers.linear_utils.get_env_device", return_value="cpu")
+    @patch(
+        "paddlefleet.transformers.linear_utils.get_env_device",
+        return_value="cpu",
+    )
     def test_cpu_device_default(self, mock_device):
         from paddlefleet.transformers.linear_utils import Linear
 

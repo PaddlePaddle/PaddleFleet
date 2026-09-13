@@ -109,7 +109,9 @@ class TestDeepEPMoECommunication(unittest.TestCase):
     """Tests for DeepEPMoECommunication class."""
 
     def _get_cls(self):
-        from paddlefleet.nn.moe_deepep.moe_communication import DeepEPMoECommunication
+        from paddlefleet.nn.moe_deepep.moe_communication import (
+            DeepEPMoECommunication,
+        )
 
         return DeepEPMoECommunication
 
@@ -170,7 +172,11 @@ class TestDeepEPMoECommunication(unittest.TestCase):
         tokens_per_expert = [2, 2]
 
         result = comm.expert_forward(
-            dispatched_input, tokens_per_expert, experts, moe_rank=0, num_experts_per_device=2
+            dispatched_input,
+            tokens_per_expert,
+            experts,
+            moe_rank=0,
+            num_experts_per_device=2,
         )
         self.assertEqual(result.shape[1], 8)
 
@@ -188,7 +194,11 @@ class TestDeepEPMoECommunication(unittest.TestCase):
         tokens_per_expert = [0]
 
         result = comm.expert_forward(
-            dispatched_input, tokens_per_expert, experts, moe_rank=0, num_experts_per_device=1
+            dispatched_input,
+            tokens_per_expert,
+            experts,
+            moe_rank=0,
+            num_experts_per_device=1,
         )
         # When no expert has tokens, the outputs list is empty, so input is returned
         self.assertEqual(result.shape[0], 0)
@@ -211,7 +221,11 @@ class TestDeepEPMoECommunication(unittest.TestCase):
         tokens_per_expert = [3, 3]
 
         result = comm.expert_forward(
-            dispatched_input, tokens_per_expert, experts, moe_rank=0, num_experts_per_device=2
+            dispatched_input,
+            tokens_per_expert,
+            experts,
+            moe_rank=0,
+            num_experts_per_device=2,
         )
         self.assertEqual(result.shape[0], 6)
         self.assertEqual(result.shape[1], 8)

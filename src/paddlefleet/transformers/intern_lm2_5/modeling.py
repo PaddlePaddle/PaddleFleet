@@ -11,7 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-""" Paddle InternLM25 model."""
+"""Paddle InternLM25 model."""
+
 import logging
 import math
 import queue
@@ -45,7 +46,9 @@ except Exception:
     BaseStreamer = None
 
 try:
-    from paddle.nn.functional.flash_attention import flash_attention as flash_attn_func
+    from paddle.nn.functional.flash_attention import (
+        flash_attention as flash_attn_func,
+    )
     from paddle.nn.functional.flash_attention import (
         flash_attn_unpadded as flash_attn_varlen_func,
     )
@@ -61,14 +64,18 @@ def index_first_axis(tensor, index):
 
 
 def pad_input(hidden_states, indices, batch, seqlen):
-    output = paddle.zeros([batch * seqlen, *hidden_states.shape[1:]], dtype=hidden_states.dtype)
+    output = paddle.zeros(
+        [batch * seqlen, *hidden_states.shape[1:]], dtype=hidden_states.dtype
+    )
     output = paddle.scatter(output, indices, hidden_states)
     return output.reshape([batch, seqlen, *hidden_states.shape[1:]])
 
 
 def unpad_input(hidden_states, attention_mask):
     indices, cu_seqlens, max_seqlen = _get_unpad_data(attention_mask)
-    hidden_states = index_first_axis(hidden_states.reshape([-1, *hidden_states.shape[2:]]), indices)
+    hidden_states = index_first_axis(
+        hidden_states.reshape([-1, *hidden_states.shape[2:]]), indices
+    )
     return hidden_states, indices, cu_seqlens, max_seqlen
 
 
@@ -79,7 +86,9 @@ def _get_unpad_data(attention_mask):
     seqlens_in_batch = attention_mask.sum(axis=-1, dtype=paddle.int32)
     indices = paddle.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
     max_seqlen_in_batch = seqlens_in_batch.max().item()
-    cu_seqlens = F.pad(paddle.cumsum(seqlens_in_batch, axis=0, dtype=paddle.int32), (1, 0))
+    cu_seqlens = F.pad(
+        paddle.cumsum(seqlens_in_batch, axis=0, dtype=paddle.int32), (1, 0)
+    )
     return (
         indices,
         cu_seqlens,
@@ -95,7 +104,9 @@ class InternLM25RMSNorm(nn.Layer):
         out_2 = paddle.create_parameter(
             shape=paddle.ones(shape=hidden_size).shape,
             dtype=paddle.ones(shape=hidden_size).numpy().dtype,
-            default_initializer=paddle.nn.initializer.Assign(paddle.ones(shape=hidden_size)),
+            default_initializer=paddle.nn.initializer.Assign(
+                paddle.ones(shape=hidden_size)
+            ),
         )
         out_2.stop_gradient = not True
         self.weight = out_2
@@ -105,19 +116,34 @@ class InternLM25RMSNorm(nn.Layer):
         input_dtype = hidden_states.dtype
         hidden_states = hidden_states.astype(paddle.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * paddle.rsqrt(variance + self.variance_epsilon)
+        hidden_states = hidden_states * paddle.rsqrt(
+            variance + self.variance_epsilon
+        )
         return self.weight * hidden_states.astype(input_dtype)
 
 
 class InternLM25RotaryEmbedding(nn.Layer):
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None, scaling_factor=1.0):
+    def __init__(
+        self,
+        dim,
+        max_position_embeddings=2048,
+        base=10000,
+        device=None,
+        scaling_factor=1.0,
+    ):
         super().__init__()
         self.scaling_factor = scaling_factor
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
         inv_freq = 1.0 / (
-            self.base ** (paddle.arange(0, self.dim, 2, dtype=paddle.int64).astype("float32") / self.dim)
+            self.base
+            ** (
+                paddle.arange(0, self.dim, 2, dtype=paddle.int64).astype(
+                    "float32"
+                )
+                / self.dim
+            )
         )
         self.register_buffer("inv_freq", inv_freq, persistable=False)
         self.max_seq_len_cached = max_position_embeddings
@@ -126,7 +152,9 @@ class InternLM25RotaryEmbedding(nn.Layer):
     def forward(self, x, position_ids):
         # x: [bs, num_attention_heads, seq_len, head_size]
         inv_freq_expanded = (
-            self.inv_freq[None, :, None].astype("float32").expand([position_ids.shape[0], self.inv_freq.shape[0], 1])
+            self.inv_freq[None, :, None]
+            .astype("float32")
+            .expand([position_ids.shape[0], self.inv_freq.shape[0], 1])
         )
         position_ids_expanded = position_ids[:, None, :].astype("float32")
         freqs = (inv_freq_expanded @ position_ids_expanded).transpose([0, 2, 1])
@@ -148,10 +176,17 @@ class InternLM25DynamicNTKScalingRotaryEmbedding(InternLM25RotaryEmbedding):
         seq_len = paddle.max(position_ids) + 1
         if seq_len > self.max_position_embeddings:
             base = self.base * (
-                (self.scaling_factor * seq_len / self.max_position_embeddings) - (self.scaling_factor - 1)
+                (self.scaling_factor * seq_len / self.max_position_embeddings)
+                - (self.scaling_factor - 1)
             ) ** (self.dim / (self.dim - 2))
             inv_freq = 1.0 / (
-                base ** (paddle.arange(0, self.dim, 2, dtype=paddle.int64).astype("float32").to(x.place) / self.dim)
+                base
+                ** (
+                    paddle.arange(0, self.dim, 2, dtype=paddle.int64)
+                    .astype("float32")
+                    .to(x.place)
+                    / self.dim
+                )
             )
             self.register_buffer("inv_freq", inv_freq, persistable=False)
 
@@ -179,9 +214,15 @@ class InternLM25MLP(nn.Layer):
         self.config = config
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
-        self.w1 = nn.Linear(self.hidden_size, self.intermediate_size, bias_attr=False)
-        self.w3 = nn.Linear(self.hidden_size, self.intermediate_size, bias_attr=False)
-        self.w2 = nn.Linear(self.intermediate_size, self.hidden_size, bias_attr=False)
+        self.w1 = nn.Linear(
+            self.hidden_size, self.intermediate_size, bias_attr=False
+        )
+        self.w3 = nn.Linear(
+            self.hidden_size, self.intermediate_size, bias_attr=False
+        )
+        self.w2 = nn.Linear(
+            self.intermediate_size, self.hidden_size, bias_attr=False
+        )
         self.act_fn = ACT2FN[config.hidden_act]
 
     def forward(self, x):
@@ -194,12 +235,18 @@ def repeat_kv(hidden_states: paddle.Tensor, n_rep: int) -> paddle.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand([batch, num_key_value_heads, n_rep, slen, head_dim])
-    return hidden_states.reshape([batch, num_key_value_heads * n_rep, slen, head_dim])
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        [batch, num_key_value_heads, n_rep, slen, head_dim]
+    )
+    return hidden_states.reshape(
+        [batch, num_key_value_heads * n_rep, slen, head_dim]
+    )
 
 
 class InternLM25Attention(nn.Layer):
-    def __init__(self, config: InternLM25Config, layer_idx: Optional[int] = None):
+    def __init__(
+        self, config: InternLM25Config, layer_idx: Optional[int] = None
+    ):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -230,7 +277,11 @@ class InternLM25Attention(nn.Layer):
             (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim,
             bias_attr=config.bias,
         )
-        self.wo = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias_attr=config.bias)
+        self.wo = nn.Linear(
+            self.num_heads * self.head_dim,
+            self.hidden_size,
+            bias_attr=config.bias,
+        )
 
         self._init_rope()
 
@@ -270,13 +321,23 @@ class InternLM25Attention(nn.Layer):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[paddle.Tensor] = None,
-    ) -> Tuple[paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]]:
+    ) -> Tuple[
+        paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]
+    ]:
         bsz, q_len, _ = hidden_states.shape
 
         if self.config.pretraining_tp > 1:
-            key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
+            key_value_slicing = (
+                self.num_key_value_heads * self.head_dim
+            ) // self.config.pretraining_tp
             qkv_slices = self.wqkv.weight.split(key_value_slicing, axis=0)
-            qkv_states = paddle.concat([F.linear(hidden_states, qkv_slice) for qkv_slice in qkv_slices], axis=-1)
+            qkv_states = paddle.concat(
+                [
+                    F.linear(hidden_states, qkv_slice)
+                    for qkv_slice in qkv_slices
+                ],
+                axis=-1,
+            )
         else:
             qkv_states = self.wqkv(hidden_states)
 
@@ -286,27 +347,41 @@ class InternLM25Attention(nn.Layer):
         qkv_states = qkv_states.reshape([bsz, q_len, h, gs, d])
 
         query_states = qkv_states[..., : self.num_key_value_groups, :]
-        query_states = query_states.reshape([bsz, q_len, -1, self.head_dim]).transpose([0, 2, 1, 3])
+        query_states = query_states.reshape(
+            [bsz, q_len, -1, self.head_dim]
+        ).transpose([0, 2, 1, 3])
         key_states = qkv_states[..., -2, :].transpose([0, 2, 1, 3])
         value_states = qkv_states[..., -1, :].transpose([0, 2, 1, 3])
 
         cos, sin = self.rotary_emb(value_states, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin, position_ids
+        )
 
         if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            cache_kwargs = {
+                "sin": sin,
+                "cos": cos,
+                "cache_position": cache_position,
+            }
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
 
-        attn_weights = paddle.matmul(query_states, key_states.transpose([0, 1, 3, 2])) / math.sqrt(self.head_dim)
+        attn_weights = paddle.matmul(
+            query_states, key_states.transpose([0, 1, 3, 2])
+        ) / math.sqrt(self.head_dim)
 
         if attention_mask is not None:
             causal_mask = attention_mask[:, :, :, : key_states.shape[-2]]
             attn_weights = attn_weights + causal_mask
 
-        attn_weights = nn.functional.softmax(attn_weights, axis=-1, dtype=paddle.float32).to(query_states.dtype)
+        attn_weights = nn.functional.softmax(
+            attn_weights, axis=-1, dtype=paddle.float32
+        ).to(query_states.dtype)
         attn_output = paddle.matmul(attn_weights, value_states)
 
         if attn_output.shape != (bsz, self.num_heads, q_len, self.head_dim):
@@ -320,9 +395,18 @@ class InternLM25Attention(nn.Layer):
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
         if self.config.pretraining_tp > 1:
-            attn_output = attn_output.split(self.hidden_size // self.config.pretraining_tp, axis=2)
-            o_proj_slices = self.wo.weight.split(self.hidden_size // self.config.pretraining_tp, axis=1)
-            attn_output = sum([F.linear(attn_output[i], o_proj_slices[i]) for i in range(self.config.pretraining_tp)])
+            attn_output = attn_output.split(
+                self.hidden_size // self.config.pretraining_tp, axis=2
+            )
+            o_proj_slices = self.wo.weight.split(
+                self.hidden_size // self.config.pretraining_tp, axis=1
+            )
+            attn_output = sum(
+                [
+                    F.linear(attn_output[i], o_proj_slices[i])
+                    for i in range(self.config.pretraining_tp)
+                ]
+            )
         else:
             attn_output = self.wo(attn_output)
 
@@ -346,7 +430,9 @@ class InternLM25FlashAttention2(InternLM25Attention):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[paddle.Tensor] = None,
-    ) -> Tuple[paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]]:
+    ) -> Tuple[
+        paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]
+    ]:
         output_attentions = False
 
         bsz, q_len, _ = hidden_states.shape
@@ -368,11 +454,19 @@ class InternLM25FlashAttention2(InternLM25Attention):
         value_states = value_states.transpose([0, 2, 1, 3])
 
         cos, sin = self.rotary_emb(value_states, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin
+        )
 
         if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            cache_kwargs = {
+                "sin": sin,
+                "cos": cos,
+                "cache_position": cache_position,
+            }
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
 
         query_states = query_states.transpose([0, 2, 1, 3])
         key_states = key_states.transpose([0, 2, 1, 3])
@@ -400,7 +494,12 @@ class InternLM25FlashAttention2(InternLM25Attention):
             value_states = value_states.to(target_dtype)
 
         attn_output = self._flash_attention_forward(
-            query_states, key_states, value_states, attention_mask, q_len, dropout=dropout_rate
+            query_states,
+            key_states,
+            value_states,
+            attention_mask,
+            q_len,
+            dropout=dropout_rate,
         )
 
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
@@ -412,7 +511,14 @@ class InternLM25FlashAttention2(InternLM25Attention):
         return attn_output, attn_weights, past_key_value
 
     def _flash_attention_forward(
-        self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None
+        self,
+        query_states,
+        key_states,
+        value_states,
+        attention_mask,
+        query_length,
+        dropout=0.0,
+        softmax_scale=None,
     ):
         if not self._flash_attn_uses_top_left_mask:
             causal = self.is_causal
@@ -421,8 +527,19 @@ class InternLM25FlashAttention2(InternLM25Attention):
 
         if attention_mask is not None:
             batch_size = query_states.shape[0]
-            query_states, key_states, value_states, indices_q, cu_seq_lens, max_seq_lens = self._upad_input(
-                query_states, key_states, value_states, attention_mask, query_length
+            (
+                query_states,
+                key_states,
+                value_states,
+                indices_q,
+                cu_seq_lens,
+                max_seq_lens,
+            ) = self._upad_input(
+                query_states,
+                key_states,
+                value_states,
+                attention_mask,
+                query_length,
             )
 
             cu_seqlens_q, cu_seqlens_k = cu_seq_lens
@@ -441,27 +558,47 @@ class InternLM25FlashAttention2(InternLM25Attention):
                 causal=causal,
             )
 
-            attn_output = pad_input(attn_output_unpad, indices_q, batch_size, query_length)
+            attn_output = pad_input(
+                attn_output_unpad, indices_q, batch_size, query_length
+            )
         else:
             attn_output = flash_attn_func(
-                query_states, key_states, value_states, dropout, softmax_scale=softmax_scale, causal=causal
+                query_states,
+                key_states,
+                value_states,
+                dropout,
+                softmax_scale=softmax_scale,
+                causal=causal,
             )
 
         return attn_output
 
-    def _upad_input(self, query_layer, key_layer, value_layer, attention_mask, query_length):
-        indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(attention_mask)
+    def _upad_input(
+        self, query_layer, key_layer, value_layer, attention_mask, query_length
+    ):
+        indices_k, cu_seqlens_k, max_seqlen_in_batch_k = _get_unpad_data(
+            attention_mask
+        )
         batch_size, kv_seq_len, num_key_value_heads, head_dim = key_layer.shape
 
         key_layer = index_first_axis(
-            key_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
+            key_layer.reshape(
+                batch_size * kv_seq_len, num_key_value_heads, head_dim
+            ),
+            indices_k,
         )
         value_layer = index_first_axis(
-            value_layer.reshape(batch_size * kv_seq_len, num_key_value_heads, head_dim), indices_k
+            value_layer.reshape(
+                batch_size * kv_seq_len, num_key_value_heads, head_dim
+            ),
+            indices_k,
         )
         if query_length == kv_seq_len:
             query_layer = index_first_axis(
-                query_layer.reshape(batch_size * kv_seq_len, self.num_heads, head_dim), indices_k
+                query_layer.reshape(
+                    batch_size * kv_seq_len, self.num_heads, head_dim
+                ),
+                indices_k,
             )
             cu_seqlens_q = cu_seqlens_k
             max_seqlen_in_batch_q = max_seqlen_in_batch_k
@@ -473,7 +610,9 @@ class InternLM25FlashAttention2(InternLM25Attention):
             query_layer = query_layer.squeeze(1)
         else:
             attention_mask = attention_mask[:, -query_length:]
-            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = unpad_input(query_layer, attention_mask)
+            query_layer, indices_q, cu_seqlens_q, max_seqlen_in_batch_q = (
+                unpad_input(query_layer, attention_mask)
+            )
 
         return (
             query_layer,
@@ -495,9 +634,10 @@ class InternLM25SdpaAttention(InternLM25Attention):
         output_attentions: bool = False,
         use_cache: bool = False,
         cache_position: Optional[paddle.Tensor] = None,
-    ) -> Tuple[paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]]:
+    ) -> Tuple[
+        paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]
+    ]:
         if output_attentions:
-
             logger.warning(
                 "InternLM25Model uses InternLM25SdpaAttention, but `paddle.nn.functional.scaled_dot_product_attention` "
                 "does not support `output_attentions=True`. "
@@ -531,11 +671,19 @@ class InternLM25SdpaAttention(InternLM25Attention):
         value_states = value_states.transpose([0, 2, 1, 3])
 
         cos, sin = self.rotary_emb(value_states, position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin
+        )
 
         if past_key_value is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            cache_kwargs = {
+                "sin": sin,
+                "cos": cos,
+                "cache_position": cache_position,
+            }
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
 
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
@@ -581,11 +729,17 @@ class InternLM25DecoderLayer(nn.Layer):
         self.hidden_size = config.hidden_size
         self.layer_idx = layer_idx
 
-        self.attention = INTERNLM25_ATTENTION_CLASSES[config.attn_implementation](config=config, layer_idx=layer_idx)
+        self.attention = INTERNLM25_ATTENTION_CLASSES[
+            config.attn_implementation
+        ](config=config, layer_idx=layer_idx)
 
         self.feed_forward = InternLM25MLP(config)
-        self.attention_norm = InternLM25RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.ffn_norm = InternLM25RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.attention_norm = InternLM25RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.ffn_norm = InternLM25RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -654,7 +808,9 @@ class InternLM25PretrainedModel(PretrainedModel):
 
     @classmethod
     def _gen_aoa_config(cls, config: InternLM25Config):
-        model_prefix = cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        model_prefix = (
+            cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        )
         aoa_statements = [
             f"model.tok_embeddings.weight -> {model_prefix}tok_embeddings.weight",
             f"model.norm.weight -> {model_prefix}norm.weight",
@@ -675,14 +831,18 @@ class InternLM25PretrainedModel(PretrainedModel):
         )
         if cls != cls.base_model_class:
             if getattr(config, "tie_word_embeddings", False):
-                aoa_statements.append("model.tok_embeddings.weight -> output.weight")
+                aoa_statements.append(
+                    "model.tok_embeddings.weight -> output.weight"
+                )
             else:
                 aoa_statements.append("output.weight^T -> output.weight")
         return {"aoa_statements": aoa_statements}
 
     @classmethod
     def _gen_inv_aoa_config(cls, config: InternLM25Config):
-        model_prefix = cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        model_prefix = (
+            cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        )
         aoa_statements = [
             f"{model_prefix}tok_embeddings.weight -> model.tok_embeddings.weight",
             f"{model_prefix}norm.weight -> model.norm.weight",
@@ -703,7 +863,9 @@ class InternLM25PretrainedModel(PretrainedModel):
         )
         if cls != cls.base_model_class:
             if getattr(config, "tie_word_embeddings", False):
-                aoa_statements.append("output.weight -> model.tok_embeddings.weight")
+                aoa_statements.append(
+                    "output.weight -> model.tok_embeddings.weight"
+                )
             else:
                 aoa_statements.append("output.weight^T -> output.weight")
         return {"aoa_statements": aoa_statements}
@@ -719,12 +881,19 @@ class InternLM25Model(InternLM25PretrainedModel):
         self.vocab_size = config.vocab_size
         self.config = config
 
-        self.tok_embeddings = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        self.tok_embeddings = nn.Embedding(
+            config.vocab_size, config.hidden_size, self.padding_idx
+        )
 
         self.layers = nn.LayerList(
-            [InternLM25DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [
+                InternLM25DecoderLayer(config, layer_idx)
+                for layer_idx in range(config.num_hidden_layers)
+            ]
         )
-        self.norm = InternLM25RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = InternLM25RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
         self.enable_recompute = False
 
@@ -780,12 +949,24 @@ class InternLM25Model(InternLM25PretrainedModel):
         # accept and ignore them here for compatibility.
         **kwargs,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
         )
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        use_cache = (
+            use_cache if use_cache is not None else self.config.use_cache
+        )
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
 
         if (input_ids is None) ^ (inputs_embeds is not None):
             raise ValueError(
@@ -793,7 +974,9 @@ class InternLM25Model(InternLM25PretrainedModel):
             )
 
         if self.enable_recompute and self.training and use_cache:
-            logger.warning("`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`.")
+            logger.warning(
+                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
+            )
             use_cache = False
 
         if inputs_embeds is None:
@@ -808,13 +991,23 @@ class InternLM25Model(InternLM25PretrainedModel):
                 past_key_values = DynamicCache(ddp_cache_data=past_key_values)
 
         if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = paddle.arange(past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1])
+            past_seen_tokens = (
+                past_key_values.get_seq_length()
+                if past_key_values is not None
+                else 0
+            )
+            cache_position = paddle.arange(
+                past_seen_tokens, past_seen_tokens + inputs_embeds.shape[1]
+            )
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
         causal_mask = self._update_causal_mask(
-            attention_mask, inputs_embeds, cache_position, past_key_values, output_attentions
+            attention_mask,
+            inputs_embeds,
+            cache_position,
+            past_key_values,
+            output_attentions,
         )
 
         hidden_states = inputs_embeds
@@ -852,7 +1045,9 @@ class InternLM25Model(InternLM25PretrainedModel):
             hidden_states = layer_outputs[0]
 
             if use_cache:
-                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+                next_decoder_cache = layer_outputs[
+                    2 if output_attentions else 1
+                ]
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
@@ -864,10 +1059,21 @@ class InternLM25Model(InternLM25PretrainedModel):
 
         next_cache = next_decoder_cache if use_cache else None
         if return_legacy_cache:
-            next_cache = tuple((layer.keys, layer.values) for layer in next_cache.layers)
+            next_cache = tuple(
+                (layer.keys, layer.values) for layer in next_cache.layers
+            )
 
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+            return tuple(
+                v
+                for v in [
+                    hidden_states,
+                    next_cache,
+                    all_hidden_states,
+                    all_self_attns,
+                ]
+                if v is not None
+            )
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
@@ -887,10 +1093,18 @@ class InternLM25Model(InternLM25PretrainedModel):
             if attention_mask is not None and 0.0 in attention_mask:
                 return attention_mask
             return None
-        past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
+        past_seen_tokens = (
+            past_key_values.get_seq_length()
+            if past_key_values is not None
+            else 0
+        )
         using_static_cache = False
 
-        if self.config.attn_implementation == "sdpa" and not using_static_cache and not output_attentions:
+        if (
+            self.config.attn_implementation == "sdpa"
+            and not using_static_cache
+            and not output_attentions
+        ):
             pass
 
         dtype, device = input_tensor.dtype, input_tensor.place
@@ -908,27 +1122,40 @@ class InternLM25Model(InternLM25PretrainedModel):
         if attention_mask is not None and attention_mask.ndim == 4:
             causal_mask = attention_mask
         else:
-            causal_mask = paddle.full([sequence_length, target_length], fill_value=min_dtype, dtype=dtype)
+            causal_mask = paddle.full(
+                [sequence_length, target_length],
+                fill_value=min_dtype,
+                dtype=dtype,
+            )
             if device is not None:
                 causal_mask = causal_mask.to(device)
             if sequence_length != 1:
                 if dtype == paddle.float32:
                     causal_mask = paddle.triu(causal_mask, diagonal=1)
                 else:
-                    triu_mask = paddle.triu(paddle.ones(causal_mask.shape).to(device), diagonal=1).astype("bool")
-                    causal_mask = paddle.where(triu_mask, causal_mask, paddle.zeros_like(causal_mask))
-            causal_mask *= (paddle.arange(target_length).to(device) > cache_position.reshape(-1, 1)).astype(dtype)
-            causal_mask = causal_mask[None, None, :, :].expand([input_tensor.shape[0], 1, -1, -1])
+                    triu_mask = paddle.triu(
+                        paddle.ones(causal_mask.shape).to(device), diagonal=1
+                    ).astype("bool")
+                    causal_mask = paddle.where(
+                        triu_mask, causal_mask, paddle.zeros_like(causal_mask)
+                    )
+            causal_mask *= (
+                paddle.arange(target_length).to(device)
+                > cache_position.reshape(-1, 1)
+            ).astype(dtype)
+            causal_mask = causal_mask[None, None, :, :].expand(
+                [input_tensor.shape[0], 1, -1, -1]
+            )
             if attention_mask is not None:
                 causal_mask = causal_mask.clone()
                 mask_length = attention_mask.shape[-1]
-                padding_mask = causal_mask[:, :, :, :mask_length] + attention_mask[:, None, None, :].astype(
-                    causal_mask.dtype
-                )
+                padding_mask = causal_mask[
+                    :, :, :, :mask_length
+                ] + attention_mask[:, None, None, :].astype(causal_mask.dtype)
                 padding_mask = padding_mask == 0
-                causal_mask[:, :, :, :mask_length] = causal_mask[:, :, :, :mask_length].masked_fill(
-                    padding_mask, min_dtype
-                )
+                causal_mask[:, :, :, :mask_length] = causal_mask[
+                    :, :, :, :mask_length
+                ].masked_fill(padding_mask, min_dtype)
         if (
             self.config.attn_implementation == "sdpa"
             and attention_mask is not None
@@ -948,7 +1175,9 @@ class InternLM25ForCausalLM(InternLM25PretrainedModel):
         super().__init__(config)
         self.model = InternLM25Model(config)
         self.vocab_size = config.vocab_size
-        self.output = nn.Linear(config.hidden_size, config.vocab_size, bias_attr=False)
+        self.output = nn.Linear(
+            config.hidden_size, config.vocab_size, bias_attr=False
+        )
 
     def get_input_embeddings(self):
         return self.model.tok_embeddings
@@ -985,11 +1214,21 @@ class InternLM25ForCausalLM(InternLM25PretrainedModel):
         # accept and ignore them here for compatibility.
         **kwargs,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
 
         outputs = self.model(
             input_ids=input_ids,
@@ -1006,8 +1245,13 @@ class InternLM25ForCausalLM(InternLM25PretrainedModel):
 
         hidden_states = outputs[0]
         if self.config.pretraining_tp > 1:
-            output_slices = self.output.weight.split(self.vocab_size // self.config.pretraining_tp, axis=0)
-            logits = [F.linear(hidden_states, output_slices[i]) for i in range(self.config.pretraining_tp)]
+            output_slices = self.output.weight.split(
+                self.vocab_size // self.config.pretraining_tp, axis=0
+            )
+            logits = [
+                F.linear(hidden_states, output_slices[i])
+                for i in range(self.config.pretraining_tp)
+            ]
             logits = paddle.concat(logits, axis=-1)
         else:
             logits = self.output(hidden_states)
@@ -1048,22 +1292,37 @@ class InternLM25ForCausalLM(InternLM25PretrainedModel):
         past_length = 0
         if past_key_values is not None:
             if isinstance(past_key_values, Cache):
-                past_length = cache_position[0] if cache_position is not None else past_key_values.get_seq_length()
+                past_length = (
+                    cache_position[0]
+                    if cache_position is not None
+                    else past_key_values.get_seq_length()
+                )
                 max_cache_length = (
                     paddle.to_tensor(
                         past_key_values.get_max_cache_shape(),
-                        place=input_ids.place if hasattr(input_ids, "place") else None,
+                        place=input_ids.place
+                        if hasattr(input_ids, "place")
+                        else None,
                     )
                     if past_key_values.get_max_cache_shape() is not None
                     else None
                 )
-                cache_length = past_length if max_cache_length is None else paddle.min(max_cache_length, past_length)
+                cache_length = (
+                    past_length
+                    if max_cache_length is None
+                    else paddle.min(max_cache_length, past_length)
+                )
             else:
                 cache_length = past_length = past_key_values[0][0].shape[2]
                 max_cache_length = None
 
-            if attention_mask is not None and attention_mask.shape[1] > input_ids.shape[1]:
-                input_ids = input_ids[:, -(attention_mask.shape[1] - past_length) :]
+            if (
+                attention_mask is not None
+                and attention_mask.shape[1] > input_ids.shape[1]
+            ):
+                input_ids = input_ids[
+                    :, -(attention_mask.shape[1] - past_length) :
+                ]
 
             elif past_length < input_ids.shape[1]:
                 input_ids = input_ids[:, past_length:]
@@ -1077,7 +1336,11 @@ class InternLM25ForCausalLM(InternLM25PretrainedModel):
         position_ids = kwargs.get("position_ids", None)
         if attention_mask is not None and position_ids is None:
             position_ids = attention_mask.astype("int64").cumsum(-1) - 1
-            position_ids = paddle.where(attention_mask == 0, paddle.ones_like(position_ids), position_ids)
+            position_ids = paddle.where(
+                attention_mask == 0,
+                paddle.ones_like(position_ids),
+                position_ids,
+            )
             if past_key_values:
                 position_ids = position_ids[:, -input_ids.shape[1] :]
 
@@ -1086,9 +1349,15 @@ class InternLM25ForCausalLM(InternLM25PretrainedModel):
         else:
             model_inputs = {"input_ids": input_ids}
 
-        input_length = position_ids.shape[-1] if position_ids is not None else input_ids.shape[-1]
+        input_length = (
+            position_ids.shape[-1]
+            if position_ids is not None
+            else input_ids.shape[-1]
+        )
         if cache_position is None:
-            cache_position = paddle.arange(past_length, past_length + input_length)
+            cache_position = paddle.arange(
+                past_length, past_length + input_length
+            )
         elif use_cache:
             cache_position = cache_position[-input_length:]
 
@@ -1108,11 +1377,20 @@ class InternLM25ForCausalLM(InternLM25PretrainedModel):
         reordered_past = ()
         for layer_past in past_key_values:
             reordered_past += (
-                tuple(past_state.index_select(0, beam_idx.to(past_state.place)) for past_state in layer_past),
+                tuple(
+                    past_state.index_select(0, beam_idx.to(past_state.place))
+                    for past_state in layer_past
+                ),
             )
         return reordered_past
 
-    def build_inputs(self, tokenizer, query: str, history: List[Tuple[str, str]] = None, meta_instruction=""):
+    def build_inputs(
+        self,
+        tokenizer,
+        query: str,
+        history: List[Tuple[str, str]] = None,
+        meta_instruction="",
+    ):
         if history is None:
             history = []
         if tokenizer.add_bos_token:
@@ -1123,7 +1401,9 @@ class InternLM25ForCausalLM(InternLM25PretrainedModel):
             prompt += f"""<|im_start|>system\n{meta_instruction}<|im_end|>\n"""
         for record in history:
             prompt += f"""<|im_start|>user\n{record[0]}<|im_end|>\n<|im_start|>assistant\n{record[1]}<|im_end|>\n"""
-        prompt += f"""<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n"""
+        prompt += (
+            f"""<|im_start|>user\n{query}<|im_end|>\n<|im_start|>assistant\n"""
+        )
         return tokenizer([prompt], return_tensors="pd")
 
     @paddle.no_grad()
@@ -1148,7 +1428,10 @@ class InternLM25ForCausalLM(InternLM25PretrainedModel):
             history = []
         inputs = self.build_inputs(tokenizer, query, history, meta_instruction)
         inputs = {k: v for k, v in inputs.items() if paddle.is_tensor(v)}
-        eos_token_id = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids(["<|im_end|>"])[0]]
+        eos_token_id = [
+            tokenizer.eos_token_id,
+            tokenizer.convert_tokens_to_ids(["<|im_end|>"])[0],
+        ]
         outputs = self.generate(
             **inputs,
             streamer=streamer,
@@ -1194,7 +1477,9 @@ class InternLM25ForCausalLM(InternLM25PretrainedModel):
                 self.response = ""
                 self.cache = []
                 self.received_inputs = False
-                self.queue.put((self.response, history + [(self.query, self.response)]))
+                self.queue.put(
+                    (self.response, history + [(self.query, self.response)])
+                )
 
             def put(self, value):
                 if len(value.shape) > 1 and value.shape[0] > 1:
@@ -1207,7 +1492,9 @@ class InternLM25ForCausalLM(InternLM25PretrainedModel):
                     return
 
                 self.cache.extend(value.tolist())
-                token = self.tokenizer.decode(self.cache, skip_special_tokens=True)
+                token = self.tokenizer.decode(
+                    self.cache, skip_special_tokens=True
+                )
                 if token.strip() != "<|im_end|>":
                     self.response = self.response + token
                     history = self.history + [(self.query, self.response)]
@@ -1249,7 +1536,9 @@ class InternLM25ForSequenceClassification(InternLM25PretrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.model = InternLM25Model(config)
-        self.score = nn.Linear(config.hidden_size, self.num_labels, bias_attr=False)
+        self.score = nn.Linear(
+            config.hidden_size, self.num_labels, bias_attr=False
+        )
 
     def get_input_embeddings(self):
         return self.model.tok_embeddings
@@ -1270,7 +1559,11 @@ class InternLM25ForSequenceClassification(InternLM25PretrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
 
         transformer_outputs = self.model(
             input_ids,
@@ -1292,12 +1585,19 @@ class InternLM25ForSequenceClassification(InternLM25PretrainedModel):
             batch_size = inputs_embeds.shape[0]
 
         if self.config.pad_token_id is None and batch_size != 1:
-            raise ValueError("Cannot handle batch sizes > 1 if no padding token is defined.")
+            raise ValueError(
+                "Cannot handle batch sizes > 1 if no padding token is defined."
+            )
         if self.config.pad_token_id is None:
             sequence_lengths = -1
         else:
             if input_ids is not None:
-                sequence_lengths = paddle.equal(input_ids, self.config.pad_token_id).astype("int32").argmax(-1) - 1
+                sequence_lengths = (
+                    paddle.equal(input_ids, self.config.pad_token_id)
+                    .astype("int32")
+                    .argmax(-1)
+                    - 1
+                )
                 sequence_lengths = sequence_lengths % input_ids.shape[-1]
                 sequence_lengths = sequence_lengths.to(logits.place)
             else:
@@ -1311,7 +1611,9 @@ class InternLM25ForSequenceClassification(InternLM25PretrainedModel):
             if self.config.problem_type is None:
                 if self.num_labels == 1:
                     self.config.problem_type = "regression"
-                elif self.num_labels > 1 and (labels.dtype in (paddle.int64, paddle.int32)):
+                elif self.num_labels > 1 and (
+                    labels.dtype in (paddle.int64, paddle.int32)
+                ):
                     self.config.problem_type = "single_label_classification"
                 else:
                     self.config.problem_type = "multi_label_classification"
@@ -1324,7 +1626,10 @@ class InternLM25ForSequenceClassification(InternLM25PretrainedModel):
                     loss = loss_fct(pooled_logits, labels)
             elif self.config.problem_type == "single_label_classification":
                 loss_fct = CrossEntropyLoss()
-                loss = loss_fct(pooled_logits.reshape(-1, self.num_labels), labels.reshape(-1))
+                loss = loss_fct(
+                    pooled_logits.reshape(-1, self.num_labels),
+                    labels.reshape(-1),
+                )
             elif self.config.problem_type == "multi_label_classification":
                 loss_fct = BCEWithLogitsLoss()
                 loss = loss_fct(pooled_logits, labels)
@@ -1368,7 +1673,11 @@ class InternLM25ForQuestionAnswering(InternLM25PretrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, QuestionAnsweringModelOutput]:
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
 
         outputs = self.transformer(
             input_ids,
@@ -1384,14 +1693,18 @@ class InternLM25ForQuestionAnswering(InternLM25PretrainedModel):
         sequence_output = outputs[0]
 
         logits = self.qa_outputs(sequence_output)
-        start_logits, end_logits = paddle.split(logits, num_or_sections=2, axis=-1)
+        start_logits, end_logits = paddle.split(
+            logits, num_or_sections=2, axis=-1
+        )
         start_logits = start_logits.squeeze(-1)
         end_logits = end_logits.squeeze(-1)
 
         total_loss = None
         if start_positions is not None and end_positions is not None:
             if len(start_positions.shape) > 1:
-                start_positions = start_positions.squeeze(-1).to(start_logits.place)
+                start_positions = start_positions.squeeze(-1).to(
+                    start_logits.place
+                )
             if len(end_positions.shape) > 1:
                 end_positions = end_positions.squeeze(-1).to(end_logits.place)
             ignored_index = start_logits.shape[1]
@@ -1405,7 +1718,9 @@ class InternLM25ForQuestionAnswering(InternLM25PretrainedModel):
 
         if not return_dict:
             output = (start_logits, end_logits) + outputs[2:]
-            return ((total_loss,) + output) if total_loss is not None else output
+            return (
+                ((total_loss,) + output) if total_loss is not None else output
+            )
 
         return QuestionAnsweringModelOutput(
             loss=total_loss,
@@ -1449,7 +1764,11 @@ class InternLM25ForTokenClassification(InternLM25PretrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
     ) -> Union[Tuple, SequenceClassifierOutputWithPast]:
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
 
         outputs = self.model(
             input_ids,
@@ -1469,7 +1788,9 @@ class InternLM25ForTokenClassification(InternLM25PretrainedModel):
         loss = None
         if labels is not None:
             loss_fct = CrossEntropyLoss()
-            loss = loss_fct(logits.reshape(-1, self.num_labels), labels.reshape(-1))
+            loss = loss_fct(
+                logits.reshape(-1, self.num_labels), labels.reshape(-1)
+            )
 
         if not return_dict:
             output = (logits,) + outputs[2:]

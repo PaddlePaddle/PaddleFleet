@@ -31,7 +31,11 @@ import paddle.nn.functional as F
 from paddlefleet.transformers.model_outputs import ModelOutput
 from paddlefleet.transformers.model_utils import PretrainedModel
 
-from .configuration import Gemma2TextConfig, PaliGemma2Config, SiglipVisionConfig
+from .configuration import (
+    Gemma2TextConfig,
+    PaliGemma2Config,
+    SiglipVisionConfig,
+)
 
 
 @dataclass
@@ -64,7 +68,9 @@ class SiglipVisionEmbeddings(nn.Layer):
 
         self.num_patches = (self.image_size // self.patch_size) ** 2
         self.num_positions = self.num_patches
-        self.position_embedding = nn.Embedding(self.num_positions, self.embed_dim)
+        self.position_embedding = nn.Embedding(
+            self.num_positions, self.embed_dim
+        )
 
     def forward(self, pixel_values: paddle.Tensor) -> paddle.Tensor:
         target_dtype = self.patch_embedding.weight.dtype
@@ -73,7 +79,9 @@ class SiglipVisionEmbeddings(nn.Layer):
         patch_embeds = self.patch_embedding(pixel_values)  # [B, C, H, W]
         patch_embeds = patch_embeds.flatten(2).transpose((0, 2, 1))  # [B, N, C]
 
-        position_ids = paddle.arange(self.num_positions, dtype="int64").unsqueeze(0)
+        position_ids = paddle.arange(
+            self.num_positions, dtype="int64"
+        ).unsqueeze(0)
         embeddings = patch_embeds + self.position_embedding(position_ids)
         return embeddings
 
@@ -91,26 +99,41 @@ class SiglipVisionAttention(nn.Layer):
         self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias_attr=True)
         self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias_attr=True)
         self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias_attr=True)
-        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias_attr=True)
+        self.out_proj = nn.Linear(
+            self.embed_dim, self.embed_dim, bias_attr=True
+        )
 
     def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
         bsz, tgt_len, _ = hidden_states.shape
 
         query_states = (
-            self.q_proj(hidden_states).reshape([bsz, tgt_len, self.num_heads, self.head_dim]).transpose([0, 2, 1, 3])
+            self.q_proj(hidden_states)
+            .reshape([bsz, tgt_len, self.num_heads, self.head_dim])
+            .transpose([0, 2, 1, 3])
         )
         key_states = (
-            self.k_proj(hidden_states).reshape([bsz, tgt_len, self.num_heads, self.head_dim]).transpose([0, 2, 1, 3])
+            self.k_proj(hidden_states)
+            .reshape([bsz, tgt_len, self.num_heads, self.head_dim])
+            .transpose([0, 2, 1, 3])
         )
         value_states = (
-            self.v_proj(hidden_states).reshape([bsz, tgt_len, self.num_heads, self.head_dim]).transpose([0, 2, 1, 3])
+            self.v_proj(hidden_states)
+            .reshape([bsz, tgt_len, self.num_heads, self.head_dim])
+            .transpose([0, 2, 1, 3])
         )
 
-        attn_weights = paddle.matmul(query_states, key_states, transpose_y=True) * self.scale
-        attn_weights = F.softmax(attn_weights.cast("float32"), axis=-1).cast(query_states.dtype)
+        attn_weights = (
+            paddle.matmul(query_states, key_states, transpose_y=True)
+            * self.scale
+        )
+        attn_weights = F.softmax(attn_weights.cast("float32"), axis=-1).cast(
+            query_states.dtype
+        )
 
         attn_output = paddle.matmul(attn_weights, value_states)
-        attn_output = attn_output.transpose([0, 2, 1, 3]).reshape([bsz, tgt_len, self.embed_dim])
+        attn_output = attn_output.transpose([0, 2, 1, 3]).reshape(
+            [bsz, tgt_len, self.embed_dim]
+        )
 
         return self.out_proj(attn_output)
 
@@ -121,8 +144,12 @@ class SiglipMLP(nn.Layer):
     def __init__(self, config: SiglipVisionConfig):
         super().__init__()
         self.config = config
-        self.fc1 = nn.Linear(config.hidden_size, config.intermediate_size, bias_attr=True)
-        self.fc2 = nn.Linear(config.intermediate_size, config.hidden_size, bias_attr=True)
+        self.fc1 = nn.Linear(
+            config.hidden_size, config.intermediate_size, bias_attr=True
+        )
+        self.fc2 = nn.Linear(
+            config.intermediate_size, config.hidden_size, bias_attr=True
+        )
 
     def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
         hidden_states = self.fc1(hidden_states)
@@ -136,10 +163,14 @@ class SiglipEncoderLayer(nn.Layer):
 
     def __init__(self, config: SiglipVisionConfig):
         super().__init__()
-        self.layer_norm1 = nn.LayerNorm(config.hidden_size, epsilon=config.layer_norm_eps)
+        self.layer_norm1 = nn.LayerNorm(
+            config.hidden_size, epsilon=config.layer_norm_eps
+        )
         self.self_attn = SiglipVisionAttention(config)
         self.mlp = SiglipMLP(config)
-        self.layer_norm2 = nn.LayerNorm(config.hidden_size, epsilon=config.layer_norm_eps)
+        self.layer_norm2 = nn.LayerNorm(
+            config.hidden_size, epsilon=config.layer_norm_eps
+        )
 
     def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
         residual = hidden_states
@@ -161,8 +192,15 @@ class SiglipVisionTransformer(nn.Layer):
         super().__init__()
         self.config = config
         self.embeddings = SiglipVisionEmbeddings(config)
-        self.encoder = nn.LayerList([SiglipEncoderLayer(config) for _ in range(config.num_hidden_layers)])
-        self.post_layernorm = nn.LayerNorm(config.hidden_size, epsilon=config.layer_norm_eps)
+        self.encoder = nn.LayerList(
+            [
+                SiglipEncoderLayer(config)
+                for _ in range(config.num_hidden_layers)
+            ]
+        )
+        self.post_layernorm = nn.LayerNorm(
+            config.hidden_size, epsilon=config.layer_norm_eps
+        )
 
     def forward(self, pixel_values: paddle.Tensor) -> paddle.Tensor:
         hidden_states = self.embeddings(pixel_values)
@@ -202,7 +240,9 @@ class Gemma2RMSNorm(nn.Layer):
     def forward(self, x: paddle.Tensor) -> paddle.Tensor:
         input_dtype = x.dtype
         x = x.cast("float32")
-        output = x * paddle.rsqrt(paddle.mean(x * x, axis=-1, keepdim=True) + self.eps)
+        output = x * paddle.rsqrt(
+            paddle.mean(x * x, axis=-1, keepdim=True) + self.eps
+        )
         output = output * (1.0 + self.weight.cast("float32"))
         return output.cast(input_dtype)
 
@@ -214,14 +254,20 @@ class Gemma2RotaryEmbedding(nn.Layer):
         super().__init__()
         self.dim = dim
         self.base = base
-        inv_freq = 1.0 / (base ** (paddle.arange(0, dim, 2).cast("float32") / dim))
+        inv_freq = 1.0 / (
+            base ** (paddle.arange(0, dim, 2).cast("float32") / dim)
+        )
         self.register_buffer("inv_freq", inv_freq)
 
-    def forward(self, seq_len: int, position_ids: paddle.Tensor, dtype=None) -> paddle.Tensor:
+    def forward(
+        self, seq_len: int, position_ids: paddle.Tensor, dtype=None
+    ) -> paddle.Tensor:
         # position_ids: [bsz, seq_len]
         # inv_freq: [head_dim // 2]
         # freqs: [bsz, seq_len, head_dim // 2]
-        freqs = position_ids.cast("float32").unsqueeze(-1) * self.inv_freq  # [bsz, seq_len, head_dim//2]
+        freqs = (
+            position_ids.cast("float32").unsqueeze(-1) * self.inv_freq
+        )  # [bsz, seq_len, head_dim//2]
         emb = paddle.concat([freqs, freqs], axis=-1)  # [bsz, seq_len, head_dim]
         cos = emb.cos()
         sin = emb.sin()
@@ -256,15 +302,29 @@ class Gemma2Attention(nn.Layer):
         self.layer_idx = layer_idx
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
-        self.head_dim = config.head_dim or config.hidden_size // config.num_attention_heads
+        self.head_dim = (
+            config.head_dim or config.hidden_size // config.num_attention_heads
+        )
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = self.num_heads // self.num_key_value_heads
         self.scaling = self.config.query_pre_attn_scalar**-0.5
 
-        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias_attr=False)
-        self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias_attr=False)
-        self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias_attr=False)
-        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias_attr=False)
+        self.q_proj = nn.Linear(
+            self.hidden_size, self.num_heads * self.head_dim, bias_attr=False
+        )
+        self.k_proj = nn.Linear(
+            self.hidden_size,
+            self.num_key_value_heads * self.head_dim,
+            bias_attr=False,
+        )
+        self.v_proj = nn.Linear(
+            self.hidden_size,
+            self.num_key_value_heads * self.head_dim,
+            bias_attr=False,
+        )
+        self.o_proj = nn.Linear(
+            self.num_heads * self.head_dim, self.hidden_size, bias_attr=False
+        )
 
     def forward(
         self,
@@ -279,38 +339,59 @@ class Gemma2Attention(nn.Layer):
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
 
-        query_states = query_states.reshape([bsz, q_len, self.num_heads, self.head_dim]).transpose([0, 2, 1, 3])
-        key_states = key_states.reshape([bsz, q_len, self.num_key_value_heads, self.head_dim]).transpose([0, 2, 1, 3])
-        value_states = value_states.reshape([bsz, q_len, self.num_key_value_heads, self.head_dim]).transpose(
-            [0, 2, 1, 3]
-        )
+        query_states = query_states.reshape(
+            [bsz, q_len, self.num_heads, self.head_dim]
+        ).transpose([0, 2, 1, 3])
+        key_states = key_states.reshape(
+            [bsz, q_len, self.num_key_value_heads, self.head_dim]
+        ).transpose([0, 2, 1, 3])
+        value_states = value_states.reshape(
+            [bsz, q_len, self.num_key_value_heads, self.head_dim]
+        ).transpose([0, 2, 1, 3])
 
         # Repeat KV for GQA
-        key_states = paddle.repeat_interleave(key_states, self.num_key_value_groups, axis=1)
-        value_states = paddle.repeat_interleave(value_states, self.num_key_value_groups, axis=1)
+        key_states = paddle.repeat_interleave(
+            key_states, self.num_key_value_groups, axis=1
+        )
+        value_states = paddle.repeat_interleave(
+            value_states, self.num_key_value_groups, axis=1
+        )
 
         # Apply rotary embedding
         cos, sin = self._get_rotary_emb(q_len, position_ids, query_states.dtype)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin
+        )
 
         # Match HuggingFace Gemma2: softcap raw attention scores before masking.
-        attn_weights = paddle.matmul(query_states, key_states, transpose_y=True) * self.scaling
+        attn_weights = (
+            paddle.matmul(query_states, key_states, transpose_y=True)
+            * self.scaling
+        )
         if self.config.attn_logit_softcapping is not None:
             attn_weights = attn_weights / self.config.attn_logit_softcapping
-            attn_weights = paddle.tanh(attn_weights) * self.config.attn_logit_softcapping
+            attn_weights = (
+                paddle.tanh(attn_weights) * self.config.attn_logit_softcapping
+            )
         if attention_mask is not None:
             attn_weights = attn_weights + attention_mask
 
-        attn_weights = F.softmax(attn_weights.cast("float32"), axis=-1).cast(query_states.dtype)
+        attn_weights = F.softmax(attn_weights.cast("float32"), axis=-1).cast(
+            query_states.dtype
+        )
         attn_output = paddle.matmul(attn_weights, value_states)
 
-        attn_output = attn_output.transpose([0, 2, 1, 3]).reshape([bsz, q_len, self.num_heads * self.head_dim])
+        attn_output = attn_output.transpose([0, 2, 1, 3]).reshape(
+            [bsz, q_len, self.num_heads * self.head_dim]
+        )
         attn_output = attn_output.cast(self.o_proj.weight.dtype)
         return self.o_proj(attn_output)
 
     def _get_rotary_emb(self, seq_len: int, position_ids: paddle.Tensor, dtype):
         if not hasattr(self, "_rotary_emb"):
-            self._rotary_emb = Gemma2RotaryEmbedding(self.head_dim, self.config.rope_theta)
+            self._rotary_emb = Gemma2RotaryEmbedding(
+                self.head_dim, self.config.rope_theta
+            )
         cos, sin = self._rotary_emb(seq_len, position_ids, dtype)
         return cos, sin
 
@@ -321,9 +402,15 @@ class Gemma2MLP(nn.Layer):
     def __init__(self, config: Gemma2TextConfig):
         super().__init__()
         self.config = config
-        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias_attr=False)
-        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias_attr=False)
-        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias_attr=False)
+        self.gate_proj = nn.Linear(
+            config.hidden_size, config.intermediate_size, bias_attr=False
+        )
+        self.up_proj = nn.Linear(
+            config.hidden_size, config.intermediate_size, bias_attr=False
+        )
+        self.down_proj = nn.Linear(
+            config.intermediate_size, config.hidden_size, bias_attr=False
+        )
 
     def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
         gate_states = self.gate_proj(hidden_states)
@@ -339,10 +426,18 @@ class Gemma2DecoderLayer(nn.Layer):
         self.config = config
         self.self_attn = Gemma2Attention(config, layer_idx)
         self.mlp = Gemma2MLP(config)
-        self.input_layernorm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.pre_feedforward_layernorm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_feedforward_layernorm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.input_layernorm = Gemma2RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.post_attention_layernorm = Gemma2RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.pre_feedforward_layernorm = Gemma2RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
+        self.post_feedforward_layernorm = Gemma2RMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps
+        )
 
     def forward(
         self,
@@ -352,7 +447,9 @@ class Gemma2DecoderLayer(nn.Layer):
     ) -> paddle.Tensor:
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(hidden_states, position_ids, attention_mask)
+        hidden_states = self.self_attn(
+            hidden_states, position_ids, attention_mask
+        )
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = residual + hidden_states
 
@@ -371,7 +468,12 @@ class Gemma2Model(nn.Layer):
         super().__init__()
         self.config = config
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.LayerList([Gemma2DecoderLayer(config, i) for i in range(config.num_hidden_layers)])
+        self.layers = nn.LayerList(
+            [
+                Gemma2DecoderLayer(config, i)
+                for i in range(config.num_hidden_layers)
+            ]
+        )
         self.norm = Gemma2RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -388,7 +490,9 @@ class Gemma2Model(nn.Layer):
 
         bsz, seq_len = hidden_states.shape[:2]
         if position_ids is None:
-            position_ids = paddle.arange(seq_len).unsqueeze(0).expand([bsz, seq_len])
+            position_ids = (
+                paddle.arange(seq_len).unsqueeze(0).expand([bsz, seq_len])
+            )
 
         causal_mask = (
             paddle.triu(
@@ -402,7 +506,9 @@ class Gemma2Model(nn.Layer):
             padding_mask = paddle.where(
                 attention_mask.unsqueeze([1, 2]).astype("bool"),
                 paddle.zeros([bsz, 1, 1, seq_len], dtype="float32"),
-                paddle.full([bsz, 1, 1, seq_len], float("-inf"), dtype="float32"),
+                paddle.full(
+                    [bsz, 1, 1, seq_len], float("-inf"), dtype="float32"
+                ),
             )
             causal_mask = causal_mask + padding_mask
 
@@ -449,7 +555,9 @@ class PaliGemma2ForConditionalGeneration(PaliGemma2PreTrainedModel):
         ```
     """
 
-    _tied_weights_keys = {"lm_head.weight": "language_model.embed_tokens.weight"}
+    _tied_weights_keys = {
+        "lm_head.weight": "language_model.embed_tokens.weight"
+    }
 
     def __init__(self, config: PaliGemma2Config):
         super().__init__(config)
@@ -503,24 +611,33 @@ class PaliGemma2ForConditionalGeneration(PaliGemma2PreTrainedModel):
         if pixel_values is not None:
             image_features = self.vision_tower(pixel_values)
             image_features = self.multi_modal_projector(image_features)
-            image_features = image_features / (self.config.text_config.hidden_size**0.5)
+            image_features = image_features / (
+                self.config.text_config.hidden_size**0.5
+            )
 
             # Replace image token placeholders with image features
             image_token_mask = input_ids == self.config.image_token_index
             num_image_tokens = image_features.shape[1]
 
-            if int(image_token_mask.astype("int64").sum().item()) != bsz * num_image_tokens:
+            if (
+                int(image_token_mask.astype("int64").sum().item())
+                != bsz * num_image_tokens
+            ):
                 raise ValueError("Image features and image tokens do not match")
 
             for batch_idx in range(bsz):
                 mask = image_token_mask[batch_idx]
                 positions = paddle.nonzero(mask).flatten()
                 if len(positions) > 0:
-                    inputs_embeds[batch_idx, positions[:num_image_tokens]] = image_features[batch_idx]
+                    inputs_embeds[batch_idx, positions[:num_image_tokens]] = (
+                        image_features[batch_idx]
+                    )
 
             image_hidden_states = image_features
 
-        position_ids = paddle.arange(1, seq_len + 1).unsqueeze(0).expand([bsz, seq_len])
+        position_ids = (
+            paddle.arange(1, seq_len + 1).unsqueeze(0).expand([bsz, seq_len])
+        )
 
         # Create causal additive mask without multiplying zero by -inf.
         causal_mask = (
@@ -533,7 +650,9 @@ class PaliGemma2ForConditionalGeneration(PaliGemma2PreTrainedModel):
         )
         if token_type_ids is not None:
             image_tokens = token_type_ids == 0
-            bidirectional_image_mask = image_tokens.unsqueeze(2) & image_tokens.unsqueeze(1)
+            bidirectional_image_mask = image_tokens.unsqueeze(
+                2
+            ) & image_tokens.unsqueeze(1)
             causal_mask = paddle.where(
                 bidirectional_image_mask.unsqueeze(1),
                 paddle.zeros_like(causal_mask),
@@ -543,7 +662,9 @@ class PaliGemma2ForConditionalGeneration(PaliGemma2PreTrainedModel):
             padding_mask = paddle.where(
                 attention_mask.unsqueeze([1, 2]).astype("bool"),
                 paddle.zeros([bsz, 1, 1, seq_len], dtype="float32"),
-                paddle.full([bsz, 1, 1, seq_len], float("-inf"), dtype="float32"),
+                paddle.full(
+                    [bsz, 1, 1, seq_len], float("-inf"), dtype="float32"
+                ),
             )
             extended_mask = causal_mask + padding_mask
         else:
@@ -565,8 +686,14 @@ class PaliGemma2ForConditionalGeneration(PaliGemma2PreTrainedModel):
         if labels is not None:
             flat_labels = labels.reshape([-1])
             loss_mask = (flat_labels != -100).astype(logits.dtype)
-            safe_labels = paddle.where(flat_labels == -100, paddle.zeros_like(flat_labels), flat_labels)
-            token_loss = F.cross_entropy(logits.reshape([-1, logits.shape[-1]]), safe_labels, reduction="none")
+            safe_labels = paddle.where(
+                flat_labels == -100, paddle.zeros_like(flat_labels), flat_labels
+            )
+            token_loss = F.cross_entropy(
+                logits.reshape([-1, logits.shape[-1]]),
+                safe_labels,
+                reduction="none",
+            )
             loss = (token_loss * loss_mask).sum() / loss_mask.sum()
 
         return PaliGemma2ModelOutput(
@@ -665,14 +792,23 @@ class PaliGemma2ForCausalLM(PaliGemma2PreTrainedModel):
 
         if self.config.text_config.final_logit_softcapping is not None:
             logits = logits / self.config.text_config.final_logit_softcapping
-            logits = paddle.tanh(logits) * self.config.text_config.final_logit_softcapping
+            logits = (
+                paddle.tanh(logits)
+                * self.config.text_config.final_logit_softcapping
+            )
 
         loss = None
         if labels is not None:
             flat_labels = labels.reshape([-1])
             loss_mask = (flat_labels != -100).astype(logits.dtype)
-            safe_labels = paddle.where(flat_labels == -100, paddle.zeros_like(flat_labels), flat_labels)
-            token_loss = F.cross_entropy(logits.reshape([-1, logits.shape[-1]]), safe_labels, reduction="none")
+            safe_labels = paddle.where(
+                flat_labels == -100, paddle.zeros_like(flat_labels), flat_labels
+            )
+            token_loss = F.cross_entropy(
+                logits.reshape([-1, logits.shape[-1]]),
+                safe_labels,
+                reduction="none",
+            )
             loss = (token_loss * loss_mask).sum() / loss_mask.sum()
 
         return PaliGemma2ModelOutput(loss=loss, logits=logits)

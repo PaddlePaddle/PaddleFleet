@@ -59,7 +59,9 @@ class TestIterableDummyDataset(unittest.TestCase):
         """Test that IterableDummyDataset is a subclass of paddle.io.IterableDataset."""
         from paddlefleet.data.dist_dataloader import IterableDummyDataset
 
-        self.assertTrue(issubclass(IterableDummyDataset, paddle.io.IterableDataset))
+        self.assertTrue(
+            issubclass(IterableDummyDataset, paddle.io.IterableDataset)
+        )
 
     def test_iter_returns_none(self):
         """Test that __iter__ returns None (non-iterator)."""

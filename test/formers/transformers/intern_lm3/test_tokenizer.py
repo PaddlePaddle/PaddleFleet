@@ -24,7 +24,9 @@ class TestTokenizer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         try:
-            cls.tokenizer = InternLM3Tokenizer.from_pretrained(hf_model_path, download_hub="huggingface")
+            cls.tokenizer = InternLM3Tokenizer.from_pretrained(
+                hf_model_path, download_hub="huggingface"
+            )
         except Exception:
             cls.tokenizer = None
 
@@ -38,12 +40,16 @@ class TestTokenizer(unittest.TestCase):
             self.skipTest("Model path not available")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            special_tokens_dict = {"additional_special_tokens": ["[ENT_START]", "[ENT_END]"]}
+            special_tokens_dict = {
+                "additional_special_tokens": ["[ENT_START]", "[ENT_END]"]
+            }
             self.tokenizer.add_special_tokens(special_tokens_dict)
             self.tokenizer.add_tokens(["new_word", "another_word"])
             self.tokenizer.model_max_length = 512
             self.tokenizer.save_pretrained(tmpdir)
-            self.assertTrue(os.path.exists(os.path.join(tmpdir, "tokenizer_config.json")))
+            self.assertTrue(
+                os.path.exists(os.path.join(tmpdir, "tokenizer_config.json"))
+            )
 
     def test_tokenize(self):
         if self.tokenizer is None:

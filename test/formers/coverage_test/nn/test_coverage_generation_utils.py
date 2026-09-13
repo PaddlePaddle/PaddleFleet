@@ -73,7 +73,9 @@ class TestGetUnfinishedFlag(unittest.TestCase):
         input_ids = paddle.to_tensor([[1, 2, 3, 5]])
         unfinished = paddle.to_tensor([[True]])
         # [[0], [5]] -- second sublist matches
-        result = get_unfinished_flag(input_ids, unfinished, eos_token_id=[[0], [5]])
+        result = get_unfinished_flag(
+            input_ids, unfinished, eos_token_id=[[0], [5]]
+        )
         self.assertFalse(result.item())
 
     def test_nested_list_eos_none_match(self):
@@ -82,7 +84,9 @@ class TestGetUnfinishedFlag(unittest.TestCase):
 
         input_ids = paddle.to_tensor([[1, 2, 3, 9]])
         unfinished = paddle.to_tensor([[True]])
-        result = get_unfinished_flag(input_ids, unfinished, eos_token_id=[[0], [5]])
+        result = get_unfinished_flag(
+            input_ids, unfinished, eos_token_id=[[0], [5]]
+        )
         self.assertTrue(result.item())
 
     def test_batch_input(self):
@@ -103,7 +107,9 @@ class TestBeamHypotheses(unittest.TestCase):
         """BeamHypotheses should initialize with empty beams."""
         from paddlefleet.generation.utils import BeamHypotheses
 
-        hyps = BeamHypotheses(num_beams=3, length_penalty=1.0, early_stopping=False)
+        hyps = BeamHypotheses(
+            num_beams=3, length_penalty=1.0, early_stopping=False
+        )
         self.assertEqual(len(hyps), 0)
         self.assertEqual(hyps.num_beams, 3)
 
@@ -111,7 +117,9 @@ class TestBeamHypotheses(unittest.TestCase):
         """Adding beams within capacity should store them."""
         from paddlefleet.generation.utils import BeamHypotheses
 
-        hyps = BeamHypotheses(num_beams=3, length_penalty=1.0, early_stopping=False)
+        hyps = BeamHypotheses(
+            num_beams=3, length_penalty=1.0, early_stopping=False
+        )
         hyp1 = paddle.to_tensor([1, 2, 3])
         hyps.add(hyp1, sum_logprobs=-1.0)
         self.assertEqual(len(hyps), 1)
@@ -120,7 +128,9 @@ class TestBeamHypotheses(unittest.TestCase):
         """Adding up to num_beams should keep all beams."""
         from paddlefleet.generation.utils import BeamHypotheses
 
-        hyps = BeamHypotheses(num_beams=3, length_penalty=1.0, early_stopping=False)
+        hyps = BeamHypotheses(
+            num_beams=3, length_penalty=1.0, early_stopping=False
+        )
         for i in range(3):
             hyp = paddle.to_tensor([1, 2, 3 + i])
             hyps.add(hyp, sum_logprobs=-(i + 1) * 0.5)
@@ -130,7 +140,9 @@ class TestBeamHypotheses(unittest.TestCase):
         """When exceeding capacity, the worst beam should be evicted."""
         from paddlefleet.generation.utils import BeamHypotheses
 
-        hyps = BeamHypotheses(num_beams=2, length_penalty=1.0, early_stopping=False)
+        hyps = BeamHypotheses(
+            num_beams=2, length_penalty=1.0, early_stopping=False
+        )
         hyps.add(paddle.to_tensor([1, 2, 3]), sum_logprobs=-2.0)
         hyps.add(paddle.to_tensor([1, 2, 4]), sum_logprobs=-1.0)
         # worst_score is the lower of the two
@@ -146,7 +158,9 @@ class TestBeamHypotheses(unittest.TestCase):
         """A beam better than worst should replace it."""
         from paddlefleet.generation.utils import BeamHypotheses
 
-        hyps = BeamHypotheses(num_beams=2, length_penalty=1.0, early_stopping=False)
+        hyps = BeamHypotheses(
+            num_beams=2, length_penalty=1.0, early_stopping=False
+        )
         hyps.add(paddle.to_tensor([1, 2, 3]), sum_logprobs=-5.0)
         hyps.add(paddle.to_tensor([1, 2, 4]), sum_logprobs=-4.0)
         old_worst = hyps.worst_score
@@ -159,14 +173,18 @@ class TestBeamHypotheses(unittest.TestCase):
         """is_done should return False when not enough beams."""
         from paddlefleet.generation.utils import BeamHypotheses
 
-        hyps = BeamHypotheses(num_beams=3, length_penalty=1.0, early_stopping=False)
+        hyps = BeamHypotheses(
+            num_beams=3, length_penalty=1.0, early_stopping=False
+        )
         self.assertFalse(hyps.is_done(best_sum_logprobs=0.0, cur_len=5))
 
     def test_is_done_early_stopping(self):
         """is_done should return True with early_stopping when beams are full."""
         from paddlefleet.generation.utils import BeamHypotheses
 
-        hyps = BeamHypotheses(num_beams=2, length_penalty=1.0, early_stopping=True)
+        hyps = BeamHypotheses(
+            num_beams=2, length_penalty=1.0, early_stopping=True
+        )
         hyps.add(paddle.to_tensor([1, 2, 3]), sum_logprobs=-1.0)
         hyps.add(paddle.to_tensor([1, 2, 4]), sum_logprobs=-2.0)
         self.assertTrue(hyps.is_done(best_sum_logprobs=0.0, cur_len=5))
@@ -175,7 +193,9 @@ class TestBeamHypotheses(unittest.TestCase):
         """Without early_stopping, should return False if a better score is possible."""
         from paddlefleet.generation.utils import BeamHypotheses
 
-        hyps = BeamHypotheses(num_beams=2, length_penalty=1.0, early_stopping=False)
+        hyps = BeamHypotheses(
+            num_beams=2, length_penalty=1.0, early_stopping=False
+        )
         hyps.add(paddle.to_tensor([1, 2, 3]), sum_logprobs=-1.0)
         hyps.add(paddle.to_tensor([1, 2, 4]), sum_logprobs=-2.0)
         # A much better score should make is_done return False
@@ -185,7 +205,9 @@ class TestBeamHypotheses(unittest.TestCase):
         """add with origin_len should use it in length penalty calculation."""
         from paddlefleet.generation.utils import BeamHypotheses
 
-        hyps = BeamHypotheses(num_beams=3, length_penalty=1.0, early_stopping=False)
+        hyps = BeamHypotheses(
+            num_beams=3, length_penalty=1.0, early_stopping=False
+        )
         hyp = paddle.to_tensor([1, 2, 3, 4, 5, 6, 7, 8])
         hyps.add(hyp, sum_logprobs=-1.0, origin_len=5)
         self.assertEqual(len(hyps), 1)
@@ -194,10 +216,18 @@ class TestBeamHypotheses(unittest.TestCase):
         """is_done with origin_len should use it in score comparison."""
         from paddlefleet.generation.utils import BeamHypotheses
 
-        hyps = BeamHypotheses(num_beams=2, length_penalty=1.0, early_stopping=False)
-        hyps.add(paddle.to_tensor([1, 2, 3, 4, 5]), sum_logprobs=-1.0, origin_len=2)
-        hyps.add(paddle.to_tensor([1, 2, 3, 4, 5]), sum_logprobs=-2.0, origin_len=2)
-        self.assertFalse(hyps.is_done(best_sum_logprobs=100.0, cur_len=5, origin_len=2))
+        hyps = BeamHypotheses(
+            num_beams=2, length_penalty=1.0, early_stopping=False
+        )
+        hyps.add(
+            paddle.to_tensor([1, 2, 3, 4, 5]), sum_logprobs=-1.0, origin_len=2
+        )
+        hyps.add(
+            paddle.to_tensor([1, 2, 3, 4, 5]), sum_logprobs=-2.0, origin_len=2
+        )
+        self.assertFalse(
+            hyps.is_done(best_sum_logprobs=100.0, cur_len=5, origin_len=2)
+        )
 
 
 class TestMakeSlidingWindowMask(unittest.TestCase):
@@ -207,21 +237,27 @@ class TestMakeSlidingWindowMask(unittest.TestCase):
         """Output shape should be [bsz, 1, tgt_seq_len, src_seq_len]."""
         from paddlefleet.generation.utils import _make_sliding_window_mask
 
-        mask = _make_sliding_window_mask((2, 8), past_key_values_length=0, window_size=5)
+        mask = _make_sliding_window_mask(
+            (2, 8), past_key_values_length=0, window_size=5
+        )
         self.assertEqual(mask.shape, [2, 1, 8, 8])
 
     def test_with_past_key_values(self):
         """With past_key_values_length, src_seq_len should be tgt + past."""
         from paddlefleet.generation.utils import _make_sliding_window_mask
 
-        mask = _make_sliding_window_mask((2, 4), past_key_values_length=10, window_size=5)
+        mask = _make_sliding_window_mask(
+            (2, 4), past_key_values_length=10, window_size=5
+        )
         self.assertEqual(mask.shape, [2, 1, 4, 14])
 
     def test_causal_property(self):
         """Each position should only attend to itself and earlier positions within window."""
         from paddlefleet.generation.utils import _make_sliding_window_mask
 
-        mask = _make_sliding_window_mask((1, 5), past_key_values_length=0, window_size=3)
+        mask = _make_sliding_window_mask(
+            (1, 5), past_key_values_length=0, window_size=3
+        )
         # Position 0 should only see position 0
         self.assertTrue(mask[0, 0, 0, 0].item())
         self.assertFalse(mask[0, 0, 0, 1].item())
@@ -240,11 +276,15 @@ class TestMakeSlidingWindowMask(unittest.TestCase):
         """When window_size >= seq_length, all causal positions should be visible."""
         from paddlefleet.generation.utils import _make_sliding_window_mask
 
-        mask = _make_sliding_window_mask((1, 3), past_key_values_length=0, window_size=10)
+        mask = _make_sliding_window_mask(
+            (1, 3), past_key_values_length=0, window_size=10
+        )
         # All positions should see all previous and current
         for i in range(3):
             for j in range(i + 1):
-                self.assertTrue(mask[0, 0, i, j].item(), f"pos {i} should see pos {j}")
+                self.assertTrue(
+                    mask[0, 0, i, j].item(), f"pos {i} should see pos {j}"
+                )
 
 
 class TestBeamSearchScorer(unittest.TestCase):
@@ -262,7 +302,9 @@ class TestBeamSearchScorer(unittest.TestCase):
         from paddlefleet.generation.utils import BeamSearchScorer
 
         with self.assertRaises(ValueError):
-            BeamSearchScorer(batch_size=1, max_length=10, num_beams=4, num_beam_groups=3)
+            BeamSearchScorer(
+                batch_size=1, max_length=10, num_beams=4, num_beam_groups=3
+            )
 
     def test_init_valid(self):
         """BeamSearchScorer should initialize correctly with valid params."""
@@ -277,5 +319,7 @@ class TestBeamSearchScorer(unittest.TestCase):
         """BeamSearchScorer with multiple beam groups."""
         from paddlefleet.generation.utils import BeamSearchScorer
 
-        scorer = BeamSearchScorer(batch_size=2, max_length=20, num_beams=4, num_beam_groups=2)
+        scorer = BeamSearchScorer(
+            batch_size=2, max_length=20, num_beams=4, num_beam_groups=2
+        )
         self.assertEqual(scorer.group_size, 2)

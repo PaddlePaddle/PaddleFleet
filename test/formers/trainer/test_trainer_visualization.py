@@ -27,7 +27,10 @@ from paddlefleet.trainer.integrations import (
     VisualDLCallback,
     WandbCallback,
 )
-from formers.trainer.trainer_utils import RegressionModelConfig, RegressionPretrainedModel
+from formers.trainer.trainer_utils import (
+    RegressionModelConfig,
+    RegressionPretrainedModel,
+)
 
 
 class TestWandbCallback(unittest.TestCase):
@@ -56,11 +59,23 @@ class TestWandbCallback(unittest.TestCase):
         for global_step in range(args.max_steps):
             state.global_step = global_step
             if global_step % args.logging_steps == 0:
-                log = {"loss": 100 - 0.4 * global_step, "learning_rate": 0.1, "global_step": global_step}
+                log = {
+                    "loss": 100 - 0.4 * global_step,
+                    "learning_rate": 0.1,
+                    "global_step": global_step,
+                }
                 wandbcallback.on_log(args, state, control, logs=log)
-                self.assertEqual(wandbcallback._wandb.run.summary["train/loss"], log["loss"])
-                self.assertEqual(wandbcallback._wandb.run.summary["train/learning_rate"], log["learning_rate"])
-                self.assertEqual(wandbcallback._wandb.run.summary["train/global_step"], log["global_step"])
+                self.assertEqual(
+                    wandbcallback._wandb.run.summary["train/loss"], log["loss"]
+                )
+                self.assertEqual(
+                    wandbcallback._wandb.run.summary["train/learning_rate"],
+                    log["learning_rate"],
+                )
+                self.assertEqual(
+                    wandbcallback._wandb.run.summary["train/global_step"],
+                    log["global_step"],
+                )
         wandbcallback.on_train_end(args, state, control, model=model)
         wandbcallback._wandb.finish()
         os.environ.pop("WANDB_LOG_MODEL", None)
@@ -91,7 +106,11 @@ class TestSwanlabCallback(unittest.TestCase):
         for global_step in range(args.max_steps):
             state.global_step = global_step
             if global_step % args.logging_steps == 0:
-                log = {"loss": 100 - 0.4 * global_step, "learning_rate": 0.1, "global_step": global_step}
+                log = {
+                    "loss": 100 - 0.4 * global_step,
+                    "learning_rate": 0.1,
+                    "global_step": global_step,
+                }
                 swanlabcallback.on_log(args, state, control, logs=log)
         swanlabcallback.on_train_end(args, state, control, model=model)
         # In disabled mode, finish() should not be called as there is no active run
@@ -125,7 +144,11 @@ class TestTensorboardCallback(unittest.TestCase):
         for global_step in range(args.max_steps):
             state.global_step = global_step
             if global_step % args.logging_steps == 0:
-                log = {"loss": 100 - 0.4 * global_step, "learning_rate": 0.1, "global_step": global_step}
+                log = {
+                    "loss": 100 - 0.4 * global_step,
+                    "learning_rate": 0.1,
+                    "global_step": global_step,
+                }
                 tensorboard_callback.on_log(args, state, control, logs=log)
         ea = event_accumulator.EventAccumulator(output_dir)
         ea.Reload()
@@ -166,7 +189,11 @@ class TestVisualDLCallback(unittest.TestCase):
         for global_step in range(args.max_steps):
             state.global_step = global_step
             if global_step % args.logging_steps == 0:
-                log = {"loss": 100 - 0.4 * global_step, "learning_rate": 0.1, "global_step": global_step}
+                log = {
+                    "loss": 100 - 0.4 * global_step,
+                    "learning_rate": 0.1,
+                    "global_step": global_step,
+                }
                 visualdl_callback.on_log(args, state, control, logs=log)
         reader = LogReader(file_path=visualdl_callback.vdl_writer.file_name)
         loss_scalars = reader.get_data("scalar", "train/loss")

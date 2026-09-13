@@ -87,7 +87,9 @@ def convert_to_tokens_for_sft(
         tokenizer.init_chat_template(NONE_CHAT_TEMPLATE)
     encoded_messages = tokenizer.encode_chat_inputs({"messages": dial})
 
-    num_reserved_tokens_for_each_dialog = 1  # only break_turn_token or end_token
+    num_reserved_tokens_for_each_dialog = (
+        1  # only break_turn_token or end_token
+    )
     num_reserved_tokens_for_each_turn = 8
 
     cur_len = num_reserved_tokens_for_each_dialog
@@ -100,7 +102,9 @@ def convert_to_tokens_for_sft(
 
     while turn_index >= 0:
         tokens_src, tokens_target = encoded_messages[turn_index]
-        if len(tokens_src) + len(tokens_target) > (max_src_len + 1 - cur_len - num_reserved_tokens_for_each_turn):
+        if len(tokens_src) + len(tokens_target) > (
+            max_src_len + 1 - cur_len - num_reserved_tokens_for_each_turn
+        ):
             break
 
         tokens = tokens_src + tokens_target + tokens
@@ -141,7 +145,9 @@ def convert_to_input_ids(
             tokens = convert_to_tokens_for_pt(dial, tokenizer, max_src_len)
             input_ids.append(tokenizer.convert_tokens_to_ids(tokens))
         elif data_format == "chat":
-            input_ids.append(convert_to_tokens_for_sft(dial, tokenizer, max_src_len))
+            input_ids.append(
+                convert_to_tokens_for_sft(dial, tokenizer, max_src_len)
+            )
         else:
             raise ValueError(f"Unsupported data format: {data_format}")
         num_input_tokens += len(input_ids[-1])
@@ -173,8 +179,12 @@ def function_call_chat_template(tokenizer, messages, tools):
     if all_str.endswith(s):
         all_str = all_str[: -len(s)]
     response_str = all_str[history_len:]
-    history_id = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(history_str))
-    response_id = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(response_str))
+    history_id = tokenizer.convert_tokens_to_ids(
+        tokenizer.tokenize(history_str)
+    )
+    response_id = tokenizer.convert_tokens_to_ids(
+        tokenizer.tokenize(response_str)
+    )
     return [history_id, response_id]
 
 
@@ -206,13 +216,20 @@ def estimate_training(train_dataset, data_args, training_args, model_args):
 
     if training_args.max_estimate_samples != -1:
         # Set estimate samples to max_estimate_samples
-        logger.warning("The results between sampling and non-sampling methods may differ.")
+        logger.warning(
+            "The results between sampling and non-sampling methods may differ."
+        )
         train_dataset.max_estimate_samples = min(
-            training_args.max_estimate_samples, train_dataset.max_estimate_samples
+            training_args.max_estimate_samples,
+            train_dataset.max_estimate_samples,
         )
 
-    logger.info(f"training_args.max_estimate_samples: {training_args.max_estimate_samples}")
-    logger.info(f"train_dataset.max_estimate_samples: {train_dataset.max_estimate_samples }")
+    logger.info(
+        f"training_args.max_estimate_samples: {training_args.max_estimate_samples}"
+    )
+    logger.info(
+        f"train_dataset.max_estimate_samples: {train_dataset.max_estimate_samples}"
+    )
     if train_dataset.max_estimate_samples > 0:
         train_batches = 0
         train_tokens = 0
@@ -228,7 +245,9 @@ def estimate_training(train_dataset, data_args, training_args, model_args):
             _iter.close()
 
         estimate_elapsed = time.time() - estimate_start_time
-        print(f"[Estimate Max Steps Progress]: 100% (total elapsed: {estimate_elapsed:.1f}s)")
+        print(
+            f"[Estimate Max Steps Progress]: 100% (total elapsed: {estimate_elapsed:.1f}s)"
+        )
 
         train_tokens *= training_args.num_train_epochs
         train_batches *= training_args.num_train_epochs
@@ -241,8 +260,12 @@ def estimate_training(train_dataset, data_args, training_args, model_args):
         if max_samples != train_dataset.max_estimate_samples:
             max_steps *= max_samples / train_dataset.max_estimate_samples
             train_tokens *= max_samples / train_dataset.max_estimate_samples
-            train_dataset.used_samples *= max_samples / train_dataset.max_estimate_samples
-            train_dataset.unused_samples *= max_samples / train_dataset.max_estimate_samples
+            train_dataset.used_samples *= (
+                max_samples / train_dataset.max_estimate_samples
+            )
+            train_dataset.unused_samples *= (
+                max_samples / train_dataset.max_estimate_samples
+            )
 
         max_steps = int(np.ceil(max_steps))
 
@@ -253,9 +276,15 @@ def estimate_training(train_dataset, data_args, training_args, model_args):
             "global_batch_size": int(global_batch_size),
             "gradient_accumulation_steps": training_args.gradient_accumulation_steps,
             "warmup_steps": int(np.ceil(0.1 * max_steps)),
-            "per_device_train_batch_size": int(training_args.per_device_train_batch_size),
-            "tensor_model_parallel_size": int(training_args.tensor_model_parallel_size),
-            "pipeline_model_parallel_size": int(training_args.pipeline_model_parallel_size),
+            "per_device_train_batch_size": int(
+                training_args.per_device_train_batch_size
+            ),
+            "tensor_model_parallel_size": int(
+                training_args.tensor_model_parallel_size
+            ),
+            "pipeline_model_parallel_size": int(
+                training_args.pipeline_model_parallel_size
+            ),
             "sharding_parallel_size": int(training_args.sharding_parallel_size),
             "seed": training_args.seed,
             "num_samples_each_epoch": data_args.num_samples_each_epoch,
@@ -263,18 +292,29 @@ def estimate_training(train_dataset, data_args, training_args, model_args):
             "valid": True,
             "train_samples": int(max_samples * training_args.num_train_epochs),
             "estimate_samples": int(train_dataset.max_estimate_samples),
-            "actual_train_samples": int(train_dataset.used_samples * training_args.num_train_epochs),
-            "skip_samples": int(train_dataset.unused_samples * training_args.num_train_epochs),
+            "actual_train_samples": int(
+                train_dataset.used_samples * training_args.num_train_epochs
+            ),
+            "skip_samples": int(
+                train_dataset.unused_samples * training_args.num_train_epochs
+            ),
         }
         if hasattr(training_args, "num_of_gpus"):
             res["num_of_gpus"] = training_args.num_of_gpus
 
-        if train_batches / training_args.num_train_epochs / global_batch_size < 1:
-            logger.warning("This dataset is too small, you'd better enlarge your dataset.")
+        if (
+            train_batches / training_args.num_train_epochs / global_batch_size
+            < 1
+        ):
+            logger.warning(
+                "This dataset is too small, you'd better enlarge your dataset."
+            )
             res["valid"] = False
 
         if getattr(training_args, "estimation_output_file", None):
-            with open(training_args.estimation_output_file, "w", encoding="utf-8") as f:
+            with open(
+                training_args.estimation_output_file, "w", encoding="utf-8"
+            ) as f:
                 json.dump(res, f)
 
         return max_steps
@@ -284,9 +324,15 @@ def estimate_training(train_dataset, data_args, training_args, model_args):
             "max_steps": 0,
             "gradient_accumulation_steps": training_args.gradient_accumulation_steps,
             "train_tokens": 0,
-            "per_device_train_batch_size": int(training_args.per_device_train_batch_size),
-            "tensor_model_parallel_size": int(training_args.tensor_model_parallel_size),
-            "pipeline_model_parallel_size": int(training_args.pipeline_model_parallel_size),
+            "per_device_train_batch_size": int(
+                training_args.per_device_train_batch_size
+            ),
+            "tensor_model_parallel_size": int(
+                training_args.tensor_model_parallel_size
+            ),
+            "pipeline_model_parallel_size": int(
+                training_args.pipeline_model_parallel_size
+            ),
             "sharding_parallel_size": int(training_args.sharding_parallel_size),
             "num_samples_each_epoch": data_args.num_samples_each_epoch,
             "max_seq_len": int(data_args.max_seq_len),
@@ -298,7 +344,9 @@ def estimate_training(train_dataset, data_args, training_args, model_args):
             res["num_of_gpus"] = training_args.num_of_gpus
 
         if getattr(training_args, "estimation_output_file", None):
-            with open(training_args.estimation_output_file, "w", encoding="utf-8") as f:
+            with open(
+                training_args.estimation_output_file, "w", encoding="utf-8"
+            ) as f:
                 json.dump(res, f)
 
         logger.error("No valid data found, please check your dataset format.")
@@ -318,6 +366,7 @@ def get_worker_sliced_iterator(dataset):
     Returns:
         Iterator: An iterator yielding data specific to the current worker.
     """
+
     # 1. Get the full original iterator
     # Ensure the input is converted to an iterator so islice works correctly
     def infinite_iterator(iterable):
@@ -341,11 +390,15 @@ def get_worker_sliced_iterator(dataset):
     return dataset_iterator
 
 
-def calculate_matched_group(sequences, packing_length: int, is_finished: bool = True):
+def calculate_matched_group(
+    sequences, packing_length: int, is_finished: bool = True
+):
     if len(sequences) == 0:
         return [], []
 
-    sequences = binpacking.to_constant_volume(sequences, packing_length, weight_pos=1)
+    sequences = binpacking.to_constant_volume(
+        sequences, packing_length, weight_pos=1
+    )
     if sequences and not is_finished:
         sequences, ret_sequences = sequences[:-1], sequences[-1]
     else:

@@ -135,12 +135,20 @@ class TestKimiK2TikTokenTokenizer(unittest.TestCase):
         self.assertEqual(result, "hello  world")  # No change for tiktoken
 
     def test_split_whitespaces_or_nonwhitespaces(self):
-        result = list(KimiK2TikTokenTokenizer._split_whitespaces_or_nonwhitespaces("hello world", 3))
+        result = list(
+            KimiK2TikTokenTokenizer._split_whitespaces_or_nonwhitespaces(
+                "hello world", 3
+            )
+        )
         self.assertIsInstance(result, list)
         self.assertTrue(len(result) > 0)
 
     def test_split_whitespaces_edge_cases(self):
-        result = list(KimiK2TikTokenTokenizer._split_whitespaces_or_nonwhitespaces("a   b", 2))
+        result = list(
+            KimiK2TikTokenTokenizer._split_whitespaces_or_nonwhitespaces(
+                "a   b", 2
+            )
+        )
         self.assertIsInstance(result, list)
 
     def test_pre_tokenizer_process(self):

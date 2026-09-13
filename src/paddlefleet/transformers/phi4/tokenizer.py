@@ -42,7 +42,9 @@ _PHI4_REGEX = (
 )
 
 
-def _build_phi4_backend(vocab: Dict[str, int], merges: List[Tuple[str, str]]) -> Tokenizer:
+def _build_phi4_backend(
+    vocab: Dict[str, int], merges: List[Tuple[str, str]]
+) -> Tokenizer:
     bpe_model = BPE(
         vocab=vocab,
         merges=merges,
@@ -59,10 +61,14 @@ def _build_phi4_backend(vocab: Dict[str, int], merges: List[Tuple[str, str]]) ->
                 behavior="removed",
                 invert=True,
             ),
-            tokenizers_pre_tokenizers.ByteLevel(add_prefix_space=False, trim_offsets=True, use_regex=False),
+            tokenizers_pre_tokenizers.ByteLevel(
+                add_prefix_space=False, trim_offsets=True, use_regex=False
+            ),
         ]
     )
-    backend.decoder = tokenizers_decoders.ByteLevel(add_prefix_space=True, trim_offsets=True, use_regex=True)
+    backend.decoder = tokenizers_decoders.ByteLevel(
+        add_prefix_space=True, trim_offsets=True, use_regex=True
+    )
     return backend
 
 
@@ -88,7 +94,9 @@ class Phi4Tokenizer(PreTrainedTokenizerFast):
     ):
         if tokenizer_object is None and vocab is not None:
             _vocab = vocab if isinstance(vocab, dict) else {}
-            _merges = [tuple(m) if isinstance(m, list) else m for m in (merges or [])]
+            _merges = [
+                tuple(m) if isinstance(m, list) else m for m in (merges or [])
+            ]
             tokenizer_object = _build_phi4_backend(_vocab, _merges)
 
         self._vocab = vocab
@@ -141,7 +149,14 @@ class Phi4Tokenizer(PreTrainedTokenizerFast):
         eos = [1] if self.add_eos_token else []
         if token_ids_1 is None:
             return bos + ([0] * len(token_ids_0)) + eos
-        return bos + ([0] * len(token_ids_0)) + eos + bos + ([0] * len(token_ids_1)) + eos
+        return (
+            bos
+            + ([0] * len(token_ids_0))
+            + eos
+            + bos
+            + ([0] * len(token_ids_1))
+            + eos
+        )
 
     def encode(
         self,
@@ -156,11 +171,13 @@ class Phi4Tokenizer(PreTrainedTokenizerFast):
         return_tensors: Optional[str] = None,
         **kwargs,
     ) -> List[int]:
-        padding_strategy, truncation_strategy, max_length, kwargs_updated = self._get_padding_truncation_strategies(
-            padding=padding,
-            truncation=truncation,
-            max_length=max_length,
-            **kwargs,
+        padding_strategy, truncation_strategy, max_length, kwargs_updated = (
+            self._get_padding_truncation_strategies(
+                padding=padding,
+                truncation=truncation,
+                max_length=max_length,
+                **kwargs,
+            )
         )
 
         kwargs.update(kwargs_updated)

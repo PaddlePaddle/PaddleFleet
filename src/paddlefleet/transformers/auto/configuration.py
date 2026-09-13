@@ -76,7 +76,10 @@ CONFIG_MAPPING_NAMES = OrderedDict(
         ("internlm2", "InternLM2Config"),
         # TODO(VL): When Gemma4 VL is implemented, "gemma4" should point to Gemma4Config (VL wrapper)
         ("gemma4_text", "Gemma4MoeConfig"),
-        ("gemma4", "Gemma4MoeConfig"),  # Temporary: no standalone text ckpt, extract text_config in from_dict
+        (
+            "gemma4",
+            "Gemma4MoeConfig",
+        ),  # Temporary: no standalone text ckpt, extract text_config in from_dict
         ("phi4", "Phi4Config"),
         ("phi4flash", "Phi4Config"),
         ("hyperencoder", "HyperEncoderConfig"),
@@ -198,13 +201,19 @@ class _LazyConfigMapping(OrderedDict):
         return list(self._mapping.keys()) + list(self._extra_content.keys())
 
     def values(self):
-        return [self[k] for k in self._mapping.keys()] + list(self._extra_content.values())
+        return [self[k] for k in self._mapping.keys()] + list(
+            self._extra_content.values()
+        )
 
     def items(self):
-        return [(k, self[k]) for k in self._mapping.keys()] + list(self._extra_content.items())
+        return [(k, self[k]) for k in self._mapping.keys()] + list(
+            self._extra_content.items()
+        )
 
     def __iter__(self):
-        return iter(list(self._mapping.keys()) + list(self._extra_content.keys()))
+        return iter(
+            list(self._mapping.keys()) + list(self._extra_content.keys())
+        )
 
     def __contains__(self, item):
         return item in self._mapping or item in self._extra_content
@@ -214,7 +223,9 @@ class _LazyConfigMapping(OrderedDict):
         Register a new configuration in this mapping.
         """
         if key in self._mapping.keys() and not exist_ok:
-            raise ValueError(f"'{key}' is already used by a Transformers config, pick another name.")
+            raise ValueError(
+                f"'{key}' is already used by a Transformers config, pick another name."
+            )
         self._extra_content[key] = value
 
 
@@ -226,11 +237,15 @@ def resolve_minicpm4_1_model_type(config_dict, model_type_override=None):
     if model_type_override is not None:
         if model_type_override != "minicpm4_1":
             raise ValueError(
-                f"Unsupported model_type_override={model_type_override!r}. " "Only 'minicpm4_1' is supported."
+                f"Unsupported model_type_override={model_type_override!r}. "
+                "Only 'minicpm4_1' is supported."
             )
         return model_type_override
 
-    if not isinstance(config_dict, dict) or config_dict.get("model_type") != "minicpm":
+    if (
+        not isinstance(config_dict, dict)
+        or config_dict.get("model_type") != "minicpm"
+    ):
         return None
 
     original_name = str(config_dict.get("_name_or_path", ""))
@@ -265,7 +280,9 @@ def get_configurations() -> Dict[str, List[Type[PretrainedConfig]]]:
         if not os.path.exists(configuration_path):
             continue
 
-        configuration_module = import_module(f"paddlefleet.transformers.{model_name}.configuration")
+        configuration_module = import_module(
+            f"paddlefleet.transformers.{model_name}.configuration"
+        )
         for key in dir(configuration_module):
             value = getattr(configuration_module, key)
             if inspect.isclass(value) and issubclass(value, PretrainedConfig):
@@ -291,7 +308,9 @@ class AutoConfig(PretrainedConfig):
     base PretrainedConfig classes when created with the AutoConfig.from_pretrained() classmethod.
     """
 
-    MAPPING_NAMES: Dict[str, List[Type[PretrainedConfig]]] = get_configurations()
+    MAPPING_NAMES: Dict[str, List[Type[PretrainedConfig]]] = (
+        get_configurations()
+    )
 
     # cache the builtin pretrained-model-name to Model Class
     name2class = None
@@ -331,9 +350,15 @@ class AutoConfig(PretrainedConfig):
 
         assert inspect.isclass(model_class) and issubclass(
             model_class, PretrainedModel
-        ), f"<{model_class}> should be a PretarinedModel class, but <{type(model_class)}>"
+        ), (
+            f"<{model_class}> should be a PretarinedModel class, but <{type(model_class)}>"
+        )
 
-        return cls if model_class.config_class is None else model_class.config_class
+        return (
+            cls
+            if model_class.config_class is None
+            else model_class.config_class
+        )
 
     @classmethod
     def from_file(cls, config_file: str, **kwargs) -> AutoConfig:
@@ -352,7 +377,9 @@ class AutoConfig(PretrainedConfig):
         return cls(**config)
 
     @classmethod
-    def from_pretrained(cls, pretrained_model_name_or_path: str, *model_args, **kwargs):
+    def from_pretrained(
+        cls, pretrained_model_name_or_path: str, *model_args, **kwargs
+    ):
         """
         Creates an instance of `AutoConfig`. Related resources are loaded by
         specifying name of a built-in pretrained model, or a community-contributed
@@ -388,12 +415,17 @@ class AutoConfig(PretrainedConfig):
             for model_classes in cls.MAPPING_NAMES.values():
                 for model_class in model_classes:
                     cls.name2class.update(
-                        {model_name: model_class for model_name in model_class.pretrained_init_configuration.keys()}
+                        {
+                            model_name: model_class
+                            for model_name in model_class.pretrained_init_configuration.keys()
+                        }
                     )
 
         # From built-in pretrained models
         if pretrained_model_name_or_path in cls.name2class:
-            return cls.name2class[pretrained_model_name_or_path].from_pretrained(
+            return cls.name2class[
+                pretrained_model_name_or_path
+            ].from_pretrained(
                 pretrained_model_name_or_path, *model_args, **kwargs
             )
 
@@ -411,8 +443,12 @@ class AutoConfig(PretrainedConfig):
             download_hub=download_hub,
         )
         model_type_override = kwargs.pop("model_type_override", None)
-        config_dict, unused_kwargs = PretrainedConfig.get_config_dict(pretrained_model_name_or_path, **kwargs)
-        resolved_model_type = resolve_minicpm4_1_model_type(config_dict, model_type_override)
+        config_dict, unused_kwargs = PretrainedConfig.get_config_dict(
+            pretrained_model_name_or_path, **kwargs
+        )
+        resolved_model_type = resolve_minicpm4_1_model_type(
+            config_dict, model_type_override
+        )
         if resolved_model_type is not None:
             config_dict["model_type"] = resolved_model_type
         if "model_type" in config_dict:
@@ -425,18 +461,31 @@ class AutoConfig(PretrainedConfig):
                     "issue with the checkpoint, or because your version of Transformers is out of date."
                 )
             return config_class.from_dict(config_dict, **unused_kwargs)
-        elif "model_type" not in config_dict and config_file is not None and os.path.exists(config_file):
-            config_class = cls._get_config_class_from_config(pretrained_model_name_or_path, config_file)
-            logger.info("We are using %s to load '%s'." % (config_class, pretrained_model_name_or_path))
+        elif (
+            "model_type" not in config_dict
+            and config_file is not None
+            and os.path.exists(config_file)
+        ):
+            config_class = cls._get_config_class_from_config(
+                pretrained_model_name_or_path, config_file
+            )
+            logger.info(
+                "We are using %s to load '%s'."
+                % (config_class, pretrained_model_name_or_path)
+            )
             if config_class is cls:
                 return cls.from_file(config_file)
-            return config_class.from_pretrained(config_file, *model_args, **kwargs)
+            return config_class.from_pretrained(
+                config_file, *model_args, **kwargs
+            )
         elif config_file is None:
             # Fallback: use pattern matching on the string.
             # We go from longer names to shorter names to catch roberta before bert (for instance)
             for pattern in sorted(CONFIG_MAPPING.keys(), key=len, reverse=True):
                 if pattern in str(pretrained_model_name_or_path):
-                    return CONFIG_MAPPING[pattern].from_dict(config_dict, **unused_kwargs)
+                    return CONFIG_MAPPING[pattern].from_dict(
+                        config_dict, **unused_kwargs
+                    )
         else:
             raise RuntimeError(
                 f"Can't load config for '{pretrained_model_name_or_path}'.\n"
@@ -455,7 +504,10 @@ class AutoConfig(PretrainedConfig):
             model_type (`str`): The model type like "bert" or "gpt".
             config ([`PretrainedConfig`]): The config to register.
         """
-        if issubclass(config, PretrainedConfig) and config.model_type != model_type:
+        if (
+            issubclass(config, PretrainedConfig)
+            and config.model_type != model_type
+        ):
             raise ValueError(
                 "The config you are passing has a `model_type` attribute that is not consistent with the model type "
                 f"you passed (config has {config.model_type} and you passed {model_type}. Fix one of those so they "

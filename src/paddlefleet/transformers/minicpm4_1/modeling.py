@@ -98,7 +98,10 @@ def _prepare_output_docstrings(output_type, config_class, min_indent=None):
     if output_docstring is not None:
         lines = output_docstring.split("\n")
         i = 0
-        while i < len(lines) and re.search(r"^\s*(Args|Parameters):\s*$", lines[i]) is None:
+        while (
+            i < len(lines)
+            and re.search(r"^\s*(Args|Parameters):\s*$", lines[i]) is None
+        ):
             i += 1
         if i < len(lines):
             params_docstring = "\n".join(lines[(i + 1) :])
@@ -109,7 +112,9 @@ def _prepare_output_docstrings(output_type, config_class, min_indent=None):
             )
 
     full_output_type = f"{output_type.__module__}.{output_type.__name__}"
-    result = PD_RETURN_INTRODUCTION.format(full_output_type=full_output_type, config_class=config_class)
+    result = PD_RETURN_INTRODUCTION.format(
+        full_output_type=full_output_type, config_class=config_class
+    )
     if params_docstring is not None:
         result += params_docstring
 
@@ -122,7 +127,10 @@ def _prepare_output_docstrings(output_type, config_class, min_indent=None):
             indent = len(_get_indent(lines[i]))
             if indent < min_indent:
                 to_add = " " * (min_indent - indent)
-                result = "\n".join(f"{to_add}{line}" if len(line) > 0 else line for line in lines)
+                result = "\n".join(
+                    f"{to_add}{line}" if len(line) > 0 else line
+                    for line in lines
+                )
 
     return result
 
@@ -132,11 +140,15 @@ def replace_return_docstrings(output_type=None, config_class=None):
         func_doc = fn.__doc__
         lines = func_doc.split("\n")
         i = 0
-        while i < len(lines) and re.search(r"^\s*Returns?:\s*$", lines[i]) is None:
+        while (
+            i < len(lines) and re.search(r"^\s*Returns?:\s*$", lines[i]) is None
+        ):
             i += 1
         if i < len(lines):
             indent = len(_get_indent(lines[i]))
-            lines[i] = _prepare_output_docstrings(output_type, config_class, min_indent=indent)
+            lines[i] = _prepare_output_docstrings(
+                output_type, config_class, min_indent=indent
+            )
             func_doc = "\n".join(lines)
         else:
             raise ValueError(
@@ -173,7 +185,10 @@ def _tensor_max(tensor, *args, **kwargs):
             kwargs["axis"] = kwargs.pop("dim")
 
         if "axis" in kwargs or len(args) >= 1:
-            ret = paddle.max(tensor, *args, **kwargs), paddle.argmax(tensor, *args, **kwargs)
+            ret = (
+                paddle.max(tensor, *args, **kwargs),
+                paddle.argmax(tensor, *args, **kwargs),
+            )
         else:
             ret = paddle.max(tensor, *args, **kwargs)
 
@@ -183,7 +198,9 @@ def _tensor_max(tensor, *args, **kwargs):
 def _split_tensor(tensor, split_size_or_sections, dim=0):
     if isinstance(split_size_or_sections, int):
         dim_size = tensor.shape[dim]
-        sections = [split_size_or_sections] * (dim_size // split_size_or_sections)
+        sections = [split_size_or_sections] * (
+            dim_size // split_size_or_sections
+        )
         if dim_size % split_size_or_sections:
             sections.append(dim_size % split_size_or_sections)
         split_size_or_sections = sections
@@ -192,12 +209,20 @@ def _split_tensor(tensor, split_size_or_sections, dim=0):
 
 def _convert_head_mask_to_5d(head_mask, num_hidden_layers):
     if head_mask.dim() == 1:
-        head_mask = head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+        head_mask = (
+            head_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1).unsqueeze(-1)
+        )
         head_mask = head_mask.expand(num_hidden_layers, -1, -1, -1, -1)
     elif head_mask.dim() == 2:
-        head_mask = head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)  # We can specify head_mask for each layer
-    assert head_mask.dim() == 5, f"head_mask.dim != 5, instead {head_mask.dim()}"
-    head_mask = head_mask.to(dtype=paddle.get_default_dtype())  # switch to float if need + fp16 compatibility
+        head_mask = (
+            head_mask.unsqueeze(1).unsqueeze(-1).unsqueeze(-1)
+        )  # We can specify head_mask for each layer
+    assert head_mask.dim() == 5, (
+        f"head_mask.dim != 5, instead {head_mask.dim()}"
+    )
+    head_mask = head_mask.to(
+        dtype=paddle.get_default_dtype()
+    )  # switch to float if need + fp16 compatibility
     return head_mask
 
 
@@ -216,7 +241,11 @@ def _get_head_mask(
     return head_mask
 
 
-setattr(paddlefleet.transformers.model_utils.PretrainedModel, "get_head_mask", _get_head_mask)
+setattr(
+    paddlefleet.transformers.model_utils.PretrainedModel,
+    "get_head_mask",
+    _get_head_mask,
+)
 
 setattr(paddlefleet.transformers.model_utils.PretrainedModel, "device", None)
 
@@ -228,7 +257,11 @@ def _post_init(self):
         self._init_weights()
 
 
-setattr(paddlefleet.transformers.model_utils.PretrainedModel, "post_init", _post_init)
+setattr(
+    paddlefleet.transformers.model_utils.PretrainedModel,
+    "post_init",
+    _post_init,
+)
 
 
 def compressed_attention(
@@ -253,12 +286,17 @@ def compressed_attention(
         batch_size = cu_seqlens_q.shape[0] - 1
         is_prefilling = cache_lens is None or (cache_lens == 0).all().item()
         if is_prefilling:
-            cache_lens = paddle.zeros(batch_size, dtype=paddle.int32, device=q.device)
+            cache_lens = paddle.zeros(
+                batch_size, dtype=paddle.int32, device=q.device
+            )
             q_idx = paddle.cat(
                 [
                     (
                         (
-                            paddle.arange(cu_seqlens_q[i + 1] - cu_seqlens_q[i], device=q.device)
+                            paddle.arange(
+                                cu_seqlens_q[i + 1] - cu_seqlens_q[i],
+                                device=q.device,
+                            )
                             + max_seqlen_q
                             - (cu_seqlens_q[i + 1] - cu_seqlens_q[i])
                         )
@@ -327,14 +365,20 @@ def calc_chunks_with_stride(cu_seqlen, chunk_size, kernel_stride):
     seq_starts = cu_seqlen[:-1]
     chunk_start_in_seq = seq_starts[:, None] + chunk_start_offsets[None, :]
     chunk_end_in_seq = chunk_start_in_seq + chunk_size
-    valid_chunk_mask = chunk_end_in_seq <= seq_starts[:, None] + batch_sizes[:, None]
+    valid_chunk_mask = (
+        chunk_end_in_seq <= seq_starts[:, None] + batch_sizes[:, None]
+    )
     valid_chunk_starts = chunk_start_in_seq[valid_chunk_mask]
     del chunk_start_in_seq
-    chunk_indices = paddle.arange(0, chunk_size, device=cu_seqlen.device)[None, :]
+    chunk_indices = paddle.arange(0, chunk_size, device=cu_seqlen.device)[
+        None, :
+    ]
     filtered_indices = valid_chunk_starts[:, None] + chunk_indices
     filtered_indices = filtered_indices.view(-1)
     num_filtered_chunks_per_batch = valid_chunk_mask.sum(dim=1)
-    cu_seqlens_compressed = paddle.zeros(len(cu_seqlen), dtype=paddle.int32, device=cu_seqlen.device)
+    cu_seqlens_compressed = paddle.zeros(
+        len(cu_seqlen), dtype=paddle.int32, device=cu_seqlen.device
+    )
     cu_seqlens_compressed[1:] = num_filtered_chunks_per_batch.cumsum(dim=0)
     del (
         num_filtered_chunks_per_batch,
@@ -396,10 +440,14 @@ class InfLLMv2CacheLayer(DynamicLayer):
         self.no_rope_keys = paddle.tensor([], dtype=paddle.float32)
         self.compress_k_cache = []
         self.no_compress_k_cache = []
-        self.cached_compressed_cu_seqlens = paddle.tensor([], dtype=paddle.int32)
+        self.cached_compressed_cu_seqlens = paddle.tensor(
+            [], dtype=paddle.int32
+        )
         self.compress_k_cache_varlen = paddle.tensor([], dtype=paddle.float32)
         self.compress_k2_cache = []
-        self.cached_compressed_cu_seqlens2 = paddle.tensor([], dtype=paddle.int32)
+        self.cached_compressed_cu_seqlens2 = paddle.tensor(
+            [], dtype=paddle.int32
+        )
         self.compress_k2_cache_varlen = paddle.tensor([], dtype=paddle.float32)
         self.no_compress_k2_cache = []
 
@@ -407,7 +455,9 @@ class InfLLMv2CacheLayer(DynamicLayer):
         if self.no_rope_keys.size == 0:
             self.no_rope_keys = key_states
         else:
-            self.no_rope_keys = paddle.cat([self.no_rope_keys, key_states], dim=1)
+            self.no_rope_keys = paddle.cat(
+                [self.no_rope_keys, key_states], dim=1
+            )
         return self.no_rope_keys
 
     def update_compress_k(self, key_states, cu_seqlens=None):
@@ -416,33 +466,47 @@ class InfLLMv2CacheLayer(DynamicLayer):
                 self.cached_compressed_cu_seqlens = cu_seqlens.clone()
             self.compress_k_cache_varlen = key_states
             split_sizes = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-            self.compress_k_cache = list(paddle.compat.split(key_states, split_sizes))
+            self.compress_k_cache = list(
+                paddle.compat.split(key_states, split_sizes)
+            )
         else:
             for index, k in enumerate(key_states):
                 if k is not None:
-                    self.compress_k_cache[index] = paddle.cat([self.compress_k_cache[index], k], dim=0)
+                    self.compress_k_cache[index] = paddle.cat(
+                        [self.compress_k_cache[index], k], dim=0
+                    )
             new_seq_lens = paddle.tensor(
                 [tensor.shape[0] for tensor in self.compress_k_cache],
                 dtype=paddle.int32,
             )
             new_cumsum = paddle.cumsum(new_seq_lens, dim=0, dtype=paddle.int32)
-            self.compress_k_cache_varlen = paddle.cat(self.compress_k_cache, dim=0)
-            self.cached_compressed_cu_seqlens = paddle.cat([paddle.tensor([0], dtype=paddle.int32), new_cumsum]).to(
-                self.compress_k_cache_varlen.device
+            self.compress_k_cache_varlen = paddle.cat(
+                self.compress_k_cache, dim=0
             )
+            self.cached_compressed_cu_seqlens = paddle.cat(
+                [paddle.tensor([0], dtype=paddle.int32), new_cumsum]
+            ).to(self.compress_k_cache_varlen.device)
         return self.compress_k_cache_varlen, self.cached_compressed_cu_seqlens
 
-    def update_no_compress_k(self, key_states, kernel_size=32, kernel_stride=16):
+    def update_no_compress_k(
+        self, key_states, kernel_size=32, kernel_stride=16
+    ):
         k_chunk_list = []
         for index, k in enumerate(key_states):
             if len(self.no_compress_k_cache) <= index:
                 self.no_compress_k_cache.append(k)
             else:
-                self.no_compress_k_cache[index] = paddle.cat([self.no_compress_k_cache[index], k], dim=0)
+                self.no_compress_k_cache[index] = paddle.cat(
+                    [self.no_compress_k_cache[index], k], dim=0
+                )
                 current_len = self.no_compress_k_cache[index].shape[0]
                 if current_len >= kernel_size:
-                    k_chunk_list.append(self.no_compress_k_cache[index][:kernel_size])
-                    self.no_compress_k_cache[index] = self.no_compress_k_cache[index][kernel_stride:]
+                    k_chunk_list.append(
+                        self.no_compress_k_cache[index][:kernel_size]
+                    )
+                    self.no_compress_k_cache[index] = self.no_compress_k_cache[
+                        index
+                    ][kernel_stride:]
                 else:
                     k_chunk_list.append(None)
         return k_chunk_list
@@ -453,33 +517,50 @@ class InfLLMv2CacheLayer(DynamicLayer):
                 self.cached_compressed_cu_seqlens2 = cu_seqlens.clone()
             self.compress_k2_cache_varlen = key_states
             split_sizes = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
-            self.compress_k2_cache = list(paddle.compat.split(key_states, split_sizes))
+            self.compress_k2_cache = list(
+                paddle.compat.split(key_states, split_sizes)
+            )
         else:
             for index, k in enumerate(key_states):
                 if k is not None:
-                    self.compress_k2_cache[index] = paddle.cat([self.compress_k2_cache[index], k], dim=0)
+                    self.compress_k2_cache[index] = paddle.cat(
+                        [self.compress_k2_cache[index], k], dim=0
+                    )
             new_seq_lens = paddle.tensor(
                 [tensor.shape[0] for tensor in self.compress_k2_cache],
                 dtype=paddle.int32,
             )
             new_cumsum = paddle.cumsum(new_seq_lens, dim=0, dtype=paddle.int32)
-            self.compress_k2_cache_varlen = paddle.cat(self.compress_k2_cache, dim=0)
-            self.cached_compressed_cu_seqlens2 = paddle.cat([paddle.tensor([0], dtype=paddle.int32), new_cumsum]).to(
-                self.compress_k2_cache_varlen.device
+            self.compress_k2_cache_varlen = paddle.cat(
+                self.compress_k2_cache, dim=0
             )
-        return (self.compress_k2_cache_varlen, self.cached_compressed_cu_seqlens2)
+            self.cached_compressed_cu_seqlens2 = paddle.cat(
+                [paddle.tensor([0], dtype=paddle.int32), new_cumsum]
+            ).to(self.compress_k2_cache_varlen.device)
+        return (
+            self.compress_k2_cache_varlen,
+            self.cached_compressed_cu_seqlens2,
+        )
 
-    def update_no_compress_k2(self, key_states, kernel_size=128, kernel_stride=64):
+    def update_no_compress_k2(
+        self, key_states, kernel_size=128, kernel_stride=64
+    ):
         k_chunk_list = []
         for index, k in enumerate(key_states):
             if len(self.no_compress_k2_cache) <= index:
                 self.no_compress_k2_cache.append(k)
             else:
-                self.no_compress_k2_cache[index] = paddle.cat([self.no_compress_k2_cache[index], k], dim=0)
+                self.no_compress_k2_cache[index] = paddle.cat(
+                    [self.no_compress_k2_cache[index], k], dim=0
+                )
                 current_len = self.no_compress_k2_cache[index].shape[0]
                 if current_len >= kernel_size:
-                    k_chunk_list.append(self.no_compress_k2_cache[index][:kernel_size])
-                    self.no_compress_k2_cache[index] = self.no_compress_k2_cache[index][kernel_stride:]
+                    k_chunk_list.append(
+                        self.no_compress_k2_cache[index][:kernel_size]
+                    )
+                    self.no_compress_k2_cache[index] = (
+                        self.no_compress_k2_cache[index][kernel_stride:]
+                    )
                 else:
                     k_chunk_list.append(None)
         return k_chunk_list
@@ -488,24 +569,43 @@ class InfLLMv2CacheLayer(DynamicLayer):
 class InfLLMv2Cache(DynamicCache):
     def __init__(self, config, num_hidden_layers: Optional[int] = None) -> None:
         super().__init__(config=config)
-        self.layers = [InfLLMv2CacheLayer() for _ in range(num_hidden_layers)] if num_hidden_layers else []
+        self.layers = (
+            [InfLLMv2CacheLayer() for _ in range(num_hidden_layers)]
+            if num_hidden_layers
+            else []
+        )
         self._seen_tokens = 0
 
     def update(self, key_states, value_states, layer_idx, cache_kwargs=None):
         if layer_idx == 0:
             self._seen_tokens += key_states.shape[-2]
-        return self.layers[layer_idx].update(key_states, value_states, cache_kwargs)
+        return self.layers[layer_idx].update(
+            key_states, value_states, cache_kwargs
+        )
 
     def update_no_rope_key(self, key_states, layer_idx, cache_kwargs=None):
         return self.layers[layer_idx].update_no_rope_key(key_states)
 
-    def update_compress_k(self, key_states, layer_idx, cu_seqlens=None, cache_kwargs=None):
+    def update_compress_k(
+        self, key_states, layer_idx, cu_seqlens=None, cache_kwargs=None
+    ):
         return self.layers[layer_idx].update_compress_k(key_states, cu_seqlens)
 
-    def update_no_compress_k(self, key_states, layer_idx, kernel_size=32, kernel_stride=16, cache_kwargs=None):
-        return self.layers[layer_idx].update_no_compress_k(key_states, kernel_size, kernel_stride)
+    def update_no_compress_k(
+        self,
+        key_states,
+        layer_idx,
+        kernel_size=32,
+        kernel_stride=16,
+        cache_kwargs=None,
+    ):
+        return self.layers[layer_idx].update_no_compress_k(
+            key_states, kernel_size, kernel_stride
+        )
 
-    def update_compress_k2(self, key_states, layer_idx, cu_seqlens=None, cache_kwargs=None):
+    def update_compress_k2(
+        self, key_states, layer_idx, cu_seqlens=None, cache_kwargs=None
+    ):
         return self.layers[layer_idx].update_compress_k2(key_states, cu_seqlens)
 
     def update_no_compress_k2(
@@ -516,7 +616,9 @@ class InfLLMv2Cache(DynamicCache):
         kernel_stride=64,
         cache_kwargs=None,
     ):
-        return self.layers[layer_idx].update_no_compress_k2(key_states, kernel_size, kernel_stride)
+        return self.layers[layer_idx].update_no_compress_k2(
+            key_states, kernel_size, kernel_stride
+        )
 
     def crop(self, max_length):
         for layer in self.layers:
@@ -539,7 +641,10 @@ def _get_unpad_data(attention_mask):
     seqlens_in_batch = attention_mask.sum(dim=-1, dtype=paddle.int32)
     indices = paddle.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
     max_seqlen_in_batch = _tensor_max(seqlens_in_batch).item()
-    cu_seqlens = nn.functional.pad(paddle.cumsum(seqlens_in_batch, dim=0, dtype=paddle.paddle.int32), (1, 0))
+    cu_seqlens = nn.functional.pad(
+        paddle.cumsum(seqlens_in_batch, dim=0, dtype=paddle.paddle.int32),
+        (1, 0),
+    )
     return indices, cu_seqlens, max_seqlen_in_batch
 
 
@@ -564,13 +669,18 @@ class MiniCPM4_1RMSNorm(nn.Layer):
 
 
 class MiniCPM4_1RotaryEmbedding(nn.Layer):
-    def __init__(self, dim, max_position_embeddings=2048, base=10000, device=None):
+    def __init__(
+        self, dim, max_position_embeddings=2048, base=10000, device=None
+    ):
         super().__init__()
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
         inv_freq = 1.0 / self.base ** (
-            paddle.arange(0, int(self.dim), 2, dtype=paddle.int64).astype(dtype=paddle.float32) / self.dim
+            paddle.arange(0, int(self.dim), 2, dtype=paddle.int64).astype(
+                dtype=paddle.float32
+            )
+            / self.dim
         )
         self.register_buffer("inv_freq", inv_freq, persistable=False)
         self._set_cos_sin_cache(
@@ -581,16 +691,24 @@ class MiniCPM4_1RotaryEmbedding(nn.Layer):
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
         self.max_seq_len_cached = seq_len
-        t = paddle.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
+        t = paddle.arange(
+            self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype
+        )
         freqs = paddle.outer(t, self.inv_freq)
         emb = paddle.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos().to(dtype), persistable=False)
-        self.register_buffer("sin_cached", emb.sin().to(dtype), persistable=False)
+        self.register_buffer(
+            "cos_cached", emb.cos().to(dtype), persistable=False
+        )
+        self.register_buffer(
+            "sin_cached", emb.sin().to(dtype), persistable=False
+        )
 
     def forward(self, x, position_ids):
         seq_len = int(position_ids.max()) + 1
         if seq_len > self.max_seq_len_cached:
-            self._set_cos_sin_cache(seq_len=seq_len, device=x.device, dtype=x.dtype)
+            self._set_cos_sin_cache(
+                seq_len=seq_len, device=x.device, dtype=x.dtype
+            )
         return (
             self.cos_cached[:seq_len].to(dtype=x.dtype),
             self.sin_cached[:seq_len].to(dtype=x.dtype),
@@ -614,23 +732,40 @@ class MiniCPM4_1LongRoPE(MiniCPM4_1RotaryEmbedding):
         self.long_factor = long_factor
         self.original_max_position_embeddings = original_max_position_embeddings
         scale = max_position_embeddings / self.original_max_position_embeddings
-        self.scaling_factor = math.sqrt(1 + math.log(scale) / math.log(self.original_max_position_embeddings))
+        self.scaling_factor = math.sqrt(
+            1
+            + math.log(scale) / math.log(self.original_max_position_embeddings)
+        )
         super().__init__(dim, max_position_embeddings, base, device)
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
         self.max_seq_len_cached = seq_len
-        t = paddle.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
+        t = paddle.arange(
+            self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype
+        )
         if seq_len > self.original_max_position_embeddings:
-            ext_factors = paddle.tensor(self.long_factor, dtype=paddle.float32, device=device)
+            ext_factors = paddle.tensor(
+                self.long_factor, dtype=paddle.float32, device=device
+            )
         else:
-            ext_factors = paddle.tensor(self.short_factor, dtype=paddle.float32, device=device)
+            ext_factors = paddle.tensor(
+                self.short_factor, dtype=paddle.float32, device=device
+            )
         freqs = paddle.mul(
             paddle.outer(t, 1.0 / ext_factors).to(device=device),
             self.inv_freq.to(device=device).to(dtype),
         )
         emb = paddle.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos().to(dtype) * self.scaling_factor, persistable=False)
-        self.register_buffer("sin_cached", emb.sin().to(dtype) * self.scaling_factor, persistable=False)
+        self.register_buffer(
+            "cos_cached",
+            emb.cos().to(dtype) * self.scaling_factor,
+            persistable=False,
+        )
+        self.register_buffer(
+            "sin_cached",
+            emb.sin().to(dtype) * self.scaling_factor,
+            persistable=False,
+        )
 
 
 class MiniCPM4_1LinearScalingRotaryEmbedding(MiniCPM4_1RotaryEmbedding):
@@ -649,12 +784,18 @@ class MiniCPM4_1LinearScalingRotaryEmbedding(MiniCPM4_1RotaryEmbedding):
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
         self.max_seq_len_cached = seq_len
-        t = paddle.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
+        t = paddle.arange(
+            self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype
+        )
         t = t / self.scaling_factor
         freqs = paddle.outer(t, self.inv_freq)
         emb = paddle.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
-        self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
+        self.register_buffer(
+            "cos_cached", emb.cos().to(dtype), persistent=False
+        )
+        self.register_buffer(
+            "sin_cached", emb.sin().to(dtype), persistent=False
+        )
 
 
 class MiniCPM4_1DynamicNTKScalingRotaryEmbedding(MiniCPM4_1RotaryEmbedding):
@@ -675,15 +816,24 @@ class MiniCPM4_1DynamicNTKScalingRotaryEmbedding(MiniCPM4_1RotaryEmbedding):
         self.max_seq_len_cached = seq_len
         if seq_len > self.max_position_embeddings:
             base = self.base * (
-                self.scaling_factor * seq_len / self.max_position_embeddings - (self.scaling_factor - 1)
+                self.scaling_factor * seq_len / self.max_position_embeddings
+                - (self.scaling_factor - 1)
             ) ** (self.dim / (self.dim - 2))
-            inv_freq = 1.0 / base ** (paddle.arange(0, self.dim, 2).float().to(device) / self.dim)
+            inv_freq = 1.0 / base ** (
+                paddle.arange(0, self.dim, 2).float().to(device) / self.dim
+            )
             self.register_buffer("inv_freq", inv_freq, persistent=False)
-        t = paddle.arange(self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype)
+        t = paddle.arange(
+            self.max_seq_len_cached, device=device, dtype=self.inv_freq.dtype
+        )
         freqs = paddle.outer(t, self.inv_freq)
         emb = paddle.cat((freqs, freqs), dim=-1)
-        self.register_buffer("cos_cached", emb.cos().to(dtype), persistent=False)
-        self.register_buffer("sin_cached", emb.sin().to(dtype), persistent=False)
+        self.register_buffer(
+            "cos_cached", emb.cos().to(dtype), persistent=False
+        )
+        self.register_buffer(
+            "sin_cached", emb.sin().to(dtype), persistent=False
+        )
 
 
 def rotate_half(x):
@@ -729,7 +879,9 @@ def _unpad_one_tensor(hidden_states, attention_mask):
     indices, cu_seqlens, max_seqlen_in_batch = _get_unpad_data(attention_mask)
     batch_size, seq_len = hidden_states.shape[:2]
     remaining_dims = hidden_states.shape[2:]
-    reshaped_states = hidden_states.reshape(batch_size * seq_len, *remaining_dims)
+    reshaped_states = hidden_states.reshape(
+        batch_size * seq_len, *remaining_dims
+    )
     unpadded_states = paddle.gather(reshaped_states, indices)
     return unpadded_states, indices, cu_seqlens, max_seqlen_in_batch
 
@@ -742,14 +894,20 @@ def repeat_kv(hidden_states: paddle.Tensor, n_rep: int) -> paddle.Tensor:
     batch, num_key_value_heads, slen, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        batch, num_key_value_heads, n_rep, slen, head_dim
+    )
+    return hidden_states.reshape(
+        batch, num_key_value_heads * n_rep, slen, head_dim
+    )
 
 
 class MiniCPM4_1Attention(nn.Layer):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: MiniCPM4_1Config, layer_idx: Optional[int] = None):
+    def __init__(
+        self, config: MiniCPM4_1Config, layer_idx: Optional[int] = None
+    ):
         super().__init__()
         self.config = config
         self.layer_idx = layer_idx
@@ -772,7 +930,9 @@ class MiniCPM4_1Attention(nn.Layer):
                 f"hidden_size must be divisible by num_heads (got `hidden_size`: {self.hidden_size} and `num_heads`: {self.num_heads})."
             )
         if self.fuse_attention_qkv:
-            qkv_hidden_size = (self.num_heads + 2 * self.num_key_value_heads) * self.head_dim
+            qkv_hidden_size = (
+                self.num_heads + 2 * self.num_key_value_heads
+            ) * self.head_dim
             self.qkv_proj = GeneralLinear.create(
                 self.hidden_size,
                 qkv_hidden_size,
@@ -845,13 +1005,19 @@ class MiniCPM4_1Attention(nn.Layer):
                     short_factor=self.config.rope_scaling["short_factor"],
                     long_factor=self.config.rope_scaling["long_factor"],
                     base=self.rope_theta,
-                    original_max_position_embeddings=self.config.rope_scaling["original_max_position_embeddings"],
+                    original_max_position_embeddings=self.config.rope_scaling[
+                        "original_max_position_embeddings"
+                    ],
                 )
             else:
                 raise ValueError(f"Unknown RoPE scaling type {scaling_type}")
 
     def _shape(self, tensor: paddle.Tensor, seq_len: int, bsz: int):
-        return tensor.view(bsz, seq_len, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+        return (
+            tensor.view(bsz, seq_len, self.num_heads, self.head_dim)
+            .transpose(1, 2)
+            .contiguous()
+        )
 
     def forward(
         self,
@@ -863,14 +1029,20 @@ class MiniCPM4_1Attention(nn.Layer):
         output_attentions: bool = False,
         use_cache: bool = False,
         **kwargs,
-    ) -> Tuple[paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]]:
+    ) -> Tuple[
+        paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]
+    ]:
         if "padding_mask" in kwargs:
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
             )
         if self.config.sequence_parallel:
             max_sequence_length = self.config.max_sequence_length
-            bsz = hidden_states.shape[0] * self.config.tensor_model_parallel_size // max_sequence_length
+            bsz = (
+                hidden_states.shape[0]
+                * self.config.tensor_model_parallel_size
+                // max_sequence_length
+            )
             q_len = max_sequence_length
         else:
             bsz, q_len, _ = hidden_states.shape
@@ -896,22 +1068,33 @@ class MiniCPM4_1Attention(nn.Layer):
             )
             query_states = query_states.reshape([bsz, q_len, -1, self.head_dim])
         elif self.config.pretraining_tp > 1:
-            key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
+            key_value_slicing = (
+                self.num_key_value_heads * self.head_dim
+            ) // self.config.pretraining_tp
             query_slices = _split_tensor(
-                self.q_proj.weight, (self.num_heads * self.head_dim) // self.config.pretraining_tp, dim=1
+                self.q_proj.weight,
+                (self.num_heads * self.head_dim) // self.config.pretraining_tp,
+                dim=1,
             )
-            key_slices = _split_tensor(self.k_proj.weight, key_value_slicing, dim=1)
-            value_slices = _split_tensor(self.v_proj.weight, key_value_slicing, dim=1)
+            key_slices = _split_tensor(
+                self.k_proj.weight, key_value_slicing, dim=1
+            )
+            value_slices = _split_tensor(
+                self.v_proj.weight, key_value_slicing, dim=1
+            )
             query_states = [
-                nn.functional.linear(hidden_states, query_slices[i]) for i in range(self.config.pretraining_tp)
+                nn.functional.linear(hidden_states, query_slices[i])
+                for i in range(self.config.pretraining_tp)
             ]
             query_states = paddle.cat(query_states, dim=-1)
             key_states = [
-                nn.functional.linear(hidden_states, key_slices[i]) for i in range(self.config.pretraining_tp)
+                nn.functional.linear(hidden_states, key_slices[i])
+                for i in range(self.config.pretraining_tp)
             ]
             key_states = paddle.cat(key_states, dim=-1)
             value_states = [
-                nn.functional.linear(hidden_states, value_slices[i]) for i in range(self.config.pretraining_tp)
+                nn.functional.linear(hidden_states, value_slices[i])
+                for i in range(self.config.pretraining_tp)
             ]
             value_states = paddle.cat(value_states, dim=-1)
             query_states = query_states.reshape([bsz, q_len, -1, self.head_dim])
@@ -929,11 +1112,17 @@ class MiniCPM4_1Attention(nn.Layer):
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
 
-        cos, sin = self.rotary_emb(value_states.to(paddle.float32), position_ids)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        cos, sin = self.rotary_emb(
+            value_states.to(paddle.float32), position_ids
+        )
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin, position_ids
+        )
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
 
         attention_interface = ALL_ATTENTION_FUNCTIONS[self.attn_implementation]
 
@@ -944,7 +1133,9 @@ class MiniCPM4_1Attention(nn.Layer):
             value=value_states,
             attention_mask=attention_mask,
             attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-            dropout=self.config.get("attention_dropout_prob", 0.0) if self.training else 0.0,
+            dropout=self.config.get("attention_dropout_prob", 0.0)
+            if self.training
+            else 0.0,
             scaling=self.scaling,
         )
         if self.config.sequence_parallel:
@@ -970,7 +1161,9 @@ class MiniCPM4_1SdpaAttention(MiniCPM4_1Attention):
         past_key_value: Optional[Cache] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
-    ) -> Tuple[paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]]:
+    ) -> Tuple[
+        paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]
+    ]:
         if output_attentions:
             logger.warning_once(
                 'MiniCPM4_1Model is using MiniCPM4_1SdpaAttention. Falling back to the manual attention implementation, but specifying the manual implementation will be required from Transformers version v5.0.0 onwards. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
@@ -1005,18 +1198,28 @@ class MiniCPM4_1SdpaAttention(MiniCPM4_1Attention):
             )
             query_states = query_states.reshape([bsz, q_len, -1, self.head_dim])
         else:
-            query_states = self.q_proj(hidden_states).reshape([bsz, q_len, -1, self.head_dim])
-            key_states = self.k_proj(hidden_states).reshape([bsz, q_len, -1, self.head_dim])
-            value_states = self.v_proj(hidden_states).reshape([bsz, q_len, -1, self.head_dim])
+            query_states = self.q_proj(hidden_states).reshape(
+                [bsz, q_len, -1, self.head_dim]
+            )
+            key_states = self.k_proj(hidden_states).reshape(
+                [bsz, q_len, -1, self.head_dim]
+            )
+            value_states = self.v_proj(hidden_states).reshape(
+                [bsz, q_len, -1, self.head_dim]
+            )
         query_states = query_states.transpose(1, 2)
         key_states = key_states.transpose(1, 2)
         value_states = value_states.transpose(1, 2)
         kv_seq_len = _tensor_max(position_ids).item() + 1
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin, position_ids
+        )
         if past_key_value is not None:
             cache_kwargs = {"sin": sin, "cos": cos}
-            key_states, value_states = past_key_value.update(key_states, value_states, self.layer_idx, cache_kwargs)
+            key_states, value_states = past_key_value.update(
+                key_states, value_states, self.layer_idx, cache_kwargs
+            )
         key_states = repeat_kv(key_states, self.num_key_value_groups)
         value_states = repeat_kv(value_states, self.num_key_value_groups)
         if attention_mask is not None:
@@ -1054,7 +1257,9 @@ class MiniCPM4_1DecoderLayer(nn.Layer):
         _ensure_minicpm4_1_config_defaults(config)
         self.hidden_size = config.hidden_size
         self.self_attn = MiniCPM4_1Attention(config, layer_idx)
-        self.mlp = MiniCPM4_1MLP(config, fuse_up_gate=getattr(config, "fuse_attention_ffn", False))
+        self.mlp = MiniCPM4_1MLP(
+            config, fuse_up_gate=getattr(config, "fuse_attention_ffn", False)
+        )
         self.config = config
         self.input_layernorm = GeneralNorm.create(
             config=config,
@@ -1074,12 +1279,16 @@ class MiniCPM4_1DecoderLayer(nn.Layer):
         )
         self.scale_depth = config.scale_depth
         self.num_hidden_layers = config.num_hidden_layers
-        self.hidden_dropout = nn.Dropout(p=config.hidden_dropout_prob, mode="upscale_in_train")
+        self.hidden_dropout = nn.Dropout(
+            p=config.hidden_dropout_prob, mode="upscale_in_train"
+        )
         if config.sequence_parallel:
             if not hasattr(config, "disable_ffn_model_parallel"):
                 self.input_layernorm.enable_sequence_parallel()
                 if config.use_bias:
-                    mark_as_sequence_parallel_parameter(self.self_attn.o_proj.bias)
+                    mark_as_sequence_parallel_parameter(
+                        self.self_attn.o_proj.bias
+                    )
                     mark_as_sequence_parallel_parameter(self.mlp.down_proj.bias)
 
     def forward(
@@ -1124,11 +1333,15 @@ class MiniCPM4_1DecoderLayer(nn.Layer):
             use_cache=use_cache,
             **kwargs,
         )
-        hidden_states = residual + hidden_states * (self.scale_depth / math.sqrt(self.num_hidden_layers))
+        hidden_states = residual + hidden_states * (
+            self.scale_depth / math.sqrt(self.num_hidden_layers)
+        )
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
-        hidden_states = residual + hidden_states * (self.scale_depth / math.sqrt(self.num_hidden_layers))
+        hidden_states = residual + hidden_states * (
+            self.scale_depth / math.sqrt(self.num_hidden_layers)
+        )
         outputs = (hidden_states,)
         if output_attentions:
             outputs += (self_attn_weights,)
@@ -1232,7 +1445,9 @@ class MiniCPM4_1PreTrainedModel(PretrainedModel):
 
         LAYER_ROWWISE = ["self_attn.o_proj.weight", "mlp.down_proj.weight"]
 
-        BIAS_KEYS = [key.replace(".weight", ".bias") for key in LAYER_COLWISE] + [
+        BIAS_KEYS = [
+            key.replace(".weight", ".bias") for key in LAYER_COLWISE
+        ] + [
             "self_attn.o_proj.bias",
             "mlp.down_proj.bias",
             "lm_head.bias",
@@ -1246,19 +1461,28 @@ class MiniCPM4_1PreTrainedModel(PretrainedModel):
             for layer_idx in range(config.num_hidden_layers):
                 actions.update(
                     {
-                        f"{cls.base_model_prefix}.layers.{layer_idx}.{k}": partial(fn, is_column=True)
+                        f"{cls.base_model_prefix}.layers.{layer_idx}.{k}": partial(
+                            fn, is_column=True
+                        )
                         for k in LAYER_COLWISE
                     }
                 )
                 actions.update(
                     {
-                        f"{cls.base_model_prefix}.layers.{layer_idx}.{k}": partial(fn, is_column=False)
+                        f"{cls.base_model_prefix}.layers.{layer_idx}.{k}": partial(
+                            fn, is_column=False
+                        )
                         for k in LAYER_ROWWISE
                     }
                 )
                 if config.use_bias:
                     actions.update(
-                        {f"{cls.base_model_prefix}.layers.0.{b}": partial(fn, is_column=True) for b in BIAS_KEYS}
+                        {
+                            f"{cls.base_model_prefix}.layers.0.{b}": partial(
+                                fn, is_column=True
+                            )
+                            for b in BIAS_KEYS
+                        }
                     )
 
             return actions
@@ -1311,7 +1535,9 @@ class MiniCPM4_1PreTrainedModel(PretrainedModel):
 
         # lm_head
         if config.tie_word_embeddings:
-            aoa_config["aoa_statements"] += ["model.embed_tokens.weight -> lm_head.weight"]
+            aoa_config["aoa_statements"] += [
+                "model.embed_tokens.weight -> lm_head.weight"
+            ]
         elif cls != cls.base_model_class:
             aoa_config["aoa_statements"] += ["lm_head.weight -> lm_head.weight"]
 
@@ -1457,12 +1683,19 @@ class MiniCPM4_1Model(MiniCPM4_1PreTrainedModel):
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
+        self.embed_tokens = nn.Embedding(
+            config.vocab_size, config.hidden_size, self.padding_idx
+        )
         self.layers = nn.LayerList(
-            [MiniCPM4_1DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [
+                MiniCPM4_1DecoderLayer(config, layer_idx)
+                for layer_idx in range(config.num_hidden_layers)
+            ]
         )
         self._use_sdpa = config._attn_implementation == "sdpa"
-        self._use_flash_attention_2 = config._attn_implementation == "flash_attention_2"
+        self._use_flash_attention_2 = (
+            config._attn_implementation == "flash_attention_2"
+        )
         self.norm = GeneralNorm.create(
             config=config,
             norm_type="rms_norm",
@@ -1549,21 +1782,37 @@ class MiniCPM4_1Model(MiniCPM4_1PreTrainedModel):
         output_hidden_states=None,
         return_dict=False,
     ) -> Union[Tuple, BaseModelOutputWithPast]:
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
 
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        use_cache = (
+            use_cache if use_cache is not None else self.config.use_cache
+        )
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
         if input_ids is not None and inputs_embeds is not None:
-            raise ValueError("You cannot specify both input_ids and inputs_embeds at the same time")
+            raise ValueError(
+                "You cannot specify both input_ids and inputs_embeds at the same time"
+            )
         elif input_ids is not None:
             batch_size, seq_length = input_ids.shape
         elif inputs_embeds is not None:
             batch_size, seq_length = inputs_embeds.shape
         else:
-            raise ValueError("You have to specify either input_ids or inputs_embeds")
+            raise ValueError(
+                "You have to specify either input_ids or inputs_embeds"
+            )
         if self.gradient_checkpointing and self.training:
             if use_cache:
                 logger.warning_once(
@@ -1581,8 +1830,15 @@ class MiniCPM4_1Model(MiniCPM4_1PreTrainedModel):
                     "You must use the new past_key_values format, such as the Cache class, instead of the old tuple format."
                 )
             past_key_values_length = past_key_values.get_seq_length()
-            if self.config.sparse_config is not None and paddle.cuda.is_available() and past_key_values_length == 0:
-                past_key_values = InfLLMv2Cache(config=self.config, num_hidden_layers=self.config.num_hidden_layers)
+            if (
+                self.config.sparse_config is not None
+                and paddle.cuda.is_available()
+                and past_key_values_length == 0
+            ):
+                past_key_values = InfLLMv2Cache(
+                    config=self.config,
+                    num_hidden_layers=self.config.num_hidden_layers,
+                )
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids) * self.config.scale_emb
 
@@ -1596,18 +1852,26 @@ class MiniCPM4_1Model(MiniCPM4_1PreTrainedModel):
             "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
             "prepare_decoder_attention_mask": self._prepare_decoder_attention_mask,
         }
-        causal_attention_mask, attn_mask_startend_row_indices = create_causal_mask_and_row_indices(**mask_kwargs)
+        causal_attention_mask, attn_mask_startend_row_indices = (
+            create_causal_mask_and_row_indices(**mask_kwargs)
+        )
 
         hidden_states = inputs_embeds
 
         if position_ids is None:
             position_ids = (
-                paddle.arange(past_key_values_length, seq_length + past_key_values_length, dtype=paddle.int64)
+                paddle.arange(
+                    past_key_values_length,
+                    seq_length + past_key_values_length,
+                    dtype=paddle.int64,
+                )
                 .unsqueeze(0)
                 .tile((batch_size, 1))
             )
 
-        position_embeddings = self.rotary_emb(hidden_states.to(paddle.float32), position_ids)  # cos and sin
+        position_embeddings = self.rotary_emb(
+            hidden_states.to(paddle.float32), position_ids
+        )  # cos and sin
 
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -1622,7 +1886,6 @@ class MiniCPM4_1Model(MiniCPM4_1PreTrainedModel):
                 and self.config.recompute_num_layers == 1
                 and has_gradient
             ):
-
                 layer_outputs = self.recompute_training(
                     decoder_layer,
                     hidden_states,
@@ -1649,7 +1912,9 @@ class MiniCPM4_1Model(MiniCPM4_1PreTrainedModel):
             else:
                 hidden_states = layer_outputs
             if use_cache:
-                next_decoder_cache = layer_outputs[2 if output_attentions else 1]
+                next_decoder_cache = layer_outputs[
+                    2 if output_attentions else 1
+                ]
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
         hidden_states = self.norm(hidden_states)
@@ -1657,9 +1922,22 @@ class MiniCPM4_1Model(MiniCPM4_1PreTrainedModel):
             all_hidden_states += (hidden_states,)
         next_cache = None
         if use_cache:
-            next_cache = next_decoder_cache.to_legacy_cache() if use_legacy_cache else next_decoder_cache
+            next_cache = (
+                next_decoder_cache.to_legacy_cache()
+                if use_legacy_cache
+                else next_decoder_cache
+            )
         if not return_dict:
-            return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
+            return tuple(
+                v
+                for v in [
+                    hidden_states,
+                    next_cache,
+                    all_hidden_states,
+                    all_self_attns,
+                ]
+                if v is not None
+            )
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=next_cache,
@@ -1699,7 +1977,9 @@ class MiniCPM4_1ForCausalLM(MiniCPM4_1PreTrainedModel):
         return self.model
 
     @add_start_docstrings_to_model_forward(MINICPM4_1_INPUTS_DOCSTRING)
-    @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
+    @replace_return_docstrings(
+        output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC
+    )
     def forward(
         self,
         input_ids=None,
@@ -1727,19 +2007,37 @@ class MiniCPM4_1ForCausalLM(MiniCPM4_1PreTrainedModel):
 
         Returns:
         """
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        output_hidden_states = (
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
+        )
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
 
-        if kwargs.get("attn_mask_start_row_indices", None) is not None and attn_mask_startend_row_indices is None:
-            attn_mask_startend_row_indices = kwargs.pop("attn_mask_start_row_indices")
+        if (
+            kwargs.get("attn_mask_start_row_indices", None) is not None
+            and attn_mask_startend_row_indices is None
+        ):
+            attn_mask_startend_row_indices = kwargs.pop(
+                "attn_mask_start_row_indices"
+            )
 
         if attention_mask is not None and attention_mask.dtype != paddle.bool:
             attention_mask = paddle.cast(attention_mask, paddle.bool)
 
-        if attn_mask_startend_row_indices is not None and attention_mask is not None:
+        if (
+            attn_mask_startend_row_indices is not None
+            and attention_mask is not None
+        ):
             logger.warning(
                 "You have provided both attn_mask_startend_row_indices and attention_mask. "
                 "The attn_mask_startend_row_indices will be used."
@@ -1760,17 +2058,30 @@ class MiniCPM4_1ForCausalLM(MiniCPM4_1PreTrainedModel):
         )
         hidden_states = outputs[0]
         if labels is None:
-            slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+            slice_indices = (
+                slice(-logits_to_keep, None)
+                if isinstance(logits_to_keep, int)
+                else logits_to_keep
+            )
             hidden_states = hidden_states[:, slice_indices, :].contiguous()
         if self.config.pretraining_tp > 1:
-            lm_head_slices = _split_tensor(self.lm_head.weight, self.vocab_size // self.config.pretraining_tp, dim=0)
+            lm_head_slices = _split_tensor(
+                self.lm_head.weight,
+                self.vocab_size // self.config.pretraining_tp,
+                dim=0,
+            )
             logits = [
-                nn.functional.linear(hidden_states, lm_head_slices[i].transpose([1, 0]))
+                nn.functional.linear(
+                    hidden_states, lm_head_slices[i].transpose([1, 0])
+                )
                 for i in range(self.config.pretraining_tp)
             ]
             logits = paddle.cat(logits, dim=-1)
         else:
-            logits = self.lm_head(hidden_states / (self.config.hidden_size / self.config.dim_model_base))
+            logits = self.lm_head(
+                hidden_states
+                / (self.config.hidden_size / self.config.dim_model_base)
+            )
         if not isinstance(logits, (tuple, list)):
             logits = logits.float()
         loss = None
@@ -1798,7 +2109,11 @@ class MiniCPM4_1ForCausalLM(MiniCPM4_1PreTrainedModel):
         if past_key_values is not None:
             if isinstance(past_key_values, Cache):
                 cache_length = past_key_values.get_seq_length()
-                if self.config.sparse_config is not None and paddle.cuda.is_available() and cache_length == 0:
+                if (
+                    self.config.sparse_config is not None
+                    and paddle.cuda.is_available()
+                    and cache_length == 0
+                ):
                     past_key_values = InfLLMv2Cache(
                         config=self.config,
                         num_hidden_layers=self.config.num_hidden_layers,
@@ -1809,8 +2124,13 @@ class MiniCPM4_1ForCausalLM(MiniCPM4_1PreTrainedModel):
                 raise ValueError(
                     "You must use the new past_key_values format, such as the Cache class, instead of the old tuple format."
                 )
-            if attention_mask is not None and attention_mask.shape[1] > input_ids.shape[1]:
-                input_ids = input_ids[:, -(attention_mask.shape[1] - past_length) :]
+            if (
+                attention_mask is not None
+                and attention_mask.shape[1] > input_ids.shape[1]
+            ):
+                input_ids = input_ids[
+                    :, -(attention_mask.shape[1] - past_length) :
+                ]
             elif past_length < input_ids.shape[1]:
                 input_ids = input_ids[:, past_length:]
             if (
@@ -1847,7 +2167,10 @@ class MiniCPM4_1ForCausalLM(MiniCPM4_1PreTrainedModel):
         reordered_past = ()
         for layer_past in past_key_values:
             reordered_past += (
-                tuple(past_state.index_select(0, beam_idx.to(past_state.device)) for past_state in layer_past),
+                tuple(
+                    past_state.index_select(0, beam_idx.to(past_state.device))
+                    for past_state in layer_past
+                ),
             )
         return reordered_past
 
@@ -1878,7 +2201,9 @@ class MiniCPM4_1ForCausalLM(MiniCPM4_1PreTrainedModel):
             **kwargs,
         }
         history.append({"role": role, "content": query})
-        history_str = tokenizer.apply_chat_template(history, tokenize=False, add_generation_prompt=False)
+        history_str = tokenizer.apply_chat_template(
+            history, tokenize=False, add_generation_prompt=False
+        )
         inputs = tokenizer(history_str, return_tensors="pd")
         outputs = self.generate(**inputs, **gen_kwargs)
         if isinstance(outputs, (tuple, list)):
@@ -1886,7 +2211,10 @@ class MiniCPM4_1ForCausalLM(MiniCPM4_1PreTrainedModel):
         input_length = inputs["input_ids"].shape[-1]
         outputs = outputs.tolist()[0][input_length:-1]
         response = tokenizer.decode(outputs)
-        pattern = re.compile(r".*?(?=<\|im_end\|>|<\|im_start\|>(?:user|assistant|system)\n|<AI>|<用户>)", re.DOTALL)
+        pattern = re.compile(
+            r".*?(?=<\|im_end\|>|<\|im_start\|>(?:user|assistant|system)\n|<AI>|<用户>)",
+            re.DOTALL,
+        )
         matches = pattern.findall(response)
         if len(matches) > 0:
             response = matches[0]
@@ -1914,7 +2242,9 @@ class MiniCPM4_1ForSequenceClassification(MiniCPM4_1PreTrainedModel):
         super().__init__(config)
         self.num_labels = config.num_labels
         self.model = MiniCPM4_1Model(config)
-        self.score = nn.Linear(config.hidden_size, self.num_labels, bias_attr=False)
+        self.score = nn.Linear(
+            config.hidden_size, self.num_labels, bias_attr=False
+        )
         self.post_init()
 
     def get_input_embeddings(self):
@@ -1943,7 +2273,11 @@ class MiniCPM4_1ForSequenceClassification(MiniCPM4_1PreTrainedModel):
             `[0, ..., config.num_labels - 1]`. If `config.num_labels == 1` a regression loss is computed
             (Mean-Square loss), and if `config.num_labels > 1` a classification loss is computed (Cross-Entropy).
         """
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
         transformer_outputs = self.model(
             input_ids,
             attention_mask=attention_mask,
@@ -1962,21 +2296,30 @@ class MiniCPM4_1ForSequenceClassification(MiniCPM4_1PreTrainedModel):
         else:
             batch_size = inputs_embeds.shape[0]
         if self.config.pad_token_id is None and batch_size != 1:
-            raise ValueError("Cannot handle batch sizes > 1 if no padding token is defined.")
+            raise ValueError(
+                "Cannot handle batch sizes > 1 if no padding token is defined."
+            )
         if self.config.pad_token_id is None:
             sequence_lengths = -1
         elif input_ids is not None:
-            sequence_lengths = (paddle.eq(input_ids, self.config.pad_token_id).int().argmax(-1) - 1).to(logits.device)
+            sequence_lengths = (
+                paddle.eq(input_ids, self.config.pad_token_id).int().argmax(-1)
+                - 1
+            ).to(logits.device)
         else:
             sequence_lengths = -1
-        pooled_logits = logits[paddle.arange(batch_size, device=logits.device), sequence_lengths]
+        pooled_logits = logits[
+            paddle.arange(batch_size, device=logits.device), sequence_lengths
+        ]
         loss = None
         if labels is not None:
             labels = labels.to(logits.device)
             if self.config.problem_type is None:
                 if self.num_labels == 1:
                     self.config.problem_type = "regression"
-                elif self.num_labels > 1 and (labels.dtype == paddle.long or labels.dtype == paddle.int32):
+                elif self.num_labels > 1 and (
+                    labels.dtype == paddle.long or labels.dtype == paddle.int32
+                ):
                     self.config.problem_type = "single_label_classification"
                 else:
                     self.config.problem_type = "multi_label_classification"
@@ -1988,7 +2331,9 @@ class MiniCPM4_1ForSequenceClassification(MiniCPM4_1PreTrainedModel):
                     loss = loss_fct(pooled_logits, labels)
             elif self.config.problem_type == "single_label_classification":
                 loss_fct = paddle.nn.CrossEntropyLoss()
-                loss = loss_fct(pooled_logits.view(-1, self.num_labels), labels.view(-1))
+                loss = loss_fct(
+                    pooled_logits.view(-1, self.num_labels), labels.view(-1)
+                )
             elif self.config.problem_type == "multi_label_classification":
                 loss_fct = paddle.nn.BCEWithLogitsLoss()
                 loss = loss_fct(pooled_logits, labels)
@@ -2007,7 +2352,9 @@ class MiniCPM4_1ForSequenceClassification(MiniCPM4_1PreTrainedModel):
 class MiniCPM4_1ForCausalLMPipe(GeneralModelForCausalLMPipe):
     config_class = MiniCPM4_1Config
     _decoder_layer_cls = MiniCPM4_1DecoderLayer
-    _get_tensor_parallel_mappings = MiniCPM4_1Model._get_tensor_parallel_mappings
+    _get_tensor_parallel_mappings = (
+        MiniCPM4_1Model._get_tensor_parallel_mappings
+    )
     _init_weights = MiniCPM4_1Model._init_weights
     _keep_in_fp32_modules = MiniCPM4_1Model._keep_in_fp32_modules
     _tied_weights_keys = ["lm_head.weight"]
@@ -2016,4 +2363,8 @@ class MiniCPM4_1ForCausalLMPipe(GeneralModelForCausalLMPipe):
     _gen_inv_aoa_config = MiniCPM4_1ForCausalLM._gen_inv_aoa_config
 
 
-__all__ = ["MiniCPM4_1Model", "MiniCPM4_1ForCausalLM", "MiniCPM4_1ForCausalLMPipe"]
+__all__ = [
+    "MiniCPM4_1Model",
+    "MiniCPM4_1ForCausalLM",
+    "MiniCPM4_1ForCausalLMPipe",
+]

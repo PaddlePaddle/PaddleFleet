@@ -62,7 +62,9 @@ def endswith(key, prefix_list):
     return False
 
 
-def save_single_safetenors(save_path, state_dict, rank, total_files_size, prefix="model"):
+def save_single_safetenors(
+    save_path, state_dict, rank, total_files_size, prefix="model"
+):
     save_file_name = os.path.join(
         save_path,
         f"{prefix}-{rank + 1:05d}-of-{total_files_size:05d}.safetensors",
@@ -82,7 +84,9 @@ class GptOssWeightChangeTest(unittest.TestCase):
         save_path = os.path.join(self.tempdir, "tiny-random-gpt-oss-new-bf16")
 
         safetensor_prefix = "model"
-        save_index_file = os.path.join(save_path, safetensor_prefix + ".safetensors.index.json")
+        save_index_file = os.path.join(
+            save_path, safetensor_prefix + ".safetensors.index.json"
+        )
         index = {"metadata": {"total_size": 0}, "weight_map": {}}
         file_list = find_safetensors_files(load_path)
         file_num = len(file_list)
@@ -90,13 +94,17 @@ class GptOssWeightChangeTest(unittest.TestCase):
             local_dict = load_file(file_name)
 
             upcast_dict(local_dict)
-            save_single_safetenors(save_path, local_dict, idx, file_num, safetensor_prefix)
+            save_single_safetenors(
+                save_path, local_dict, idx, file_num, safetensor_prefix
+            )
             shard_file = f"{safetensor_prefix}-{idx + 1:05d}-of-{file_num:05d}.safetensors"
             for key in list(local_dict.keys()):
                 index["weight_map"][key] = shard_file
                 shape_ = local_dict[key].shape
                 dtype_ = local_dict[key].dtype
-                index["metadata"]["total_size"] += int(np.prod(shape_) * PADDLE_DTYPE_MAP[str(dtype_)])
+                index["metadata"]["total_size"] += int(
+                    np.prod(shape_) * PADDLE_DTYPE_MAP[str(dtype_)]
+                )
 
         with open(save_index_file, "w", encoding="utf-8") as f:
             f.write(json.dumps(index, indent=2) + "\n")
@@ -106,7 +114,9 @@ class GptOssWeightChangeTest(unittest.TestCase):
         load_path = os.path.join(self.tempdir, "tiny-random-gpt-oss-bf16")
         save_path = os.path.join(self.tempdir, "tiny-random-gpt-oss-new-fp4")
         safetensor_prefix = "model"
-        save_index_file = os.path.join(save_path, safetensor_prefix + ".safetensors.index.json")
+        save_index_file = os.path.join(
+            save_path, safetensor_prefix + ".safetensors.index.json"
+        )
         index = {"metadata": {"total_size": 0}, "weight_map": {}}
         file_list = find_safetensors_files(load_path)
         file_num = len(file_list)
@@ -114,13 +124,17 @@ class GptOssWeightChangeTest(unittest.TestCase):
             local_dict = load_file(file_name)
 
             downcast_dict(local_dict)
-            save_single_safetenors(save_path, local_dict, idx, file_num, safetensor_prefix)
+            save_single_safetenors(
+                save_path, local_dict, idx, file_num, safetensor_prefix
+            )
             shard_file = f"{safetensor_prefix}-{idx + 1:05d}-of-{file_num:05d}.safetensors"
             for key in list(local_dict.keys()):
                 index["weight_map"][key] = shard_file
                 shape_ = local_dict[key].shape
                 dtype_ = local_dict[key].dtype
-                index["metadata"]["total_size"] += int(np.prod(shape_) * PADDLE_DTYPE_MAP[str(dtype_)])
+                index["metadata"]["total_size"] += int(
+                    np.prod(shape_) * PADDLE_DTYPE_MAP[str(dtype_)]
+                )
 
         with open(save_index_file, "w", encoding="utf-8") as f:
             f.write(json.dumps(index, indent=2) + "\n")
@@ -146,18 +160,31 @@ class GptOssWeightChangeTest(unittest.TestCase):
         assert len(origin_dict) == len(new_dict)
         for key in new_dict.keys():
             assert key in origin_dict.keys()
-            assert np.allclose(new_dict[key].numpy(), origin_dict[key].numpy(), atol=atol)
+            assert np.allclose(
+                new_dict[key].numpy(), origin_dict[key].numpy(), atol=atol
+            )
 
     @slow
     def test_change_weight(self):
-
         repo_id = "PaddleFormers/tiny-random-gpt-oss-fp4"
         filename = "model.safetensors"
-        aistudio_download(repo_id, filename, None, False, os.path.join(self.tempdir, "tiny-random-gpt-oss-fp4/"))
+        aistudio_download(
+            repo_id,
+            filename,
+            None,
+            False,
+            os.path.join(self.tempdir, "tiny-random-gpt-oss-fp4/"),
+        )
 
         repo_id = "PaddleFormers/tiny-random-gpt-oss-bf16"
         filename = "model.safetensors"
-        aistudio_download(repo_id, filename, None, False, os.path.join(self.tempdir, "tiny-random-gpt-oss-bf16/"))
+        aistudio_download(
+            repo_id,
+            filename,
+            None,
+            False,
+            os.path.join(self.tempdir, "tiny-random-gpt-oss-bf16/"),
+        )
 
         self.bf16_to_fp4()
         self.fp4_to_bf16()

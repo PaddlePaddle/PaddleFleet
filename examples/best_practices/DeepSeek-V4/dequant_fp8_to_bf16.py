@@ -55,12 +55,31 @@ os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 # FP4 (e2m1) lookup table: maps 4-bit index to float value
 FP4_TABLE = torch.tensor(
-    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    [
+        0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0,
+        0.0,
+        -0.5,
+        -1.0,
+        -1.5,
+        -2.0,
+        -3.0,
+        -4.0,
+        -6.0,
+    ],
     dtype=torch.float32,
 )
 
 
-def fp8_weight_to_bf16(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+def fp8_weight_to_bf16(
+    weight: torch.Tensor, scale: torch.Tensor
+) -> torch.Tensor:
     """Dequantize MXFP8 (e4m3fn) weight to BF16."""
     assert weight.dtype == torch.float8_e4m3fn
     # assert scale.dtype == torch.float8_e8m0fnu
@@ -71,14 +90,18 @@ def fp8_weight_to_bf16(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tenso
     return out.reshape(weight.shape).bfloat16()
 
 
-def fp4_weight_to_bf16(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+def fp4_weight_to_bf16(
+    weight: torch.Tensor, scale: torch.Tensor
+) -> torch.Tensor:
     """Dequantize MXFP4 (e2m1, packed int8) weight to BF16."""
     assert weight.dtype == torch.int8
     assert scale.dtype == torch.float8_e8m0fnu
     packed = weight.view(torch.uint8)
     low = packed & 0x0F
     high = (packed >> 4) & 0x0F
-    values = torch.stack([FP4_TABLE[low.long()], FP4_TABLE[high.long()]], dim=-1).flatten(1)
+    values = torch.stack(
+        [FP4_TABLE[low.long()], FP4_TABLE[high.long()]], dim=-1
+    ).flatten(1)
     values = values.view(values.shape[0], scale.shape[1], 32)
     values = values * scale.float().unsqueeze(-1)
     return values.reshape(values.shape[0], -1).bfloat16()
@@ -113,7 +136,11 @@ def process_shard(
     n_quant = sum(1 for k in work_keys if k in quant_weight_keys)
     n_copy = len(work_keys) - n_quant
 
-    print(f"  [{shard_idx + 1} / {total_shards}] {shard_file}: " f"{n_quant} dequant + {n_copy} copy ...", flush=True)
+    print(
+        f"  [{shard_idx + 1} / {total_shards}] {shard_file}: "
+        f"{n_quant} dequant + {n_copy} copy ...",
+        flush=True,
+    )
 
     t_start = time.time()
     new_tensors = {}
@@ -133,10 +160,16 @@ def process_shard(
 
             # Progress every 100 tensors
             if (i + 1) % 200 == 0:
-                print(f"    ... {i + 1} / {len(work_keys)} tensors processed", flush=True)
+                print(
+                    f"    ... {i + 1} / {len(work_keys)} tensors processed",
+                    flush=True,
+                )
 
     t_dequant = time.time()
-    print(f"    dequant done in {t_dequant - t_start:.1f}s, writing {shard_file} ...", flush=True)
+    print(
+        f"    dequant done in {t_dequant - t_start:.1f}s, writing {shard_file} ...",
+        flush=True,
+    )
 
     # Write output
     save_file(new_tensors, out_path)
@@ -146,7 +179,8 @@ def process_shard(
     t_write = time.time()
     out_size_mb = os.path.getsize(out_path) / (1024 * 1024)
     print(
-        f"    written {out_size_mb:.0f} MB in {t_write - t_dequant:.1f}s " f"(total {t_write - t_start:.1f}s)",
+        f"    written {out_size_mb:.0f} MB in {t_write - t_dequant:.1f}s "
+        f"(total {t_write - t_start:.1f}s)",
         flush=True,
     )
 
@@ -163,7 +197,9 @@ _g_quant_weight_keys: set = set()
 _g_scale_keys: set = set()
 
 
-def _worker_init(input_dir: str, output_dir: str, quant_weight_keys: set, scale_keys: set):
+def _worker_init(
+    input_dir: str, output_dir: str, quant_weight_keys: set, scale_keys: set
+):
     global _g_input_dir, _g_output_dir, _g_quant_weight_keys, _g_scale_keys
     _g_input_dir = input_dir
     _g_output_dir = output_dir
@@ -192,17 +228,27 @@ def _process_shard_worker(task: tuple) -> tuple:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Dequantize DeepSeek-V4-Flash MXFP8/MXFP4 weights to BF16")
+    parser = argparse.ArgumentParser(
+        description="Dequantize DeepSeek-V4-Flash MXFP8/MXFP4 weights to BF16"
+    )
     parser.add_argument("--input_dir", type=str, required=True)
     parser.add_argument("--output_dir", type=str, required=True)
     parser.add_argument(
-        "--num_workers", type=int, default=4, help="Parallel workers (default 4; each needs ~12GB RAM)"
+        "--num_workers",
+        type=int,
+        default=4,
+        help="Parallel workers (default 4; each needs ~12GB RAM)",
     )
     parser.add_argument(
-        "--sequential", action="store_true", help="Process shards sequentially (lowest memory, easiest to debug)"
+        "--sequential",
+        action="store_true",
+        help="Process shards sequentially (lowest memory, easiest to debug)",
     )
     parser.add_argument(
-        "--start_shard", type=int, default=0, help="Resume from this shard index (0-based, skip already done)"
+        "--start_shard",
+        type=int,
+        default=0,
+        help="Resume from this shard index (0-based, skip already done)",
     )
     args = parser.parse_args()
 
@@ -236,10 +282,15 @@ def main():
     print(f"{'=' * 60}")
     print(f"Input:  {input_dir}")
     print(f"Output: {output_dir}")
-    print(f"Quantized weights:   {len(quant_weight_keys)} " f"({num_fp8} MXFP8 + {num_fp4} MXFP4)")
+    print(
+        f"Quantized weights:   {len(quant_weight_keys)} "
+        f"({num_fp8} MXFP8 + {num_fp4} MXFP4)"
+    )
     print(f"Scale keys (drop):   {len(scale_keys)}")
     print(f"Shards:              {len(shard_to_keys)}")
-    print(f"Mode:                {'sequential' if args.sequential else f'{args.num_workers} workers'}")
+    print(
+        f"Mode:                {'sequential' if args.sequential else f'{args.num_workers} workers'}"
+    )
     if args.start_shard > 0:
         print(f"Resuming from shard: {args.start_shard}")
     print()
@@ -275,23 +326,35 @@ def main():
         with ProcessPoolExecutor(
             max_workers=args.num_workers,
             initializer=_worker_init,
-            initargs=(str(input_dir), str(output_dir), quant_weight_keys, scale_keys),
+            initargs=(
+                str(input_dir),
+                str(output_dir),
+                quant_weight_keys,
+                scale_keys,
+            ),
         ) as executor:
-            futures = {executor.submit(_process_shard_worker, t): t[0] for t in tasks}
+            futures = {
+                executor.submit(_process_shard_worker, t): t[0] for t in tasks
+            }
             for future in as_completed(futures):
                 try:
                     shard_file, dequanted = future.result(timeout=600)
                     total_dequanted += dequanted
                 except Exception as e:
                     shard_name = futures[future]
-                    print(f"\nFATAL: Shard {shard_name} failed: {e}", file=sys.stderr)
+                    print(
+                        f"\nFATAL: Shard {shard_name} failed: {e}",
+                        file=sys.stderr,
+                    )
                     raise
 
     print(f"\n{'=' * 60}")
     print(f"Dequantized {total_dequanted} weights to BF16")
 
     # ---- Update index (drop .scale entries) ----
-    new_weight_map = {k: v for k, v in weight_map.items() if k not in scale_keys}
+    new_weight_map = {
+        k: v for k, v in weight_map.items() if k not in scale_keys
+    }
     new_index = {
         "metadata": index.get("metadata", {}),
         "weight_map": new_weight_map,
@@ -311,7 +374,12 @@ def main():
             json.dump(config, f, indent=2)
 
     # ---- Copy other files ----
-    for fname in ["tokenizer.json", "tokenizer_config.json", "generation_config.json", "special_tokens_map.json"]:
+    for fname in [
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "generation_config.json",
+        "special_tokens_map.json",
+    ]:
         src = input_dir / fname
         if src.exists():
             shutil.copy2(str(src), str(output_dir / fname))
@@ -321,7 +389,9 @@ def main():
         shutil.copytree(str(encoding_dir), str(output_dir / "encoding"))
 
     print(f"Done! BF16 model saved to: {output_dir}")
-    print(f"Weight map: {len(new_weight_map)} entries (dropped {len(scale_keys)} scales)")
+    print(
+        f"Weight map: {len(new_weight_map)} entries (dropped {len(scale_keys)} scales)"
+    )
 
 
 if __name__ == "__main__":

@@ -15,7 +15,10 @@
 """Granite model configuration."""
 
 from ..configuration_utils import PretrainedConfig
-from ..modeling_rope_utils import rope_config_validation, standardize_rope_params
+from ..modeling_rope_utils import (
+    rope_config_validation,
+    standardize_rope_params,
+)
 
 
 class GraniteConfig(PretrainedConfig):
@@ -62,7 +65,11 @@ class GraniteConfig(PretrainedConfig):
         self.max_position_embeddings = max_position_embeddings
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
-        self.num_key_value_heads = num_attention_heads if num_key_value_heads is None else num_key_value_heads
+        self.num_key_value_heads = (
+            num_attention_heads
+            if num_key_value_heads is None
+            else num_key_value_heads
+        )
         self.hidden_act = hidden_act
         self.initializer_range = initializer_range
         self.rms_norm_eps = rms_norm_eps
@@ -75,8 +82,16 @@ class GraniteConfig(PretrainedConfig):
         self.residual_multiplier = residual_multiplier
         self.attention_multiplier = attention_multiplier
         self.tie_word_embeddings = tie_word_embeddings
-        self.head_dim = head_dim if head_dim is not None else hidden_size // num_attention_heads
-        self.max_sequence_length = max_sequence_length if max_sequence_length is not None else max_position_embeddings
+        self.head_dim = (
+            head_dim
+            if head_dim is not None
+            else hidden_size // num_attention_heads
+        )
+        self.max_sequence_length = (
+            max_sequence_length
+            if max_sequence_length is not None
+            else max_position_embeddings
+        )
         self.ignored_index = ignored_index
         self.pp_seg_method = pp_seg_method
         self.dpo_config = dpo_config
@@ -102,7 +117,13 @@ class GraniteConfig(PretrainedConfig):
         )
 
         self.register_unsavable_keys(
-            ["ignored_index", "pp_seg_method", "dpo_config", "kto_config", "max_sequence_length"]
+            [
+                "ignored_index",
+                "pp_seg_method",
+                "dpo_config",
+                "kto_config",
+                "max_sequence_length",
+            ]
         )
         standardize_rope_params(self, rope_theta=self.rope_theta)
         rope_config_validation(self)

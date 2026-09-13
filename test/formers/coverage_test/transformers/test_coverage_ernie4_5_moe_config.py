@@ -21,7 +21,9 @@
 import json
 import unittest
 
-from paddlefleet.transformers.ernie4_5_moe.configuration import Ernie4_5_MoeConfig
+from paddlefleet.transformers.ernie4_5_moe.configuration import (
+    Ernie4_5_MoeConfig,
+)
 
 
 class TestErnie4_5_MoeConfig(unittest.TestCase):
@@ -68,12 +70,16 @@ class TestErnie4_5_MoeConfig(unittest.TestCase):
         self.assertEqual(config.head_dim, 1280)
 
     def test_head_dim_explicit(self):
-        config = Ernie4_5_MoeConfig(hidden_size=2560, num_attention_heads=2, head_dim=64)
+        config = Ernie4_5_MoeConfig(
+            hidden_size=2560, num_attention_heads=2, head_dim=64
+        )
         self.assertEqual(config.head_dim, 64)
 
     def test_moe_layer_end_index_default(self):
         """moe_layer_end_index should default to num_hidden_layers - 1 when -1 is passed."""
-        config = Ernie4_5_MoeConfig(num_hidden_layers=10, moe_layer_end_index=-1)
+        config = Ernie4_5_MoeConfig(
+            num_hidden_layers=10, moe_layer_end_index=-1
+        )
         self.assertEqual(config.moe_layer_end_index, 9)
 
     def test_moe_layer_end_index_explicit(self):

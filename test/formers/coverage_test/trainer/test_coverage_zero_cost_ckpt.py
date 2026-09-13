@@ -35,11 +35,15 @@ class _FakeValue:
 class _FakeWorker:
     """Minimal ZCC worker double exposing the fields the manager barrier reads."""
 
-    def __init__(self, worker_id=0, status=ZCCWorkerStatus.IDLE.value, global_step=0):
+    def __init__(
+        self, worker_id=0, status=ZCCWorkerStatus.IDLE.value, global_step=0
+    ):
         self.worker_id = worker_id
         self.status = _FakeValue(status)
         self.global_step = _FakeValue(global_step)
-        self.task_queue = MagicMock()  # get_idle_worker_for_saving puts PREPARE tasks here
+        self.task_queue = (
+            MagicMock()
+        )  # get_idle_worker_for_saving puts PREPARE tasks here
 
 
 def _bare_manager(**overrides):
@@ -53,7 +57,9 @@ def _bare_manager(**overrides):
     m.current_worker = overrides.get("current_worker", None)
     m.global_step = overrides.get("global_step", 0)
     m.pipeline_hooks_steps = overrides.get("pipeline_hooks_steps", 1)
-    m.current_pipeline_hook_step = overrides.get("current_pipeline_hook_step", 1)
+    m.current_pipeline_hook_step = overrides.get(
+        "current_pipeline_hook_step", 1
+    )
     m.ready_to_save = overrides.get("ready_to_save", True)
     return m
 
@@ -167,7 +173,9 @@ class TestSyncOffloadStatus(unittest.TestCase):
         # manager is offloading step 5; worker still reports step 4 (previous offload
         # not finished). The barrier must wait rather than pass on the stale value.
         worker = _FakeWorker(global_step=4)
-        m = _bare_manager(workers=[worker], current_worker=worker, global_step=5)
+        m = _bare_manager(
+            workers=[worker], current_worker=worker, global_step=5
+        )
 
         def _advance(_seconds):
             # Simulate the worker finishing the in-flight D2H after two poll cycles.
@@ -176,17 +184,26 @@ class TestSyncOffloadStatus(unittest.TestCase):
                 worker.global_step.value = 5
 
         _advance.calls = 0
-        with patch("paddlefleet.trainer.utils.zero_cost_checkpoint.time.sleep", side_effect=_advance) as slept:
+        with patch(
+            "paddlefleet.trainer.utils.zero_cost_checkpoint.time.sleep",
+            side_effect=_advance,
+        ) as slept:
             m.sync_offload_status()
 
         self.assertGreaterEqual(slept.call_count, 2)  # actually waited
-        self.assertIsNone(m.current_worker)  # released only after the step matched
+        self.assertIsNone(
+            m.current_worker
+        )  # released only after the step matched
         self.assertEqual(m.current_pipeline_hook_step, 0)
 
     def test_matching_step_returns_without_waiting(self):
         worker = _FakeWorker(global_step=7)
-        m = _bare_manager(workers=[worker], current_worker=worker, global_step=7)
-        with patch("paddlefleet.trainer.utils.zero_cost_checkpoint.time.sleep") as slept:
+        m = _bare_manager(
+            workers=[worker], current_worker=worker, global_step=7
+        )
+        with patch(
+            "paddlefleet.trainer.utils.zero_cost_checkpoint.time.sleep"
+        ) as slept:
             m.sync_offload_status()
         slept.assert_not_called()
         self.assertIsNone(m.current_worker)
@@ -256,20 +273,38 @@ class TestOnStepEndRefreshesGlobalStep(unittest.TestCase):
         manager = MagicMock()
         manager.global_step = 3  # stale value from a previous save
         cb = self._make_callback(manager)
-        args = SimpleNamespace(zcc_save_ema_coef=None, pipeline_model_parallel_size=1)
+        args = SimpleNamespace(
+            zcc_save_ema_coef=None, pipeline_model_parallel_size=1
+        )
         state = SimpleNamespace(global_step=7)
         control = SimpleNamespace(should_save=True)
-        cb.on_step_end(args, state, control, model=MagicMock(), lr_scheduler=MagicMock(), optimizer=MagicMock())
+        cb.on_step_end(
+            args,
+            state,
+            control,
+            model=MagicMock(),
+            lr_scheduler=MagicMock(),
+            optimizer=MagicMock(),
+        )
         self.assertEqual(manager.global_step, 7)
 
     def test_ema_branch_writes_current_step(self):
         manager = MagicMock()
         manager.global_step = 3
         cb = self._make_callback(manager)
-        args = SimpleNamespace(zcc_save_ema_coef=0.999, pipeline_model_parallel_size=1)
+        args = SimpleNamespace(
+            zcc_save_ema_coef=0.999, pipeline_model_parallel_size=1
+        )
         state = SimpleNamespace(global_step=8)  # 8 % zcc_ema_interval(2) == 0
         control = SimpleNamespace(should_save=False)
-        cb.on_step_end(args, state, control, model=MagicMock(), lr_scheduler=MagicMock(), optimizer=MagicMock())
+        cb.on_step_end(
+            args,
+            state,
+            control,
+            model=MagicMock(),
+            lr_scheduler=MagicMock(),
+            optimizer=MagicMock(),
+        )
         self.assertEqual(manager.global_step, 8)
 
     def test_ema_branch_skipped_off_interval_does_not_touch_step(self):
@@ -277,10 +312,21 @@ class TestOnStepEndRefreshesGlobalStep(unittest.TestCase):
         sentinel = object()
         manager.global_step = sentinel
         cb = self._make_callback(manager)
-        args = SimpleNamespace(zcc_save_ema_coef=0.999, pipeline_model_parallel_size=1)
-        state = SimpleNamespace(global_step=7)  # 7 % 2 != 0 -> no offload this step
+        args = SimpleNamespace(
+            zcc_save_ema_coef=0.999, pipeline_model_parallel_size=1
+        )
+        state = SimpleNamespace(
+            global_step=7
+        )  # 7 % 2 != 0 -> no offload this step
         control = SimpleNamespace(should_save=False)
-        cb.on_step_end(args, state, control, model=MagicMock(), lr_scheduler=MagicMock(), optimizer=MagicMock())
+        cb.on_step_end(
+            args,
+            state,
+            control,
+            model=MagicMock(),
+            lr_scheduler=MagicMock(),
+            optimizer=MagicMock(),
+        )
         self.assertIs(manager.global_step, sentinel)
 
 
@@ -308,22 +354,33 @@ class TestMultiWorkerPoolBarrier(unittest.TestCase):
             ticks["n"] += 1
             if ticks["n"] == 1:
                 for d in decoys:
-                    d.global_step.value = m.global_step  # adversarial / historical echo
-                self.assertIsNotNone(m.current_worker)  # still engaged, not released early
+                    d.global_step.value = (
+                        m.global_step
+                    )  # adversarial / historical echo
+                self.assertIsNotNone(
+                    m.current_worker
+                )  # still engaged, not released early
             else:
                 target.global_step.value = m.global_step  # the real completion
 
         with patch(_SLEEP, side_effect=_advance) as slept:
             m.sync_offload_status()
 
-        self.assertGreaterEqual(slept.call_count, 2)  # ignored the decoy echo, kept polling
+        self.assertGreaterEqual(
+            slept.call_count, 2
+        )  # ignored the decoy echo, kept polling
         self.assertEqual(target.global_step.value, m.global_step)
-        self.assertIsNone(m.current_worker)  # released only after `target` reached the step
+        self.assertIsNone(
+            m.current_worker
+        )  # released only after `target` reached the step
 
     def test_pool_selection_and_reuse_ignore_stale_echo(self):
         wA, wB, wC = (_FakeWorker(worker_id=i) for i in range(3))
         m = _bare_manager(workers=[wA, wB, wC], global_step=0)
-        save = (("flash", "persistent"), ("lr", "state", "rng"))  # dummy PREPARE payload
+        save = (
+            ("flash", "persistent"),
+            ("lr", "state", "rng"),
+        )  # dummy PREPARE payload
 
         # save #1 @10: all idle -> first idle (A) picked; A completes.
         m.global_step = 10
@@ -336,7 +393,9 @@ class TestMultiWorkerPoolBarrier(unittest.TestCase):
         m.global_step = 20
         wA.status.value = ZCCWorkerStatus.DUMPING.value
         m.get_idle_worker_for_saving(save)
-        self.assertIs(m.current_worker, wB)  # selection skipped the busy worker A
+        self.assertIs(
+            m.current_worker, wB
+        )  # selection skipped the busy worker A
         wB.status.value = ZCCWorkerStatus.OFFLOADING.value
         self._drive_barrier(m, target=wB, decoys=[wA])
 
@@ -344,7 +403,9 @@ class TestMultiWorkerPoolBarrier(unittest.TestCase):
         m.global_step = 30
         wA.status.value = ZCCWorkerStatus.IDLE.value
         wB.status.value = ZCCWorkerStatus.DUMPING.value
-        self.assertLess(wA.global_step.value, 30)  # historical echo from an earlier save
+        self.assertLess(
+            wA.global_step.value, 30
+        )  # historical echo from an earlier save
         m.get_idle_worker_for_saving(save)
         self.assertIs(m.current_worker, wA)  # reused
         wA.status.value = ZCCWorkerStatus.OFFLOADING.value

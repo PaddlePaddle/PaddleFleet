@@ -12,7 +12,10 @@
 
 import unittest
 
-from paddlefleet.cli.hparams.generating_args import GeneratingArguments, StreamOptions
+from paddlefleet.cli.hparams.generating_args import (
+    GeneratingArguments,
+    StreamOptions,
+)
 
 
 class TestStreamOptions(unittest.TestCase):

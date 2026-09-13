@@ -23,7 +23,10 @@ import unittest
 import paddle
 import paddle.nn as nn
 
-from paddlefleet.transformers.dpo_criterion import AutoDPOCriterion, DPOCriterion
+from paddlefleet.transformers.dpo_criterion import (
+    AutoDPOCriterion,
+    DPOCriterion,
+)
 
 
 class _MockDPOConfig:
@@ -44,11 +47,19 @@ class _MockModelConfig:
     """Mock model config object."""
 
     def __init__(self, **kwargs):
-        self.tensor_parallel_output = kwargs.get("tensor_parallel_output", False)
-        self.tensor_model_parallel_size = kwargs.get("tensor_model_parallel_size", 1)
+        self.tensor_parallel_output = kwargs.get(
+            "tensor_parallel_output", False
+        )
+        self.tensor_model_parallel_size = kwargs.get(
+            "tensor_model_parallel_size", 1
+        )
         self.dpo_config = kwargs.get("dpo_config", None)
-        self.use_fused_head_and_loss_fn = kwargs.get("use_fused_head_and_loss_fn", False)
-        self.use_filtered_label_loss = kwargs.get("use_filtered_label_loss", False)
+        self.use_fused_head_and_loss_fn = kwargs.get(
+            "use_fused_head_and_loss_fn", False
+        )
+        self.use_filtered_label_loss = kwargs.get(
+            "use_filtered_label_loss", False
+        )
         self.chunk_size = kwargs.get("chunk_size", 1024)
         self.vocab_size = kwargs.get("vocab_size", 1024)
         self.sequence_parallel = kwargs.get("sequence_parallel", False)
@@ -81,13 +92,17 @@ class TestDPOCriterionInit(unittest.TestCase):
     def test_init_with_use_infohub(self):
         model_config = _MockModelConfig()
         dpo_config = _MockDPOConfig()
-        criterion = DPOCriterion(model_config, dpo_config=dpo_config, use_infohub=True)
+        criterion = DPOCriterion(
+            model_config, dpo_config=dpo_config, use_infohub=True
+        )
         self.assertTrue(criterion.use_infohub)
 
     def test_init_with_ignore_eos_token(self):
         model_config = _MockModelConfig()
         dpo_config = _MockDPOConfig()
-        criterion = DPOCriterion(model_config, dpo_config=dpo_config, ignore_eos_token=True)
+        criterion = DPOCriterion(
+            model_config, dpo_config=dpo_config, ignore_eos_token=True
+        )
         self.assertTrue(criterion.ignore_eos_token)
 
 
@@ -97,14 +112,18 @@ class TestDPOLoss(unittest.TestCase):
     def setUp(self):
         self.model_config = _MockModelConfig()
         self.dpo_config = _MockDPOConfig()
-        self.criterion = DPOCriterion(self.model_config, dpo_config=self.dpo_config)
+        self.criterion = DPOCriterion(
+            self.model_config, dpo_config=self.dpo_config
+        )
 
     def test_sigmoid_loss(self):
         policy_chosen = paddle.to_tensor([0.5])
         policy_rejected = paddle.to_tensor([0.3])
         ref_chosen = paddle.to_tensor([0.4])
         ref_rejected = paddle.to_tensor([0.2])
-        loss = self.criterion.dpo_loss(policy_chosen, policy_rejected, ref_chosen, ref_rejected)
+        loss = self.criterion.dpo_loss(
+            policy_chosen, policy_rejected, ref_chosen, ref_rejected
+        )
         self.assertEqual(loss.shape, [])
         self.assertTrue(float(loss) >= 0)
 

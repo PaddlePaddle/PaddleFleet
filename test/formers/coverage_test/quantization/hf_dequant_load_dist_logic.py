@@ -26,7 +26,9 @@ import numpy as np
 import paddle
 import paddle.distributed as dist
 
-from paddlefleet.quantization.hf_checkpoint import build_hf_dequant_load_transform
+from paddlefleet.quantization.hf_checkpoint import (
+    build_hf_dequant_load_transform,
+)
 
 WEIGHT_KEY = "layers.0.attn.wq_a.weight"
 SCALE_KEY = "layers.0.attn.wq_a.scale"
@@ -47,7 +49,10 @@ def descriptor():
     """The quantization rules a model would return from _gen_hf_quan_config()."""
     return {
         "schema_version": 1,
-        "component_pairing": {"weight_suffix": ".weight", "scale_suffix": ".scale"},
+        "component_pairing": {
+            "weight_suffix": ".weight",
+            "scale_suffix": ".scale",
+        },
         "logic_name_suffix": ".weight",
         "groups": [
             {
@@ -76,7 +81,14 @@ def expected_logical_weight():
 def write_checkpoint(path):
     """Write a real-payload HF checkpoint: raw e4m3 codes plus a ue8m0 scale grid."""
     arrays = [
-        (WEIGHT_KEY, "F8_E4M3", np.array([[code] * LOGICAL_SHAPE[1] for code in E4M3_ROW_CODES], dtype=np.uint8)),
+        (
+            WEIGHT_KEY,
+            "F8_E4M3",
+            np.array(
+                [[code] * LOGICAL_SHAPE[1] for code in E4M3_ROW_CODES],
+                dtype=np.uint8,
+            ),
+        ),
         (SCALE_KEY, "F8_E8M0", np.array(SCALE_GRID, dtype=np.uint8)),
     ]
     header = {}
@@ -130,8 +142,12 @@ def main():
     # qweight and sliced afterwards.
     plan = transform._read_plans[WEIGHT_KEY]
     assert plan.mode == "local", f"rank {rank} planned a {plan.mode!r} read"
-    assert plan.logical_local_shape == (rows, LOGICAL_SHAPE[1]), f"rank {rank} planned for {plan.logical_local_shape}"
-    assert plan.logical_global_offset == (start, 0), f"rank {rank} planned at offset {plan.logical_global_offset}"
+    assert plan.logical_local_shape == (rows, LOGICAL_SHAPE[1]), (
+        f"rank {rank} planned for {plan.logical_local_shape}"
+    )
+    assert plan.logical_global_offset == (start, 0), (
+        f"rank {rank} planned at offset {plan.logical_global_offset}"
+    )
     qweight_slice = plan.source_slices[WEIGHT_KEY]
     assert tuple(qweight_slice.global_offset) == (start, 0)
     assert tuple(qweight_slice.local_shape) == (rows, LOGICAL_SHAPE[1])
@@ -141,7 +157,9 @@ def main():
 
     expected = expected_logical_weight()[start : start + rows]
     local = target._local_value().astype("float32").numpy()
-    assert local.shape == expected.shape, f"rank {rank} got local shape {local.shape}, expected {expected.shape}"
+    assert local.shape == expected.shape, (
+        f"rank {rank} got local shape {local.shape}, expected {expected.shape}"
+    )
     np.testing.assert_allclose(local, expected)
 
 

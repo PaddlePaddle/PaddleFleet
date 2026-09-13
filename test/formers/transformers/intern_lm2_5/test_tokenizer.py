@@ -25,7 +25,9 @@ class TestTokenizer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         try:
-            cls.tokenizer = InternLM25Tokenizer.from_pretrained(model_path, download_hub="modelscope")
+            cls.tokenizer = InternLM25Tokenizer.from_pretrained(
+                model_path, download_hub="modelscope"
+            )
         except Exception:
             cls.tokenizer = None
 
@@ -39,12 +41,16 @@ class TestTokenizer(unittest.TestCase):
             self.skipTest("Model path not available")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            special_tokens_dict = {"additional_special_tokens": ["[ENT_START]", "[ENT_END]"]}
+            special_tokens_dict = {
+                "additional_special_tokens": ["[ENT_START]", "[ENT_END]"]
+            }
             self.tokenizer.add_special_tokens(special_tokens_dict)
             self.tokenizer.add_tokens(["new_word", "another_word"])
             self.tokenizer.model_max_length = 512
             self.tokenizer.save_pretrained(tmpdir)
-            self.assertTrue(os.path.exists(os.path.join(tmpdir, "tokenizer_config.json")))
+            self.assertTrue(
+                os.path.exists(os.path.join(tmpdir, "tokenizer_config.json"))
+            )
 
     def test_tokenize(self):
         if self.tokenizer is None:
@@ -52,7 +58,9 @@ class TestTokenizer(unittest.TestCase):
 
         text = "hello world, this is a tokenizer test"
         output_dict = self.tokenizer(text)
-        decode_text = self.tokenizer.decode(output_dict, skip_special_tokens=True)
+        decode_text = self.tokenizer.decode(
+            output_dict, skip_special_tokens=True
+        )
         self.assertEqual(text, decode_text)
 
     def test_tokenizer_vocab_size(self):

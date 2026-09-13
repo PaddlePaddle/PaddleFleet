@@ -22,13 +22,27 @@ from datasets import Dataset, Value
 from paddlefleet.transformers import AutoTokenizer
 
 FORMAT_MAPPING = {
-    "chatml": [{"content": Value(dtype="string", id=None), "role": Value(dtype="string", id=None)}],
-    "instruction": {"completion": Value(dtype="string", id=None), "prompt": Value(dtype="string", id=None)},
-    "paddlefleet": {"src": Value(dtype="string", id=None), "tgt": Value(dtype="string", id=None)},
+    "chatml": [
+        {
+            "content": Value(dtype="string", id=None),
+            "role": Value(dtype="string", id=None),
+        }
+    ],
+    "instruction": {
+        "completion": Value(dtype="string", id=None),
+        "prompt": Value(dtype="string", id=None),
+    },
+    "paddlefleet": {
+        "src": Value(dtype="string", id=None),
+        "tgt": Value(dtype="string", id=None),
+    },
 }
 
 
-def conversations_formatting_function(tokenizer: AutoTokenizer, messages_field: Literal["messages", "conversations"]):
+def conversations_formatting_function(
+    tokenizer: AutoTokenizer,
+    messages_field: Literal["messages", "conversations"],
+):
     r"""
     return a callable function that takes in a "messages" dataset and returns a formatted dataset, based on the tokenizer
     apply chat template to the dataset
@@ -38,10 +52,16 @@ def conversations_formatting_function(tokenizer: AutoTokenizer, messages_field: 
         if isinstance(examples[messages_field][0], list):
             output_texts = []
             for i in range(len(examples[messages_field])):
-                output_texts.append(tokenizer.apply_chat_template(examples[messages_field][i], tokenize=False))
+                output_texts.append(
+                    tokenizer.apply_chat_template(
+                        examples[messages_field][i], tokenize=False
+                    )
+                )
             return output_texts
         else:
-            return tokenizer.apply_chat_template(examples[messages_field], tokenize=False)
+            return tokenizer.apply_chat_template(
+                examples[messages_field], tokenize=False
+            )
 
     return format_dataset
 
@@ -60,14 +80,20 @@ def instructions_formatting_function(tokenizer: AutoTokenizer):
                     {"role": "user", "content": examples["prompt"][i]},
                     {"role": "assistant", "content": examples["completion"][i]},
                 ]
-                output_texts.append(tokenizer.apply_chat_template(converted_sample, tokenize=False))
+                output_texts.append(
+                    tokenizer.apply_chat_template(
+                        converted_sample, tokenize=False
+                    )
+                )
             return output_texts
         else:
             converted_sample = [
                 {"role": "user", "content": examples["prompt"]},
                 {"role": "assistant", "content": examples["completion"]},
             ]
-            return tokenizer.apply_chat_template(converted_sample, tokenize=False)
+            return tokenizer.apply_chat_template(
+                converted_sample, tokenize=False
+            )
 
     return format_dataset
 
@@ -86,19 +112,27 @@ def paddlefleet_instructions_formatting_function(tokenizer: AutoTokenizer):
                     {"role": "user", "content": examples["src"][i]},
                     {"role": "assistant", "content": examples["tgt"][i]},
                 ]
-                output_texts.append(tokenizer.apply_chat_template(converted_sample, tokenize=False))
+                output_texts.append(
+                    tokenizer.apply_chat_template(
+                        converted_sample, tokenize=False
+                    )
+                )
             return output_texts
         else:
             converted_sample = [
                 {"role": "user", "content": examples["src"]},
                 {"role": "assistant", "content": examples["tgt"]},
             ]
-            return tokenizer.apply_chat_template(converted_sample, tokenize=False)
+            return tokenizer.apply_chat_template(
+                converted_sample, tokenize=False
+            )
 
     return format_dataset
 
 
-def get_formatting_func_from_dataset(dataset: Union[Dataset], tokenizer: AutoTokenizer) -> Optional[Callable]:
+def get_formatting_func_from_dataset(
+    dataset: Union[Dataset], tokenizer: AutoTokenizer
+) -> Optional[Callable]:
     r"""
     Finds the correct formatting function based on the dataset structure. Currently supported datasets are:
     - `ChatML` with [{"role": str, "content": str}]
@@ -119,7 +153,9 @@ def get_formatting_func_from_dataset(dataset: Union[Dataset], tokenizer: AutoTok
         if "conversations" in dataset.features:
             if dataset.features["conversations"] == FORMAT_MAPPING["chatml"]:
                 logging.info("Formatting dataset with chatml format")
-                return conversations_formatting_function(tokenizer, "conversations")
+                return conversations_formatting_function(
+                    tokenizer, "conversations"
+                )
         elif dataset.features == FORMAT_MAPPING["instruction"]:
             logging.info("Formatting dataset with instruction format")
             return instructions_formatting_function(tokenizer)

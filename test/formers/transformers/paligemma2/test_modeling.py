@@ -22,7 +22,10 @@ import unittest
 
 import paddle
 
-from paddlefleet.transformers import AutoConfig, AutoModelForConditionalGeneration
+from paddlefleet.transformers import (
+    AutoConfig,
+    AutoModelForConditionalGeneration,
+)
 from paddlefleet.transformers.paligemma2.configuration import (
     Gemma2TextConfig,
     PaliGemma2Config,
@@ -94,14 +97,20 @@ class PaliGemma2ModelTester:
         )
 
     def prepare_inputs(self):
-        input_ids = paddle.randint(0, self.text_vocab_size, (self.batch_size, self.seq_length))
+        input_ids = paddle.randint(
+            0, self.text_vocab_size, (self.batch_size, self.seq_length)
+        )
         # Insert image tokens at the beginning to match vision tower output
         # num_patches = (image_size // patch_size) ** 2 = (56 // 14) ** 2 = 16
-        num_image_tokens = (self.vision_image_size // self.vision_patch_size) ** 2
+        num_image_tokens = (
+            self.vision_image_size // self.vision_patch_size
+        ) ** 2
         num_image_tokens = min(num_image_tokens, self.seq_length)
         input_ids[:, :num_image_tokens] = self.image_token_index
         attention_mask = paddle.ones((self.batch_size, self.seq_length))
-        pixel_values = paddle.randn((self.batch_size, 3, self.vision_image_size, self.vision_image_size))
+        pixel_values = paddle.randn(
+            (self.batch_size, 3, self.vision_image_size, self.vision_image_size)
+        )
         return input_ids, attention_mask, pixel_values
 
     def check_conditional_generation(self):
@@ -123,7 +132,9 @@ class PaliGemma2ModelTester:
 
     def check_causal_lm(self):
         config = self.get_config()
-        input_ids = paddle.randint(0, self.text_vocab_size, (self.batch_size, self.seq_length))
+        input_ids = paddle.randint(
+            0, self.text_vocab_size, (self.batch_size, self.seq_length)
+        )
         model = PaliGemma2ForCausalLM(config)
         model.eval()
         output = model(input_ids=input_ids)
@@ -147,7 +158,13 @@ class PaliGemma2ModelTester:
     def check_shifted_labels_loss(self):
         config = self.get_config()
         input_ids, attention_mask, pixel_values = self.prepare_inputs()
-        labels = paddle.concat([input_ids[:, 1:], paddle.full([self.batch_size, 1], -100, dtype="int64")], axis=1)
+        labels = paddle.concat(
+            [
+                input_ids[:, 1:],
+                paddle.full([self.batch_size, 1], -100, dtype="int64"),
+            ],
+            axis=1,
+        )
         labels[:, :2] = -100
         model = PaliGemma2ForConditionalGeneration(config)
         model.eval()
@@ -164,10 +181,12 @@ class PaliGemma2ModelTester:
             safe_labels.reshape([-1]),
             reduction="none",
         )
-        expected_loss = (token_loss * valid.reshape([-1]).astype(token_loss.dtype)).sum() / valid.astype(
-            "float32"
-        ).sum()
-        self.parent.assertAlmostEqual(output.loss.item(), expected_loss.item(), places=6)
+        expected_loss = (
+            token_loss * valid.reshape([-1]).astype(token_loss.dtype)
+        ).sum() / valid.astype("float32").sum()
+        self.parent.assertAlmostEqual(
+            output.loss.item(), expected_loss.item(), places=6
+        )
 
     def check_backward(self):
         config = self.get_config()
@@ -187,7 +206,9 @@ class PaliGemma2ModelTester:
             if p.requires_grad and p.grad is not None:
                 has_grad = True
                 break
-        self.parent.assertTrue(has_grad, "No parameter has gradient after backward")
+        self.parent.assertTrue(
+            has_grad, "No parameter has gradient after backward"
+        )
 
 
 class PaliGemma2Test(unittest.TestCase):
@@ -219,28 +240,45 @@ class PaliGemma2Test(unittest.TestCase):
     def test_rms_norm_default_is_unit_scaling(self):
         norm = Gemma2RMSNorm(4)
         inputs = paddle.to_tensor([[1.0, 2.0, 3.0, 4.0]])
-        expected = inputs * paddle.rsqrt(paddle.mean(inputs * inputs, axis=-1, keepdim=True) + norm.eps)
+        expected = inputs * paddle.rsqrt(
+            paddle.mean(inputs * inputs, axis=-1, keepdim=True) + norm.eps
+        )
         self.assertTrue(paddle.allclose(norm(inputs), expected).item())
-        self.assertTrue(paddle.allclose(norm.weight, paddle.zeros_like(norm.weight)).item())
+        self.assertTrue(
+            paddle.allclose(norm.weight, paddle.zeros_like(norm.weight)).item()
+        )
 
     def test_causal_lm_accepts_batched_padding_mask(self):
         config = self.tester.get_config()
         model = PaliGemma2ForCausalLM(config)
-        input_ids = paddle.randint(0, self.tester.text_vocab_size, [2, self.tester.seq_length])
+        input_ids = paddle.randint(
+            0, self.tester.text_vocab_size, [2, self.tester.seq_length]
+        )
         attention_mask = paddle.to_tensor(
-            [[1] * self.tester.seq_length, [1] * (self.tester.seq_length - 3) + [0] * 3], dtype="int64"
+            [
+                [1] * self.tester.seq_length,
+                [1] * (self.tester.seq_length - 3) + [0] * 3,
+            ],
+            dtype="int64",
         )
         output = model(input_ids=input_ids, attention_mask=attention_mask)
-        self.assertEqual(output.logits.shape, [2, self.tester.seq_length, self.tester.text_vocab_size])
+        self.assertEqual(
+            output.logits.shape,
+            [2, self.tester.seq_length, self.tester.text_vocab_size],
+        )
 
     def test_embedding_and_lm_head_weights_are_tied(self):
         config = self.tester.get_config()
         conditional_model = PaliGemma2ForConditionalGeneration(config)
         causal_model = PaliGemma2ForCausalLM(config)
         self.assertIs(
-            conditional_model.get_input_embeddings().weight, conditional_model.get_output_embeddings().weight
+            conditional_model.get_input_embeddings().weight,
+            conditional_model.get_output_embeddings().weight,
         )
-        self.assertIs(causal_model.get_input_embeddings().weight, causal_model.get_output_embeddings().weight)
+        self.assertIs(
+            causal_model.get_input_embeddings().weight,
+            causal_model.get_output_embeddings().weight,
+        )
 
     def test_final_logit_softcapping_matches_hf_model_classes(self):
         config = self.tester.get_config()
@@ -248,9 +286,15 @@ class PaliGemma2Test(unittest.TestCase):
         config.text_config.final_logit_softcapping = 1.0
         conditional_model = PaliGemma2ForConditionalGeneration(config)
         causal_model = PaliGemma2ForCausalLM(config)
-        conditional_model.lm_head.weight.set_value(paddle.full_like(conditional_model.lm_head.weight, 100.0))
-        causal_model.lm_head.weight.set_value(paddle.full_like(causal_model.lm_head.weight, 100.0))
-        input_ids = paddle.randint(0, self.tester.text_vocab_size, [1, self.tester.seq_length])
+        conditional_model.lm_head.weight.set_value(
+            paddle.full_like(conditional_model.lm_head.weight, 100.0)
+        )
+        causal_model.lm_head.weight.set_value(
+            paddle.full_like(causal_model.lm_head.weight, 100.0)
+        )
+        input_ids = paddle.randint(
+            0, self.tester.text_vocab_size, [1, self.tester.seq_length]
+        )
 
         conditional_logits = conditional_model(input_ids=input_ids).logits
         causal_logits = causal_model(input_ids=input_ids).logits
@@ -268,12 +312,16 @@ class PaliGemma2Test(unittest.TestCase):
             }
         )
         with tempfile.TemporaryDirectory() as tempdir:
-            with open(os.path.join(tempdir, "config.json"), "w", encoding="utf-8") as f:
+            with open(
+                os.path.join(tempdir, "config.json"), "w", encoding="utf-8"
+            ) as f:
                 json.dump(config_dict, f)
             config = AutoConfig.from_pretrained(tempdir)
             self.assertIsInstance(config, PaliGemma2Config)
-            model_class = AutoModelForConditionalGeneration._get_model_class_from_config(
-                tempdir, os.path.join(tempdir, "config.json")
+            model_class = (
+                AutoModelForConditionalGeneration._get_model_class_from_config(
+                    tempdir, os.path.join(tempdir, "config.json")
+                )
             )
             self.assertIs(model_class, PaliGemma2ForConditionalGeneration)
 

@@ -22,7 +22,9 @@ import gc
 import unittest
 from unittest.mock import MagicMock
 
-from paddlefleet.cli.train.ernie_pretrain.src.callbacks.gc_callback import GCCallback
+from paddlefleet.cli.train.ernie_pretrain.src.callbacks.gc_callback import (
+    GCCallback,
+)
 
 
 class TestGCCallback(unittest.TestCase):

@@ -28,7 +28,9 @@ import unittest
 import paddle
 import paddle.distributed as dist
 
-WORKER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hf_dequant_load_dist_logic.py")
+WORKER_SCRIPT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "hf_dequant_load_dist_logic.py"
+)
 
 
 def _load_transform_is_supported():
@@ -40,15 +42,25 @@ def _load_transform_is_supported():
     ``read_plans`` argument in the same change that fixed this, so it is the
     marker for a Paddle new enough to run this test.
     """
-    if "load_transform" not in inspect.signature(dist.load_state_dict).parameters:
+    if (
+        "load_transform"
+        not in inspect.signature(dist.load_state_dict).parameters
+    ):
         return False
     from paddle.distributed.flex_checkpoint.dcp import load_state_dict as dcp
 
-    return "read_plans" in inspect.signature(dcp._apply_load_transform).parameters
+    return (
+        "read_plans" in inspect.signature(dcp._apply_load_transform).parameters
+    )
 
 
-@unittest.skipUnless(paddle.device.cuda.device_count() > 1, "test requires multiple GPUs")
-@unittest.skipUnless(_load_transform_is_supported(), "paddle is too old to shard a load_transform target")
+@unittest.skipUnless(
+    paddle.device.cuda.device_count() > 1, "test requires multiple GPUs"
+)
+@unittest.skipUnless(
+    _load_transform_is_supported(),
+    "paddle is too old to shard a load_transform target",
+)
 class TestHFDequantLoadDist(unittest.TestCase):
     def test_block_aligned_shard_loads_its_own_rows(self):
         with tempfile.TemporaryDirectory() as ckpt_dir:
@@ -63,7 +75,9 @@ class TestHFDequantLoadDist(unittest.TestCase):
                 os.path.join(ckpt_dir, "log"),
                 WORKER_SCRIPT,
             ]
-            process = subprocess.run(command, env=env, capture_output=True, text=True)
+            process = subprocess.run(
+                command, env=env, capture_output=True, text=True
+            )
             self.assertEqual(
                 process.returncode,
                 0,

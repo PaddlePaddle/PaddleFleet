@@ -72,7 +72,9 @@ def layer_init_wrapper(func):
 
 
 @paddle.jit.not_to_static
-def _transformer_encoder_layer_fwd(self, src, src_mask=None, cache=None, output_attentions=False):
+def _transformer_encoder_layer_fwd(
+    self, src, src_mask=None, cache=None, output_attentions=False
+):
     self.self_attn.need_weights = output_attentions
     src_mask = _convert_attention_mask(src_mask, src.dtype)
 
@@ -100,7 +102,9 @@ def _transformer_encoder_layer_fwd(self, src, src_mask=None, cache=None, output_
     if not self.normalize_before:
         src = self.norm2(src)
 
-    return src if outputs is None else ((src,) + outputs[::-1])  # hidden_states, cache, attentions
+    return (
+        src if outputs is None else ((src,) + outputs[::-1])
+    )  # hidden_states, cache, attentions
 
 
 @paddle.jit.not_to_static
@@ -122,7 +126,9 @@ def _transformer_decoder_layer_fwd(
     if self.normalize_before:
         tgt = self.norm1(tgt)
 
-    self_attn_outputs = self.self_attn(tgt, tgt, tgt, tgt_mask, cache[0] if cache else None)
+    self_attn_outputs = self.self_attn(
+        tgt, tgt, tgt, tgt_mask, cache[0] if cache else None
+    )
     # self_attn_outputs = (tgt, attn_weights, incremental_cache) or only tgt
     if isinstance(self_attn_outputs, type(tgt)):
         tgt = self_attn_outputs
@@ -147,7 +153,9 @@ def _transformer_decoder_layer_fwd(
         if self.normalize_before:
             tgt = self.norm2(tgt)
 
-        cross_attn_outputs = self.cross_attn(tgt, memory, memory, memory_mask, cache[1] if cache else None)
+        cross_attn_outputs = self.cross_attn(
+            tgt, memory, memory, memory_mask, cache[1] if cache else None
+        )
         if isinstance(cross_attn_outputs, type(tgt)):
             tgt = cross_attn_outputs
         else:
@@ -175,9 +183,17 @@ def _transformer_decoder_layer_fwd(
     else:
         outputs = (tgt,)
         if output_attentions:
-            outputs += (self_attn_weights, cross_attn_weights if memory is not None else None)
+            outputs += (
+                self_attn_weights,
+                cross_attn_weights if memory is not None else None,
+            )
         if cache:
-            outputs += ((incremental_cache, static_cache if memory is not None else None),)
+            outputs += (
+                (
+                    incremental_cache,
+                    static_cache if memory is not None else None,
+                ),
+            )
         return outputs
 
 
@@ -208,7 +224,15 @@ def _transformer_decoder_fwd(
             memory_stop_gradient = memory is not None and memory.stop_gradient
             has_gradient = (not tgt.stop_gradient) or (not memory_stop_gradient)
             if self.enable_recompute and has_gradient:
-                outputs = recompute(mod, tgt, memory, tgt_mask, memory_mask, None, output_attentions)
+                outputs = recompute(
+                    mod,
+                    tgt,
+                    memory,
+                    tgt_mask,
+                    memory_mask,
+                    None,
+                    output_attentions,
+                )
             else:
                 outputs = mod(
                     tgt,
@@ -268,7 +292,13 @@ def _transformer_decoder_fwd(
 
 @paddle.jit.not_to_static
 def _transformer_encoder_fwd(
-    self, src, src_mask=None, cache=None, output_attentions=False, output_hidden_states=False, return_dict=False
+    self,
+    src,
+    src_mask=None,
+    cache=None,
+    output_attentions=False,
+    output_hidden_states=False,
+    return_dict=False,
 ):
     src_mask = _convert_attention_mask(src_mask, src.dtype)
 
@@ -280,7 +310,9 @@ def _transformer_encoder_fwd(
         cache = [tuple(self.layers[0].gen_cache(src))] * len(self.layers)
     # To be compatible with `TransformerEncoder.forward`, `_use_cache` defaults
     # to True when cache is not None.
-    new_caches = [] if cache is not None and getattr(self, "_use_cache", True) else None
+    new_caches = (
+        [] if cache is not None and getattr(self, "_use_cache", True) else None
+    )
     all_attentions = [] if output_attentions else None
     # NOTE: Also includes embedding output which is same as HF.
     all_hidden_states = [output] if output_hidden_states else None
@@ -324,7 +356,11 @@ def _transformer_encoder_fwd(
         if output_attentions:
             all_attentions.append(outputs[-1])
         if new_caches is not None:
-            new_caches.append(outputs[0] if isinstance(cache[i], MultiHeadAttention.Cache) else (tuple(outputs[0])))
+            new_caches.append(
+                outputs[0]
+                if isinstance(cache[i], MultiHeadAttention.Cache)
+                else (tuple(outputs[0]))
+            )
 
     if self.norm is not None:
         output = self.norm(output)
@@ -378,15 +414,15 @@ def _get_wrap_setattr(cls):
     return _wrap_setattr
 
 
-paddle.nn.TransformerEncoderLayer.__setattr__ = functools.wraps(paddle.nn.TransformerEncoderLayer.__setattr__)(
-    _get_wrap_setattr(paddle.nn.TransformerEncoderLayer)
-)
-paddle.nn.TransformerEncoder.__setattr__ = functools.wraps(paddle.nn.TransformerEncoder.__setattr__)(
-    _get_wrap_setattr(paddle.nn.TransformerEncoder)
-)
-paddle.nn.TransformerDecoder.__setattr__ = functools.wraps(paddle.nn.TransformerDecoder.__setattr__)(
-    _get_wrap_setattr(paddle.nn.TransformerDecoder)
-)
+paddle.nn.TransformerEncoderLayer.__setattr__ = functools.wraps(
+    paddle.nn.TransformerEncoderLayer.__setattr__
+)(_get_wrap_setattr(paddle.nn.TransformerEncoderLayer))
+paddle.nn.TransformerEncoder.__setattr__ = functools.wraps(
+    paddle.nn.TransformerEncoder.__setattr__
+)(_get_wrap_setattr(paddle.nn.TransformerEncoder))
+paddle.nn.TransformerDecoder.__setattr__ = functools.wraps(
+    paddle.nn.TransformerDecoder.__setattr__
+)(_get_wrap_setattr(paddle.nn.TransformerDecoder))
 
 
 def is_tensor(x):
@@ -425,10 +461,14 @@ class ModelOutput(OrderedDict):
         if not len(class_fields):
             raise ValueError(f"{self.__class__.__name__} has no fields.")
         if not all(field.default is None for field in class_fields[1:]):
-            raise ValueError(f"{self.__class__.__name__} should not have more than one required field.")
+            raise ValueError(
+                f"{self.__class__.__name__} should not have more than one required field."
+            )
 
         first_field = getattr(self, class_fields[0].name)
-        other_fields_are_none = all(getattr(self, field.name) is None for field in class_fields[1:])
+        other_fields_are_none = all(
+            getattr(self, field.name) is None for field in class_fields[1:]
+        )
 
         if other_fields_are_none and not is_tensor(first_field):
             if isinstance(first_field, dict):
@@ -463,16 +503,24 @@ class ModelOutput(OrderedDict):
                     self[field.name] = v
 
     def __delitem__(self, *args, **kwargs):
-        raise Exception(f"You cannot use ``__delitem__`` on a {self.__class__.__name__} instance.")
+        raise Exception(
+            f"You cannot use ``__delitem__`` on a {self.__class__.__name__} instance."
+        )
 
     def setdefault(self, *args, **kwargs):
-        raise Exception(f"You cannot use ``setdefault`` on a {self.__class__.__name__} instance.")
+        raise Exception(
+            f"You cannot use ``setdefault`` on a {self.__class__.__name__} instance."
+        )
 
     def pop(self, *args, **kwargs):
-        raise Exception(f"You cannot use ``pop`` on a {self.__class__.__name__} instance.")
+        raise Exception(
+            f"You cannot use ``pop`` on a {self.__class__.__name__} instance."
+        )
 
     def update(self, *args, **kwargs):
-        raise Exception(f"You cannot use ``update`` on a {self.__class__.__name__} instance.")
+        raise Exception(
+            f"You cannot use ``update`` on a {self.__class__.__name__} instance."
+        )
 
     def __getitem__(self, k):
         if isinstance(k, str):

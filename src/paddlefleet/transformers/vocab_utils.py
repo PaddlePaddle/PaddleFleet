@@ -71,9 +71,13 @@ def _calculate_padded_vocab_size_cached(
     if vocab_size <= 0:
         raise ValueError(f"vocab_size must be positive, got {vocab_size}")
     if make_vocab_size_divisible_by <= 0:
-        raise ValueError(f"make_vocab_size_divisible_by must be positive, got {make_vocab_size_divisible_by}")
+        raise ValueError(
+            f"make_vocab_size_divisible_by must be positive, got {make_vocab_size_divisible_by}"
+        )
     if tensor_model_parallel_size <= 0:
-        raise ValueError(f"tensor_model_parallel_size must be positive, got {tensor_model_parallel_size}")
+        raise ValueError(
+            f"tensor_model_parallel_size must be positive, got {tensor_model_parallel_size}"
+        )
 
     multiple = make_vocab_size_divisible_by * tensor_model_parallel_size
     return int(math.ceil(vocab_size / multiple) * multiple)

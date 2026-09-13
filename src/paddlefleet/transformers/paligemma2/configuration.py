@@ -130,7 +130,10 @@ class PaliGemma2Config(PretrainedConfig):
 
     model_type = "paligemma2"
     attribute_map = {"image_token_id": "image_token_index"}
-    sub_configs = {"text_config": Gemma2TextConfig, "vision_config": SiglipVisionConfig}
+    sub_configs = {
+        "text_config": Gemma2TextConfig,
+        "vision_config": SiglipVisionConfig,
+    }
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(

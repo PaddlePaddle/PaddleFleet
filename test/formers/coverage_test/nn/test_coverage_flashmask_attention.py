@@ -59,7 +59,9 @@ class TestFlashmaskAttentionForward(unittest.TestCase):
         key = paddle.randn([2, 4, 4, 16], dtype="float32")
         value = paddle.randn([2, 4, 4, 16], dtype="float32")
         indices = paddle.zeros([2, 8, 1], dtype="int64")
-        flashmask_attention_forward(module, query, key, value, attn_mask_startend_row_indices=indices)
+        flashmask_attention_forward(
+            module, query, key, value, attn_mask_startend_row_indices=indices
+        )
         call_kwargs = mock_flash.call_args[1]
         self.assertTrue(call_kwargs["causal"])
 
@@ -76,7 +78,9 @@ class TestFlashmaskAttentionForward(unittest.TestCase):
         key = paddle.randn([2, 4, 4, 16], dtype="float32")
         value = paddle.randn([2, 4, 4, 16], dtype="float32")
         indices = paddle.zeros([2, 8, 1, 4], dtype="int64")
-        flashmask_attention_forward(module, query, key, value, attn_mask_startend_row_indices=indices)
+        flashmask_attention_forward(
+            module, query, key, value, attn_mask_startend_row_indices=indices
+        )
         call_kwargs = mock_flash.call_args[1]
         self.assertFalse(call_kwargs["causal"])
 
@@ -93,12 +97,16 @@ class TestFlashmaskAttentionForward(unittest.TestCase):
         key = paddle.randn([2, 4, 4, 16], dtype="float32")
         value = paddle.randn([2, 4, 4, 16], dtype="float32")
         indices = paddle.zeros([2, 8, 1], dtype="int64")  # 3D input
-        flashmask_attention_forward(module, query, key, value, attn_mask_startend_row_indices=indices)
+        flashmask_attention_forward(
+            module, query, key, value, attn_mask_startend_row_indices=indices
+        )
         call_args = mock_flash.call_args
         passed_indices = call_args[1]["startend_row_indices"]
         self.assertEqual(passed_indices.ndim, 4)
 
-    @patch("paddlefleet.nn.attention.flashmask_attention.sink_attention_forward")
+    @patch(
+        "paddlefleet.nn.attention.flashmask_attention.sink_attention_forward"
+    )
     def test_with_sink(self, mock_sink):
         """When sink is provided, sink_attention_forward should be called."""
         from paddlefleet.nn.attention.flashmask_attention import (
@@ -113,7 +121,14 @@ class TestFlashmaskAttentionForward(unittest.TestCase):
         sink = paddle.randn([2, 4, 4, 16], dtype="float32")
         indices = paddle.zeros([2, 8, 1], dtype="int64")
         flashmask_attention_forward(
-            module, query, key, value, attn_mask_startend_row_indices=indices, sink=sink, scaling=1.0, dropout=0.1
+            module,
+            query,
+            key,
+            value,
+            attn_mask_startend_row_indices=indices,
+            sink=sink,
+            scaling=1.0,
+            dropout=0.1,
         )
         mock_sink.assert_called_once()
         call_kwargs = mock_sink.call_args[1]
@@ -132,7 +147,9 @@ class TestFlashmaskAttentionForward(unittest.TestCase):
         query = paddle.randn([2, 4, 8, 16], dtype="float32")
         key = paddle.randn([2, 4, 4, 16], dtype="float32")
         value = paddle.randn([2, 4, 4, 16], dtype="float32")
-        flashmask_attention_forward(module, query, key, value, attn_mask_startend_row_indices=None)
+        flashmask_attention_forward(
+            module, query, key, value, attn_mask_startend_row_indices=None
+        )
         call_kwargs = mock_flash.call_args[1]
         self.assertTrue(call_kwargs["causal"])
 
@@ -149,7 +166,9 @@ class TestFlashmaskAttentionForward(unittest.TestCase):
         query = paddle.randn([2, 4, 1, 16], dtype="float32")
         key = paddle.randn([2, 4, 1, 16], dtype="float32")
         value = paddle.randn([2, 4, 1, 16], dtype="float32")
-        flashmask_attention_forward(module, query, key, value, attn_mask_startend_row_indices=None)
+        flashmask_attention_forward(
+            module, query, key, value, attn_mask_startend_row_indices=None
+        )
         call_kwargs = mock_flash.call_args[1]
         self.assertFalse(call_kwargs["causal"])
 
@@ -166,14 +185,26 @@ class TestFlashmaskAttentionForward(unittest.TestCase):
         query = paddle.randn([2, 4, 8, 16], dtype="float32")
         key = paddle.randn([2, 4, 4, 16], dtype="float32")
         value = paddle.randn([2, 4, 4, 16], dtype="float32")
-        indices = paddle.zeros([2, 8, 1, 4], dtype="int64")  # shape[-1]==4 -> non-causal
-        flashmask_attention_forward(module, query, key, value, attn_mask_startend_row_indices=indices, is_causal=False)
+        indices = paddle.zeros(
+            [2, 8, 1, 4], dtype="int64"
+        )  # shape[-1]==4 -> non-causal
+        flashmask_attention_forward(
+            module,
+            query,
+            key,
+            value,
+            attn_mask_startend_row_indices=indices,
+            is_causal=False,
+        )
         call_kwargs = mock_flash.call_args[1]
         # With shape[-1]==4, the code sets is_causal=False, matching explicit override
         self.assertFalse(call_kwargs["causal"])
 
     @patch("paddlefleet.nn.attention.flashmask_attention.flashmask_attention")
-    @patch("paddlefleet.nn.attention.flashmask_attention.paddle.base.core.is_compiled_with_cuda", return_value=False)
+    @patch(
+        "paddlefleet.nn.attention.flashmask_attention.paddle.base.core.is_compiled_with_cuda",
+        return_value=False,
+    )
     def test_non_cuda_skip_fa_version_check(self, mock_cuda, mock_flash):
         """Non-CUDA builds should skip the flash attention version check."""
         from paddlefleet.nn.attention.flashmask_attention import (
@@ -186,5 +217,7 @@ class TestFlashmaskAttentionForward(unittest.TestCase):
         key = paddle.randn([2, 4, 8, 16], dtype="float32")
         value = paddle.randn([2, 4, 8, 16], dtype="float32")
         indices = paddle.zeros([2, 8, 1], dtype="int64")
-        flashmask_attention_forward(module, query, key, value, attn_mask_startend_row_indices=indices)
+        flashmask_attention_forward(
+            module, query, key, value, attn_mask_startend_row_indices=indices
+        )
         mock_flash.assert_called_once()

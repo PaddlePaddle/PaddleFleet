@@ -83,7 +83,10 @@ class TestStartupProfile(unittest.TestCase):
             pass
         self.assertEqual(
             spy.calls,
-            [("read_metadata", False, {}), ("load_master_weight", True, {"n": 7})],
+            [
+                ("read_metadata", False, {}),
+                ("load_master_weight", True, {"n": 7}),
+            ],
         )
         # The body really runs inside the provider's context manager.
         self.assertEqual(
@@ -132,7 +135,9 @@ class TestStartupProfile(unittest.TestCase):
         source = inspect.getsource(trainer_mod)
         self.assertNotIn("startup_profiler", source)
         # Spans are only reachable through the indirection.
-        self.assertIn("from .startup_profile import span as _sprof_span", source)
+        self.assertIn(
+            "from .startup_profile import span as _sprof_span", source
+        )
 
 
 if __name__ == "__main__":

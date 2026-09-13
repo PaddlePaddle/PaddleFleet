@@ -17,7 +17,10 @@ import os
 import tempfile
 import unittest
 
-from paddlefleet.transformers import AutoFeatureExtractor, WhisperFeatureExtractor
+from paddlefleet.transformers import (
+    AutoFeatureExtractor,
+    WhisperFeatureExtractor,
+)
 
 
 class AutoFeatureExtractorTest(unittest.TestCase):
@@ -33,4 +36,6 @@ class AutoFeatureExtractorTest(unittest.TestCase):
                 "PaddleFormers/tiny-random-qwen3omni", download_hub="aistudio"
             )
             feature_extractor.save_pretrained(tmpdir)
-            self.assertTrue(os.path.exists(os.path.join(tmpdir, "preprocessor_config.json")))
+            self.assertTrue(
+                os.path.exists(os.path.join(tmpdir, "preprocessor_config.json"))
+            )

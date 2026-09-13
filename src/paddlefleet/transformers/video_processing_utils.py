@@ -167,15 +167,26 @@ class BaseVideoProcessor(BaseImageProcessorFast):
         # Prepare size related keys and turn then into `SizeDict`
         size = kwargs.pop("size", self.size)
         self.size = (
-            get_size_dict(size=size, default_to_square=kwargs.pop("default_to_square", self.default_to_square))
+            get_size_dict(
+                size=size,
+                default_to_square=kwargs.pop(
+                    "default_to_square", self.default_to_square
+                ),
+            )
             if size is not None
             else None
         )
         crop_size = kwargs.pop("crop_size", self.crop_size)
-        self.crop_size = get_size_dict(crop_size, param_name="crop_size") if crop_size is not None else None
+        self.crop_size = (
+            get_size_dict(crop_size, param_name="crop_size")
+            if crop_size is not None
+            else None
+        )
 
         # Save valid kwargs in a list for further processing
-        self.model_valid_processing_keys = list(self.valid_kwargs.__annotations__.keys())
+        self.model_valid_processing_keys = list(
+            self.valid_kwargs.__annotations__.keys()
+        )
         for key in self.model_valid_processing_keys:
             if kwargs.get(key) is not None:
                 setattr(self, key, kwargs[key])
@@ -197,7 +208,9 @@ class BaseVideoProcessor(BaseImageProcessorFast):
             return video
 
         alpha = video[..., 3, :, :] / 255.0
-        video = (1 - alpha[..., None, :, :]) * 255 + alpha[..., None, :, :] * video[..., :3, :, :]
+        video = (1 - alpha[..., None, :, :]) * 255 + alpha[
+            ..., None, :, :
+        ] * video[..., :3, :, :]
         return video
 
     def sample_frames(
@@ -248,7 +261,9 @@ class BaseVideoProcessor(BaseImageProcessorFast):
             )
 
         if num_frames is not None:
-            indices = paddle.arange(0, total_num_frames, total_num_frames / num_frames).int()
+            indices = paddle.arange(
+                0, total_num_frames, total_num_frames / num_frames
+            ).int()
         else:
             indices = paddle.arange(total_num_frames).int()
         return indices
@@ -265,7 +280,9 @@ class BaseVideoProcessor(BaseImageProcessorFast):
         Decode input videos and sample frames if needed.
         """
         videos = make_batched_videos(videos)
-        video_metadata = make_batched_metadata(videos, video_metadata=video_metadata)
+        video_metadata = make_batched_metadata(
+            videos, video_metadata=video_metadata
+        )
 
         # Only sample frames if an array video is passed, otherwise first decode -> then sample
         if is_valid_video(videos[0]) and do_sample_frames:
@@ -282,7 +299,9 @@ class BaseVideoProcessor(BaseImageProcessorFast):
             if isinstance(videos[0], list):
                 # Videos sometimes are passed as a list of image URLs, especially through templates
                 videos = [
-                    paddle.stack([pil_to_tensor(image) for image in images], dim=0)
+                    paddle.stack(
+                        [pil_to_tensor(image) for image in images], dim=0
+                    )
                     for images in self.fetch_images(videos)
                 ]
                 if do_sample_frames:
@@ -290,7 +309,9 @@ class BaseVideoProcessor(BaseImageProcessorFast):
                         "Sampling frames from a list of images is not supported! Set `do_sample_frames=False`."
                     )
             else:
-                videos, video_metadata = self.fetch_videos(videos, sample_indices_fn=sample_indices_fn, **kwargs)
+                videos, video_metadata = self.fetch_videos(
+                    videos, sample_indices_fn=sample_indices_fn, **kwargs
+                )
 
         return videos, video_metadata
 
@@ -329,7 +350,8 @@ class BaseVideoProcessor(BaseImageProcessorFast):
     ) -> BatchFeature:
         validate_kwargs(
             captured_kwargs=kwargs.keys(),
-            valid_processor_keys=list(self.valid_kwargs.__annotations__.keys()) + ["return_tensors"],
+            valid_processor_keys=list(self.valid_kwargs.__annotations__.keys())
+            + ["return_tensors"],
         )
 
         # Perform type validation on received kwargs
@@ -344,7 +366,9 @@ class BaseVideoProcessor(BaseImageProcessorFast):
         do_sample_frames = kwargs.pop("do_sample_frames")
         video_metadata = kwargs.pop("video_metadata")
 
-        sample_indices_fn = partial(self.sample_frames, **kwargs) if do_sample_frames else None
+        sample_indices_fn = (
+            partial(self.sample_frames, **kwargs) if do_sample_frames else None
+        )
         videos, video_metadata = self._decode_and_sample_videos(
             videos,
             video_metadata=video_metadata,
@@ -352,7 +376,9 @@ class BaseVideoProcessor(BaseImageProcessorFast):
             sample_indices_fn=sample_indices_fn,
             **kwargs,
         )
-        videos = self._prepare_input_videos(videos=videos, input_data_format=input_data_format)
+        videos = self._prepare_input_videos(
+            videos=videos, input_data_format=input_data_format
+        )
 
         kwargs = self._further_process_kwargs(**kwargs)
 
@@ -389,27 +415,47 @@ class BaseVideoProcessor(BaseImageProcessorFast):
             if do_convert_rgb:
                 stacked_videos = self.convert_to_rgb(stacked_videos)
             if do_resize:
-                stacked_videos = self.resize(stacked_videos, size=size, interpolation=interpolation)
+                stacked_videos = self.resize(
+                    stacked_videos, size=size, interpolation=interpolation
+                )
             resized_videos_grouped[shape] = stacked_videos
-        resized_videos = reorder_videos(resized_videos_grouped, grouped_videos_index)
+        resized_videos = reorder_videos(
+            resized_videos_grouped, grouped_videos_index
+        )
 
         # Group videos by size for further processing
         # Needed in case do_resize is False, or resize returns videos with different sizes
-        grouped_videos, grouped_videos_index = group_videos_by_shape(resized_videos)
+        grouped_videos, grouped_videos_index = group_videos_by_shape(
+            resized_videos
+        )
         processed_videos_grouped = {}
         for shape, stacked_videos in grouped_videos.items():
             if do_center_crop:
                 stacked_videos = self.center_crop(stacked_videos, crop_size)
             # Fused rescale and normalize
             stacked_videos = self.rescale_and_normalize(
-                stacked_videos, do_rescale, rescale_factor, do_normalize, image_mean, image_std
+                stacked_videos,
+                do_rescale,
+                rescale_factor,
+                do_normalize,
+                image_mean,
+                image_std,
             )
             processed_videos_grouped[shape] = stacked_videos
 
-        processed_videos = reorder_videos(processed_videos_grouped, grouped_videos_index)
-        processed_videos = paddle.stack(processed_videos, dim=0) if return_tensors else processed_videos
+        processed_videos = reorder_videos(
+            processed_videos_grouped, grouped_videos_index
+        )
+        processed_videos = (
+            paddle.stack(processed_videos, dim=0)
+            if return_tensors
+            else processed_videos
+        )
 
-        return BatchFeature(data={"pixel_values_videos": processed_videos}, tensor_type=return_tensors)
+        return BatchFeature(
+            data={"pixel_values_videos": processed_videos},
+            tensor_type=return_tensors,
+        )
 
     @classmethod
     def from_pretrained(
@@ -418,10 +464,17 @@ class BaseVideoProcessor(BaseImageProcessorFast):
         *args,
         **kwargs,
     ):
-        image_processor_dict, kwargs = cls.get_video_processor_dict(pretrained_model_name_or_path, **kwargs)
+        image_processor_dict, kwargs = cls.get_video_processor_dict(
+            pretrained_model_name_or_path, **kwargs
+        )
         return cls.from_dict(image_processor_dict, **kwargs)
 
-    def save_pretrained(self, save_directory: Union[str, os.PathLike], push_to_hub: bool = False, **kwargs):
+    def save_pretrained(
+        self,
+        save_directory: Union[str, os.PathLike],
+        push_to_hub: bool = False,
+        **kwargs,
+    ):
         """
         Save an video processor object to the directory `save_directory`, so that it can be re-loaded using the
         [`~video_processing_utils.VideoProcessorBase.from_pretrained`] class method.
@@ -433,7 +486,9 @@ class BaseVideoProcessor(BaseImageProcessorFast):
                 Additional key word arguments passed along to the [`~utils.PushToHubMixin.push_to_hub`] method.
         """
         if os.path.isfile(save_directory):
-            raise AssertionError(f"Provided path ({save_directory}) should be a directory, not a file")
+            raise AssertionError(
+                f"Provided path ({save_directory}) should be a directory, not a file"
+            )
 
         os.makedirs(save_directory, exist_ok=True)
 
@@ -443,7 +498,9 @@ class BaseVideoProcessor(BaseImageProcessorFast):
             custom_object_save(self, save_directory, config=self)
 
         # If we save using the predefined names, we can load using `from_pretrained`
-        output_video_processor_file = os.path.join(save_directory, VIDEO_PROCESSOR_NAME)
+        output_video_processor_file = os.path.join(
+            save_directory, VIDEO_PROCESSOR_NAME
+        )
 
         self.to_json_file(output_video_processor_file)
         logger.info(f"Video processor saved in {output_video_processor_file}")
@@ -474,16 +531,24 @@ class BaseVideoProcessor(BaseImageProcessorFast):
             try:
                 resolved_video_processor_file = resolve_file_path(
                     pretrained_model_name_or_path,
-                    [video_processor_file, IMAGE_PROCESSOR_NAME, PROCESSOR_NAME],
+                    [
+                        video_processor_file,
+                        IMAGE_PROCESSOR_NAME,
+                        PROCESSOR_NAME,
+                    ],
                     subfolder,
                     cache_dir=cache_dir,
                     download_hub=download_hub,
                     local_files_only=local_files_only,
                 )
             except Exception:
-                hf_link = f"https://huggingface.co/{pretrained_model_name_or_path}"
+                hf_link = (
+                    f"https://huggingface.co/{pretrained_model_name_or_path}"
+                )
                 modelscope_link = f"https://modelscope.cn/models/{pretrained_model_name_or_path}"
-                encoded_model_name = pretrained_model_name_or_path.replace("/", "%2F")
+                encoded_model_name = pretrained_model_name_or_path.replace(
+                    "/", "%2F"
+                )
                 aistudio_link = f"https://aistudio.baidu.com/modelsoverview?sortBy=weight&q={encoded_model_name}"
 
                 raise ValueError(
@@ -503,10 +568,14 @@ class BaseVideoProcessor(BaseImageProcessorFast):
 
         try:
             # Load image_processor dict
-            with open(resolved_video_processor_file, encoding="utf-8") as reader:
+            with open(
+                resolved_video_processor_file, encoding="utf-8"
+            ) as reader:
                 text = reader.read()
             video_processor_dict = json.loads(text)
-            video_processor_dict = video_processor_dict.get("video_processor", video_processor_dict)
+            video_processor_dict = video_processor_dict.get(
+                "video_processor", video_processor_dict
+            )
 
         except json.JSONDecodeError:
             raise OSError(
@@ -514,7 +583,9 @@ class BaseVideoProcessor(BaseImageProcessorFast):
             )
 
         if is_local:
-            logger.info(f"loading configuration file {resolved_video_processor_file}")
+            logger.info(
+                f"loading configuration file {resolved_video_processor_file}"
+            )
         else:
             logger.info(
                 f"loading configuration file {video_processor_file} from cache at {resolved_video_processor_file}"
@@ -597,7 +668,10 @@ class BaseVideoProcessor(BaseImageProcessorFast):
             writer.write(self.to_json_string())
 
     def fetch_videos(
-        self, video_url_or_urls: Union[str, list[str], list[list[str]]], sample_indices_fn=None, **kwargs
+        self,
+        video_url_or_urls: Union[str, list[str], list[list[str]]],
+        sample_indices_fn=None,
+        **kwargs,
     ):
         """
         Convert a single or a list of urls into the corresponding `np.array` objects.
@@ -609,7 +683,18 @@ class BaseVideoProcessor(BaseImageProcessorFast):
 
         if isinstance(video_url_or_urls, list):
             return list(
-                zip(*[self.fetch_videos(x, sample_indices_fn=sample_indices_fn, **kwargs) for x in video_url_or_urls])
+                zip(
+                    *[
+                        self.fetch_videos(
+                            x, sample_indices_fn=sample_indices_fn, **kwargs
+                        )
+                        for x in video_url_or_urls
+                    ]
+                )
             )
         else:
-            return load_video(video_url_or_urls, video_backend=video_backend, sample_indices_fn=sample_indices_fn)
+            return load_video(
+                video_url_or_urls,
+                video_backend=video_backend,
+                sample_indices_fn=sample_indices_fn,
+            )

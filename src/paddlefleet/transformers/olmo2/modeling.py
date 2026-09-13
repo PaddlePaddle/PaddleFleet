@@ -40,7 +40,12 @@ from .configuration import Olmo2Config
 
 
 class Olmo2RMSNorm(nn.Layer):
-    def __init__(self, hidden_size: int, eps: float = 1e-6, input_is_parallel: bool = False):
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-6,
+        input_is_parallel: bool = False,
+    ):
         super().__init__()
         self.weight = paddle.create_parameter(
             shape=[hidden_size],
@@ -55,8 +60,12 @@ class Olmo2RMSNorm(nn.Layer):
         input_dtype = hidden_states.dtype
         hidden_states_fp32 = hidden_states.astype("float32")
         variance = hidden_states_fp32.pow(2).mean(-1, keepdim=True)
-        hidden_states_fp32 = hidden_states_fp32 * paddle.rsqrt(variance + self.variance_epsilon)
-        return (self.weight.astype("float32") * hidden_states_fp32).astype(input_dtype)
+        hidden_states_fp32 = hidden_states_fp32 * paddle.rsqrt(
+            variance + self.variance_epsilon
+        )
+        return (self.weight.astype("float32") * hidden_states_fp32).astype(
+            input_dtype
+        )
 
 
 def rotate_half(x: paddle.Tensor) -> paddle.Tensor:
@@ -89,17 +98,24 @@ class Olmo2Attention(nn.Layer):
             self.head_dim = config.hidden_size // config.num_attention_heads
 
         if config.tensor_model_parallel_size > 1:
-            assert (
-                self.num_heads % config.tensor_model_parallel_size == 0
-            ), f"num_heads: {self.num_heads}, tensor_model_parallel_size: {config.tensor_model_parallel_size}"
+            assert self.num_heads % config.tensor_model_parallel_size == 0, (
+                f"num_heads: {self.num_heads}, tensor_model_parallel_size: {config.tensor_model_parallel_size}"
+            )
             self.num_heads = self.num_heads // config.tensor_model_parallel_size
 
             assert (
-                self.num_key_value_heads % config.tensor_model_parallel_size == 0
-            ), f"num_key_value_heads: {self.num_key_value_heads}, tensor_model_parallel_size: {config.tensor_model_parallel_size}"
-            self.num_key_value_heads = self.num_key_value_heads // config.tensor_model_parallel_size
+                self.num_key_value_heads % config.tensor_model_parallel_size
+                == 0
+            ), (
+                f"num_key_value_heads: {self.num_key_value_heads}, tensor_model_parallel_size: {config.tensor_model_parallel_size}"
+            )
+            self.num_key_value_heads = (
+                self.num_key_value_heads // config.tensor_model_parallel_size
+            )
 
-        self.num_key_value_groups = config.num_attention_heads // config.num_key_value_heads
+        self.num_key_value_groups = (
+            config.num_attention_heads // config.num_key_value_heads
+        )
         self.scaling = self.head_dim**-0.5
         self.attention_dropout = config.attention_dropout
 
@@ -161,7 +177,11 @@ class Olmo2Attention(nn.Layer):
     ) -> tuple[paddle.Tensor, list[paddle.Tensor] | None]:
         if self.config.sequence_parallel:
             seq_len = self.config.max_sequence_length
-            batch_size = hidden_states.shape[0] * self.config.tensor_model_parallel_size // seq_len
+            batch_size = (
+                hidden_states.shape[0]
+                * self.config.tensor_model_parallel_size
+                // seq_len
+            )
         else:
             batch_size, seq_len = hidden_states.shape[:2]
 
@@ -177,12 +197,18 @@ class Olmo2Attention(nn.Layer):
         value_states = value_states.reshape(kv_shape).transpose(1, 2)
 
         cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
+        query_states, key_states = apply_rotary_pos_emb(
+            query_states, key_states, cos, sin
+        )
 
         if past_key_values is not None:
-            key_states, value_states = past_key_values.update(key_states, value_states, self.layer_idx)
+            key_states, value_states = past_key_values.update(
+                key_states, value_states, self.layer_idx
+            )
 
-        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        attention_interface: Callable = ALL_ATTENTION_FUNCTIONS[
+            self.config._attn_implementation
+        ]
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -228,7 +254,7 @@ class Olmo2DecoderLayer(nn.Layer):
         position_embeddings: tuple[paddle.Tensor, paddle.Tensor] | None = None,
         past_key_values: Cache | None = None,
         use_cache: bool = False,
-    ) -> (tuple[paddle.Tensor] | tuple[paddle.Tensor, paddle.Tensor]):
+    ) -> tuple[paddle.Tensor] | tuple[paddle.Tensor, paddle.Tensor]:
         residual = hidden_states
         hidden_states, _ = self.self_attn(
             hidden_states=hidden_states,
@@ -255,10 +281,14 @@ class Olmo2RotaryEmbedding(nn.Layer):
         self.max_seq_len_cached = config.max_position_embeddings
         self.original_max_seq_len = config.max_position_embeddings
         self.config = config
-        self.head_dim = getattr(config, "head_dim", config.hidden_size // config.num_attention_heads)
+        self.head_dim = getattr(
+            config, "head_dim", config.hidden_size // config.num_attention_heads
+        )
 
         self.rope_type = "default"
-        if hasattr(config, "rope_parameters") and isinstance(config.rope_parameters, dict):
+        if hasattr(config, "rope_parameters") and isinstance(
+            config.rope_parameters, dict
+        ):
             self.rope_type = config.rope_parameters.get("rope_type", "default")
 
         rope_init_fn = self.compute_default_rope_parameters
@@ -275,20 +305,37 @@ class Olmo2RotaryEmbedding(nn.Layer):
         seq_len: Optional[int] = None,
     ) -> tuple["paddle.Tensor", float]:
         base = config.rope_parameters["rope_theta"]
-        dim = getattr(config, "head_dim", None) or config.hidden_size // config.num_attention_heads
+        dim = (
+            getattr(config, "head_dim", None)
+            or config.hidden_size // config.num_attention_heads
+        )
 
         attention_factor = 1.0
 
-        inv_freq = 1.0 / (base ** (paddle.arange(0, dim, 2, dtype=paddle.int64).astype(dtype=paddle.float32) / dim))
+        inv_freq = 1.0 / (
+            base
+            ** (
+                paddle.arange(0, dim, 2, dtype=paddle.int64).astype(
+                    dtype=paddle.float32
+                )
+                / dim
+            )
+        )
         return inv_freq, attention_factor
 
     @dynamic_rope_update
     def forward(self, x, position_ids):
         with paddle.amp.auto_cast(enable=False):
-            inv_freq_expanded = self.inv_freq[None, :, None].float().expand([position_ids.shape[0], -1, 1])
+            inv_freq_expanded = (
+                self.inv_freq[None, :, None]
+                .float()
+                .expand([position_ids.shape[0], -1, 1])
+            )
             position_ids_expanded = position_ids[:, None, :].float()
 
-            freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
+            freqs = (
+                inv_freq_expanded.float() @ position_ids_expanded.float()
+            ).transpose(1, 2)
             emb = paddle.concat((freqs, freqs), axis=-1)
 
             cos = emb.cos() * self.attention_scaling
@@ -312,7 +359,9 @@ class Olmo2PretrainedModel(PretrainedModel):
 
     @classmethod
     def _gen_aoa_config(cls, config: Olmo2Config):
-        model_prefix = cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        model_prefix = (
+            cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        )
 
         aoa_statements = [
             f"model.embed_tokens.weight -> {model_prefix}embed_tokens.weight",
@@ -339,7 +388,9 @@ class Olmo2PretrainedModel(PretrainedModel):
 
         if cls != cls.base_model_class:
             if config.tie_word_embeddings:
-                aoa_statements.append("model.embed_tokens.weight -> lm_head.weight")
+                aoa_statements.append(
+                    "model.embed_tokens.weight -> lm_head.weight"
+                )
             else:
                 aoa_statements.append("lm_head.weight -> lm_head.weight")
 
@@ -347,7 +398,9 @@ class Olmo2PretrainedModel(PretrainedModel):
 
     @classmethod
     def _gen_inv_aoa_config(cls, config: Olmo2Config):
-        model_prefix = cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        model_prefix = (
+            cls.base_model_prefix + "." if cls != cls.base_model_class else ""
+        )
 
         aoa_statements = [
             f"{model_prefix}embed_tokens.weight -> model.embed_tokens.weight",
@@ -396,7 +449,10 @@ class Olmo2Model(Olmo2PretrainedModel):
             padding_idx=None,
         )
         self.layers = nn.LayerList(
-            [Olmo2DecoderLayer(config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+            [
+                Olmo2DecoderLayer(config, layer_idx)
+                for layer_idx in range(config.num_hidden_layers)
+            ]
         )
         self.norm = Olmo2RMSNorm(
             config.hidden_size,
@@ -418,15 +474,27 @@ class Olmo2Model(Olmo2PretrainedModel):
         return_dict: bool | None = False,
     ):
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        use_cache = (
+            use_cache if use_cache is not None else self.config.use_cache
+        )
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
 
         if not ((input_ids is None) ^ (inputs_embeds is None)):
-            raise ValueError("You must specify exactly one of input_ids or inputs_embeds")
+            raise ValueError(
+                "You must specify exactly one of input_ids or inputs_embeds"
+            )
         if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids).astype(self.embed_tokens.weight.dtype)
+            inputs_embeds = self.embed_tokens(input_ids).astype(
+                self.embed_tokens.weight.dtype
+            )
         inputs_embeds = cast(paddle.Tensor, inputs_embeds)
         bsz, seq_length, _ = inputs_embeds.shape
 
@@ -436,11 +504,19 @@ class Olmo2Model(Olmo2PretrainedModel):
 
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache(config=self.config)
-        kv_seq_len = past_key_values.get_seq_length() if past_key_values is not None else 0
+        kv_seq_len = (
+            past_key_values.get_seq_length()
+            if past_key_values is not None
+            else 0
+        )
 
         if position_ids is None:
             position_ids = (
-                paddle.arange(kv_seq_len, seq_length + kv_seq_len, dtype=paddle.int64).unsqueeze(0).tile((bsz, 1))
+                paddle.arange(
+                    kv_seq_len, seq_length + kv_seq_len, dtype=paddle.int64
+                )
+                .unsqueeze(0)
+                .tile((bsz, 1))
             )
 
         mask_kwargs = {
@@ -453,7 +529,9 @@ class Olmo2Model(Olmo2PretrainedModel):
             "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
             "prepare_decoder_attention_mask": self._prepare_decoder_attention_mask,
         }
-        causal_mask, attn_mask_startend_row_indices = create_causal_mask_and_row_indices(**mask_kwargs)
+        causal_mask, attn_mask_startend_row_indices = (
+            create_causal_mask_and_row_indices(**mask_kwargs)
+        )
         position_embeddings = self.rotary_emb(inputs_embeds, position_ids)
         all_hidden_states = [] if output_hidden_states else None
 
@@ -489,13 +567,19 @@ class Olmo2Model(Olmo2PretrainedModel):
                     use_cache=use_cache,
                 )
 
-            hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple | list) else layer_outputs
+            hidden_states = (
+                layer_outputs[0]
+                if isinstance(layer_outputs, tuple | list)
+                else layer_outputs
+            )
 
         hidden_states = self.norm(hidden_states)
         if output_hidden_states:
             all_hidden_states.append(hidden_states)
 
-        all_hidden_states = tuple(all_hidden_states) if all_hidden_states else None
+        all_hidden_states = (
+            tuple(all_hidden_states) if all_hidden_states else None
+        )
 
         if not return_dict:
             outputs = []
@@ -566,17 +650,31 @@ class Olmo2ForCausalLM(Olmo2PretrainedModel):
         return_dict: bool = False,
         **kwargs,
     ):
-        if kwargs.get("attn_mask_start_row_indices", None) is not None and attn_mask_startend_row_indices is None:
-            attn_mask_startend_row_indices = kwargs.pop("attn_mask_start_row_indices")
+        if (
+            kwargs.get("attn_mask_start_row_indices", None) is not None
+            and attn_mask_startend_row_indices is None
+        ):
+            attn_mask_startend_row_indices = kwargs.pop(
+                "attn_mask_start_row_indices"
+            )
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
 
         if attention_mask is not None and attention_mask.dtype != paddle.bool:
             attention_mask = paddle.cast(attention_mask, paddle.bool)
 
-        if attn_mask_startend_row_indices is not None and attention_mask is not None:
+        if (
+            attn_mask_startend_row_indices is not None
+            and attention_mask is not None
+        ):
             logger.warning(
                 "You have provided both attn_mask_startend_row_indices and attention_mask. "
                 "The attn_mask_startend_row_indices will be used."

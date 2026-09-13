@@ -59,7 +59,9 @@ def custom_import(name, *args, **kwargs):
 
     module = _original_import(name, *args, **kwargs)
 
-    if not _paddlenlp_ops_updated and os.getenv("DYNAMIC_INFERENCE_MODE", "1").lower() in [
+    if not _paddlenlp_ops_updated and os.getenv(
+        "DYNAMIC_INFERENCE_MODE", "1"
+    ).lower() in [
         "1",
         "true",
         "t",
@@ -99,7 +101,9 @@ def dynamic_graph_pybind_context():
         if "paddlenlp_ops" in _original_attributes:
             paddlenlp_ops_module = sys.modules.get("paddlenlp_ops")
             if paddlenlp_ops_module:
-                for attr, value in _original_attributes["paddlenlp_ops"].items():
+                for attr, value in _original_attributes[
+                    "paddlenlp_ops"
+                ].items():
                     setattr(paddlenlp_ops_module, attr, value)
                 _paddlenlp_ops_updated = False
 
@@ -114,7 +118,9 @@ def auto_dynamic_graph_pybind(func):
 
 
 # TODO: This doesn't work for all packages (`bs4`, `faiss`, etc.) Talk to Sylvain to see how to do with it better.
-def _is_package_available(pkg_name: str, return_version: bool = False) -> Union[Tuple[bool, str], bool]:
+def _is_package_available(
+    pkg_name: str, return_version: bool = False
+) -> Union[Tuple[bool, str], bool]:
     # Check if the package spec exists and grab its version to avoid importing a local directory
     package_exists = importlib.util.find_spec(pkg_name) is not None
     package_version = "N/A"
@@ -157,7 +163,9 @@ if _sklearn_available:
 
 
 # TODO: This doesn't work for all packages (`bs4`, `faiss`, etc.) Talk to Sylvain to see how to do with it better.
-def _is_package_available(pkg_name: str, return_version: bool = False) -> Union[Tuple[bool, str], bool]:
+def _is_package_available(
+    pkg_name: str, return_version: bool = False
+) -> Union[Tuple[bool, str], bool]:
     # Check if the package spec exists and grab its version to avoid importing a local directory
     package_exists = importlib.util.find_spec(pkg_name) is not None
     package_version = "N/A"
@@ -336,7 +344,9 @@ def install_package(
     mirror_key = "PYPI_MIRROR"
     mirror_source = os.environ.get(mirror_key, None)
     if mirror_source is not None:
-        logger.info(f"loading <{mirror_source}> from as the final mirror source to install package.")
+        logger.info(
+            f"loading <{mirror_source}> from as the final mirror source to install package."
+        )
         arguments += ["-i", mirror_source]
 
     arguments += [package_name]
@@ -411,7 +421,9 @@ def direct_paddlefleet_import(path: str, file="__init__.py") -> ModuleType:
     """
     name = "paddlefleet.transformers"
     location = os.path.join(path, file)
-    spec = importlib.util.spec_from_file_location(name, location, submodule_search_locations=[path])
+    spec = importlib.util.spec_from_file_location(
+        name, location, submodule_search_locations=[path]
+    )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module = sys.modules[name]

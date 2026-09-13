@@ -44,7 +44,9 @@ class TestNpuCombining(unittest.TestCase):
         combine_weights = paddle.ones([6, 2]) * 0.5
         scatter_index = paddle.randint(0, 6, [6, 1])
 
-        result = npu_combining(x, combine_weights, scatter_index, hard_gate=True)
+        result = npu_combining(
+            x, combine_weights, scatter_index, hard_gate=True
+        )
         # With hard_gate, it does squeeze(-2) so result should be [6, 4]
         self.assertEqual(result.shape[0], 6)
         self.assertEqual(result.shape[-1], 4)
@@ -69,7 +71,13 @@ class TestNpuCalAuxLossFunc(unittest.TestCase):
         num_experts = 4
 
         l_aux, _, _ = npu_cal_aux_loss_func(
-            gate_prob, dispatch_mask, tokens_mask, dispatch_tokens_mask, num_experts, use_group=False, moe_k=2
+            gate_prob,
+            dispatch_mask,
+            tokens_mask,
+            dispatch_tokens_mask,
+            num_experts,
+            use_group=False,
+            moe_k=2,
         )
         self.assertEqual(l_aux.shape, [])
 
@@ -81,7 +89,13 @@ class TestNpuCalAuxLossFunc(unittest.TestCase):
         num_experts = 4
 
         l_aux, _, _ = npu_cal_aux_loss_func(
-            gate_prob, dispatch_mask, tokens_mask, dispatch_tokens_mask, num_experts, use_group=True, moe_k=2
+            gate_prob,
+            dispatch_mask,
+            tokens_mask,
+            dispatch_tokens_mask,
+            num_experts,
+            use_group=True,
+            moe_k=2,
         )
         self.assertEqual(l_aux.shape, [])
 
@@ -93,7 +107,13 @@ class TestNpuCalAuxLossFunc(unittest.TestCase):
         num_experts = 4
 
         l_aux, _, _ = npu_cal_aux_loss_func(
-            gate_prob, dispatch_mask, tokens_mask, dispatch_tokens_mask, num_experts, use_group=False, moe_k=2
+            gate_prob,
+            dispatch_mask,
+            tokens_mask,
+            dispatch_tokens_mask,
+            num_experts,
+            use_group=False,
+            moe_k=2,
         )
         self.assertEqual(l_aux.shape, [])
 
@@ -105,7 +125,13 @@ class TestNpuCalAuxLossFunc(unittest.TestCase):
         num_experts = 4
 
         l_aux, _, _ = npu_cal_aux_loss_func(
-            gate_prob, dispatch_mask, tokens_mask, dispatch_tokens_mask, num_experts, use_group=False, moe_k=2
+            gate_prob,
+            dispatch_mask,
+            tokens_mask,
+            dispatch_tokens_mask,
+            num_experts,
+            use_group=False,
+            moe_k=2,
         )
         self.assertEqual(l_aux.shape, [])
 
@@ -118,7 +144,13 @@ class TestNpuCalAuxLossFunc(unittest.TestCase):
         num_experts = 4
 
         l_aux, _, _ = npu_cal_aux_loss_func(
-            gate_prob, dispatch_mask, tokens_mask, dispatch_tokens_mask, num_experts, use_group=False, moe_k=2
+            gate_prob,
+            dispatch_mask,
+            tokens_mask,
+            dispatch_tokens_mask,
+            num_experts,
+            use_group=False,
+            moe_k=2,
         )
         self.assertEqual(l_aux.shape, [])
 
@@ -131,7 +163,13 @@ class TestNpuCalAuxLossFunc(unittest.TestCase):
         num_experts = 4
 
         l_aux, _, _ = npu_cal_aux_loss_func(
-            gate_prob, dispatch_mask, tokens_mask, dispatch_tokens_mask, num_experts, use_group=False, moe_k=2
+            gate_prob,
+            dispatch_mask,
+            tokens_mask,
+            dispatch_tokens_mask,
+            num_experts,
+            use_group=False,
+            moe_k=2,
         )
         self.assertEqual(l_aux.shape, [])
 

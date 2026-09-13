@@ -87,13 +87,17 @@ class InternLM25ModelTest(unittest.TestCase):
 
         batch_size = 2
         seq_length = 10
-        input_ids = paddle.randint(0, self.config.vocab_size, [batch_size, seq_length])
+        input_ids = paddle.randint(
+            0, self.config.vocab_size, [batch_size, seq_length]
+        )
 
         with paddle.no_grad():
             outputs = model(input_ids=input_ids, return_dict=True)
 
         logits = outputs.logits
-        self.assertEqual(logits.shape, [batch_size, seq_length, self.config.vocab_size])
+        self.assertEqual(
+            logits.shape, [batch_size, seq_length, self.config.vocab_size]
+        )
 
     def test_model_generation(self):
         model = InternLM25ForCausalLM(self.config)
@@ -119,15 +123,27 @@ class InternLM25ModelTest(unittest.TestCase):
         model = InternLM25ForCausalLM(self.config)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            model.save_pretrained(temp_dir, save_checkpoint_format="", save_safetensors=False)
+            model.save_pretrained(
+                temp_dir, save_checkpoint_format="", save_safetensors=False
+            )
 
-            self.assertTrue(os.path.exists(os.path.join(temp_dir, "model_state.pdparams")))
-            self.assertTrue(os.path.exists(os.path.join(temp_dir, "config.json")))
+            self.assertTrue(
+                os.path.exists(os.path.join(temp_dir, "model_state.pdparams"))
+            )
+            self.assertTrue(
+                os.path.exists(os.path.join(temp_dir, "config.json"))
+            )
 
-            loaded_model = InternLM25ForCausalLM.from_pretrained(temp_dir, load_checkpoint_format="")
+            loaded_model = InternLM25ForCausalLM.from_pretrained(
+                temp_dir, load_checkpoint_format=""
+            )
 
-            self.assertEqual(model.config.vocab_size, loaded_model.config.vocab_size)
-            self.assertEqual(model.config.hidden_size, loaded_model.config.hidden_size)
+            self.assertEqual(
+                model.config.vocab_size, loaded_model.config.vocab_size
+            )
+            self.assertEqual(
+                model.config.hidden_size, loaded_model.config.hidden_size
+            )
 
     def test_chat_method(self):
         model = InternLM25ForCausalLM(self.config)
@@ -142,14 +158,22 @@ class InternLM25ModelTest(unittest.TestCase):
 
         batch_size = 2
         seq_length = 10
-        input_ids = paddle.randint(0, self.config.vocab_size, [batch_size, seq_length])
+        input_ids = paddle.randint(
+            0, self.config.vocab_size, [batch_size, seq_length]
+        )
         attention_mask = paddle.ones([batch_size, seq_length])
 
         with paddle.no_grad():
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True,
+            )
 
         logits = outputs.logits
-        self.assertEqual(logits.shape, [batch_size, seq_length, self.config.vocab_size])
+        self.assertEqual(
+            logits.shape, [batch_size, seq_length, self.config.vocab_size]
+        )
 
     def test_model_with_past_key_values(self):
         config = InternLM25Config(
@@ -167,12 +191,18 @@ class InternLM25ModelTest(unittest.TestCase):
 
         batch_size = 1
         seq_length = 5
-        input_ids = paddle.randint(0, config.vocab_size, [batch_size, seq_length])
+        input_ids = paddle.randint(
+            0, config.vocab_size, [batch_size, seq_length]
+        )
 
         with paddle.no_grad():
-            outputs = model(input_ids=input_ids, use_cache=True, return_dict=True)
+            outputs = model(
+                input_ids=input_ids, use_cache=True, return_dict=True
+            )
             past_key_values = outputs.past_key_values
-            next_input_ids = paddle.randint(0, config.vocab_size, [batch_size, 1])
+            next_input_ids = paddle.randint(
+                0, config.vocab_size, [batch_size, 1]
+            )
             outputs = model(
                 input_ids=next_input_ids,
                 past_key_values=past_key_values,
@@ -209,12 +239,16 @@ class InternLM25ConvertedTest(unittest.TestCase):
         )
         model.eval()
         tokenizer = InternLM25Tokenizer.from_pretrained(
-            modelscope_lm25_model_location, load_checkpoint_format="", download_hub="modelscope"
+            modelscope_lm25_model_location,
+            load_checkpoint_format="",
+            download_hub="modelscope",
         )
 
         prompt = "What are the differences between cats and dogs? Here are the three main points"
         meta_instruction = "You are a helpful assistant. Please answer in plain text without markdown."
-        inputs = model.build_inputs(tokenizer, prompt, history=[], meta_instruction=meta_instruction)
+        inputs = model.build_inputs(
+            tokenizer, prompt, history=[], meta_instruction=meta_instruction
+        )
         with paddle.no_grad():
             outputs = model.generate(
                 input_ids=inputs["input_ids"],
@@ -224,8 +258,12 @@ class InternLM25ConvertedTest(unittest.TestCase):
                 decode_strategy="greedy_search",
             )
 
-        generated_ids = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
-        decoded = tokenizer.decode(generated_ids[0].numpy().tolist(), skip_special_tokens=True)
+        generated_ids = (
+            outputs[0] if isinstance(outputs, (tuple, list)) else outputs
+        )
+        decoded = tokenizer.decode(
+            generated_ids[0].numpy().tolist(), skip_special_tokens=True
+        )
         print("\n[HF Direct Load] prompt:", prompt)
         print("[HF Direct Load] response:", decoded)
 
@@ -252,7 +290,9 @@ class InternLM25CompatibilityTest(unittest.TestCase):
 
         cls.torch_model_path = tempfile.mkdtemp()
 
-        config = AutoConfig.from_pretrained(modelscope_lm25_model_location, trust_remote_code=True)
+        config = AutoConfig.from_pretrained(
+            modelscope_lm25_model_location, trust_remote_code=True
+        )
 
         # Override with small test parameters,  accelerate calc
         config.hidden_size = 128
@@ -263,9 +303,14 @@ class InternLM25CompatibilityTest(unittest.TestCase):
         config.vocab_size = 10000
         config.max_position_embeddings = 128
 
-        cls.torch_model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+        cls.torch_model = AutoModelForCausalLM.from_config(
+            config, trust_remote_code=True
+        )
 
-        torch.save(cls.torch_model.state_dict(), f"{cls.torch_model_path}/pytorch_model.bin")
+        torch.save(
+            cls.torch_model.state_dict(),
+            f"{cls.torch_model_path}/pytorch_model.bin",
+        )
 
         config_dict = config.to_dict()
         for key in ["_commit_hash", "_name_or_path"]:
@@ -286,22 +331,42 @@ class InternLM25CompatibilityTest(unittest.TestCase):
         input_ids = np.random.randint(100, 200, [1, 20])
 
         self.torch_model.eval()
-        torch_output = self.torch_model(torch.tensor(input_ids), use_cache=False)
-        torch_logit = torch_output[0] if isinstance(torch_output, tuple) else torch_output.logits
+        torch_output = self.torch_model(
+            torch.tensor(input_ids), use_cache=False
+        )
+        torch_logit = (
+            torch_output[0]
+            if isinstance(torch_output, tuple)
+            else torch_output.logits
+        )
 
         paddle_model = InternLM25ForCausalLM.from_pretrained(
-            self.torch_model_path, convert_from_hf=True, load_checkpoint_format=""
+            self.torch_model_path,
+            convert_from_hf=True,
+            load_checkpoint_format="",
         )
         paddle_model.eval()
-        paddle_logit = paddle_model(paddle.to_tensor(input_ids), use_cache=False)[0]
+        paddle_logit = paddle_model(
+            paddle.to_tensor(input_ids), use_cache=False
+        )[0]
 
-        paddle_out = paddle_logit.detach().cpu().reshape([-1])[:9].astype("float32").numpy()
+        paddle_out = (
+            paddle_logit.detach()
+            .cpu()
+            .reshape([-1])[:9]
+            .astype("float32")
+            .numpy()
+        )
         torch_out = torch_logit.detach().cpu().reshape([-1])[:9].float().numpy()
         max_diff = np.max(np.abs(paddle_out - torch_out))
         print(f"\nMax diff: {max_diff}")
 
-        paddle_token_ids = paddle.argmax(paddle_logit, axis=-1).cpu().numpy()[0][:10]
-        torch_token_ids = torch.argmax(torch_logit, dim=-1).cpu().numpy()[0][:10]
+        paddle_token_ids = (
+            paddle.argmax(paddle_logit, axis=-1).cpu().numpy()[0][:10]
+        )
+        torch_token_ids = (
+            torch.argmax(torch_logit, dim=-1).cpu().numpy()[0][:10]
+        )
         print(f"Paddle token ids: {paddle_token_ids}")
         print(f"Torch token ids:  {torch_token_ids}")
         self.assertTrue(
@@ -310,7 +375,8 @@ class InternLM25CompatibilityTest(unittest.TestCase):
         )
 
         self.assertTrue(
-            np.allclose(paddle_out, torch_out, atol=1e-2, rtol=1e-2), f"Max diff {max_diff} exceeds tolerance"
+            np.allclose(paddle_out, torch_out, atol=1e-2, rtol=1e-2),
+            f"Max diff {max_diff} exceeds tolerance",
         )
 
 
@@ -341,7 +407,9 @@ class InternLM2ProxyEmbeddingTest(unittest.TestCase):
         model = InternLM2Model(self.config)
         emb = model.get_input_embeddings()
         self.assertIsNotNone(emb)
-        self.assertEqual(emb.weight.shape, [self.config.vocab_size, self.config.hidden_size])
+        self.assertEqual(
+            emb.weight.shape, [self.config.vocab_size, self.config.hidden_size]
+        )
 
     def test_model_set_input_embeddings(self):
         model = InternLM2Model(self.config)
@@ -355,7 +423,9 @@ class InternLM2ProxyEmbeddingTest(unittest.TestCase):
         model = InternLM2ForCausalLM(self.config)
         emb = model.get_input_embeddings()
         self.assertIsNotNone(emb)
-        self.assertEqual(emb.weight.shape, [self.config.vocab_size, self.config.hidden_size])
+        self.assertEqual(
+            emb.weight.shape, [self.config.vocab_size, self.config.hidden_size]
+        )
 
     def test_for_causal_lm_set_input_embeddings(self):
         model = InternLM2ForCausalLM(self.config)
@@ -368,11 +438,15 @@ class InternLM2ProxyEmbeddingTest(unittest.TestCase):
         model = InternLM2ForCausalLM(self.config)
         out = model.get_output_embeddings()
         self.assertIsNotNone(out)
-        self.assertEqual(out.weight.shape, [self.config.hidden_size, self.config.vocab_size])
+        self.assertEqual(
+            out.weight.shape, [self.config.hidden_size, self.config.vocab_size]
+        )
 
     def test_for_causal_lm_set_output_embeddings(self):
         model = InternLM2ForCausalLM(self.config)
-        new_head = paddle.nn.Linear(self.config.hidden_size, 3000, bias_attr=False)
+        new_head = paddle.nn.Linear(
+            self.config.hidden_size, 3000, bias_attr=False
+        )
         model.set_output_embeddings(new_head)
         out = model.get_output_embeddings()
         self.assertIs(out, new_head)
@@ -383,7 +457,9 @@ class InternLM2ProxyEmbeddingTest(unittest.TestCase):
         model = InternLM2ForSequenceClassification(config)
         emb = model.get_input_embeddings()
         self.assertIsNotNone(emb)
-        self.assertEqual(emb.weight.shape, [config.vocab_size, config.hidden_size])
+        self.assertEqual(
+            emb.weight.shape, [config.vocab_size, config.hidden_size]
+        )
 
     def test_for_sequence_classification_set_input_embeddings(self):
         config = _make_internlm2_config(num_labels=2)
@@ -398,7 +474,9 @@ class InternLM2ProxyEmbeddingTest(unittest.TestCase):
         model = InternLM2ForQuestionAnswering(config)
         emb = model.get_input_embeddings()
         self.assertIsNotNone(emb)
-        self.assertEqual(emb.weight.shape, [config.vocab_size, config.hidden_size])
+        self.assertEqual(
+            emb.weight.shape, [config.vocab_size, config.hidden_size]
+        )
 
     def test_for_question_answering_set_input_embeddings(self):
         config = _make_internlm2_config(num_labels=2)
@@ -413,7 +491,9 @@ class InternLM2ProxyEmbeddingTest(unittest.TestCase):
         model = InternLM2ForTokenClassification(config)
         emb = model.get_input_embeddings()
         self.assertIsNotNone(emb)
-        self.assertEqual(emb.weight.shape, [config.vocab_size, config.hidden_size])
+        self.assertEqual(
+            emb.weight.shape, [config.vocab_size, config.hidden_size]
+        )
 
     def test_for_token_classification_set_input_embeddings(self):
         config = _make_internlm2_config(num_labels=5)

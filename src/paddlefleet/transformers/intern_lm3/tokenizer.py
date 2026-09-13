@@ -60,7 +60,9 @@ class InternLM3Tokenizer(PretrainedTokenizer):
                 "You need to install sentencepiece to use InternLM3Tokenizer. "
                 "See https://github.com/google/sentencepiece for installation."
             )
-        self.sp_model_kwargs = {} if sp_model_kwargs is None else sp_model_kwargs
+        self.sp_model_kwargs = (
+            {} if sp_model_kwargs is None else sp_model_kwargs
+        )
         self.vocab_file = vocab_file
         self.add_bos_token = add_bos_token
         self.add_eos_token = add_eos_token
@@ -68,10 +70,14 @@ class InternLM3Tokenizer(PretrainedTokenizer):
         self.sp_model = spm.SentencePieceProcessor(**self.sp_model_kwargs)
         self.sp_model.Load(vocab_file)
         self.add_prefix_space = add_prefix_space
-        self.spaces_for_interleaved_special_tokens = spaces_for_interleaved_special_tokens
+        self.spaces_for_interleaved_special_tokens = (
+            spaces_for_interleaved_special_tokens
+        )
 
         vocab_size = self.sp_model.get_piece_size()
-        self.decoder = {i: self.sp_model.id_to_piece(i) for i in range(vocab_size)}
+        self.decoder = {
+            i: self.sp_model.id_to_piece(i) for i in range(vocab_size)
+        }
 
         super().__init__(
             bos_token=bos_token,
@@ -102,7 +108,9 @@ class InternLM3Tokenizer(PretrainedTokenizer):
         return self.sp_model.get_piece_size()
 
     def get_vocab(self):
-        vocab = {self.convert_ids_to_tokens(i): i for i in range(self.vocab_size)}
+        vocab = {
+            self.convert_ids_to_tokens(i): i for i in range(self.vocab_size)
+        }
         vocab.update(self.added_tokens_encoder)
         return vocab
 
@@ -119,7 +127,11 @@ class InternLM3Tokenizer(PretrainedTokenizer):
         return self.decoder.get(index, "")
 
     def convert_tokens_to_string(self, tokens):
-        if tokens and tokens[0].startswith(SPIECE_UNDERLINE) and self.add_prefix_space:
+        if (
+            tokens
+            and tokens[0].startswith(SPIECE_UNDERLINE)
+            and self.add_prefix_space
+        ):
             tokens[0] = tokens[0][1:]
 
         current_sub_tokens = []
@@ -127,7 +139,11 @@ class InternLM3Tokenizer(PretrainedTokenizer):
         prev_is_special = False
         for i, token in enumerate(tokens):
             if token in self.all_special_tokens:
-                if not prev_is_special and i != 0 and self.spaces_for_interleaved_special_tokens:
+                if (
+                    not prev_is_special
+                    and i != 0
+                    and self.spaces_for_interleaved_special_tokens
+                ):
                     out_string += " "
                 out_string += self.sp_model.decode(current_sub_tokens) + token
                 prev_is_special = True
@@ -146,15 +162,23 @@ class InternLM3Tokenizer(PretrainedTokenizer):
         out_string += self.sp_model.decode(current_sub_tokens)
         return out_string
 
-    def save_vocabulary(self, save_directory, filename_prefix: Optional[str] = None) -> Tuple[str]:
+    def save_vocabulary(
+        self, save_directory, filename_prefix: Optional[str] = None
+    ) -> Tuple[str]:
         if not os.path.isdir(save_directory):
-            logger.error(f"Vocabulary path ({save_directory}) should be a directory")
+            logger.error(
+                f"Vocabulary path ({save_directory}) should be a directory"
+            )
             return
         out_vocab_file = os.path.join(
-            save_directory, (filename_prefix + "-" if filename_prefix else "") + VOCAB_FILES_NAMES["vocab_file"]
+            save_directory,
+            (filename_prefix + "-" if filename_prefix else "")
+            + VOCAB_FILES_NAMES["vocab_file"],
         )
 
-        if os.path.abspath(self.vocab_file) != os.path.abspath(out_vocab_file) and os.path.isfile(self.vocab_file):
+        if os.path.abspath(self.vocab_file) != os.path.abspath(
+            out_vocab_file
+        ) and os.path.isfile(self.vocab_file):
             copyfile(self.vocab_file, out_vocab_file)
         elif not os.path.isfile(self.vocab_file):
             with open(out_vocab_file, "wb") as fi:
@@ -175,12 +199,16 @@ class InternLM3Tokenizer(PretrainedTokenizer):
         return output
 
     def get_special_tokens_mask(
-        self, token_ids_0: List[int], token_ids_1: Optional[List[int]] = None, already_has_special_tokens: bool = False
+        self,
+        token_ids_0: List[int],
+        token_ids_1: Optional[List[int]] = None,
+        already_has_special_tokens: bool = False,
     ) -> List[int]:
-
         if already_has_special_tokens:
             return super().get_special_tokens_mask(
-                token_ids_0=token_ids_0, token_ids_1=token_ids_1, already_has_special_tokens=True
+                token_ids_0=token_ids_0,
+                token_ids_1=token_ids_1,
+                already_has_special_tokens=True,
             )
 
         bos_token_id = [1] if self.add_bos_token else []
@@ -223,11 +251,13 @@ class InternLM3Tokenizer(PretrainedTokenizer):
         return_tensors: str | None = None,
         **kwargs,
     ) -> List[int]:
-        padding_strategy, truncation_strategy, max_length, kwargs_updated = self._get_padding_truncation_strategies(
-            padding=padding,
-            truncation=truncation,
-            max_length=max_length,
-            **kwargs,
+        padding_strategy, truncation_strategy, max_length, kwargs_updated = (
+            self._get_padding_truncation_strategies(
+                padding=padding,
+                truncation=truncation,
+                max_length=max_length,
+                **kwargs,
+            )
         )
 
         kwargs.update(kwargs_updated)

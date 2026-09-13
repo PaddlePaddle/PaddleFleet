@@ -25,7 +25,10 @@ class TestUtils(unittest.TestCase):
     def test_find_transformer_model_type(self):
         """test for `find_transformer_model_type`"""
         self.assertEqual(utils.find_transformer_model_type(Qwen3Model), "qwen3")
-        self.assertEqual(utils.find_transformer_model_type(Qwen3ForTokenClassification), "qwen3")
+        self.assertEqual(
+            utils.find_transformer_model_type(Qwen3ForTokenClassification),
+            "qwen3",
+        )
 
 
 def check_json_file_has_correct_format(file_path):

@@ -76,13 +76,19 @@ class TestCombiningFunction(unittest.TestCase):
         seq_len, dim = 4, 8
         x = paddle.randn([seq_len, dim], dtype="float32")
         k = 2
-        combine_weights = paddle.abs(paddle.randn([seq_len, k], dtype="float32"))
+        combine_weights = paddle.abs(
+            paddle.randn([seq_len, k], dtype="float32")
+        )
         scatter_index = paddle.randint(0, seq_len, [k, seq_len], dtype="int64")
 
-        with patch("paddlefleet.nn.moe.moe_alltoall_layer.GateCombine") as mock_gc:
+        with patch(
+            "paddlefleet.nn.moe.moe_alltoall_layer.GateCombine"
+        ) as mock_gc:
             mock_result = paddle.randn([seq_len, dim], dtype="float32")
             mock_gc.apply.return_value = mock_result
-            result = combining(x, combine_weights, scatter_index, hard_gate=False)
+            result = combining(
+                x, combine_weights, scatter_index, hard_gate=False
+            )
             self.assertEqual(result.shape, [seq_len, dim])
             mock_gc.apply.assert_called_once()
 
@@ -93,14 +99,20 @@ class TestCombiningFunction(unittest.TestCase):
         seq_len, dim = 4, 8
         x = paddle.randn([seq_len, dim], dtype="float32")
         k = 2
-        combine_weights = paddle.abs(paddle.randn([seq_len, k], dtype="float32"))
+        combine_weights = paddle.abs(
+            paddle.randn([seq_len, k], dtype="float32")
+        )
         scatter_index = paddle.randint(0, seq_len, [k, seq_len], dtype="int64")
 
         # Use mocked GateCombine path (hard_gate=False) to test stop_gradient behavior
-        with patch("paddlefleet.nn.moe.moe_alltoall_layer.GateCombine") as mock_gc:
+        with patch(
+            "paddlefleet.nn.moe.moe_alltoall_layer.GateCombine"
+        ) as mock_gc:
             mock_result = paddle.randn([seq_len, dim], dtype="float32")
             mock_gc.apply.return_value = mock_result
-            result = combining(x, combine_weights, scatter_index, hard_gate=False)
+            result = combining(
+                x, combine_weights, scatter_index, hard_gate=False
+            )
             # combining sets ret.stop_gradient = False after GateCombine.apply
             self.assertFalse(result.stop_gradient)
 
@@ -118,12 +130,19 @@ class TestGateCombinePyLayer(unittest.TestCase):
         scatter_index = paddle.randint(0, 4, [2, 4], dtype="int64")
 
         mock_result = paddle.randn([4, 8], dtype="float32")
-        with patch("paddlefleet.nn.moe.moe_alltoall_layer.moe_combine", return_value=mock_result):
+        with patch(
+            "paddlefleet.nn.moe.moe_alltoall_layer.moe_combine",
+            return_value=mock_result,
+        ):
             GateCombine.forward(ctx, x, combine_weights, scatter_index)
 
         np.testing.assert_allclose(ctx.x.numpy(), x.numpy())
-        np.testing.assert_allclose(ctx.combine_weights.numpy(), combine_weights.numpy())
-        np.testing.assert_allclose(ctx.scatter_index.numpy(), scatter_index.numpy())
+        np.testing.assert_allclose(
+            ctx.combine_weights.numpy(), combine_weights.numpy()
+        )
+        np.testing.assert_allclose(
+            ctx.scatter_index.numpy(), scatter_index.numpy()
+        )
 
 
 def _create_no_hcg_fleet():
@@ -138,9 +157,17 @@ def _create_no_hcg_fleet():
 class TestMOEAlltoAllLayerInit(unittest.TestCase):
     """Tests for MOEAlltoAllLayer initialization logic."""
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_init_basic(self, mock_rank, mock_ws):
         """Test basic initialization of MOEAlltoAllLayer."""
         from paddlefleet.nn.moe.moe_alltoall_layer import MOEAlltoAllLayer
@@ -180,9 +207,17 @@ class TestMOEAlltoAllLayerInit(unittest.TestCase):
         self.assertIsNone(layer.shared_experts)
         self.assertFalse(layer.use_correction_bias)
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_init_with_correction_bias(self, mock_rank, mock_ws):
         """Test initialization with moe_statics (correction bias enabled)."""
         from paddlefleet.nn.moe.moe_alltoall_layer import MOEAlltoAllLayer
@@ -209,9 +244,17 @@ class TestMOEAlltoAllLayerInit(unittest.TestCase):
         self.assertTrue(layer.use_correction_bias)
         self.assertIs(layer.moe_statics, moe_statics)
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_init_multimodal_experts(self, mock_rank, mock_ws):
         """Test initialization with multimodal expert configuration."""
         from paddlefleet.nn.moe.moe_alltoall_layer import MOEAlltoAllLayer
@@ -222,7 +265,9 @@ class TestMOEAlltoAllLayerInit(unittest.TestCase):
         mock_gate.config.moe_use_aux_free = True
         mock_gate.parameters.return_value = []
 
-        experts = nn.LayerList([nn.Linear(4, 4), nn.Linear(4, 4), nn.Linear(4, 4), nn.Linear(4, 4)])
+        experts = nn.LayerList(
+            [nn.Linear(4, 4), nn.Linear(4, 4), nn.Linear(4, 4), nn.Linear(4, 4)]
+        )
         for p in experts.parameters():
             p.expert = False
             p.no_sync = False
@@ -236,9 +281,17 @@ class TestMOEAlltoAllLayerInit(unittest.TestCase):
         self.assertTrue(layer.multimodal_experts)
         self.assertEqual(layer.num_local_multimodal_experts, [2, 2])
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_init_gate_params_marked_is_gate(self, mock_rank, mock_ws):
         """Test that gate parameters have is_gate attribute set to True."""
         from paddlefleet.nn.moe.moe_alltoall_layer import MOEAlltoAllLayer
@@ -257,9 +310,17 @@ class TestMOEAlltoAllLayerInit(unittest.TestCase):
         for p in gate.parameters():
             self.assertTrue(p.is_gate)
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_init_world_size_and_rank_defaults(self, mock_rank, mock_ws):
         """Test world_size and rank default values."""
         from paddlefleet.nn.moe.moe_alltoall_layer import MOEAlltoAllLayer
@@ -279,9 +340,17 @@ class TestMOEAlltoAllLayerInit(unittest.TestCase):
         self.assertEqual(layer.world_size, 1)
         self.assertEqual(layer.rank, 0)
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_init_config_assigned(self, mock_rank, mock_ws):
         """Test that self.config is set from gate.config."""
         from paddlefleet.nn.moe.moe_alltoall_layer import MOEAlltoAllLayer
@@ -300,9 +369,17 @@ class TestMOEAlltoAllLayerInit(unittest.TestCase):
         layer = MOEAlltoAllLayer(gate=mock_gate, experts=experts, layer_idx=0)
         self.assertIs(layer.config, mock_gate.config)
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_init_zero_tensor_created(self, mock_rank, mock_ws):
         """Test that self.zero is a float32 tensor."""
         from paddlefleet.nn.moe.moe_alltoall_layer import MOEAlltoAllLayer
@@ -322,9 +399,17 @@ class TestMOEAlltoAllLayerInit(unittest.TestCase):
         self.assertEqual(layer.zero.dtype, paddle.float32)
         self.assertEqual(layer.zero.shape, [])
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_init_num_local_experts(self, mock_rank, mock_ws):
         """Test num_local_experts is correctly computed."""
         from paddlefleet.nn.moe.moe_alltoall_layer import MOEAlltoAllLayer
@@ -348,9 +433,17 @@ class TestMOEAlltoAllLayerInit(unittest.TestCase):
 class TestMOEAlltoAllLayerCalcRouterLoss(unittest.TestCase):
     """Tests for _calc_router_loss method."""
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def _make_layer(self, mock_rank, mock_ws, aux_loss_coef=0.01):
         """Helper to create a MOEAlltoAllLayer with mocked gate config."""
         from paddlefleet.nn.moe.moe_alltoall_layer import MOEAlltoAllLayer
@@ -392,7 +485,9 @@ class TestMOEAlltoAllLayerCalcRouterLoss(unittest.TestCase):
         tokens_type_mask = paddle.ones([4], dtype="bool")
         dispatch_tokens_mask = paddle.ones([4], dtype="bool")
 
-        with patch.object(layer.gate, "_cal_aux_loss", return_value=paddle.to_tensor(0.1)):
+        with patch.object(
+            layer.gate, "_cal_aux_loss", return_value=paddle.to_tensor(0.1)
+        ):
             result = layer._calc_router_loss(
                 dispatch_mask,
                 gate_logits,
@@ -430,9 +525,17 @@ class TestMOEAlltoAllLayerCalcRouterLoss(unittest.TestCase):
 class TestMOEAlltoAllLayerCombineExpertOutput(unittest.TestCase):
     """Tests for combine_expert_output method."""
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_combine_expert_output_with_postprocess(self, mock_rank, mock_ws):
         """Test combine_expert_output with output_postprocess set."""
         from paddlefleet.nn.moe.moe_alltoall_layer import MOEAlltoAllLayer
@@ -458,13 +561,26 @@ class TestMOEAlltoAllLayerCombineExpertOutput(unittest.TestCase):
         combine_weights = paddle.abs(paddle.randn([4, 2], dtype="float32"))
         scatter_index = paddle.randint(0, 4, [2, 4], dtype="int64")
 
-        with patch("paddlefleet.nn.moe.moe_alltoall_layer.combining", return_value=expert_output):
-            layer.combine_expert_output(expert_output, combine_weights, scatter_index)
+        with patch(
+            "paddlefleet.nn.moe.moe_alltoall_layer.combining",
+            return_value=expert_output,
+        ):
+            layer.combine_expert_output(
+                expert_output, combine_weights, scatter_index
+            )
             post_fn.assert_called_once()
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_combine_expert_output_no_postprocess(self, mock_rank, mock_ws):
         """Test combine_expert_output without output_postprocess."""
         from paddlefleet.nn.moe.moe_alltoall_layer import MOEAlltoAllLayer
@@ -486,7 +602,10 @@ class TestMOEAlltoAllLayerCombineExpertOutput(unittest.TestCase):
         self.assertIsNone(layer.output_postprocess)
 
         mock_combined = paddle.randn([4, 4], dtype="float32")
-        with patch("paddlefleet.nn.moe.moe_alltoall_layer.combining", return_value=mock_combined):
+        with patch(
+            "paddlefleet.nn.moe.moe_alltoall_layer.combining",
+            return_value=mock_combined,
+        ):
             result = layer.combine_expert_output(
                 paddle.randn([4, 4]),
                 paddle.abs(paddle.randn([4, 2])),
@@ -498,9 +617,17 @@ class TestMOEAlltoAllLayerCombineExpertOutput(unittest.TestCase):
 class TestMOEAlltoAllLayerForwardExperts(unittest.TestCase):
     """Tests for forward_experts method."""
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_forward_experts_layerlist(self, mock_rank, mock_ws):
         """Test forward_experts with LayerList experts."""
         from paddlefleet.nn.moe.moe_alltoall_layer import MOEAlltoAllLayer
@@ -528,9 +655,17 @@ class TestMOEAlltoAllLayerForwardExperts(unittest.TestCase):
         self.assertEqual(result.shape[0], 1)  # world_size
         self.assertEqual(result.shape[1], 2)  # num_local_experts
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_forward_experts_fused_experts(self, mock_rank, mock_ws):
         """Test forward_experts with fused (non-LayerList) experts."""
         from paddlefleet.nn.moe.moe_alltoall_layer import MOEAlltoAllLayer
@@ -562,7 +697,9 @@ class TestMOEAlltoAllLayerForwardExperts(unittest.TestCase):
             p.expert = False
             p.no_sync = False
 
-        layer = MOEAlltoAllLayer(gate=mock_gate, experts=fused_expert, layer_idx=0)
+        layer = MOEAlltoAllLayer(
+            gate=mock_gate, experts=fused_expert, layer_idx=0
+        )
         dispatched = paddle.randn([2, 1, 4, 8], dtype="float32")
 
         result = layer.forward_experts(dispatched)
@@ -572,9 +709,17 @@ class TestMOEAlltoAllLayerForwardExperts(unittest.TestCase):
 class TestMOEAlltoAllLayerFusedGateLogitsProcess(unittest.TestCase):
     """Tests for fused_gate_logits_process method."""
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def _make_layer(self, mock_rank, mock_ws):
         """Helper to create a layer for fused_gate_logits_process tests."""
         from paddlefleet.nn.moe.moe_alltoall_layer import MOEAlltoAllLayer
@@ -635,9 +780,17 @@ class TestMOEAlltoAllLayerIsSubclass(unittest.TestCase):
 class TestMOEAlltoAllLayerForwardSingleStage(unittest.TestCase):
     """Tests for forward_single_stage method."""
 
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size", return_value=1)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0)
-    @patch("paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet", _create_no_hcg_fleet())
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_world_size",
+        return_value=1,
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.dist.get_rank", return_value=0
+    )
+    @patch(
+        "paddlefleet.nn.moe.moe_alltoall_layer.fleet.fleet",
+        _create_no_hcg_fleet(),
+    )
     def test_forward_single_stage(self, mock_rank, mock_ws):
         """Test forward_single_stage calls the right expert."""
         from paddlefleet.nn.moe.moe_alltoall_layer import MOEAlltoAllLayer
@@ -654,7 +807,9 @@ class TestMOEAlltoAllLayerForwardSingleStage(unittest.TestCase):
             p.no_sync = False
 
         layer = MOEAlltoAllLayer(gate=mock_gate, experts=experts, layer_idx=0)
-        dispatched = paddle.randn([4, 4], dtype="float32")  # Linear(4, 4) expects last dim = 4
+        dispatched = paddle.randn(
+            [4, 4], dtype="float32"
+        )  # Linear(4, 4) expects last dim = 4
         result = layer.forward_single_stage(dispatched, stage_id=0)
         self.assertEqual(result.shape, [4, 4])
 

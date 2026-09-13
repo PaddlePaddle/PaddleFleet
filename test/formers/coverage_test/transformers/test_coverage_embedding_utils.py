@@ -23,7 +23,9 @@ from unittest.mock import MagicMock, patch
 
 import paddle
 
-from paddlefleet.transformers.embedding_utils import dist_gather_tensor_with_gradient
+from paddlefleet.transformers.embedding_utils import (
+    dist_gather_tensor_with_gradient,
+)
 
 IS_SINGLE_CARD = paddle.distributed.get_world_size() <= 1
 

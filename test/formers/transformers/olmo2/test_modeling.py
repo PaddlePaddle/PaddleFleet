@@ -27,7 +27,10 @@ from paddlefleet.transformers import (
 )
 from formers.testing_utils import gpu_device_initializer, require_package
 from formers.transformers.test_configuration_common import ConfigTester
-from formers.transformers.test_modeling_common import ModelTesterMixin, ids_tensor
+from formers.transformers.test_modeling_common import (
+    ModelTesterMixin,
+    ids_tensor,
+)
 
 
 class Olmo2ModelTester:
@@ -100,8 +103,16 @@ class Olmo2ModelTester:
         )
 
     def prepare_config_and_inputs(self):
-        input_ids = ids_tensor([self.batch_size, self.seq_length], self.vocab_size, dtype=paddle.int64)
-        token_labels = ids_tensor([self.batch_size, self.seq_length], self.vocab_size, dtype=paddle.int64)
+        input_ids = ids_tensor(
+            [self.batch_size, self.seq_length],
+            self.vocab_size,
+            dtype=paddle.int64,
+        )
+        token_labels = ids_tensor(
+            [self.batch_size, self.seq_length],
+            self.vocab_size,
+            dtype=paddle.int64,
+        )
         config = self.get_config()
         return config, input_ids, token_labels
 
@@ -113,13 +124,19 @@ class Olmo2ModelTester:
         model = Olmo2Model(config)
         model.eval()
         result = model(input_ids)
-        self.parent.assertEqual(result[0].shape, [self.batch_size, self.seq_length, self.hidden_size])
+        self.parent.assertEqual(
+            result[0].shape,
+            [self.batch_size, self.seq_length, self.hidden_size],
+        )
 
     def create_and_check_for_causal_lm(self, config, input_ids, token_labels):
         model = Olmo2ForCausalLM(config)
         model.eval()
         result = model(input_ids, labels=token_labels, return_dict=True)
-        self.parent.assertEqual(result.logits.shape, [self.batch_size, self.seq_length, self.vocab_size])
+        self.parent.assertEqual(
+            result.logits.shape,
+            [self.batch_size, self.seq_length, self.vocab_size],
+        )
         self.parent.assertIsNotNone(result.loss)
 
     def create_and_check_lm_head_model(self, config, input_ids, token_labels):
@@ -133,24 +150,36 @@ class Olmo2ModelTester:
         )
         if self.parent.use_labels:
             self.parent.assertIsInstance(result[0].item(), float)
-            self.parent.assertEqual(result[1].shape, [self.batch_size, self.seq_length, self.vocab_size])
+            self.parent.assertEqual(
+                result[1].shape,
+                [self.batch_size, self.seq_length, self.vocab_size],
+            )
         else:
-            self.parent.assertEqual(result[0].shape, [self.batch_size, self.seq_length, self.vocab_size])
+            self.parent.assertEqual(
+                result[0].shape,
+                [self.batch_size, self.seq_length, self.vocab_size],
+            )
 
     def check_model_position_ids(self, config, input_ids, token_labels):
         model = Olmo2ForCausalLM(config)
         model.eval()
 
-        result_no_position_id = model(input_ids, return_dict=self.parent.return_dict, use_cache=False)
+        result_no_position_id = model(
+            input_ids, return_dict=self.parent.return_dict, use_cache=False
+        )
         batch_size, seq_len = input_ids.shape
-        position_ids = paddle.arange(seq_len, dtype=paddle.int64).expand((batch_size, seq_len))
+        position_ids = paddle.arange(seq_len, dtype=paddle.int64).expand(
+            (batch_size, seq_len)
+        )
         result_position_id = model(
             input_ids,
             position_ids=position_ids,
             return_dict=self.parent.return_dict,
             use_cache=False,
         )
-        self.parent.assertTrue((result_position_id[0] == result_no_position_id[0]).all())
+        self.parent.assertTrue(
+            (result_position_id[0] == result_no_position_id[0]).all()
+        )
 
 
 class Olmo2ModelTest(ModelTesterMixin, unittest.TestCase):
@@ -165,7 +194,9 @@ class Olmo2ModelTest(ModelTesterMixin, unittest.TestCase):
     def setUp(self):
         super().setUp()
         self.model_tester = Olmo2ModelTester(self)
-        self.config_tester = ConfigTester(self, config_class=Olmo2Config, vocab_size=256, hidden_size=24)
+        self.config_tester = ConfigTester(
+            self, config_class=Olmo2Config, vocab_size=256, hidden_size=24
+        )
 
     def test_model(self):
         config_and_inputs = self.model_tester.prepare_config_and_inputs()
@@ -230,11 +261,15 @@ class Olmo2CompatibilityTest(unittest.TestCase):
         input_ids = np.array([[1, 2, 3, 4, 5, 6, 7, 8]], dtype=np.int64)
 
         torch_model = HFOlmo2ForCausalLM.from_pretrained(
-            self.torch_model_path, torch_dtype=torch.float32, attn_implementation="eager"
+            self.torch_model_path,
+            torch_dtype=torch.float32,
+            attn_implementation="eager",
         )
         torch_model.eval()
         with torch.no_grad():
-            torch_logit = torch_model(torch.tensor(input_ids), return_dict=False, use_cache=False)[0]
+            torch_logit = torch_model(
+                torch.tensor(input_ids), return_dict=False, use_cache=False
+            )[0]
 
         paddle_model = Olmo2ForCausalLM.from_pretrained(
             self.torch_model_path,
@@ -244,11 +279,17 @@ class Olmo2CompatibilityTest(unittest.TestCase):
         paddle_model.eval()
         paddle_model.config._attn_implementation = "eager"
         with paddle.no_grad():
-            paddle_logit = paddle_model(paddle.to_tensor(input_ids), use_cache=False)[0]
+            paddle_logit = paddle_model(
+                paddle.to_tensor(input_ids), use_cache=False
+            )[0]
 
         self.assertTrue(
             np.allclose(
-                paddle_logit.detach().cpu().reshape([-1])[:16].astype("float32").numpy(),
+                paddle_logit.detach()
+                .cpu()
+                .reshape([-1])[:16]
+                .astype("float32")
+                .numpy(),
                 torch_logit.detach().cpu().reshape([-1])[:16].float().numpy(),
                 atol=1e-4,
                 rtol=1e-4,

@@ -45,7 +45,20 @@ class TestNormalizeAccuracyTarget(unittest.TestCase):
         # ``bool("false") is True``, so returning the input unchanged would turn
         # the default path into the accuracy-compatible path. The type check is
         # the point of this test: a truthy string must not survive.
-        for value in [False, None, "", 0, "false", "False", "FALSE", "no", "off", "none", "null", "0"]:
+        for value in [
+            False,
+            None,
+            "",
+            0,
+            "false",
+            "False",
+            "FALSE",
+            "no",
+            "off",
+            "none",
+            "null",
+            "0",
+        ]:
             with self.subTest(value=value):
                 result = normalize_accuracy_target(value)
                 self.assertIs(result, False)
@@ -55,7 +68,9 @@ class TestNormalizeAccuracyTarget(unittest.TestCase):
         """``True`` predates the "hf" target, so it keeps its historical meaning."""
         for value in [True, 1, "true", "True", "yes", "on", "1"]:
             with self.subTest(value=value):
-                self.assertEqual(normalize_accuracy_target(value), ACCURACY_TARGET_MEGATRON)
+                self.assertEqual(
+                    normalize_accuracy_target(value), ACCURACY_TARGET_MEGATRON
+                )
 
     def test_target_names_are_case_and_space_insensitive(self):
         for value, expected in [
@@ -71,7 +86,13 @@ class TestNormalizeAccuracyTarget(unittest.TestCase):
 
     def test_unknown_target_raises_instead_of_degrading(self):
         """A typo must fail loudly, not quietly select the default kernels."""
-        for value in ["megatron_lm", "megatron-lm", "huggingface", "torch", "mg"]:
+        for value in [
+            "megatron_lm",
+            "megatron-lm",
+            "huggingface",
+            "torch",
+            "mg",
+        ]:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 normalize_accuracy_target(value)
 
@@ -82,7 +103,10 @@ class TestNormalizeAccuracyTarget(unittest.TestCase):
     def test_non_bool_non_str_raises_type_error(self):
         """Truthy values of an unexpected type are a programming error."""
         for value in [2, 1.5, [1], {"a": 1}, object()]:
-            with self.subTest(value=value), self.assertRaises((TypeError, ValueError)):
+            with (
+                self.subTest(value=value),
+                self.assertRaises((TypeError, ValueError)),
+            ):
                 normalize_accuracy_target(value)
 
     def test_any_falsy_value_is_off_regardless_of_type(self):
@@ -145,13 +169,16 @@ class TestFinetuningArgumentsCLI(unittest.TestCase):
 
         parser = PdArgumentParser(FinetuningArguments)
         (args,) = parser.parse_args_into_dataclasses(
-            ["--output_dir", "/tmp/accuracy_target_cli"] + argv, look_for_args_file=False
+            ["--output_dir", "/tmp/accuracy_target_cli"] + argv,
+            look_for_args_file=False,
         )
         return args.use_accuracy_compatible
 
     def test_valueless_flag_still_means_megatron(self):
         value = self._parse(["--use_accuracy_compatible"])
-        self.assertEqual(normalize_accuracy_target(value), ACCURACY_TARGET_MEGATRON)
+        self.assertEqual(
+            normalize_accuracy_target(value), ACCURACY_TARGET_MEGATRON
+        )
 
     def test_omitted_flag_is_off(self):
         self.assertIs(normalize_accuracy_target(self._parse([])), False)
@@ -188,7 +215,9 @@ class TestSetLlmConfigNormalizes(unittest.TestCase):
         config = types.SimpleNamespace()
         args = types.SimpleNamespace(use_accuracy_compatible=True)
         LlmMetaConfig.set_llm_config(config, args)
-        self.assertEqual(config.use_accuracy_compatible, ACCURACY_TARGET_MEGATRON)
+        self.assertEqual(
+            config.use_accuracy_compatible, ACCURACY_TARGET_MEGATRON
+        )
 
     def test_hf_target_survives(self):
         config = types.SimpleNamespace()
@@ -208,11 +237,20 @@ class TestSetLlmConfigNormalizes(unittest.TestCase):
         import json
 
         config = types.SimpleNamespace()
-        LlmMetaConfig.set_llm_config(config, types.SimpleNamespace(use_accuracy_compatible="false"))
-        restored = json.loads(json.dumps({"use_accuracy_compatible": config.use_accuracy_compatible}))
+        LlmMetaConfig.set_llm_config(
+            config, types.SimpleNamespace(use_accuracy_compatible="false")
+        )
+        restored = json.loads(
+            json.dumps(
+                {"use_accuracy_compatible": config.use_accuracy_compatible}
+            )
+        )
         self.assertIs(restored["use_accuracy_compatible"], False)
         # A round trip must not re-introduce a truthy spelling.
-        self.assertIs(normalize_accuracy_target(restored["use_accuracy_compatible"]), False)
+        self.assertIs(
+            normalize_accuracy_target(restored["use_accuracy_compatible"]),
+            False,
+        )
 
 
 if __name__ == "__main__":

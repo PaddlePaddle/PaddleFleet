@@ -36,7 +36,9 @@ from paddlefleet.datasets.data_utils import estimate_training
 from paddlefleet.datasets.loader import create_dataset as create_dataset_sft
 from paddlefleet.datasets.loader import create_indexed_dataset
 from paddlefleet.datasets.SFTDataset import TextSequence
-from paddlefleet.datasets.template.template import get_template_and_fix_tokenizer
+from paddlefleet.datasets.template.template import (
+    get_template_and_fix_tokenizer,
+)
 from paddlefleet.nn.attention import AttentionInterface
 from paddlefleet.peft import LoRAConfig, LoRAModel
 from paddlefleet.trainer import (
@@ -105,7 +107,12 @@ def freeze_param_except_mtp(model, config):
         return None
 
     # not sure can work on all model
-    jackpot = set(range(config.num_hidden_layers, config.num_hidden_layers + config.mtp_num_layers))
+    jackpot = set(
+        range(
+            config.num_hidden_layers,
+            config.num_hidden_layers + config.mtp_num_layers,
+        )
+    )
     for name, param in model.state_dict().items():
         layer_idx = extract_layer_idx(name)
         is_mtp = layer_idx in jackpot
@@ -116,7 +123,9 @@ def freeze_param_except_mtp(model, config):
 
 
 def create_pretrained_dataset(training_args, data_args, model_args):
-    assert data_args.input_dir is not None and len(data_args.input_dir.split()) > 1
+    assert (
+        data_args.input_dir is not None and len(data_args.input_dir.split()) > 1
+    )
 
     check_data_split(
         data_args.split,
@@ -139,24 +148,34 @@ def create_pretrained_dataset(training_args, data_args, model_args):
         * training_args.dataset_world_size
         * training_args.eval_iters
         * (training_args.max_steps // training_args.eval_steps + 1),
-        training_args.per_device_eval_batch_size * training_args.dataset_world_size * training_args.test_iters,
+        training_args.per_device_eval_batch_size
+        * training_args.dataset_world_size
+        * training_args.test_iters,
     ]
 
-    train_dataset, valid_dataset, test_dataset = build_train_valid_test_datasets(
-        data_prefix=data_args.input_dir.split(),
-        data_impl="mmap",
-        splits_string=data_args.split,
-        train_val_test_num_samples=train_val_test_num_samples,
-        seq_length=data_args.max_seq_len + training_args.num_nextn_predict_layers,
-        seed=training_args.seed,
-        skip_warmup=True,
-        data_cache_path=None,
+    train_dataset, valid_dataset, test_dataset = (
+        build_train_valid_test_datasets(
+            data_prefix=data_args.input_dir.split(),
+            data_impl="mmap",
+            splits_string=data_args.split,
+            train_val_test_num_samples=train_val_test_num_samples,
+            seq_length=data_args.max_seq_len
+            + training_args.num_nextn_predict_layers,
+            seed=training_args.seed,
+            skip_warmup=True,
+            data_cache_path=None,
+        )
     )
 
     from paddlefleet.data import Stack
 
     def _collate_data(batch, stack_fn=Stack()):
-        input_keys = ["input_ids", "labels", "position_ids", "attn_mask_startend_row_indices"]
+        input_keys = [
+            "input_ids",
+            "labels",
+            "position_ids",
+            "attn_mask_startend_row_indices",
+        ]
         return_list = []
         for batch_sequence in batch:
             # tokens
@@ -164,7 +183,9 @@ def create_pretrained_dataset(training_args, data_args, model_args):
             # labels
             padded_labels = np.array([batch_sequence["text"][1:]])
             # position_ids
-            padded_position_ids = np.array([sum(batch_sequence["position_ids"], [])[:-1]])
+            padded_position_ids = np.array(
+                [sum(batch_sequence["position_ids"], [])[:-1]]
+            )
             return_list.append(
                 [
                     padded_token_ids,
@@ -181,12 +202,15 @@ def create_pretrained_dataset(training_args, data_args, model_args):
             return_list[-1].append(
                 gen_attn_mask_startend_row_indices(
                     oral_position_ids,
-                    data_args.max_seq_len + training_args.num_nextn_predict_layers,
+                    data_args.max_seq_len
+                    + training_args.num_nextn_predict_layers,
                     model_args.use_global_causal_attn,
                 )[:, :, :-1, :]
             )
 
-        return_list = [np.concatenate(tensor_list) for tensor_list in zip(*return_list)]
+        return_list = [
+            np.concatenate(tensor_list) for tensor_list in zip(*return_list)
+        ]
         input_dict = dict(zip(input_keys, return_list))
         return input_dict
 
@@ -244,9 +268,16 @@ def run_sft(
 
     # Detecting last checkpoint.
     last_checkpoint = None
-    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
+    if (
+        os.path.isdir(training_args.output_dir)
+        and training_args.do_train
+        and not training_args.overwrite_output_dir
+    ):
         last_checkpoint = get_last_checkpoint(training_args.output_dir)
-        if last_checkpoint is not None and training_args.resume_from_checkpoint is None:
+        if (
+            last_checkpoint is not None
+            and training_args.resume_from_checkpoint is None
+        ):
             logger.info(
                 f"Checkpoint detected, resuming training at {last_checkpoint}. To avoid this behavior, change "
                 "the `--output_dir` or add `--overwrite_output_dir` to train from scratch."
@@ -269,7 +300,9 @@ def run_sft(
             ignore_modules=[".*out_linear.*"],
         )
     else:
-        quantization_config = dict(weight_quantize_algo=finetuning_args.weight_quantize_algo)
+        quantization_config = dict(
+            weight_quantize_algo=finetuning_args.weight_quantize_algo
+        )
     quantization_config = QuantizationConfig.from_dict(quantization_config)
 
     model_config = AutoConfig.from_pretrained(
@@ -293,11 +326,16 @@ def run_sft(
 
     architectures_to_check = {"Qwen2Moe", "DeepseekV2", "DeepseekV3"}
     if (
-        any(architecture in str(model_config.architectures) for architecture in architectures_to_check)
+        any(
+            architecture in str(model_config.architectures)
+            for architecture in architectures_to_check
+        )
         and training_args.data_parallel_size > 1
         and not training_args.use_expert_parallel
     ):
-        raise ValueError("Please set use_expert_parallel to true in expert parallel mode.")
+        raise ValueError(
+            "Please set use_expert_parallel to true in expert parallel mode."
+        )
 
     # (Liuting) Not support acc calculation now due to MTP.
     if "DeepseekV3" in str(model_config.architectures):
@@ -324,7 +362,9 @@ def run_sft(
     if hasattr(model_config, "hidden_dropout_prob"):
         model_config.hidden_dropout_prob = finetuning_args.hidden_dropout_prob
     if hasattr(model_config, "attention_probs_dropout_prob"):
-        model_config.attention_probs_dropout_prob = finetuning_args.attention_probs_dropout_prob
+        model_config.attention_probs_dropout_prob = (
+            finetuning_args.attention_probs_dropout_prob
+        )
     if hasattr(model_config, "ignore_index"):
         model_config.ignore_index = -100
 
@@ -344,25 +384,41 @@ def run_sft(
     # Sync arguments to MLLM sub_config
     if getattr(model_config, "text_config", None) is not None:
         LlmMetaConfig.set_llm_config(model_config.text_config, training_args)
-        model_config.text_config._attn_implementation = model_args._attn_implementation
+        model_config.text_config._attn_implementation = (
+            model_args._attn_implementation
+        )
         model_config.text_config.max_sequence_length = data_args.max_seq_len
         if hasattr(model_config.text_config, "mtp_num_hidden_layers"):
-            model_config.text_config.mtp_num_hidden_layers = getattr(training_args, "num_nextn_predict_layers", 0)
+            model_config.text_config.mtp_num_hidden_layers = getattr(
+                training_args, "num_nextn_predict_layers", 0
+            )
     if getattr(model_config, "vision_config", None) is not None:
-        model_config.vision_config._attn_implementation = model_args._attn_implementation
-        model_config.vision_config.recompute_granularity = model_config.recompute_granularity
-        model_config.vision_config.recompute_method = model_config.recompute_method
-        model_config.vision_config.recompute_num_layers = model_config.recompute_num_layers
+        model_config.vision_config._attn_implementation = (
+            model_args._attn_implementation
+        )
+        model_config.vision_config.recompute_granularity = (
+            model_config.recompute_granularity
+        )
+        model_config.vision_config.recompute_method = (
+            model_config.recompute_method
+        )
+        model_config.vision_config.recompute_num_layers = (
+            model_config.recompute_num_layers
+        )
         # recompute_granularity="selective" requires recompute_modules to be set,
         # otherwise the vision TransformerConfig.__post_init__ assertion fails.
-        model_config.vision_config.recompute_modules = getattr(model_config, "recompute_modules", None)
+        model_config.vision_config.recompute_modules = getattr(
+            model_config, "recompute_modules", None
+        )
 
     # Sync freeze_config to model_config so that Fleet model providers can read it
     freeze_config = getattr(training_args, "freeze_config", "")
     if freeze_config:
         model_config.freeze_vision_model = "freeze_vision" in freeze_config
         model_config.freeze_language_model = "freeze_llm" in freeze_config
-        model_config.freeze_vision_projection = "freeze_aligner" in freeze_config
+        model_config.freeze_vision_projection = (
+            "freeze_aligner" in freeze_config
+        )
 
     # Sync enable_auto_parallel to model_config for Fleet to access
     model_config.enable_auto_parallel = training_args.enable_auto_parallel
@@ -374,21 +430,30 @@ def run_sft(
         logger.info("Making offline data..., model is not loaded!")
         logger.info(f"Training data: {data_args.train_dataset_path}")
     else:
-        logger.info(f"Loading model weights from {model_args.model_name_or_path}")
+        logger.info(
+            f"Loading model weights from {model_args.model_name_or_path}"
+        )
         if "VL" in model_args.stage:
             model_class = AutoModelForConditionalGeneration
             if training_args.pipeline_model_parallel_size > 1:
                 if data_args.eval_with_do_generation and training_args.do_eval:
-                    raise ValueError("Please set eval_with_do_generation to false in pipeline parallel mode.")
+                    raise ValueError(
+                        "Please set eval_with_do_generation to false in pipeline parallel mode."
+                    )
                 model_class = AutoModelForConditionalGenerationPipe
         else:
             model_class = AutoModelForCausalLM
             if training_args.pipeline_model_parallel_size > 1:
                 if data_args.eval_with_do_generation and training_args.do_eval:
-                    raise ValueError("Please set eval_with_do_generation to false in pipeline parallel mode.")
+                    raise ValueError(
+                        "Please set eval_with_do_generation to false in pipeline parallel mode."
+                    )
                 model_class = AutoModelForCausalLMPipe
 
-        if model_args.continue_training and not training_args.autotuner_benchmark:
+        if (
+            model_args.continue_training
+            and not training_args.autotuner_benchmark
+        ):
             model = model_class.from_pretrained(
                 model_args.model_name_or_path,
                 config=model_config,
@@ -406,16 +471,28 @@ def run_sft(
                 def neft_post_hook(module, input, output):
                     if module.training:
                         mag_norm = model_args.neftune_noise_alpha / paddle.sqrt(
-                            paddle.to_tensor(output.shape[0] * output.shape[1], dtype="float32")
+                            paddle.to_tensor(
+                                output.shape[0] * output.shape[1],
+                                dtype="float32",
+                            )
                         )
                         output = output + paddle.uniform(
-                            shape=output.shape, dtype=output.dtype, min=-mag_norm, max=mag_norm
+                            shape=output.shape,
+                            dtype=output.dtype,
+                            min=-mag_norm,
+                            max=mag_norm,
                         )
                     return output
 
-                neft_post_hook_handle = model.get_input_embeddings().register_forward_post_hook(neft_post_hook)
+                neft_post_hook_handle = (
+                    model.get_input_embeddings().register_forward_post_hook(
+                        neft_post_hook
+                    )
+                )
             else:
-                raise NotImplementedError("Only support neftune for model with get_input_embeddings")
+                raise NotImplementedError(
+                    "Only support neftune for model with get_input_embeddings"
+                )
 
     runtime_timer = RuntimeTimer("Creating SFT MapDataset")
 
@@ -429,10 +506,14 @@ def run_sft(
     if tokenizer.chat_template is not None:
         data_args.eval_with_do_generation = False
 
-    if isinstance(tokenizer, LlamaTokenizer) or isinstance(tokenizer, Llama3Tokenizer):
+    if isinstance(tokenizer, LlamaTokenizer) or isinstance(
+        tokenizer, Llama3Tokenizer
+    ):
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    processor = AutoProcessor.from_pretrained(model_args.model_name_or_path, use_fast=data_args.processor_use_fast)
+    processor = AutoProcessor.from_pretrained(
+        model_args.model_name_or_path, use_fast=data_args.processor_use_fast
+    )
     # The multimodal plugins read the resolution bounds off the processor
     # (falling back to a hardcoded 768*768 / 32*32), so without wiring these the
     # --max_pixels / --min_pixels arguments have no way to reach image
@@ -505,10 +586,18 @@ def run_sft(
             * max(training_args.sharding_parallel_size, 1)
         )
 
-        logger.info(f"training_args.per_device_train_batch_size: {training_args.per_device_train_batch_size}")
-        logger.info(f"training_args.gradient_accumulation_steps: {training_args.gradient_accumulation_steps}")
-        logger.info(f"training_args.data_parallel_size: {training_args.data_parallel_size}")
-        logger.info(f"training_args.sharding_parallel_size: {training_args.sharding_parallel_size}")
+        logger.info(
+            f"training_args.per_device_train_batch_size: {training_args.per_device_train_batch_size}"
+        )
+        logger.info(
+            f"training_args.gradient_accumulation_steps: {training_args.gradient_accumulation_steps}"
+        )
+        logger.info(
+            f"training_args.data_parallel_size: {training_args.data_parallel_size}"
+        )
+        logger.info(
+            f"training_args.sharding_parallel_size: {training_args.sharding_parallel_size}"
+        )
         logger.info(f"global_batch_size: {global_batch_size}")
 
         def fetch_and_serialize(generator, dtype):
@@ -518,7 +607,9 @@ def run_sft(
                 serialized = []
                 for key in train_builder._data_file_dict.keys():
                     tensor = np.array(getattr(sequence, key), dtype=dtype)
-                    serialized.append((key, tensor.tobytes(order="C"), tensor.size))
+                    serialized.append(
+                        (key, tensor.tobytes(order="C"), tensor.size)
+                    )
                 result.append(serialized)
             return result
 
@@ -529,9 +620,14 @@ def run_sft(
             and paddle.distributed.get_rank() == 0
         ):
             runtime_timer.start("Create SFT Train MapDataset")
-            os.makedirs(os.path.join(data_args.dataset_output_dir, "train"), exist_ok=True)
+            os.makedirs(
+                os.path.join(data_args.dataset_output_dir, "train"),
+                exist_ok=True,
+            )
 
-            train_output_idx_files = os.path.join(data_args.dataset_output_dir, "train", "index.idx")
+            train_output_idx_files = os.path.join(
+                data_args.dataset_output_dir, "train", "index.idx"
+            )
             train_dataset = create_dataset_sft(
                 task_group=data_args.train_dataset_path,
                 task_group_prob=data_args.train_dataset_prob,
@@ -540,20 +636,28 @@ def run_sft(
             )
             output_file_dict = {}
             train_dir = os.path.join(data_args.dataset_output_dir, "train")
-            index_file = os.path.join(data_args.dataset_output_dir, "train", "index.idx")
+            index_file = os.path.join(
+                data_args.dataset_output_dir, "train", "index.idx"
+            )
             for field in fields(dataclass):
                 output_path = os.path.join(train_dir, f"{field.name}.bin")
                 output_file_dict[field.name] = output_path
-            train_builder = SFTMMapIndexedDatasetBuilder(output_file_dict, save_dtype, index_file=index_file)
+            train_builder = SFTMMapIndexedDatasetBuilder(
+                output_file_dict, save_dtype, index_file=index_file
+            )
             train_sample_generator = DataGenerator(train_dataset)
             count = 0
             start_time = time.time()
 
             with ThreadPoolExecutor(max_workers=2) as executor:
-                future = executor.submit(fetch_and_serialize, train_sample_generator, save_dtype)
+                future = executor.submit(
+                    fetch_and_serialize, train_sample_generator, save_dtype
+                )
                 while not train_dataset.iter_all_examples:
                     serialized_sequences = future.result()
-                    future = executor.submit(fetch_and_serialize, train_sample_generator, save_dtype)
+                    future = executor.submit(
+                        fetch_and_serialize, train_sample_generator, save_dtype
+                    )
                     if train_dataset.iter_all_examples:
                         break
                     for serialized in serialized_sequences:
@@ -574,9 +678,14 @@ def run_sft(
             and paddle.distributed.get_rank() == 0
         ):
             runtime_timer.start("Create SFT Eval MapDataset")
-            os.makedirs(os.path.join(data_args.dataset_output_dir, "eval"), exist_ok=True)
+            os.makedirs(
+                os.path.join(data_args.dataset_output_dir, "eval"),
+                exist_ok=True,
+            )
 
-            eval_output_idx_files = os.path.join(data_args.dataset_output_dir, "eval", "index.idx")
+            eval_output_idx_files = os.path.join(
+                data_args.dataset_output_dir, "eval", "index.idx"
+            )
             eval_dataset = create_dataset_sft(
                 task_group=data_args.eval_dataset_path,
                 task_group_prob=data_args.eval_dataset_prob,
@@ -586,11 +695,15 @@ def run_sft(
             )
             output_file_dict = {}
             eval_dir = os.path.join(data_args.dataset_output_dir, "eval")
-            index_file = os.path.join(data_args.dataset_output_dir, "eval", "index.idx")
+            index_file = os.path.join(
+                data_args.dataset_output_dir, "eval", "index.idx"
+            )
             for field in fields(dataclass):
                 output_path = os.path.join(eval_dir, f"{field.name}.bin")
                 output_file_dict[field.name] = output_path
-            eval_builder = SFTMMapIndexedDatasetBuilder(output_file_dict, save_dtype, index_file=index_file)
+            eval_builder = SFTMMapIndexedDatasetBuilder(
+                output_file_dict, save_dtype, index_file=index_file
+            )
             for sequences in eval_dataset:
                 for sequence in sequences:
                     eval_builder.add_item(sequence)
@@ -602,8 +715,8 @@ def run_sft(
 
     if data_args.dataset_type == "pretrain":
         training_args.test_iters = training_args.eval_iters * 10
-        train_dataset, eval_dataset, test_dataset, data_collator = create_pretrained_dataset(
-            training_args, data_args, model_args
+        train_dataset, eval_dataset, test_dataset, data_collator = (
+            create_pretrained_dataset(training_args, data_args, model_args)
         )
     elif data_args.dataset_type == "offline":
         train_file_path = os.path.join(data_args.input_dir, "train")
@@ -647,17 +760,27 @@ def run_sft(
     if getattr(model, "is_fleet", False) and not model_args.lora:
         if training_args.per_device_train_batch_size > 1:
             max_seq_len = data_args.max_seq_len
-            logger.warning(f"Setting max_seq_len to {max_seq_len} for mbs > 1 using PaddleFleet model.")
+            logger.warning(
+                f"Setting max_seq_len to {max_seq_len} for mbs > 1 using PaddleFleet model."
+            )
         else:
             max_seq_len = None
-            logger.warning("Setting max_seq_len to None for mbs = 1 using PaddleFleet Model.")
+            logger.warning(
+                "Setting max_seq_len to None for mbs = 1 using PaddleFleet Model."
+            )
     else:
         max_seq_len = (
             data_args.max_seq_len
-            if (data_args.packing or training_args.sequence_parallel or training_args.context_parallel_size > 1)
+            if (
+                data_args.packing
+                or training_args.sequence_parallel
+                or training_args.context_parallel_size > 1
+            )
             else None
         )
-        logger.info(f"Setting max_seq_len to {max_seq_len} using PaddleFleet Model.")
+        logger.info(
+            f"Setting max_seq_len to {max_seq_len} using PaddleFleet Model."
+        )
     if data_args.dataset_type != "pretrain":
         if "VL" in model_args.stage:
             data_collator = partial(
@@ -687,9 +810,14 @@ def run_sft(
                 "When using 'random' mix_strategy, max_steps must be explicitly set (cannot be -1). "
                 "Random mixing requires a fixed number of training steps to properly sample data."
             )
-        if training_args.should_load_dataset and paddle.distributed.get_rank() == 0:
+        if (
+            training_args.should_load_dataset
+            and paddle.distributed.get_rank() == 0
+        ):
             if data_args.dataset_type not in {"pretrain", "offline", "map"}:
-                training_args.max_steps = estimate_training(train_dataset, data_args, training_args, model_args)
+                training_args.max_steps = estimate_training(
+                    train_dataset, data_args, training_args, model_args
+                )
                 del train_dataset
                 gc.collect()
                 train_dataset = create_dataset_sft(
@@ -699,7 +827,9 @@ def run_sft(
                     **dataset_config,
                 )
             else:
-                training_args.max_steps = math.ceil(len(train_dataset) / training_args.global_batch_size)
+                training_args.max_steps = math.ceil(
+                    len(train_dataset) / training_args.global_batch_size
+                )
                 training_args.max_steps *= training_args.num_train_epochs
                 logger.info(
                     f"len(train_dataset): {len(train_dataset)}, global_batch_size: {training_args.global_batch_size}, \
@@ -712,27 +842,47 @@ def run_sft(
             paddle.distributed.broadcast(max_steps, src=0)
             training_args.max_steps = int(max_steps.item())
         if training_args.max_steps <= 0:
-            raise ValueError(f"Invalid max_steps: {training_args.max_steps}. Please check your dataset")
+            raise ValueError(
+                f"Invalid max_steps: {training_args.max_steps}. Please check your dataset"
+            )
 
-        logger.info(f"Re-setting training_args.max_steps to {training_args.max_steps}.")
+        logger.info(
+            f"Re-setting training_args.max_steps to {training_args.max_steps}."
+        )
     # Create the learning_rate sheduler and optimizer
     if training_args.decay_steps is None:
         training_args.decay_steps = training_args.max_steps
 
     if training_args.save_strategy == IntervalStrategy.EPOCH:
         training_args.save_strategy = IntervalStrategy.STEPS
-        training_args.save_steps = int(training_args.max_steps / training_args.num_train_epochs)
+        training_args.save_steps = int(
+            training_args.max_steps / training_args.num_train_epochs
+        )
     if training_args.evaluation_strategy == IntervalStrategy.EPOCH:
         training_args.evaluation_strategy = IntervalStrategy.STEPS
-        training_args.eval_steps = int(training_args.max_steps / training_args.num_train_epochs)
+        training_args.eval_steps = int(
+            training_args.max_steps / training_args.num_train_epochs
+        )
     if training_args.logging_strategy == IntervalStrategy.EPOCH:
         training_args.logging_strategy = IntervalStrategy.STEPS
-        training_args.logging_steps = int(training_args.max_steps / training_args.num_train_epochs)
+        training_args.logging_steps = int(
+            training_args.max_steps / training_args.num_train_epochs
+        )
 
     callbacks = []
-    if getattr(model_config.get_text_config(), "topk_method", None) == "noaux_tc":
-        callbacks += [MoECorrectionBiasAdjustCallback(lr=training_args.moe_router_bias_update_rate)]
-    elif getattr(model_config.get_text_config(), "topk_method", None) == "quantile_balancing":
+    if (
+        getattr(model_config.get_text_config(), "topk_method", None)
+        == "noaux_tc"
+    ):
+        callbacks += [
+            MoECorrectionBiasAdjustCallback(
+                lr=training_args.moe_router_bias_update_rate
+            )
+        ]
+    elif (
+        getattr(model_config.get_text_config(), "topk_method", None)
+        == "quantile_balancing"
+    ):
         callbacks += [MoEQuantileBalancingCallback()]
 
     if training_args.use_expert_parallel:
@@ -749,8 +899,16 @@ def run_sft(
     trainer = SFTTrainer(
         model=model,
         args=training_args,
-        train_dataset=(train_dataset if training_args.do_train and training_args.should_load_dataset else None),
-        eval_dataset=(eval_dataset if training_args.do_eval and training_args.should_load_dataset else None),
+        train_dataset=(
+            train_dataset
+            if training_args.do_train and training_args.should_load_dataset
+            else None
+        ),
+        eval_dataset=(
+            eval_dataset
+            if training_args.do_eval and training_args.should_load_dataset
+            else None
+        ),
         tokenizer=tokenizer,
         processing_class=processor,
         data_collator=data_collator,
@@ -764,7 +922,10 @@ def run_sft(
         freeze_param_except_mtp(model, model_config)
 
     trainable_parameters = [
-        p for p in model.parameters() if not p.stop_gradient or ("quantization_linear" in p.name and "w_1" in p.name)
+        p
+        for p in model.parameters()
+        if not p.stop_gradient
+        or ("quantization_linear" in p.name and "w_1" in p.name)
     ]
     trainer.set_optimizer_grouped_parameters(trainable_parameters)
 
@@ -786,11 +947,19 @@ def run_sft(
             * training_args.max_steps
         )
         total_tokens_per_second_per_gpu = (
-            total_tokens / train_result.metrics["train_runtime"] / training_args.world_size
+            total_tokens
+            / train_result.metrics["train_runtime"]
+            / training_args.world_size
         )
-        logger.info(f"Total_Tokens_per_second_per_gpu: {total_tokens_per_second_per_gpu} ")
+        logger.info(
+            f"Total_Tokens_per_second_per_gpu: {total_tokens_per_second_per_gpu} "
+        )
         if not training_args.autotuner_benchmark:
-            trainer.save_model(merge_tensor_parallel=training_args.tensor_model_parallel_size > 1, last_fc_to_hf=True)
+            trainer.save_model(
+                merge_tensor_parallel=training_args.tensor_model_parallel_size
+                > 1,
+                last_fc_to_hf=True,
+            )
             trainer.log_metrics("train", train_result.metrics)
             trainer.save_metrics("train", train_result.metrics)
             trainer.save_state()
@@ -799,20 +968,24 @@ def run_sft(
 def create_peft_model(model_args, training_args, dtype, model):
     if model_args.lora:
         if training_args.sharding_parallel_size > 1:
-            assert (
-                not training_args.stage1_overlap
-            ), "Currently not support enabling sharding_stage1_overlap in lora mode."
+            assert not training_args.stage1_overlap, (
+                "Currently not support enabling sharding_stage1_overlap in lora mode."
+            )
         if model_args.lora_path is None:
             target_modules = get_lora_target_modules(model)
 
             # Freeze model based on training args (Supports for MLLM LoRA training)
             if getattr(training_args, "freeze_config", ""):
-                target_modules = get_multimodel_lora_target_modules(model, target_modules, training_args.freeze_config)
+                target_modules = get_multimodel_lora_target_modules(
+                    model, target_modules, training_args.freeze_config
+                )
 
             lora_config = LoRAConfig(
                 target_modules=target_modules,
                 r=model_args.lora_rank,
-                lora_alpha=2 * model_args.lora_rank if not model_args.rslora else 4,
+                lora_alpha=2 * model_args.lora_rank
+                if not model_args.rslora
+                else 4,
                 rslora=model_args.rslora,
                 lora_plus_scale=model_args.lora_plus_scale,
                 merge_weights=False,

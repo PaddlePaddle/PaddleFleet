@@ -35,10 +35,14 @@ from paddlefleet.utils.hf_bitexact_hybrid_clip import (
     HFBitexactHybridParallelClipGrad,
     restore_hf_bitexact_clip,
 )
-from paddlefleet.utils.moe_hybrid_parallel_optimizer import MoEHybridParallelClipGrad
+from paddlefleet.utils.moe_hybrid_parallel_optimizer import (
+    MoEHybridParallelClipGrad,
+)
 
 
-def _param(name, *, is_distributed=False, no_sync=False, need_clip=True, groups=None):
+def _param(
+    name, *, is_distributed=False, no_sync=False, need_clip=True, groups=None
+):
     p = SimpleNamespace(
         name=name,
         is_distributed=is_distributed,
@@ -67,7 +71,11 @@ def _find_differing_grouping():
     candidates = [1.0, 2.0, 3.0, 4.0, 1.5, 2.5, 3.5, 5.0]
 
     def bf16(x):
-        return float(paddle.to_tensor([x], dtype="float32").astype("bfloat16").astype("float32")[0])
+        return float(
+            paddle.to_tensor([x], dtype="float32")
+            .astype("bfloat16")
+            .astype("float32")[0]
+        )
 
     for a, b, c, d in itertools.product(candidates, repeat=4):
         whole = bf16(math.sqrt(a * a + b * b + c * c + d * d))
@@ -102,7 +110,9 @@ class TestHFClipRecipe:
         g = paddle.to_tensor([0.1, 0.2], dtype="float32")
         p = _param("p")
         clip._dygraph_clip([(p, g)])
-        expected = _bf16(paddle.to_tensor([0.1], dtype="float32")) + _bf16(paddle.to_tensor([0.2], dtype="float32"))
+        expected = _bf16(paddle.to_tensor([0.1], dtype="float32")) + _bf16(
+            paddle.to_tensor([0.2], dtype="float32")
+        )
         assert float(g.sum()) == float(expected)
 
 
@@ -157,10 +167,14 @@ class TestMoEHybridParallelClipHf:
         p = _param("w")
         inner._dygraph_clip([(p, g)])
         single_norm = inner.last_global_norm
-        wrapper._dygraph_clip([(p, paddle.to_tensor([1.0, 2.0, 3.0], dtype="float32"))])
+        wrapper._dygraph_clip(
+            [(p, paddle.to_tensor([1.0, 2.0, 3.0], dtype="float32"))]
+        )
         # identical to the single-card clip on the same input
         assert wrapper.stat["global_grad_norm"] == single_norm
-        ref = _bf16(paddle.sqrt(paddle.to_tensor([1.0 + 4.0 + 9.0], dtype="float32")))
+        ref = _bf16(
+            paddle.sqrt(paddle.to_tensor([1.0 + 4.0 + 9.0], dtype="float32"))
+        )
         assert wrapper.stat["global_grad_norm"] == float(ref)
 
     def test_distributed_wrapper_hf_uses_bf16_norm_squares(self):
@@ -188,7 +202,9 @@ class TestMoEHybridParallelClipHf:
         g1 = paddle.to_tensor([1.0, 0.0], dtype="float32")
         g2 = paddle.to_tensor([0.0, 2.0], dtype="float32")
         wrapper._dygraph_clip([(_param("a"), g1), (_param("b"), g2)])
-        expected = float(_bf16(paddle.sqrt(paddle.to_tensor([1.0 + 4.0], dtype="float32"))))
+        expected = float(
+            _bf16(paddle.sqrt(paddle.to_tensor([1.0 + 4.0], dtype="float32")))
+        )
         assert wrapper.stat["global_grad_norm"] == expected
 
     def test_fused_parameter_is_split_in_the_distributed_bucket(self):
@@ -200,7 +216,14 @@ class TestMoEHybridParallelClipHf:
         """
         values, g1, g2, (whole, grouped) = _find_differing_grouping()
         inner, wrapper = self._wrapped_clip()
-        wrapper._dygraph_clip([(_param("fused", groups=[g1, g2]), paddle.to_tensor([values], dtype="float32"))])
+        wrapper._dygraph_clip(
+            [
+                (
+                    _param("fused", groups=[g1, g2]),
+                    paddle.to_tensor([values], dtype="float32"),
+                )
+            ]
+        )
         assert wrapper.stat["global_grad_norm"] == grouped
         assert grouped != whole
 
@@ -210,11 +233,20 @@ class TestMoEHybridParallelClipHf:
         down for those groups."""
         inner = _clip(1.0)
         wrapper = MoEHybridParallelClipGrad(
-            MoEHybridParallelClipGrad(inner, hcg=None, timers=None), hcg=None, timers=None
+            MoEHybridParallelClipGrad(inner, hcg=None, timers=None),
+            hcg=None,
+            timers=None,
         )
         wrapper._global_norm = lambda *a, **k: None
         values, g1, g2, (whole, grouped) = _find_differing_grouping()
-        wrapper._dygraph_clip([(_param("fused", groups=[g1, g2]), paddle.to_tensor([values], dtype="float32"))])
+        wrapper._dygraph_clip(
+            [
+                (
+                    _param("fused", groups=[g1, g2]),
+                    paddle.to_tensor([values], dtype="float32"),
+                )
+            ]
+        )
         assert wrapper.stat["global_grad_norm"] == grouped
 
 
@@ -230,15 +262,21 @@ class TestHFBitexactHybridParallelClipGrad:
 
     def _wrapped_clip(self, norm=1.0):
         inner = _clip(norm)
-        wrapper = HFBitexactHybridParallelClipGrad(inner, hcg=None, split_norm_comm=False, timers=None)
+        wrapper = HFBitexactHybridParallelClipGrad(
+            inner, hcg=None, split_norm_comm=False, timers=None
+        )
         wrapper._global_norm = lambda *a, **k: None
         return inner, wrapper
 
     def test_matches_the_single_card_clip(self):
         inner, wrapper = self._wrapped_clip()
         reference = _clip(1.0)
-        reference._dygraph_clip([(_param("w"), paddle.to_tensor([1.0, 2.0, 3.0], dtype="float32"))])
-        out = wrapper._dygraph_clip([(_param("w"), paddle.to_tensor([1.0, 2.0, 3.0], dtype="float32"))])
+        reference._dygraph_clip(
+            [(_param("w"), paddle.to_tensor([1.0, 2.0, 3.0], dtype="float32"))]
+        )
+        out = wrapper._dygraph_clip(
+            [(_param("w"), paddle.to_tensor([1.0, 2.0, 3.0], dtype="float32"))]
+        )
         assert inner.last_global_norm == reference.last_global_norm
         assert inner.last_clip_coef == reference.last_clip_coef
         assert out[0][1] is not None
@@ -246,7 +284,14 @@ class TestHFBitexactHybridParallelClipGrad:
     def test_fused_parameter_is_split_like_the_reference(self):
         values, g1, g2, (whole, grouped) = _find_differing_grouping()
         inner, wrapper = self._wrapped_clip()
-        wrapper._dygraph_clip([(_param("fused", groups=[g1, g2]), paddle.to_tensor([values], dtype="float32"))])
+        wrapper._dygraph_clip(
+            [
+                (
+                    _param("fused", groups=[g1, g2]),
+                    paddle.to_tensor([values], dtype="float32"),
+                )
+            ]
+        )
         assert inner.last_global_norm == grouped
         assert grouped != whole
 
@@ -264,8 +309,14 @@ class TestHFBitexactHybridParallelClipGrad:
         # 3.0 is exact in BF16, so each bucket holds exactly the square.
         wrapper._dygraph_clip(
             [
-                (_param("mp", is_distributed=True), paddle.to_tensor([3.0], dtype="float32")),
-                (_param("replicated"), paddle.to_tensor([4.0], dtype="float32")),
+                (
+                    _param("mp", is_distributed=True),
+                    paddle.to_tensor([3.0], dtype="float32"),
+                ),
+                (
+                    _param("replicated"),
+                    paddle.to_tensor([4.0], dtype="float32"),
+                ),
             ]
         )
         assert seen == {"dist": 9.0, "not_dist": 16.0}
@@ -297,7 +348,10 @@ class TestRestoreHFBitexactClip:
 
     @staticmethod
     def _dist_optimizer(clip):
-        inner = SimpleNamespace(_grad_clip=HybridParallelClipGrad(clip, hcg=None), _param_groups=None)
+        inner = SimpleNamespace(
+            _grad_clip=HybridParallelClipGrad(clip, hcg=None),
+            _param_groups=None,
+        )
         return SimpleNamespace(_inner_opt=inner), inner
 
     def test_hf_clip_is_restored(self):
@@ -306,7 +360,9 @@ class TestRestoreHFBitexactClip:
         assert isinstance(inner._grad_clip, HFBitexactHybridParallelClipGrad)
 
     def test_other_clips_are_left_alone(self):
-        dist_opt, inner = self._dist_optimizer(paddle.nn.ClipGradByGlobalNorm(1.0))
+        dist_opt, inner = self._dist_optimizer(
+            paddle.nn.ClipGradByGlobalNorm(1.0)
+        )
         original = inner._grad_clip
         assert restore_hf_bitexact_clip(dist_opt) is False
         assert inner._grad_clip is original
@@ -314,7 +370,9 @@ class TestRestoreHFBitexactClip:
     def test_moe_wrapper_is_left_alone(self):
         """``MoEHybridParallelClipGrad`` already keeps the recipe itself."""
         inner = SimpleNamespace(
-            _grad_clip=MoEHybridParallelClipGrad(_clip(1.0), hcg=None, timers=None),
+            _grad_clip=MoEHybridParallelClipGrad(
+                _clip(1.0), hcg=None, timers=None
+            ),
             _param_groups=None,
         )
         dist_opt = SimpleNamespace(_inner_opt=inner)
@@ -325,7 +383,9 @@ class TestRestoreHFBitexactClip:
     def test_param_groups_are_restored(self):
         group = {"grad_clip": HybridParallelClipGrad(_clip(1.0), hcg=None)}
         inner = SimpleNamespace(_grad_clip=None, _param_groups=[group])
-        assert restore_hf_bitexact_clip(SimpleNamespace(_inner_opt=inner)) is True
+        assert (
+            restore_hf_bitexact_clip(SimpleNamespace(_inner_opt=inner)) is True
+        )
         assert isinstance(group["grad_clip"], HFBitexactHybridParallelClipGrad)
 
     def test_double_wrapped_param_group_is_restored(self):
@@ -334,10 +394,14 @@ class TestRestoreHFBitexactClip:
         wrappers. Matching one level of ``_clip`` would leave those groups on
         paddle's formula while the rest of the model used torch's."""
         hf = _clip(1.0)
-        outer = HybridParallelClipGrad(HybridParallelClipGrad(hf, hcg=None), hcg=None)
+        outer = HybridParallelClipGrad(
+            HybridParallelClipGrad(hf, hcg=None), hcg=None
+        )
         group = {"grad_clip": outer}
         inner = SimpleNamespace(_grad_clip=outer, _param_groups=[group])
-        assert restore_hf_bitexact_clip(SimpleNamespace(_inner_opt=inner)) is True
+        assert (
+            restore_hf_bitexact_clip(SimpleNamespace(_inner_opt=inner)) is True
+        )
         for restored in (inner._grad_clip, group["grad_clip"]):
             assert isinstance(restored, HFBitexactHybridParallelClipGrad)
             # the double wrap is collapsed: reducing twice would square the norm
@@ -354,14 +418,20 @@ class TestRestoreHFBitexactClip:
 class TestUnwrapHFBitexactClip:
     def test_finds_the_clip_through_nested_wrappers(self):
         hf = _clip(1.0)
-        nested = HybridParallelClipGrad(HybridParallelClipGrad(hf, hcg=None), hcg=None)
+        nested = HybridParallelClipGrad(
+            HybridParallelClipGrad(hf, hcg=None), hcg=None
+        )
         assert unwrap_hf_bitexact_clip(nested) is hf
         assert unwrap_hf_bitexact_clip(hf) is hf
 
     def test_returns_none_for_other_clips(self):
         assert unwrap_hf_bitexact_clip(None) is None
-        assert unwrap_hf_bitexact_clip(paddle.nn.ClipGradByGlobalNorm(1.0)) is None
-        plain = HybridParallelClipGrad(paddle.nn.ClipGradByGlobalNorm(1.0), hcg=None)
+        assert (
+            unwrap_hf_bitexact_clip(paddle.nn.ClipGradByGlobalNorm(1.0)) is None
+        )
+        plain = HybridParallelClipGrad(
+            paddle.nn.ClipGradByGlobalNorm(1.0), hcg=None
+        )
         assert unwrap_hf_bitexact_clip(plain) is None
 
 
@@ -391,7 +461,10 @@ class TestNormGroupContract:
         plain.stop_gradient = False
         fused = _param("fused", groups=[[0, 1], [2, 3], [4, 5]])
         fused.stop_gradient = False
-        assert verify_hf_norm_groups_registered(self._model(plain, fused)) == (2, 4)
+        assert verify_hf_norm_groups_registered(self._model(plain, fused)) == (
+            2,
+            4,
+        )
 
     def test_frozen_parameters_are_ignored(self):
         frozen = _param("frozen", groups=[[0], [1]])

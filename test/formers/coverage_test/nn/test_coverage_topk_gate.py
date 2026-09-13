@@ -100,7 +100,9 @@ class TestMaskedFill(unittest.TestCase):
         x = paddle.ones([2, 3])
         mask = paddle.ones([2, 3], dtype="bool")
         result = self.masked_fill(x, mask, -100.0)
-        self.assertTrue(paddle.allclose(result, paddle.full([2, 3], -100.0, x.dtype)))
+        self.assertTrue(
+            paddle.allclose(result, paddle.full([2, 3], -100.0, x.dtype))
+        )
 
 
 class TestCastIfNeeded(unittest.TestCase):
@@ -224,7 +226,12 @@ class TestTopKGateInit(unittest.TestCase):
         """Test initialization with external gate_weight."""
         config = FakeGateConfig()
         gate_weight = _randn([64, 8])
-        gate = self.TopKGate(config, layer_idx=0, group=_make_fake_group(), gate_weight=gate_weight)
+        gate = self.TopKGate(
+            config,
+            layer_idx=0,
+            group=_make_fake_group(),
+            gate_weight=gate_weight,
+        )
         self.assertIs(gate.weight, gate_weight)
 
     @patch("paddlefleet.nn.moe.topk_gate.dist.get_rank", return_value=0)
@@ -406,7 +413,11 @@ class TestTopKGateCalAuxLoss(unittest.TestCase):
         gate_prob = F.softmax(_randn([8, 8]))
         dispatch_mask = paddle.randint(0, 8, [8])
         with patch("paddlefleet.nn.moe.topk_gate.cal_aux_loss") as mock_cal:
-            mock_cal.return_value = (paddle.zeros([]), paddle.to_tensor(8.0), paddle.zeros([8]))
+            mock_cal.return_value = (
+                paddle.zeros([]),
+                paddle.to_tensor(8.0),
+                paddle.zeros([8]),
+            )
             loss = gate._cal_aux_loss(gate_prob, dispatch_mask)
         self.assertEqual(loss.shape, [])
 
@@ -418,7 +429,11 @@ class TestTopKGateCalAuxLoss(unittest.TestCase):
         gate_prob = F.sigmoid(_randn([8, 8]))
         dispatch_mask = paddle.randint(0, 8, [8])
         with patch("paddlefleet.nn.moe.topk_gate.cal_aux_loss") as mock_cal:
-            mock_cal.return_value = (paddle.zeros([]), paddle.to_tensor(8.0), paddle.zeros([8]))
+            mock_cal.return_value = (
+                paddle.zeros([]),
+                paddle.to_tensor(8.0),
+                paddle.zeros([8]),
+            )
             loss = gate._cal_aux_loss(gate_prob, dispatch_mask)
         self.assertEqual(loss.shape, [])
 
@@ -432,8 +447,14 @@ class TestTopKGateCalAuxLoss(unittest.TestCase):
         with patch("paddlefleet.nn.moe.topk_gate.int_bincount") as mock_bc:
             mock_bc.return_value = paddle.zeros([8], dtype="int64")
             with patch("paddlefleet.nn.moe.topk_gate.dist.stream.all_reduce"):
-                with patch("paddlefleet.nn.moe.topk_gate.cal_aux_loss") as mock_cal:
-                    mock_cal.return_value = (paddle.zeros([]), paddle.to_tensor(8.0), paddle.zeros([8]))
+                with patch(
+                    "paddlefleet.nn.moe.topk_gate.cal_aux_loss"
+                ) as mock_cal:
+                    mock_cal.return_value = (
+                        paddle.zeros([]),
+                        paddle.to_tensor(8.0),
+                        paddle.zeros([8]),
+                    )
                     loss = gate._cal_aux_loss(gate_prob, dispatch_mask)
         self.assertEqual(loss.shape, [])
 
@@ -499,7 +520,9 @@ class TestTopKGateCalOrthogonalLoss(unittest.TestCase):
     @patch("paddlefleet.nn.moe.topk_gate.dist.get_rank", return_value=0)
     def test_orthogonal_loss_no_group(self, mock_rank):
         """Test orthogonal loss without group."""
-        config = FakeGateConfig(moe_group_experts=False, moe_group_orthogonal_loss=False)
+        config = FakeGateConfig(
+            moe_group_experts=False, moe_group_orthogonal_loss=False
+        )
         gate = self.TopKGate(config, layer_idx=0, group=_make_fake_group())
         loss = gate._cal_orthogonal_loss()
         self.assertEqual(loss.shape, [1])  # _squared_l2_norm returns [1]
@@ -507,7 +530,9 @@ class TestTopKGateCalOrthogonalLoss(unittest.TestCase):
     @patch("paddlefleet.nn.moe.topk_gate.dist.get_rank", return_value=0)
     def test_orthogonal_loss_with_group(self, mock_rank):
         """Test orthogonal loss with group."""
-        config = FakeGateConfig(moe_k=2, moe_group_experts=True, moe_group_orthogonal_loss=True)
+        config = FakeGateConfig(
+            moe_k=2, moe_group_experts=True, moe_group_orthogonal_loss=True
+        )
         gate = self.TopKGate(config, layer_idx=0, group=_make_fake_group())
         loss = gate._cal_orthogonal_loss()
         self.assertEqual(loss.shape, [1])  # _squared_l2_norm returns [1]

@@ -21,7 +21,9 @@ from typing import Dict, Literal, Optional, Union
 from huggingface_hub import _CACHED_NO_EXIST
 from huggingface_hub import file_exists as hf_hub_file_exists
 from huggingface_hub import hf_hub_download
-from huggingface_hub import try_to_load_from_cache as hf_hub_try_to_load_from_cache
+from huggingface_hub import (
+    try_to_load_from_cache as hf_hub_try_to_load_from_cache,
+)
 from huggingface_hub.utils import (
     EntryNotFoundError,
     LocalEntryNotFoundError,
@@ -62,13 +64,17 @@ def check_repo(model_name_or_path, download_hub):
         home_model_path = os.path.join(home_path, model_name_or_path)
         if os.path.isfile(home_model_path) or os.path.isdir(home_model_path):
             model_name_or_path = home_model_path
-    is_local = os.path.isfile(model_name_or_path) or os.path.isdir(model_name_or_path)
+    is_local = os.path.isfile(model_name_or_path) or os.path.isdir(
+        model_name_or_path
+    )
     if not is_local:
         assert download_hub in [
             DownloadSource.HUGGINGFACE,
             DownloadSource.AISTUDIO,
             DownloadSource.MODELSCOPE,
-        ], f"download_hub must be one of {DownloadSource.HUGGINGFACE}, {DownloadSource.AISTUDIO}, {DownloadSource.MODELSCOPE}"
+        ], (
+            f"download_hub must be one of {DownloadSource.HUGGINGFACE}, {DownloadSource.AISTUDIO}, {DownloadSource.MODELSCOPE}"
+        )
         if model_name_or_path not in HF_MODEL_MAPPINGS.keys():
             # repo id set by user
             return model_name_or_path
@@ -178,24 +184,41 @@ def resolve_file_path(
     # return the file path from local dir with filename, eg: /local/path
     elif os.path.isdir(repo_id):
         for index, filename in enumerate(filenames):
-            if os.path.exists(os.path.join(repo_id, download_kwargs["subfolder"], filename)):
-                if not os.path.isfile(os.path.join(repo_id, download_kwargs["subfolder"], filename)):
-                    raise EnvironmentError(f"{repo_id} does not appear to have file named {filename}.")
-                return os.path.join(repo_id, download_kwargs["subfolder"], filename)
+            if os.path.exists(
+                os.path.join(repo_id, download_kwargs["subfolder"], filename)
+            ):
+                if not os.path.isfile(
+                    os.path.join(
+                        repo_id, download_kwargs["subfolder"], filename
+                    )
+                ):
+                    raise EnvironmentError(
+                        f"{repo_id} does not appear to have file named {filename}."
+                    )
+                return os.path.join(
+                    repo_id, download_kwargs["subfolder"], filename
+                )
             elif index < len(filenames) - 1:
                 continue
             else:
                 if force_return:
                     return None
                 else:
-                    raise FileNotFoundError(f"please make sure one of the {filenames} under the dir {repo_id}")
+                    raise FileNotFoundError(
+                        f"please make sure one of the {filenames} under the dir {repo_id}"
+                    )
 
     # check cache
     existing_files = []
     file_counter = 0
     for filename in filenames:
-        cache_file_name = hf_try_to_load_from_cache(repo_id, filename, cache_dir, subfolder, revision, repo_type)
-        if download_hub == DownloadSource.HUGGINGFACE and cache_file_name is _CACHED_NO_EXIST:
+        cache_file_name = hf_try_to_load_from_cache(
+            repo_id, filename, cache_dir, subfolder, revision, repo_type
+        )
+        if (
+            download_hub == DownloadSource.HUGGINGFACE
+            and cache_file_name is _CACHED_NO_EXIST
+        ):
             cache_file_name = None
         if cache_file_name is not None and os.path.exists(str(cache_file_name)):
             existing_files.append(cache_file_name)
@@ -215,7 +238,14 @@ def resolve_file_path(
                         model_file_download as modelscope_download,
                     )
 
-                    return modelscope_download(repo_id, filename, revision, cache_dir, user_agent, local_files_only)
+                    return modelscope_download(
+                        repo_id,
+                        filename,
+                        revision,
+                        cache_dir,
+                        user_agent,
+                        local_files_only,
+                    )
                 except Exception:
                     if index < len(filenames) - 1:
                         continue
@@ -234,8 +264,18 @@ def resolve_file_path(
                         model_file_download as aistudio_download,
                     )
 
-                    aistudio_cache_dir = os.path.join(cache_dir, repo_id) if cache_dir is not None else None
-                    return aistudio_download(repo_id, filename, revision, local_files_only, aistudio_cache_dir)
+                    aistudio_cache_dir = (
+                        os.path.join(cache_dir, repo_id)
+                        if cache_dir is not None
+                        else None
+                    )
+                    return aistudio_download(
+                        repo_id,
+                        filename,
+                        revision,
+                        local_files_only,
+                        aistudio_cache_dir,
+                    )
                 except Exception:
                     if index < len(filenames) - 1:
                         continue
@@ -284,9 +324,13 @@ def resolve_file_path(
             f"'{log_endpoint}' for available revisions."
         )
     except EntryNotFoundError:
-        raise EnvironmentError(f"Does not appear one of the {filenames} in {repo_id}.")
+        raise EnvironmentError(
+            f"Does not appear one of the {filenames} in {repo_id}."
+        )
     except HTTPError as err:
-        raise EnvironmentError(f"There was a specific connection error when trying to load {repo_id}:\n{err}")
+        raise EnvironmentError(
+            f"There was a specific connection error when trying to load {repo_id}:\n{err}"
+        )
     except ValueError:
         raise EnvironmentError(
             f"We couldn't connect to '{log_endpoint}' to load this model, couldn't find it"

@@ -163,10 +163,12 @@ class TestQuantizationLoRALayers(unittest.TestCase):
         import paddle
 
         with patch(
-            "paddlefleet.peft.lora.lora_quantization_layers.quant_weight_linear", return_value=paddle.randn([2, 128])
+            "paddlefleet.peft.lora.lora_quantization_layers.quant_weight_linear",
+            return_value=paddle.randn([2, 128]),
         ):
             with patch(
-                "paddlefleet.peft.lora.lora_quantization_layers.QuantizationLoRALinear.__init__", return_value=None
+                "paddlefleet.peft.lora.lora_quantization_layers.QuantizationLoRALinear.__init__",
+                return_value=None,
             ):
                 layer = QuantizationLoRALinear.__new__(QuantizationLoRALinear)
                 layer.disable_lora = True
@@ -222,5 +224,7 @@ class TestQuantizationLoRALayers(unittest.TestCase):
         mock_lora_config.lora_dropout = 0.0
         mock_lora_config.rslora = False
 
-        layer = FleetQuantizationLoRALinear(mock_layer, skip_bias_add=True, lora_config=mock_lora_config)
+        layer = FleetQuantizationLoRALinear(
+            mock_layer, skip_bias_add=True, lora_config=mock_lora_config
+        )
         self.assertTrue(layer.skip_bias_add)

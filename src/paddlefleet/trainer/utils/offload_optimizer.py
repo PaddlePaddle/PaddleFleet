@@ -110,17 +110,25 @@ def hack_offload_optimizer(mode=None):
             # offload them back afterwards.
             origin_muon_update_group = Muon._muon_update_group
 
-            def new_muon_update_group(self, group_params_grads, *args, **kwargs):
+            def new_muon_update_group(
+                self, group_params_grads, *args, **kwargs
+            ):
                 for param, _ in group_params_grads:
-                    momentum_buffer = self._get_accumulator(self._moment_acc_str, param)
+                    momentum_buffer = self._get_accumulator(
+                        self._moment_acc_str, param
+                    )
                     reload(momentum_buffer)
 
-                ret = origin_muon_update_group(self, group_params_grads, *args, **kwargs)
+                ret = origin_muon_update_group(
+                    self, group_params_grads, *args, **kwargs
+                )
 
                 for param, _ in group_params_grads:
                     is_offload_opt = getattr(param, "is_offload_opt", True)
                     if is_offload_opt:
-                        momentum_buffer = self._get_accumulator(self._moment_acc_str, param)
+                        momentum_buffer = self._get_accumulator(
+                            self._moment_acc_str, param
+                        )
                         offload(momentum_buffer)
                 return ret
 
@@ -266,17 +274,25 @@ def hack_offload_optimizer_eb5():
             # offload them back afterwards.
             origin_muon_update_group = Muon._muon_update_group
 
-            def new_muon_update_group(self, group_params_grads, *args, **kwargs):
+            def new_muon_update_group(
+                self, group_params_grads, *args, **kwargs
+            ):
                 for param, _ in group_params_grads:
-                    momentum_buffer = self._get_accumulator(self._moment_acc_str, param)
+                    momentum_buffer = self._get_accumulator(
+                        self._moment_acc_str, param
+                    )
                     reload(momentum_buffer)
 
-                ret = origin_muon_update_group(self, group_params_grads, *args, **kwargs)
+                ret = origin_muon_update_group(
+                    self, group_params_grads, *args, **kwargs
+                )
 
                 for param, _ in group_params_grads:
                     is_offload_opt = getattr(param, "is_offload_opt", True)
                     if is_offload_opt:
-                        momentum_buffer = self._get_accumulator(self._moment_acc_str, param)
+                        momentum_buffer = self._get_accumulator(
+                            self._moment_acc_str, param
+                        )
                         offload(momentum_buffer)
                 return ret
 

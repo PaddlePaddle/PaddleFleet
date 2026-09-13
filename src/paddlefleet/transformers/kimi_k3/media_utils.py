@@ -36,7 +36,10 @@ def navit_resize_image(
     patch_limit_on_one_side: int,
 ):
     # Apply the patch limits.
-    s1 = math.sqrt(in_patch_limit / (max(1.0, width // patch_size) * max(1.0, height // patch_size)))
+    s1 = math.sqrt(
+        in_patch_limit
+        / (max(1.0, width // patch_size) * max(1.0, height // patch_size))
+    )
     s2 = patch_limit_on_one_side * patch_size / width
     s3 = patch_limit_on_one_side * patch_size / height
     scale = min(1.0, s1, s2, s3)
@@ -54,12 +57,12 @@ def navit_resize_image(
     token_height = (new_h + pad_height) // factor
     token_width = (new_w + pad_width) // factor
 
-    assert (
-        token_height * merge_kernel_size <= patch_limit_on_one_side
-    ), f"token_height {token_height} * merge_kernel_size {merge_kernel_size} > patch_limit_on_one_side {patch_limit_on_one_side}"
-    assert (
-        token_width * merge_kernel_size <= patch_limit_on_one_side
-    ), f"token_width {token_width} * merge_kernel_size {merge_kernel_size} > patch_limit_on_one_side {patch_limit_on_one_side}"
+    assert token_height * merge_kernel_size <= patch_limit_on_one_side, (
+        f"token_height {token_height} * merge_kernel_size {merge_kernel_size} > patch_limit_on_one_side {patch_limit_on_one_side}"
+    )
+    assert token_width * merge_kernel_size <= patch_limit_on_one_side, (
+        f"token_width {token_width} * merge_kernel_size {merge_kernel_size} > patch_limit_on_one_side {patch_limit_on_one_side}"
+    )
 
     return {
         "num_tokens": token_height * token_width,
@@ -83,10 +86,14 @@ def ensure_media_type(media: MediaInput) -> MediaInput:
 def image_to_np(image: Image.Image, resize_to: tuple[int, int]) -> np.ndarray:
     """Bicubic-resize a PIL image to ``resize_to`` and return it as a numpy array."""
     assert isinstance(image, Image.Image), "image must be a PIL Image"
-    return np.asarray(image.resize(resize_to, resample=Image.Resampling.BICUBIC))
+    return np.asarray(
+        image.resize(resize_to, resample=Image.Resampling.BICUBIC)
+    )
 
 
-def navit_patchify(pixel_values: np.ndarray, patch_size: int) -> dict[str, np.ndarray]:
+def navit_patchify(
+    pixel_values: np.ndarray, patch_size: int
+) -> dict[str, np.ndarray]:
     """Reshape the pixel values to a navit shape.
 
     Args:
@@ -101,7 +108,9 @@ def navit_patchify(pixel_values: np.ndarray, patch_size: int) -> dict[str, np.nd
     T, H, W, C = pixel_values.shape
     assert C == 3, "pixel_values must have 3 channels"
 
-    patches = pixel_values.reshape(T, H // patch_size, patch_size, W // patch_size, patch_size, C)
+    patches = pixel_values.reshape(
+        T, H // patch_size, patch_size, W // patch_size, patch_size, C
+    )
     # (T, H//patch_size, W//patch_size, C, patch_size, patch_size)
     patches = patches.transpose(0, 1, 3, 5, 2, 4)
     patches = patches.reshape(-1, C, patch_size, patch_size)
@@ -109,7 +118,9 @@ def navit_patchify(pixel_values: np.ndarray, patch_size: int) -> dict[str, np.nd
     return {"pixel_values": patches, "grid_thw": grid_thw}
 
 
-def normalize(x: np.ndarray, mean, std_inv, pixels_dtype: np.dtype = np.float32) -> np.ndarray:
+def normalize(
+    x: np.ndarray, mean, std_inv, pixels_dtype: np.dtype = np.float32
+) -> np.ndarray:
     """Normalize the image.
 
     Args:

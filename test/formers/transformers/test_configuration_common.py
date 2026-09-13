@@ -94,7 +94,14 @@ config_common_kwargs = {
 
 
 class ConfigTester(object):
-    def __init__(self, parent, config_class=None, has_text_modality=True, common_properties=None, **kwargs):
+    def __init__(
+        self,
+        parent,
+        config_class=None,
+        has_text_modality=True,
+        common_properties=None,
+        **kwargs,
+    ):
         self.parent = parent
         self.config_class = config_class
         self.has_text_modality = has_text_modality
@@ -105,10 +112,13 @@ class ConfigTester(object):
         config = self.config_class(**self.inputs_dict)
         common_properties = (
             ["hidden_size", "num_attention_heads", "num_hidden_layers"]
-            if self.common_properties is None and not self.config_class.sub_configs
+            if self.common_properties is None
+            and not self.config_class.sub_configs
             else self.common_properties
         )
-        common_properties = [] if common_properties is None else common_properties
+        common_properties = (
+            [] if common_properties is None else common_properties
+        )
 
         # Add common fields for text models
         if self.has_text_modality:
@@ -116,14 +126,18 @@ class ConfigTester(object):
 
         # Test that config has the common properties as getters
         for prop in common_properties:
-            self.parent.assertTrue(hasattr(config, prop), msg=f"`{prop}` does not exist")
+            self.parent.assertTrue(
+                hasattr(config, prop), msg=f"`{prop}` does not exist"
+            )
 
         # Test that config has the common properties as setter
         for idx, name in enumerate(common_properties):
             try:
                 setattr(config, name, idx)
                 self.parent.assertEqual(
-                    getattr(config, name), idx, msg=f"`{name} value {idx} expected, but was {getattr(config, name)}"
+                    getattr(config, name),
+                    idx,
+                    msg=f"`{name} value {idx} expected, but was {getattr(config, name)}",
                 )
             except NotImplementedError:
                 # Some models might not be able to implement setters for common_properties
@@ -135,7 +149,9 @@ class ConfigTester(object):
             try:
                 config = self.config_class(**{name: idx})
                 self.parent.assertEqual(
-                    getattr(config, name), idx, msg=f"`{name} value {idx} expected, but was {getattr(config, name)}"
+                    getattr(config, name),
+                    idx,
+                    msg=f"`{name} value {idx} expected, but was {getattr(config, name)}",
                 )
             except NotImplementedError:
                 # Some models might not be able to implement setters for common_properties
@@ -190,8 +206,15 @@ class ConfigTester(object):
             if getattr(config, key) != value:
                 wrong_values.append((key, getattr(config, key), value))
         if len(wrong_values) > 0:
-            errors = "\n".join([f"- {v[0]}: got {v[1]} instead of {v[2]}" for v in wrong_values])
-            raise ValueError(f"The following keys were not properly set in the config:\n{errors}")
+            errors = "\n".join(
+                [
+                    f"- {v[0]}: got {v[1]} instead of {v[2]}"
+                    for v in wrong_values
+                ]
+            )
+            raise ValueError(
+                f"The following keys were not properly set in the config:\n{errors}"
+            )
 
     def run_common_tests(self):
         self.create_and_test_config_common_properties()
@@ -216,7 +239,11 @@ class ConfigTester(object):
 class ConfigTestUtils:
     def test_config_common_kwargs_is_complete(self):
         base_config = PretrainedConfig()
-        missing_keys = [key for key in base_config.__dict__ if key not in config_common_kwargs]
+        missing_keys = [
+            key
+            for key in base_config.__dict__
+            if key not in config_common_kwargs
+        ]
         # If this part of the test fails, you have arguments to addin config_common_kwargs above.
         self.assertListEqual(
             missing_keys,
@@ -229,7 +256,11 @@ class ConfigTestUtils:
                 "paddlefleet_version",
             ],
         )
-        keys_with_defaults = [key for key, value in config_common_kwargs.items() if value == getattr(base_config, key)]
+        keys_with_defaults = [
+            key
+            for key, value in config_common_kwargs.items()
+            if value == getattr(base_config, key)
+        ]
         if len(keys_with_defaults) > 0:
             raise ValueError(
                 "The following keys are set with the default values in"
@@ -245,10 +276,16 @@ class ConfigTestUtils:
         response_mock.raise_for_status.side_effect = HTTPError
 
         # Download this model to make sure it's in the cache.
-        _ = Qwen3Config.from_pretrained("PaddleFormers/tiny-random-qwen3", convert_from_hf=True)
+        _ = Qwen3Config.from_pretrained(
+            "PaddleFormers/tiny-random-qwen3", convert_from_hf=True
+        )
 
         # Under the mock environment we get a 500 error when trying to reach the model.
-        with mock.patch("transformers.utils.hub.requests.head", return_value=response_mock) as mock_head:
-            _ = Qwen3Config.from_pretrained("PaddleFormers/tiny-random-qwen3", convert_from_hf=True)
+        with mock.patch(
+            "transformers.utils.hub.requests.head", return_value=response_mock
+        ) as mock_head:
+            _ = Qwen3Config.from_pretrained(
+                "PaddleFormers/tiny-random-qwen3", convert_from_hf=True
+            )
             # This check we did call the fake head request
             mock_head.assert_called()

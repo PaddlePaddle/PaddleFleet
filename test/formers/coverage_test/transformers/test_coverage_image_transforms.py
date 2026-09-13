@@ -268,7 +268,9 @@ class TestGetResizeOutputImageSize(unittest.TestCase):
         )
 
         image = np.random.rand(100, 200, 3).astype(np.float32)
-        result = get_resize_output_image_size(image, 224, default_to_square=True)
+        result = get_resize_output_image_size(
+            image, 224, default_to_square=True
+        )
         self.assertEqual(result, (224, 224))
 
     def test_single_element_list(self):
@@ -295,7 +297,9 @@ class TestGetResizeOutputImageSize(unittest.TestCase):
         )
 
         image = np.random.rand(100, 200, 3).astype(np.float32)
-        result = get_resize_output_image_size(image, 100, default_to_square=False)
+        result = get_resize_output_image_size(
+            image, 100, default_to_square=False
+        )
         # Short edge (100) becomes 100, long edge scaled
         self.assertEqual(max(result), 200)
 
@@ -305,7 +309,9 @@ class TestGetResizeOutputImageSize(unittest.TestCase):
         )
 
         image = np.random.rand(100, 200, 3).astype(np.float32)
-        result = get_resize_output_image_size(image, 100, default_to_square=False, max_size=150)
+        result = get_resize_output_image_size(
+            image, 100, default_to_square=False, max_size=150
+        )
         self.assertTrue(max(result) <= 150)
 
     def test_max_size_too_small(self):
@@ -315,7 +321,9 @@ class TestGetResizeOutputImageSize(unittest.TestCase):
 
         image = np.random.rand(100, 200, 3).astype(np.float32)
         with self.assertRaises(ValueError):
-            get_resize_output_image_size(image, 100, default_to_square=False, max_size=50)
+            get_resize_output_image_size(
+                image, 100, default_to_square=False, max_size=50
+            )
 
 
 class TestResize(unittest.TestCase):
@@ -331,7 +339,9 @@ class TestResize(unittest.TestCase):
     def test_pil_resize(self):
         from paddlefleet.transformers.image_transforms import resize
 
-        image = np.array(PIL.Image.new("RGB", (100, 200), color=(128, 128, 128)))
+        image = np.array(
+            PIL.Image.new("RGB", (100, 200), color=(128, 128, 128))
+        )
         result = resize(image, (50, 100))
         self.assertEqual(result.shape, (50, 100, 3))
 
@@ -392,7 +402,9 @@ class TestNormalize(unittest.TestCase):
         from paddlefleet.transformers.image_transforms import normalize
 
         image = np.ones((32, 32, 3), dtype=np.float32) * 0.5
-        result = normalize(image, mean=0.5, std=0.5, data_format=ChannelDimension.FIRST)
+        result = normalize(
+            image, mean=0.5, std=0.5, data_format=ChannelDimension.FIRST
+        )
         self.assertEqual(result.shape, (3, 32, 32))
 
     def test_normalize_wrong_mean_length(self):
@@ -446,7 +458,9 @@ class TestCenterCrop(unittest.TestCase):
         from paddlefleet.transformers.image_transforms import center_crop
 
         image = np.random.rand(100, 200, 3).astype(np.float32)
-        result = center_crop(image, (50, 100), data_format=ChannelDimension.FIRST)
+        result = center_crop(
+            image, (50, 100), data_format=ChannelDimension.FIRST
+        )
         self.assertEqual(result.shape, (3, 50, 100))
 
     def test_center_crop_invalid_size(self):
@@ -476,7 +490,9 @@ class TestCenterToCornersFormat(unittest.TestCase):
     """Tests for center_to_corners_format and corners_to_center_format."""
 
     def test_numpy_center_to_corners(self):
-        from paddlefleet.transformers.image_transforms import center_to_corners_format
+        from paddlefleet.transformers.image_transforms import (
+            center_to_corners_format,
+        )
 
         bboxes_center = np.array([[50.0, 50.0, 20.0, 40.0]])
         result = center_to_corners_format(bboxes_center)
@@ -484,7 +500,9 @@ class TestCenterToCornersFormat(unittest.TestCase):
         np.testing.assert_array_almost_equal(result, expected)
 
     def test_paddle_center_to_corners(self):
-        from paddlefleet.transformers.image_transforms import center_to_corners_format
+        from paddlefleet.transformers.image_transforms import (
+            center_to_corners_format,
+        )
 
         bboxes_center = paddle.to_tensor([[50.0, 50.0, 20.0, 40.0]])
         result = center_to_corners_format(bboxes_center)
@@ -492,7 +510,9 @@ class TestCenterToCornersFormat(unittest.TestCase):
         np.testing.assert_array_almost_equal(result.numpy(), expected)
 
     def test_numpy_corners_to_center(self):
-        from paddlefleet.transformers.image_transforms import corners_to_center_format
+        from paddlefleet.transformers.image_transforms import (
+            corners_to_center_format,
+        )
 
         bboxes_corners = np.array([[40.0, 30.0, 60.0, 70.0]])
         result = corners_to_center_format(bboxes_corners)
@@ -500,7 +520,9 @@ class TestCenterToCornersFormat(unittest.TestCase):
         np.testing.assert_array_almost_equal(result, expected)
 
     def test_paddle_corners_to_center(self):
-        from paddlefleet.transformers.image_transforms import corners_to_center_format
+        from paddlefleet.transformers.image_transforms import (
+            corners_to_center_format,
+        )
 
         bboxes_corners = paddle.to_tensor([[40.0, 30.0, 60.0, 70.0]])
         result = corners_to_center_format(bboxes_corners)
@@ -508,13 +530,17 @@ class TestCenterToCornersFormat(unittest.TestCase):
         np.testing.assert_array_almost_equal(result.numpy(), expected)
 
     def test_center_to_corners_unsupported_type(self):
-        from paddlefleet.transformers.image_transforms import center_to_corners_format
+        from paddlefleet.transformers.image_transforms import (
+            center_to_corners_format,
+        )
 
         with self.assertRaises(ValueError):
             center_to_corners_format([[50, 50, 20, 40]])
 
     def test_corners_to_center_unsupported_type(self):
-        from paddlefleet.transformers.image_transforms import corners_to_center_format
+        from paddlefleet.transformers.image_transforms import (
+            corners_to_center_format,
+        )
 
         with self.assertRaises(ValueError):
             corners_to_center_format([[40, 30, 60, 70]])
@@ -525,7 +551,9 @@ class TestCenterToCornersFormat(unittest.TestCase):
             corners_to_center_format,
         )
 
-        original = np.array([[50.0, 50.0, 20.0, 40.0], [100.0, 100.0, 30.0, 50.0]])
+        original = np.array(
+            [[50.0, 50.0, 20.0, 40.0], [100.0, 100.0, 30.0, 50.0]]
+        )
         corners = center_to_corners_format(original)
         recovered = corners_to_center_format(corners)
         np.testing.assert_array_almost_equal(original, recovered)
@@ -573,7 +601,10 @@ class TestRgbToId(unittest.TestCase):
         self.assertEqual(result[0, 0].tolist(), [1, 2, 3])
 
     def test_rgb_id_roundtrip(self):
-        from paddlefleet.transformers.image_transforms import id_to_rgb, rgb_to_id
+        from paddlefleet.transformers.image_transforms import (
+            id_to_rgb,
+            rgb_to_id,
+        )
 
         color = np.array([[[10, 20, 30], [40, 50, 60]]], dtype=np.uint8)
         id_map = rgb_to_id(color)
@@ -647,7 +678,9 @@ class TestPad(unittest.TestCase):
         from paddlefleet.transformers.image_transforms import PaddingMode, pad
 
         image = np.zeros((32, 32, 3), dtype=np.float32)
-        result = pad(image, padding=5, mode=PaddingMode.CONSTANT, constant_values=1.0)
+        result = pad(
+            image, padding=5, mode=PaddingMode.CONSTANT, constant_values=1.0
+        )
         self.assertEqual(result.shape, (42, 42, 3))
         # Check that the padding region has the constant value
         self.assertEqual(result[0, 0, 0], 1.0)
@@ -656,14 +689,24 @@ class TestPad(unittest.TestCase):
         from paddlefleet.transformers.image_transforms import PaddingMode, pad
 
         image = np.ones((3, 32, 32), dtype=np.float32)
-        result = pad(image, padding=5, mode=PaddingMode.CONSTANT, input_data_format=ChannelDimension.FIRST)
+        result = pad(
+            image,
+            padding=5,
+            mode=PaddingMode.CONSTANT,
+            input_data_format=ChannelDimension.FIRST,
+        )
         self.assertEqual(result.shape, (3, 42, 42))
 
     def test_with_data_format(self):
         from paddlefleet.transformers.image_transforms import PaddingMode, pad
 
         image = np.ones((32, 32, 3), dtype=np.float32)
-        result = pad(image, padding=5, mode=PaddingMode.CONSTANT, data_format=ChannelDimension.FIRST)
+        result = pad(
+            image,
+            padding=5,
+            mode=PaddingMode.CONSTANT,
+            data_format=ChannelDimension.FIRST,
+        )
         self.assertEqual(result.shape, (3, 42, 42))
 
 

@@ -48,21 +48,41 @@ class TestModeling(unittest.TestCase):
     def test_from_pretrained_cache_dir_community_model(self):
         model_name = "PaddleFormers/tiny-random-qwen3"
         with TemporaryDirectory() as tempdir:
-            Qwen3ForCausalLM.from_pretrained(model_name, cache_dir=tempdir, convert_from_hf=True)
-            self.assertTrue(os.path.exists(os.path.join(tempdir, model_name, CONFIG_NAME)))
-            self.assertTrue(os.path.exists(os.path.join(tempdir, model_name, PADDLE_WEIGHTS_NAME)))
+            Qwen3ForCausalLM.from_pretrained(
+                model_name, cache_dir=tempdir, convert_from_hf=True
+            )
+            self.assertTrue(
+                os.path.exists(os.path.join(tempdir, model_name, CONFIG_NAME))
+            )
+            self.assertTrue(
+                os.path.exists(
+                    os.path.join(tempdir, model_name, PADDLE_WEIGHTS_NAME)
+                )
+            )
             # check against double appending model_name in cache_dir
-            self.assertFalse(os.path.exists(os.path.join(tempdir, model_name, model_name)))
+            self.assertFalse(
+                os.path.exists(os.path.join(tempdir, model_name, model_name))
+            )
 
     @slow
     def test_from_pretrained_cache_dir_pretrained_init(self):
         model_name = "PaddleFormers/tiny-random-qwen3"
         with TemporaryDirectory() as tempdir:
-            Qwen3ForCausalLM.from_pretrained(model_name, cache_dir=tempdir, convert_from_hf=True)
-            self.assertTrue(os.path.exists(os.path.join(tempdir, model_name, CONFIG_NAME)))
-            self.assertTrue(os.path.exists(os.path.join(tempdir, model_name, PADDLE_WEIGHTS_NAME)))
+            Qwen3ForCausalLM.from_pretrained(
+                model_name, cache_dir=tempdir, convert_from_hf=True
+            )
+            self.assertTrue(
+                os.path.exists(os.path.join(tempdir, model_name, CONFIG_NAME))
+            )
+            self.assertTrue(
+                os.path.exists(
+                    os.path.join(tempdir, model_name, PADDLE_WEIGHTS_NAME)
+                )
+            )
             # check against double appending model_name in cache_dir
-            self.assertFalse(os.path.exists(os.path.join(tempdir, model_name, model_name)))
+            self.assertFalse(
+                os.path.exists(os.path.join(tempdir, model_name, model_name))
+            )
 
 
 class TestVirtualPipelineNameMapping(unittest.TestCase):
@@ -81,16 +101,34 @@ class TestVirtualPipelineNameMapping(unittest.TestCase):
         "3": "model.lm_head",
     }
 
-    def _build_mapping(self, pp_keys, layers_desc=(), stage_id=0, index_to_stage=None, num_virtual_pipeline_stages=2):
+    def _build_mapping(
+        self,
+        pp_keys,
+        layers_desc=(),
+        stage_id=0,
+        index_to_stage=None,
+        num_virtual_pipeline_stages=2,
+    ):
         model = PipelinePretrainedModel.__new__(PipelinePretrainedModel)
         model._layers_desc = list(layers_desc)
         model._stage_id = stage_id
         model._num_virtual_pipeline_stages = num_virtual_pipeline_stages
         model._use_dualpipev = False
-        model.get_stage_from_index = lambda idx: (index_to_stage or {}).get(idx, stage_id)
-        with mock.patch.object(
-            PretrainedModel, "state_dict", return_value={k: None for k in pp_keys}
-        ), mock.patch.object(PipelinePretrainedModel, "get_sequential_name_prefixes", return_value=self.PREFIXES):
+        model.get_stage_from_index = lambda idx: (index_to_stage or {}).get(
+            idx, stage_id
+        )
+        with (
+            mock.patch.object(
+                PretrainedModel,
+                "state_dict",
+                return_value={k: None for k in pp_keys},
+            ),
+            mock.patch.object(
+                PipelinePretrainedModel,
+                "get_sequential_name_prefixes",
+                return_value=self.PREFIXES,
+            ),
+        ):
             model._set_pipeline_name_mapping()
         return model._pp_to_single_mapping
 
@@ -129,7 +167,9 @@ class TestVirtualPipelineNameMapping(unittest.TestCase):
         # VPP, so the same parameter shows up both as `shared_layers.{name}.rest` and as
         # `{chunk_start}.{name}.rest`. Both aliases must resolve to the same name.
         layers_desc = [
-            SharedLayerDesc("embed_weight_share", nn.Linear, shared_weight_attr="weight"),
+            SharedLayerDesc(
+                "embed_weight_share", nn.Linear, shared_weight_attr="weight"
+            ),
             LayerDesc(nn.Linear),
             LayerDesc(nn.Linear),
             SharedLayerDesc(
@@ -146,7 +186,10 @@ class TestVirtualPipelineNameMapping(unittest.TestCase):
         ]
         # stage 1 of a pp=2, vpp=2 run owns virtual stages 1 and 3
         mapping = self._build_mapping(
-            pp_keys, layers_desc=layers_desc, stage_id=1, index_to_stage={0: 0, 1: 1, 2: 0, 3: 1}
+            pp_keys,
+            layers_desc=layers_desc,
+            stage_id=1,
+            index_to_stage={0: 0, 1: 1, 2: 0, 3: 1},
         )
 
         self.assertEqual(
@@ -164,9 +207,17 @@ class TestVirtualPipelineNameMapping(unittest.TestCase):
         # not a digit. The `{chunk_start}.{local_idx}.rest` keys of the other chunks must
         # still be resolved as chunk keys.
         shared = SharedLayerDesc(
-            "embed_weight_share", nn.Linear, forward_func=lambda layer, x: x, shared_weight_attr="weight"
+            "embed_weight_share",
+            nn.Linear,
+            forward_func=lambda layer, x: x,
+            shared_weight_attr="weight",
         )
-        layers_desc = [shared, LayerDesc(nn.Linear), LayerDesc(nn.Linear), shared]
+        layers_desc = [
+            shared,
+            LayerDesc(nn.Linear),
+            LayerDesc(nn.Linear),
+            shared,
+        ]
         pp_keys = [
             "shared_layers.embed_weight_share.weight",
             "0.embed_weight_share.weight",
@@ -174,7 +225,10 @@ class TestVirtualPipelineNameMapping(unittest.TestCase):
         ]
         # stage 0 of a pp=2, vpp=2 run owns virtual stages 0 and 2
         mapping = self._build_mapping(
-            pp_keys, layers_desc=layers_desc, stage_id=0, index_to_stage={0: 0, 1: 1, 2: 0, 3: 1}
+            pp_keys,
+            layers_desc=layers_desc,
+            stage_id=0,
+            index_to_stage={0: 0, 1: 1, 2: 0, 3: 1},
         )
 
         self.assertEqual(

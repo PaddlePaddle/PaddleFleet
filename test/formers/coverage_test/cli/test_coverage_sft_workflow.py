@@ -168,7 +168,11 @@ class TestSFTWorkflowValidation(unittest.TestCase):
 
         max_seq_len = (
             data_args.max_seq_len
-            if (data_args.packing or training_args.sequence_parallel or training_args.context_parallel_size > 1)
+            if (
+                data_args.packing
+                or training_args.sequence_parallel
+                or training_args.context_parallel_size > 1
+            )
             else None
         )
         self.assertEqual(max_seq_len, data_args.max_seq_len)
@@ -183,7 +187,11 @@ class TestSFTWorkflowValidation(unittest.TestCase):
 
         max_seq_len = (
             data_args.max_seq_len
-            if (data_args.packing or training_args.sequence_parallel or training_args.context_parallel_size > 1)
+            if (
+                data_args.packing
+                or training_args.sequence_parallel
+                or training_args.context_parallel_size > 1
+            )
             else None
         )
         self.assertIsNone(max_seq_len)

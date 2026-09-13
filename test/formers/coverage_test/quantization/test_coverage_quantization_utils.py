@@ -109,9 +109,14 @@ class TestQuantizationUtils(unittest.TestCase):
         state_dict = {"layer.0.weight": MagicMock()}
         mock_config = MagicMock()
 
-        with patch("paddlefleet.quantization.quantization_utils.qlora_weight_quantize", None):
+        with patch(
+            "paddlefleet.quantization.quantization_utils.qlora_weight_quantize",
+            None,
+        ):
             with self.assertRaises(ImportError):
-                convert_to_qlora_state_dict(state_dict, "layer.0", mock_config, "float16", "nf4")
+                convert_to_qlora_state_dict(
+                    state_dict, "layer.0", mock_config, "float16", "nf4"
+                )
 
     def test_update_loaded_state_dict_keys_no_change(self):
         from paddlefleet.quantization.quantization_utils import (
@@ -122,7 +127,9 @@ class TestQuantizationUtils(unittest.TestCase):
         mock_config = MagicMock()
         mock_config.qlora_weight_double_quant = False
 
-        result = update_loaded_state_dict_keys(state_dict, ["layer.0"], mock_config)
+        result = update_loaded_state_dict_keys(
+            state_dict, ["layer.0"], mock_config
+        )
         # No change since quant_weight and weight_scale already present
         self.assertIn("layer.0.quant_weight", result)
 
@@ -135,7 +142,9 @@ class TestQuantizationUtils(unittest.TestCase):
         mock_config = MagicMock()
         mock_config.qlora_weight_double_quant = False
 
-        result = update_loaded_state_dict_keys(state_dict, ["layer.0"], mock_config)
+        result = update_loaded_state_dict_keys(
+            state_dict, ["layer.0"], mock_config
+        )
         self.assertNotIn("layer.0.weight", result)
         self.assertIn("layer.0.quant_weight", result)
         self.assertIn("layer.0.weight_scale", result)
@@ -156,7 +165,10 @@ class TestQuantizationUtils(unittest.TestCase):
         mock_config = MagicMock()
 
         with patch(
-            "paddlefleet.quantization.quantization_utils.parse_weight_quantize_algo", return_value="unsupported_algo"
+            "paddlefleet.quantization.quantization_utils.parse_weight_quantize_algo",
+            return_value="unsupported_algo",
         ):
             with self.assertRaises(NotImplementedError):
-                convert_to_quantize_state_dict(state_dict, ["layer.0"], mock_config, "float16")
+                convert_to_quantize_state_dict(
+                    state_dict, ["layer.0"], mock_config, "float16"
+                )

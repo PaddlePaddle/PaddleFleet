@@ -167,7 +167,9 @@ class TestAdamWMiniAdamwPython(unittest.TestCase):
             True,  # with_decay, multi_precision
         )
         # master_weight should be updated
-        self.assertFalse(paddle.all(master_weight == paddle.to_tensor([1.0, 2.0])).item())
+        self.assertFalse(
+            paddle.all(master_weight == paddle.to_tensor([1.0, 2.0])).item()
+        )
 
 
 class TestAdamWCustomAdamwCustom(unittest.TestCase):
@@ -314,7 +316,9 @@ class TestAdamWCustomAdamwCustom(unittest.TestCase):
             True,  # skip_update_param=True -> param not updated
         )
         # master_weight should change
-        self.assertFalse(paddle.all(master_weight == paddle.to_tensor([1.0, 2.0])).item())
+        self.assertFalse(
+            paddle.all(master_weight == paddle.to_tensor([1.0, 2.0])).item()
+        )
         # param should NOT be updated because skip_update_param=True
         self.assertTrue(paddle.all(param == param_clone).item())
 
@@ -348,7 +352,11 @@ class TestAdamWCustomAdamwCustom(unittest.TestCase):
             False,  # skip_update_param=False -> param updated
         )
         # param should be updated
-        self.assertFalse(paddle.all(param == paddle.to_tensor([1.0, 2.0], dtype="float16")).item())
+        self.assertFalse(
+            paddle.all(
+                param == paddle.to_tensor([1.0, 2.0], dtype="float16")
+            ).item()
+        )
 
 
 class TestAdamWCustomIsDtypeFp16OrBf16(unittest.TestCase):

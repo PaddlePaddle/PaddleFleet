@@ -52,7 +52,10 @@ class TestPerfUtils(unittest.TestCase):
     def test_add_record_event_profiler_enabled(self):
         from paddlefleet.utils.perf_utils import add_record_event
 
-        with patch("paddle.base.core.nvprof_nvtx_push"), patch("paddle.base.core.nvprof_nvtx_pop"):
+        with (
+            patch("paddle.base.core.nvprof_nvtx_push"),
+            patch("paddle.base.core.nvprof_nvtx_pop"),
+        ):
             with add_record_event("test_event"):
                 pass
 

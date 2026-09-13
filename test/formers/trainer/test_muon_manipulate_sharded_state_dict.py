@@ -39,7 +39,9 @@ from paddlefleet.trainer.utils.zero_cost_checkpoint import (
     ZeroCostCheckpointCallbackFcBased,
 )
 
-_MANIPULATE = ZeroCostCheckpointCallbackFcBased._muon_manipulate_sharded_state_dict
+_MANIPULATE = (
+    ZeroCostCheckpointCallbackFcBased._muon_manipulate_sharded_state_dict
+)
 
 
 class _FakeTensor:
@@ -60,7 +62,10 @@ class _FakeModel:
         self._entries = entries
 
     def sharded_state_dict(self):
-        return {f"struct.{name}": _FakeShardedWeight(name, dtype) for name, dtype in self._entries}
+        return {
+            f"struct.{name}": _FakeShardedWeight(name, dtype)
+            for name, dtype in self._entries
+        }
 
 
 class _FakeGroup:
@@ -83,10 +88,20 @@ class _FakeInnerOpt:
 
 
 class _FakeOptimizer:
-    def __init__(self, local_2d, all_2d, all_1d, master_weight_names, sharding_rank=0, nranks=1):
+    def __init__(
+        self,
+        local_2d,
+        all_2d,
+        all_1d,
+        master_weight_names,
+        sharding_rank=0,
+        nranks=1,
+    ):
         self._sharding_rank = sharding_rank
         self._local_2d = [_FakeTensor(n, paddle.bfloat16) for n in local_2d]
-        self._params_2d_by_color = {0: [_FakeTensor(n, paddle.bfloat16) for n in all_2d]}
+        self._params_2d_by_color = {
+            0: [_FakeTensor(n, paddle.bfloat16) for n in all_2d]
+        }
         self._params_1d = [_FakeTensor(n, paddle.bfloat16) for n in all_1d]
         self._inner_opt = _FakeInnerOpt(master_weight_names)
         self._hcg = _FakeHcg(nranks)
@@ -181,8 +196,19 @@ class TestMuonManipulateShardedStateDict(unittest.TestCase):
         per_rank = []
         for rank in range(4):
             # rotate ownership to emulate greedy bin-packing assigning owners differently
-            self.local_2d = [["owned_bf16", "owned_fp32"], ["other_bf16"], ["other_fp32"], []][rank]
-            per_rank.append({n for n in self._run(replicate=True, sharding_rank=rank) if "fp32" in n})
+            self.local_2d = [
+                ["owned_bf16", "owned_fp32"],
+                ["other_bf16"],
+                ["other_fp32"],
+                [],
+            ][rank]
+            per_rank.append(
+                {
+                    n
+                    for n in self._run(replicate=True, sharding_rank=rank)
+                    if "fp32" in n
+                }
+            )
         for names in per_rank:
             self.assertEqual(names, {"owned_fp32", "other_fp32", "buffer_fp32"})
 
@@ -191,7 +217,10 @@ class TestMuonManipulateShardedStateDict(unittest.TestCase):
         model = _FakeModel(self.entries)
         optimizer = _FakeOptimizer(self.local_2d, self.all_2d, self.all_1d, [])
         optimizer._inner_opt._multi_precision = False
-        names = {sw.local_tensor.name for sw in _MANIPULATE(_FakeSelf(True), model, optimizer).values()}
+        names = {
+            sw.local_tensor.name
+            for sw in _MANIPULATE(_FakeSelf(True), model, optimizer).values()
+        }
         self.assertEqual(names, {n for n, _ in self.entries})
 
 

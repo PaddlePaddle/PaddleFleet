@@ -75,13 +75,17 @@ class InternLM3ModelTest(unittest.TestCase):
 
         batch_size = 2
         seq_length = 10
-        input_ids = paddle.randint(0, self.config.vocab_size, [batch_size, seq_length])
+        input_ids = paddle.randint(
+            0, self.config.vocab_size, [batch_size, seq_length]
+        )
 
         with paddle.no_grad():
             outputs = model(input_ids=input_ids, return_dict=True)
 
         logits = outputs.logits
-        self.assertEqual(logits.shape, [batch_size, seq_length, self.config.vocab_size])
+        self.assertEqual(
+            logits.shape, [batch_size, seq_length, self.config.vocab_size]
+        )
 
     def test_model_generation(self):
         model = InternLM3ForCausalLM(self.config)
@@ -109,15 +113,27 @@ class InternLM3ModelTest(unittest.TestCase):
         model = InternLM3ForCausalLM(self.config)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            model.save_pretrained(temp_dir, save_checkpoint_format="", save_safetensors=False)
+            model.save_pretrained(
+                temp_dir, save_checkpoint_format="", save_safetensors=False
+            )
 
-            self.assertTrue(os.path.exists(os.path.join(temp_dir, "model_state.pdparams")))
-            self.assertTrue(os.path.exists(os.path.join(temp_dir, "config.json")))
+            self.assertTrue(
+                os.path.exists(os.path.join(temp_dir, "model_state.pdparams"))
+            )
+            self.assertTrue(
+                os.path.exists(os.path.join(temp_dir, "config.json"))
+            )
 
-            loaded_model = InternLM3ForCausalLM.from_pretrained(temp_dir, load_checkpoint_format="")
+            loaded_model = InternLM3ForCausalLM.from_pretrained(
+                temp_dir, load_checkpoint_format=""
+            )
 
-            self.assertEqual(model.config.vocab_size, loaded_model.config.vocab_size)
-            self.assertEqual(model.config.hidden_size, loaded_model.config.hidden_size)
+            self.assertEqual(
+                model.config.vocab_size, loaded_model.config.vocab_size
+            )
+            self.assertEqual(
+                model.config.hidden_size, loaded_model.config.hidden_size
+            )
 
     def test_model_with_attention_mask(self):
         model = InternLM3ForCausalLM(self.config)
@@ -125,14 +141,22 @@ class InternLM3ModelTest(unittest.TestCase):
 
         batch_size = 2
         seq_length = 10
-        input_ids = paddle.randint(0, self.config.vocab_size, [batch_size, seq_length])
+        input_ids = paddle.randint(
+            0, self.config.vocab_size, [batch_size, seq_length]
+        )
         attention_mask = paddle.ones([batch_size, seq_length])
 
         with paddle.no_grad():
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True,
+            )
 
         logits = outputs.logits
-        self.assertEqual(logits.shape, [batch_size, seq_length, self.config.vocab_size])
+        self.assertEqual(
+            logits.shape, [batch_size, seq_length, self.config.vocab_size]
+        )
 
     def test_model_with_past_key_values(self):
         config = InternLM3Config(
@@ -150,12 +174,18 @@ class InternLM3ModelTest(unittest.TestCase):
 
         batch_size = 1
         seq_length = 5
-        input_ids = paddle.randint(0, config.vocab_size, [batch_size, seq_length])
+        input_ids = paddle.randint(
+            0, config.vocab_size, [batch_size, seq_length]
+        )
 
         with paddle.no_grad():
-            outputs = model(input_ids=input_ids, use_cache=True, return_dict=True)
+            outputs = model(
+                input_ids=input_ids, use_cache=True, return_dict=True
+            )
             past_key_values = outputs.past_key_values
-            next_input_ids = paddle.randint(0, config.vocab_size, [batch_size, 1])
+            next_input_ids = paddle.randint(
+                0, config.vocab_size, [batch_size, 1]
+            )
             outputs = model(
                 input_ids=next_input_ids,
                 past_key_values=past_key_values,
@@ -187,17 +217,25 @@ class InternLM3ConvertedWeightTest(unittest.TestCase):
             load_checkpoint_format="",
         )
         model.eval()
-        tokenizer = InternLM3Tokenizer.from_pretrained(hf_model_path, download_hub="modelscope")
+        tokenizer = InternLM3Tokenizer.from_pretrained(
+            hf_model_path, download_hub="modelscope"
+        )
         prompt = "What are the main differences between cats and dogs? List 3 points."
-        meta_instruction = "You are a helpful AI assistant. Please answer in English."
-        chat_inputs = model.build_inputs(tokenizer, prompt, history=[], meta_instruction=meta_instruction)
+        meta_instruction = (
+            "You are a helpful AI assistant. Please answer in English."
+        )
+        chat_inputs = model.build_inputs(
+            tokenizer, prompt, history=[], meta_instruction=meta_instruction
+        )
         print("\n" + "=" * 80)
         print(f"Prompt: {prompt}")
         print(f"Meta Instruction: {meta_instruction}")
         print(f"Input Length: {chat_inputs['input_ids'].shape[1]} tokens")
         self.assertIsNotNone(chat_inputs)
         self.assertIn("input_ids", chat_inputs)
-        self.assertGreater(chat_inputs["input_ids"].shape[1], 0, "Input should not be empty")
+        self.assertGreater(
+            chat_inputs["input_ids"].shape[1], 0, "Input should not be empty"
+        )
         with paddle.no_grad():
             outputs = model(
                 input_ids=chat_inputs["input_ids"],
@@ -221,7 +259,9 @@ class InternLM3ConvertedWeightTest(unittest.TestCase):
             out = out[0]
         input_length = chat_inputs["input_ids"].shape[1]
         output_ids = out[0][input_length:]
-        output_text = tokenizer.decode(output_ids.squeeze().numpy().tolist(), skip_special_tokens=True)
+        output_text = tokenizer.decode(
+            output_ids.squeeze().numpy().tolist(), skip_special_tokens=True
+        )
 
         print(
             f"Output Length: {out.shape[1]} tokens (input: {input_length}, generated: {out.shape[1] - input_length})"
@@ -232,7 +272,11 @@ class InternLM3ConvertedWeightTest(unittest.TestCase):
 
         self.assertIsNotNone(out)
         self.assertGreater(out.shape[1], 0, "Output should not be empty")
-        self.assertGreater(len(output_text.strip()), 10, "Generated output should have meaningful content")
+        self.assertGreater(
+            len(output_text.strip()),
+            10,
+            "Generated output should have meaningful content",
+        )
 
 
 if __name__ == "__main__":

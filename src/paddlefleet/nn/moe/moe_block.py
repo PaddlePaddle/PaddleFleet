@@ -103,19 +103,27 @@ class MoEStatics(nn.Layer):
         self._cast_to_low_precison = False
         use_multimodel_experts = config.get("multimodel_experts", False)
 
-        num_experts = config.moe_num_experts[0] if use_multimodel_experts else config.moe_num_experts
+        num_experts = (
+            config.moe_num_experts[0]
+            if use_multimodel_experts
+            else config.moe_num_experts
+        )
         if use_multimodel_experts:
-            assert (
-                len(set(config.moe_num_experts)) == 1
-            ), f"assume expert group has same size, got: {config.moe_num_experts}"
+            assert len(set(config.moe_num_experts)) == 1, (
+                f"assume expert group has same size, got: {config.moe_num_experts}"
+            )
 
         with paddle.utils.unique_name.guard(f"mm_layer_{layer_idx}_"):
-            num_experts_groups = len(config.moe_num_experts) if use_multimodel_experts else 1
+            num_experts_groups = (
+                len(config.moe_num_experts) if use_multimodel_experts else 1
+            )
             p = self.create_parameter(
                 shape=[num_experts_groups, num_experts],
                 dtype="float32",
                 is_bias=True,
-                attr=paddle.ParamAttr(name=paddle.utils.unique_name.generate("corr_bias")),
+                attr=paddle.ParamAttr(
+                    name=paddle.utils.unique_name.generate("corr_bias")
+                ),
             )
             p.stop_gradient = True
             self.e_score_correction_bias = p

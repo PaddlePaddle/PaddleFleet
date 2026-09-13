@@ -79,9 +79,9 @@ class GLMMoEModelProvider(GPTModelProvider):
 
     # MTP
     num_nextn_predict_layers: Optional[int] = 1
-    mtp_loss_scaling_factor: Optional[
-        float
-    ] = 0.1  # https://arxiv.org/pdf/2508.06471 0.3 for the first 15T tokens, 0.1 for the remaining tokens.
+    mtp_loss_scaling_factor: Optional[float] = (
+        0.1  # https://arxiv.org/pdf/2508.06471 0.3 for the first 15T tokens, 0.1 for the remaining tokens.
+    )
 
 
 @dataclass

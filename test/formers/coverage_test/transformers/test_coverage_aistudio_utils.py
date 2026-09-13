@@ -82,7 +82,9 @@ class TestAistudioUtils(unittest.TestCase):
         from paddlefleet.transformers.aistudio_utils import aistudio_download
 
         mock_download.return_value = "/path/to/file"
-        result = aistudio_download("repo_id", filename="model.safetensors", revision="v1.0")
+        result = aistudio_download(
+            "repo_id", filename="model.safetensors", revision="v1.0"
+        )
         self.assertEqual(result, "/path/to/file")
         mock_download.assert_called_once_with(
             repo_id="repo_id",
@@ -96,7 +98,9 @@ class TestAistudioUtils(unittest.TestCase):
         from paddlefleet.transformers.aistudio_utils import aistudio_download
 
         mock_download.return_value = "/path/to/file"
-        result = aistudio_download("repo_id", filename="model.safetensors", cache_dir="/tmp/cache")
+        result = aistudio_download(
+            "repo_id", filename="model.safetensors", cache_dir="/tmp/cache"
+        )
         self.assertEqual(result, "/path/to/file")
         mock_download.assert_called_once_with(
             repo_id="repo_id",
@@ -111,7 +115,9 @@ class TestAistudioUtils(unittest.TestCase):
         from paddlefleet.transformers.aistudio_utils import aistudio_download
 
         mock_download.return_value = "/path/to/file"
-        result = aistudio_download("repo_id", filename="model.safetensors", subfolder="checkpoint")
+        result = aistudio_download(
+            "repo_id", filename="model.safetensors", subfolder="checkpoint"
+        )
         self.assertEqual(result, "/path/to/file")
         mock_download.assert_called_once_with(
             repo_id="repo_id",

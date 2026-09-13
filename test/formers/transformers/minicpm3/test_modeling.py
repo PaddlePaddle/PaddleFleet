@@ -74,38 +74,56 @@ class MiniCPM3ModelingTest(unittest.TestCase):
         config = tiny_minicpm3_config()
         config._attn_implementation = "flashmask"
 
-        with self.assertLogs("paddlefleet.transformers.minicpm3.modeling", level="WARNING") as logs:
+        with self.assertLogs(
+            "paddlefleet.transformers.minicpm3.modeling", level="WARNING"
+        ) as logs:
             model = MiniCPM3Model(config)
 
         self.assertEqual(model.config._attn_implementation, "eager")
         self.assertIn("falling back to eager attention", " ".join(logs.output))
-        input_ids = paddle.randint(low=3, high=config.vocab_size - 1, shape=[2, 8], dtype="int64")
+        input_ids = paddle.randint(
+            low=3, high=config.vocab_size - 1, shape=[2, 8], dtype="int64"
+        )
         outputs = model(input_ids=input_ids, return_dict=True)
-        self.assertEqual(list(outputs.last_hidden_state.shape), [2, 8, config.hidden_size])
+        self.assertEqual(
+            list(outputs.last_hidden_state.shape), [2, 8, config.hidden_size]
+        )
 
     def test_sdpa_forward(self):
         config = tiny_minicpm3_config()
         config._attn_implementation = "sdpa"
         model = MiniCPM3Model(config)
-        input_ids = paddle.randint(low=3, high=config.vocab_size - 1, shape=[2, 8], dtype="int64")
+        input_ids = paddle.randint(
+            low=3, high=config.vocab_size - 1, shape=[2, 8], dtype="int64"
+        )
 
         outputs = model(input_ids=input_ids, return_dict=True)
 
-        self.assertEqual(list(outputs.last_hidden_state.shape), [2, 8, config.hidden_size])
+        self.assertEqual(
+            list(outputs.last_hidden_state.shape), [2, 8, config.hidden_size]
+        )
 
     def test_tied_lm_head_aoa_config(self):
         config = tiny_minicpm3_config(tie_word_embeddings=True)
 
-        aoa_statements = MiniCPM3ForCausalLM._gen_aoa_config(config)["aoa_statements"]
-        inv_aoa_statements = MiniCPM3ForCausalLM._gen_inv_aoa_config(config)["aoa_statements"]
+        aoa_statements = MiniCPM3ForCausalLM._gen_aoa_config(config)[
+            "aoa_statements"
+        ]
+        inv_aoa_statements = MiniCPM3ForCausalLM._gen_inv_aoa_config(config)[
+            "aoa_statements"
+        ]
 
-        self.assertIn("model.embed_tokens.weight -> lm_head.weight", aoa_statements)
+        self.assertIn(
+            "model.embed_tokens.weight -> lm_head.weight", aoa_statements
+        )
         self.assertIn("lm_head.weight -> _", inv_aoa_statements)
 
     def test_causal_lm_forward_and_loss(self):
         config = tiny_minicpm3_config()
         model = MiniCPM3ForCausalLM(config)
-        input_ids = paddle.randint(low=3, high=config.vocab_size - 1, shape=[2, 8], dtype="int64")
+        input_ids = paddle.randint(
+            low=3, high=config.vocab_size - 1, shape=[2, 8], dtype="int64"
+        )
         labels = input_ids.clone()
         labels[:, :3] = -100
 
@@ -117,19 +135,25 @@ class MiniCPM3ModelingTest(unittest.TestCase):
     def test_from_pretrained_and_auto_model(self):
         config = tiny_minicpm3_config()
         model = MiniCPM3ForCausalLM(config)
-        input_ids = paddle.randint(low=3, high=config.vocab_size - 1, shape=[2, 8], dtype="int64")
+        input_ids = paddle.randint(
+            low=3, high=config.vocab_size - 1, shape=[2, 8], dtype="int64"
+        )
 
         with tempfile.TemporaryDirectory() as tmpdir:
             model.save_pretrained(tmpdir)
 
             class_loaded = MiniCPM3ForCausalLM.from_pretrained(tmpdir)
             class_outputs = class_loaded(input_ids=input_ids, return_dict=True)
-            self.assertEqual(list(class_outputs.logits.shape), [2, 8, config.vocab_size])
+            self.assertEqual(
+                list(class_outputs.logits.shape), [2, 8, config.vocab_size]
+            )
 
             auto_loaded = AutoModelForCausalLM.from_pretrained(tmpdir)
             self.assertEqual(type(auto_loaded).__name__, "MiniCPM3ForCausalLM")
             auto_outputs = auto_loaded(input_ids=input_ids, return_dict=True)
-            self.assertEqual(list(auto_outputs.logits.shape), [2, 8, config.vocab_size])
+            self.assertEqual(
+                list(auto_outputs.logits.shape), [2, 8, config.vocab_size]
+            )
 
     def test_auto_config_with_model_type(self):
         config = tiny_minicpm3_config()
@@ -154,12 +178,16 @@ class MiniCPM3ModelingTest(unittest.TestCase):
             def __init__(self):
                 self.return_tensors = None
 
-            def apply_chat_template(self, history, tokenize=False, add_generation_prompt=True):
+            def apply_chat_template(
+                self, history, tokenize=False, add_generation_prompt=True
+            ):
                 return "hello"
 
             def __call__(self, text, return_tensors=None):
                 self.return_tensors = return_tensors
-                return {"input_ids": paddle.to_tensor([[1, 2, 3]], dtype="int64")}
+                return {
+                    "input_ids": paddle.to_tensor([[1, 2, 3]], dtype="int64")
+                }
 
             def decode(self, outputs):
                 return "ok"
@@ -170,7 +198,9 @@ class MiniCPM3ModelingTest(unittest.TestCase):
 
         def fake_generate(**kwargs):
             self.assertIsInstance(kwargs["input_ids"], paddle.Tensor)
-            self.assertEqual(str(kwargs["input_ids"].place), str(paddle.to_tensor([0]).place))
+            self.assertEqual(
+                str(kwargs["input_ids"].place), str(paddle.to_tensor([0]).place)
+            )
             return paddle.to_tensor([[1, 2, 3, 4, 2]], dtype="int64")
 
         model.generate = fake_generate

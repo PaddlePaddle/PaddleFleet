@@ -86,10 +86,14 @@ class InternLM2ModelTest(unittest.TestCase):
 
         batch, seqlen, hidden = 2, 6, 8
         # mask out the last 2 tokens of sequence 0 -> padding present
-        attention_mask = paddle.to_tensor([[1, 1, 1, 1, 0, 0], [1, 1, 1, 1, 1, 1]], dtype="int32")
+        attention_mask = paddle.to_tensor(
+            [[1, 1, 1, 1, 0, 0], [1, 1, 1, 1, 1, 1]], dtype="int32"
+        )
         hidden_states = paddle.randn([batch, seqlen, hidden])
 
-        unpadded, indices, cu_seqlens, max_seqlen = unpad_input(hidden_states, attention_mask)
+        unpadded, indices, cu_seqlens, max_seqlen = unpad_input(
+            hidden_states, attention_mask
+        )
         # total non-padding tokens = 4 + 6 = 10
         self.assertEqual(unpadded.shape[0], 10)
         self.assertEqual(unpadded.shape[1], hidden)
@@ -100,9 +104,21 @@ class InternLM2ModelTest(unittest.TestCase):
         # padded positions should be zero; non-padded positions should match the input
         valid = attention_mask.astype("bool").unsqueeze(-1)
         self.assertTrue(
-            paddle.all(paddle.where(valid, repadded == hidden_states, paddle.ones_like(valid, dtype="bool")))
+            paddle.all(
+                paddle.where(
+                    valid,
+                    repadded == hidden_states,
+                    paddle.ones_like(valid, dtype="bool"),
+                )
+            )
         )
-        self.assertTrue(paddle.all(paddle.where(~valid, repadded == 0, paddle.ones_like(valid, dtype="bool"))))
+        self.assertTrue(
+            paddle.all(
+                paddle.where(
+                    ~valid, repadded == 0, paddle.ones_like(valid, dtype="bool")
+                )
+            )
+        )
 
     @require_gpu(min_gpus=1)
     def test_flash_attention_2_with_padding_mask(self):
@@ -126,11 +142,19 @@ class InternLM2ModelTest(unittest.TestCase):
         model.eval()
 
         # batch with padding: seq 0 shorter than seq 1
-        input_ids = paddle.to_tensor([[1, 2, 3, 4, 0, 0], [1, 2, 3, 4, 5, 6]], dtype="int64")
-        attention_mask = paddle.to_tensor([[1, 1, 1, 1, 0, 0], [1, 1, 1, 1, 1, 1]], dtype="int64")
+        input_ids = paddle.to_tensor(
+            [[1, 2, 3, 4, 0, 0], [1, 2, 3, 4, 5, 6]], dtype="int64"
+        )
+        attention_mask = paddle.to_tensor(
+            [[1, 1, 1, 1, 0, 0], [1, 1, 1, 1, 1, 1]], dtype="int64"
+        )
 
         with paddle.no_grad():
-            outputs = model(input_ids=input_ids, attention_mask=attention_mask, return_dict=True)
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                return_dict=True,
+            )
 
         logits = outputs.logits
         self.assertEqual(logits.shape, [2, 6, config.vocab_size])
@@ -142,13 +166,17 @@ class InternLM2ModelTest(unittest.TestCase):
 
         batch_size = 2
         seq_length = 10
-        input_ids = paddle.randint(0, self.config.vocab_size, [batch_size, seq_length])
+        input_ids = paddle.randint(
+            0, self.config.vocab_size, [batch_size, seq_length]
+        )
 
         with paddle.no_grad():
             outputs = model(input_ids=input_ids, return_dict=True)
 
         logits = outputs.logits
-        self.assertEqual(logits.shape, [batch_size, seq_length, self.config.vocab_size])
+        self.assertEqual(
+            logits.shape, [batch_size, seq_length, self.config.vocab_size]
+        )
 
     def test_model_generation(self):
         model = InternLM2ForCausalLM(self.config)
@@ -174,26 +202,42 @@ class InternLM2ModelTest(unittest.TestCase):
         model = InternLM2ForCausalLM(self.config)
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            model.save_pretrained(temp_dir, save_checkpoint_format="", save_safetensors=False)
+            model.save_pretrained(
+                temp_dir, save_checkpoint_format="", save_safetensors=False
+            )
 
-            self.assertTrue(os.path.exists(os.path.join(temp_dir, "model_state.pdparams")))
-            self.assertTrue(os.path.exists(os.path.join(temp_dir, "config.json")))
+            self.assertTrue(
+                os.path.exists(os.path.join(temp_dir, "model_state.pdparams"))
+            )
+            self.assertTrue(
+                os.path.exists(os.path.join(temp_dir, "config.json"))
+            )
 
-            loaded_model = InternLM2ForCausalLM.from_pretrained(temp_dir, load_checkpoint_format="")
+            loaded_model = InternLM2ForCausalLM.from_pretrained(
+                temp_dir, load_checkpoint_format=""
+            )
 
-            self.assertEqual(model.config.vocab_size, loaded_model.config.vocab_size)
-            self.assertEqual(model.config.hidden_size, loaded_model.config.hidden_size)
+            self.assertEqual(
+                model.config.vocab_size, loaded_model.config.vocab_size
+            )
+            self.assertEqual(
+                model.config.hidden_size, loaded_model.config.hidden_size
+            )
 
     @slow
     def test_auto_model_load(self):
         from paddlefleet.transformers.auto.modeling import AutoModelForCausalLM
 
-        model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, load_checkpoint_format="", download_hub="modelscope")
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_PATH, load_checkpoint_format="", download_hub="modelscope"
+        )
         self.assertIsNotNone(model)
 
     @slow
     def test_paddle_hello(self):
-        model = InternLM2ForCausalLM.from_pretrained(MODEL_PATH, load_checkpoint_format="", download_hub="modelscope")
+        model = InternLM2ForCausalLM.from_pretrained(
+            MODEL_PATH, load_checkpoint_format="", download_hub="modelscope"
+        )
         tokenizer = InternLM2Tokenizer.from_pretrained(
             MODEL_PATH, load_checkpoint_format="", download_hub="modelscope"
         )
@@ -202,7 +246,10 @@ class InternLM2ModelTest(unittest.TestCase):
 
         prompt = "What is the difference between cats and dogs?"
         chat_inputs = model.build_inputs(
-            tokenizer, prompt, history=[], meta_instruction="You are a helpful assistant."
+            tokenizer,
+            prompt,
+            history=[],
+            meta_instruction="You are a helpful assistant.",
         )
         input_ids = chat_inputs["input_ids"].to("gpu")
         attention_mask = chat_inputs.get("attention_mask")
@@ -226,10 +273,14 @@ class InternLM2ModelTest(unittest.TestCase):
 
     @slow
     def test_inference_with_paddle_model(self):
-        model = InternLM2ForCausalLM.from_pretrained(MODEL_PATH, load_checkpoint_format="", download_hub="modelscope")
+        model = InternLM2ForCausalLM.from_pretrained(
+            MODEL_PATH, load_checkpoint_format="", download_hub="modelscope"
+        )
         model.eval()
 
-        input_ids = paddle.to_tensor([[0, 345, 232, 328, 740, 140, 1695, 69, 6078, 1588, 2]])
+        input_ids = paddle.to_tensor(
+            [[0, 345, 232, 328, 740, 140, 1695, 69, 6078, 1588, 2]]
+        )
         with paddle.no_grad():
             output = model(input_ids)[0]
 
@@ -265,9 +316,14 @@ class InternLM2CompatibilityTest(unittest.TestCase):
         config.vocab_size = 10000
         config.max_position_embeddings = 128
 
-        cls.torch_model = AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+        cls.torch_model = AutoModelForCausalLM.from_config(
+            config, trust_remote_code=True
+        )
 
-        torch.save(cls.torch_model.state_dict(), f"{cls.torch_model_path}/pytorch_model.bin")
+        torch.save(
+            cls.torch_model.state_dict(),
+            f"{cls.torch_model_path}/pytorch_model.bin",
+        )
 
         config_dict = config.to_dict()
         for key in ["_commit_hash", "_name_or_path"]:
@@ -287,22 +343,42 @@ class InternLM2CompatibilityTest(unittest.TestCase):
         input_ids = np.random.randint(100, 200, [1, 20])
 
         self.torch_model.eval()
-        torch_output = self.torch_model(torch.tensor(input_ids), use_cache=False)
-        torch_logit = torch_output[0] if isinstance(torch_output, tuple) else torch_output.logits
+        torch_output = self.torch_model(
+            torch.tensor(input_ids), use_cache=False
+        )
+        torch_logit = (
+            torch_output[0]
+            if isinstance(torch_output, tuple)
+            else torch_output.logits
+        )
 
         paddle_model = InternLM2ForCausalLM.from_pretrained(
-            self.torch_model_path, convert_from_hf=True, load_checkpoint_format=""
+            self.torch_model_path,
+            convert_from_hf=True,
+            load_checkpoint_format="",
         )
         paddle_model.eval()
-        paddle_logit = paddle_model(paddle.to_tensor(input_ids), use_cache=False)[0]
+        paddle_logit = paddle_model(
+            paddle.to_tensor(input_ids), use_cache=False
+        )[0]
 
-        paddle_out = paddle_logit.detach().cpu().reshape([-1])[:9].astype("float32").numpy()
+        paddle_out = (
+            paddle_logit.detach()
+            .cpu()
+            .reshape([-1])[:9]
+            .astype("float32")
+            .numpy()
+        )
         torch_out = torch_logit.detach().cpu().reshape([-1])[:9].float().numpy()
         max_diff = np.max(np.abs(paddle_out - torch_out))
         print(f"\nMax diff: {max_diff}")
 
-        paddle_token_ids = paddle.argmax(paddle_logit, axis=-1).cpu().numpy()[0][:10]
-        torch_token_ids = torch.argmax(torch_logit, dim=-1).cpu().numpy()[0][:10]
+        paddle_token_ids = (
+            paddle.argmax(paddle_logit, axis=-1).cpu().numpy()[0][:10]
+        )
+        torch_token_ids = (
+            torch.argmax(torch_logit, dim=-1).cpu().numpy()[0][:10]
+        )
         print(f"Paddle token ids: {paddle_token_ids}")
         print(f"Torch token ids:  {torch_token_ids}")
         self.assertTrue(
@@ -311,7 +387,8 @@ class InternLM2CompatibilityTest(unittest.TestCase):
         )
 
         self.assertTrue(
-            np.allclose(paddle_out, torch_out, atol=1e-2, rtol=1e-2), f"Max diff {max_diff} exceeds tolerance"
+            np.allclose(paddle_out, torch_out, atol=1e-2, rtol=1e-2),
+            f"Max diff {max_diff} exceeds tolerance",
         )
 
 

@@ -49,7 +49,9 @@ class DiffTransformerModelTester:
         )
 
     def prepare_inputs(self):
-        input_ids = paddle.randint(0, self.vocab_size, (self.batch_size, self.seq_length))
+        input_ids = paddle.randint(
+            0, self.vocab_size, (self.batch_size, self.seq_length)
+        )
         return input_ids
 
     def check_model(self):
@@ -120,8 +122,12 @@ class DiffTransformerTest(unittest.TestCase):
             auto.DiffTransformerConfig
 
     def test_head_dim_must_match_hidden_size(self):
-        with self.assertRaisesRegex(ValueError, r"head_dim \* num_attention_heads"):
-            DiffTransformerConfig(hidden_size=32, num_attention_heads=2, head_dim=8)
+        with self.assertRaisesRegex(
+            ValueError, r"head_dim \* num_attention_heads"
+        ):
+            DiffTransformerConfig(
+                hidden_size=32, num_attention_heads=2, head_dim=8
+            )
 
     def test_causal_lm_does_not_attend_to_future_tokens(self):
         config = self.tester.get_config()
@@ -129,12 +135,16 @@ class DiffTransformerTest(unittest.TestCase):
         model.eval()
         input_ids = self.tester.prepare_inputs()
         modified_input_ids = input_ids.clone()
-        modified_input_ids[:, -1] = (modified_input_ids[:, -1] + 1) % config.vocab_size
+        modified_input_ids[:, -1] = (
+            modified_input_ids[:, -1] + 1
+        ) % config.vocab_size
         attention_mask = paddle.ones_like(input_ids)
 
         with paddle.no_grad():
             logits = model(input_ids, attention_mask=attention_mask)
-            modified_logits = model(modified_input_ids, attention_mask=attention_mask)
+            modified_logits = model(
+                modified_input_ids, attention_mask=attention_mask
+            )
 
         paddle.testing.assert_close(logits[:, :-1], modified_logits[:, :-1])
 

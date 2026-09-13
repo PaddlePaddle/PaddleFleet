@@ -31,7 +31,6 @@ class OrthogonalCallback(TrainerCallback):
 
         def update_(layer):
             if isinstance(layer, ErnieDecoderLayer):
-
                 if not hasattr(layer.mlp, "gate"):
                     return
                 gate = layer.mlp.gate
@@ -40,13 +39,19 @@ class OrthogonalCallback(TrainerCallback):
                         assert len(gate._forward_pre_hooks) == 1
                         hook_id = list(gate._forward_pre_hooks.keys())[0]
                         gate._forward_pre_hooks[hook_id](gate, inputs=None)
-                    assert gate.weight.dtype == paddle.float32, f"got unexpected dtype: {gate.weight.dtype}"
+                    assert gate.weight.dtype == paddle.float32, (
+                        f"got unexpected dtype: {gate.weight.dtype}"
+                    )
                     weight = gate.weight.detach()
                     weight.stop_gradient = False
-                    oloss = gate._cal_orthogonal_loss_opt_each_weight(weight, model.config.moe_group_experts)
+                    oloss = gate._cal_orthogonal_loss_opt_each_weight(
+                        weight, model.config.moe_group_experts
+                    )
                     (oloss_grad,) = paddle.autograd.grad(oloss, weight)
                     with paddle.no_grad():
-                        gate.weight.data.add_(-oloss_grad * self.ortho_loss_lambda)
+                        gate.weight.data.add_(
+                            -oloss_grad * self.ortho_loss_lambda
+                        )
                     gate.weight.stop_gradient = False
 
         model.apply(update_)

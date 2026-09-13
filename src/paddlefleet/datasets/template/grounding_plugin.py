@@ -31,13 +31,20 @@ class BaseGroundingPlugin:
         if self.norm_bbox == "none" or image_size is None:
             return [int(coord) for coord in bbox]
         if self.norm_bbox != "norm1000":
-            raise ValueError(f"Unsupported bbox normalization mode: {self.norm_bbox}")
+            raise ValueError(
+                f"Unsupported bbox normalization mode: {self.norm_bbox}"
+            )
 
         width, height = image_size
         if width <= 0 or height <= 0:
-            raise ValueError(f"Image dimensions must be positive, got width={width}, height={height}")
+            raise ValueError(
+                f"Image dimensions must be positive, got width={width}, height={height}"
+            )
         # bbox is [x1, y1, x2, y2]: even indices scale by width, odd by height.
-        return [int(round(coord / (width if index % 2 == 0 else height) * 1000)) for index, coord in enumerate(bbox)]
+        return [
+            int(round(coord / (width if index % 2 == 0 else height) * 1000))
+            for index, coord in enumerate(bbox)
+        ]
 
     def format_ref_object(self, obj_name: str) -> str:
         return f"<|object_ref_start|>{obj_name}<|object_ref_end|>"
@@ -70,7 +77,9 @@ class BaseGroundingPlugin:
             current_bboxes = bboxes[bbox_idx : bbox_idx + bbox_count]
 
             for ref in current_refs:
-                message["content"] = message["content"].replace("<ref-object>", self.format_ref_object(ref), 1)
+                message["content"] = message["content"].replace(
+                    "<ref-object>", self.format_ref_object(ref), 1
+                )
             for local_index, bbox in enumerate(current_bboxes):
                 image_index = 0
                 bbox_index = bbox_idx + local_index

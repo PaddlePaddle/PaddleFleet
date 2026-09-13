@@ -38,9 +38,15 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
 )
 from paddlefleet.models.gpt.lm_head import GPTLMHead
 from paddlefleet.models.qwen3_5.layer_specs import get_qwen3_5_vision_spec
-from paddlefleet.models.qwen3_5.qwen3_5_model import Qwen3_5RMSNorm, Qwen3_5RMSNormPipe
+from paddlefleet.models.qwen3_5.qwen3_5_model import (
+    Qwen3_5RMSNorm,
+    Qwen3_5RMSNormPipe,
+)
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm, WrappedPaddleNormPipe
+from paddlefleet.transformer.paddle_norm import (
+    WrappedPaddleNorm,
+    WrappedPaddleNormPipe,
+)
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 from ...nn.criterion.interface import CriterionLayer
@@ -173,7 +179,9 @@ class Qwen3_5TextModelProvider(GPTModelProvider):
     moe_shared_expert_gate: bool = True
     multimodal_embedding: bool = False
 
-    def provide(self, pre_process=None, post_process=None, vp_stage=None, loss_fn=None):
+    def provide(
+        self, pre_process=None, post_process=None, vp_stage=None, loss_fn=None
+    ):
         """Override GPTModelProvider.provide() to use Qwen3.5-specific layer spec.
 
         The default provide() uses gpt_builder() which calls get_gpt_decoder_layers_spec()
@@ -216,7 +224,10 @@ class Qwen3_5TextModelProvider(GPTModelProvider):
                 self.rope_type = rope_type
             if "rope_theta" in self.rope_parameters:
                 self.rope_theta = self.rope_parameters["rope_theta"]
-        if getattr(self, "rope_scaling", None) and "mscale_all_dim" in self.rope_scaling:
+        if (
+            getattr(self, "rope_scaling", None)
+            and "mscale_all_dim" in self.rope_scaling
+        ):
             self.mscale_all_dim = self.rope_scaling["mscale_all_dim"]
 
         pp_size = self.pipeline_model_parallel_size or 1
@@ -267,7 +278,9 @@ def get_qwen3_5_language_spec(config):
     if layer_types is None:
         layer_types = ["full_attention"] * config.num_hidden_layers
 
-    empty_layer_spec = LayerSpec(layer=EmptyLayer, extra_kwargs={"config": config})
+    empty_layer_spec = LayerSpec(
+        layer=EmptyLayer, extra_kwargs={"config": config}
+    )
     head_empty_layers = [empty_layer_spec] * config.num_empty_layers_add_in_head
     tail_empty_layers = [empty_layer_spec] * config.num_empty_layers_add_in_tail
 
@@ -302,9 +315,15 @@ def get_qwen3_5_language_spec(config):
         attn_spec = sub.self_attn
         if hasattr(attn_spec, "sublayers_spec"):
             attn_sub = attn_spec.sublayers_spec
-            if hasattr(attn_sub, "q_norm") and attn_sub.q_norm is WrappedPaddleNorm:
+            if (
+                hasattr(attn_sub, "q_norm")
+                and attn_sub.q_norm is WrappedPaddleNorm
+            ):
                 attn_sub.q_norm = Qwen3_5RMSNorm
-            if hasattr(attn_sub, "k_norm") and attn_sub.k_norm is WrappedPaddleNorm:
+            if (
+                hasattr(attn_sub, "k_norm")
+                and attn_sub.k_norm is WrappedPaddleNorm
+            ):
                 attn_sub.k_norm = Qwen3_5RMSNorm
 
         transformer_layers_spec.append(spec)
@@ -312,7 +331,9 @@ def get_qwen3_5_language_spec(config):
     full_spec = get_gpt_spec(
         config=config,
         transformer_layers_spec=transformer_layers_spec,
-        mtp_layers_spec=_build_mtp_layers_spec(config, transformer_layers_spec) if config.mtp_num_layers > 0 else None,
+        mtp_layers_spec=_build_mtp_layers_spec(config, transformer_layers_spec)
+        if config.mtp_num_layers > 0
+        else None,
         vocab_size=config.vocab_size,
         max_sequence_length=config.max_sequence_length,
         head_empty_layers_spec=head_empty_layers,
@@ -378,7 +399,12 @@ _warned_unforwarded_keys = set()
 
 def _warn_unforwarded_keys(keys):
     """Warn once per key about batch entries the pipeline drops on the floor."""
-    unknown = {k for k in keys if k not in _PIPELINE_FIRST_STAGE_KEYS and k not in _PIPELINE_IGNORED_KEYS}
+    unknown = {
+        k
+        for k in keys
+        if k not in _PIPELINE_FIRST_STAGE_KEYS
+        and k not in _PIPELINE_IGNORED_KEYS
+    }
     unknown -= _warned_unforwarded_keys
     if unknown:
         _warned_unforwarded_keys.update(unknown)
@@ -402,7 +428,9 @@ class Qwen3_5CriterionPipe(CriterionLayer):
 
     def forward(self, logits, labels, loss_mask=None, **kwargs):
         if isinstance(logits, list):
-            return super().forward(logits[0], labels, loss_mask, mtp_logits=logits[1:], **kwargs)
+            return super().forward(
+                logits[0], labels, loss_mask, mtp_logits=logits[1:], **kwargs
+            )
         return super().forward(logits, labels, loss_mask, **kwargs)
 
 
@@ -425,7 +453,9 @@ def _prepare_qwen3_5_pipeline_inputs(inputs, gather_pp_need_data=True):
     """
     if isinstance(inputs, dict):
         _warn_unforwarded_keys(inputs.keys())
-        first_stage_batch = {k: inputs[k] for k in _PIPELINE_FIRST_STAGE_KEYS if k in inputs}
+        first_stage_batch = {
+            k: inputs[k] for k in _PIPELINE_FIRST_STAGE_KEYS if k in inputs
+        }
         last_stage_inputs = inputs.get("labels", None)
         return (first_stage_batch, last_stage_inputs)
 
@@ -458,16 +488,18 @@ def _pp_save_pretrained(self, save_dir, is_main_process: bool = True, **kwargs):
     memory_growth_threshold = kwargs.get("memory_growth_threshold", 8 * (2**30))
 
     if os.path.isfile(save_dir):
-        raise ValueError(f"Saving directory ({save_dir}) should be a directory, not a file")
+        raise ValueError(
+            f"Saving directory ({save_dir}) should be a directory, not a file"
+        )
     os.makedirs(save_dir, exist_ok=True)
 
     config_to_save = copy.deepcopy(self.config_to_save)
     aoa_config = self._gen_inv_aoa_config(config_to_save)
 
     clean_unrelated_safetensors(save_dir)
-    HFFormatFullParamSaver(self, aoa_config, memory_growth_threshold=memory_growth_threshold).save_checkpoint(
-        save_dir, max_shard_size
-    )
+    HFFormatFullParamSaver(
+        self, aoa_config, memory_growth_threshold=memory_growth_threshold
+    ).save_checkpoint(save_dir, max_shard_size)
 
     if is_main_process:
         if config_to_save.tensor_model_parallel_size > 1:
@@ -499,7 +531,9 @@ def build_qwen3_5_model(config, criterion):
 
     pp_size = getattr(config, "pipeline_model_parallel_size", 1) or 1
     vpp_size = getattr(config, "virtual_pipeline_model_parallel_size", 1) or 1
-    spatial_merge_size = getattr(config, "spatial_merge_size", config.vision_config.spatial_merge_size)
+    spatial_merge_size = getattr(
+        config, "spatial_merge_size", config.vision_config.spatial_merge_size
+    )
 
     # --- Build vision model via Qwen3_5VisionProvider ---
     vision_provider = Qwen3_5VisionProvider.from_config(vision_config)
@@ -507,9 +541,9 @@ def build_qwen3_5_model(config, criterion):
     # the ViT is built from its own provider that never saw the flag, so every
     # accuracy-compatible branch inside the vision tower (parallel linears, SDPA,
     # MLP) silently stayed off.
-    vision_provider.use_accuracy_compatible = getattr(vision_config, "use_accuracy_compatible", False) or getattr(
-        config, "use_accuracy_compatible", False
-    )
+    vision_provider.use_accuracy_compatible = getattr(
+        vision_config, "use_accuracy_compatible", False
+    ) or getattr(config, "use_accuracy_compatible", False)
     # The reference vision RoPE always rotates in FP32 (``q, k = q.float(), k.float()``
     # then casts back), which is what ``high_precision_rope`` selects — see
     # ``_apply_rotary_pos_emb_bshd``. It has to be forced here rather than declared
@@ -532,10 +566,18 @@ def build_qwen3_5_model(config, criterion):
     # Propagate parallelism settings
     language_config.pipeline_model_parallel_size = pp_size
     language_config.virtual_pipeline_model_parallel_size = vpp_size
-    language_config.tensor_model_parallel_size = getattr(config, "tensor_model_parallel_size", 1) or 1
-    language_config.context_parallel_size = getattr(config, "context_parallel_size", 1) or 1
-    language_config.expert_model_parallel_size = getattr(config, "expert_model_parallel_size", 1) or 1
-    language_config.sequence_parallel = getattr(config, "sequence_parallel", False)
+    language_config.tensor_model_parallel_size = (
+        getattr(config, "tensor_model_parallel_size", 1) or 1
+    )
+    language_config.context_parallel_size = (
+        getattr(config, "context_parallel_size", 1) or 1
+    )
+    language_config.expert_model_parallel_size = (
+        getattr(config, "expert_model_parallel_size", 1) or 1
+    )
+    language_config.sequence_parallel = getattr(
+        config, "sequence_parallel", False
+    )
     # Propagate multimodal settings
     language_config.multimodal_embedding = True
     language_config.image_token_id = config.image_token_id
@@ -574,7 +616,10 @@ def build_qwen3_5_model(config, criterion):
             language_model.vision_merge = vision_merge
             # Insert vision_merge at position 0 in run_function (before GPTEmbedding)
             # For VPP, only insert into the first chunk (chunk 0)
-            if hasattr(language_model, "_model_chunks") and language_model._model_chunks:
+            if (
+                hasattr(language_model, "_model_chunks")
+                and language_model._model_chunks
+            ):
                 # VPP mode: insert into first chunk's run_function
                 first_chunk = language_model._model_chunks[0]
                 first_chunk.run_function.insert(0, vision_merge)
@@ -585,7 +630,9 @@ def build_qwen3_5_model(config, criterion):
             language_model.vision_merge = None
 
         # Attach _prepare_pipeline_inputs_func for the trainer
-        language_model._prepare_pipeline_inputs_func = _prepare_qwen3_5_pipeline_inputs
+        language_model._prepare_pipeline_inputs_func = (
+            _prepare_qwen3_5_pipeline_inputs
+        )
 
         # mm_collate_fn resolves the mRoPE function as model.get_rope_index /
         # model.model.get_rope_index. Without this the collator finds nothing on
@@ -602,7 +649,9 @@ def build_qwen3_5_model(config, criterion):
 
         # GPTModel is not a PretrainedModel, so provide the HF-export entry point
         # the trainer calls at the end of training.
-        language_model.save_pretrained = types.MethodType(_pp_save_pretrained, language_model)
+        language_model.save_pretrained = types.MethodType(
+            _pp_save_pretrained, language_model
+        )
 
         return language_model
     else:
@@ -681,8 +730,12 @@ class Qwen3_5Model(FleetLayer):
             return output[0]
         return output
 
-    def get_video_features(self, pixel_values_videos, video_grid_thw=None, **kwargs):
-        return self.get_image_features(pixel_values_videos, video_grid_thw, **kwargs)
+    def get_video_features(
+        self, pixel_values_videos, video_grid_thw=None, **kwargs
+    ):
+        return self.get_image_features(
+            pixel_values_videos, video_grid_thw, **kwargs
+        )
 
     def get_placeholder_mask(
         self,
@@ -693,25 +746,39 @@ class Qwen3_5Model(FleetLayer):
     ):
         if input_ids is None:
             embed_fn = self.get_input_embeddings()
-            special_image_mask = (inputs_embeds == embed_fn(paddle.to_tensor(self.image_token_id, dtype="int64"))).all(
-                -1
-            )
-            special_video_mask = (inputs_embeds == embed_fn(paddle.to_tensor(self.video_token_id, dtype="int64"))).all(
-                -1
-            )
+            special_image_mask = (
+                inputs_embeds
+                == embed_fn(
+                    paddle.to_tensor(self.image_token_id, dtype="int64")
+                )
+            ).all(-1)
+            special_video_mask = (
+                inputs_embeds
+                == embed_fn(
+                    paddle.to_tensor(self.video_token_id, dtype="int64")
+                )
+            ).all(-1)
         else:
             special_image_mask = input_ids == self.image_token_id
             special_video_mask = input_ids == self.video_token_id
 
         # n_image_tokens = special_image_mask.sum()
-        special_image_mask = special_image_mask.unsqueeze(-1).expand_as(inputs_embeds)
+        special_image_mask = special_image_mask.unsqueeze(-1).expand_as(
+            inputs_embeds
+        )
         if image_features is not None:
-            assert int(inputs_embeds[special_image_mask].numel()) == int(image_features.numel())
+            assert int(inputs_embeds[special_image_mask].numel()) == int(
+                image_features.numel()
+            )
 
         # n_video_tokens = special_video_mask.sum()
-        special_video_mask = special_video_mask.unsqueeze(-1).expand_as(inputs_embeds)
+        special_video_mask = special_video_mask.unsqueeze(-1).expand_as(
+            inputs_embeds
+        )
         if video_features is not None:
-            assert int(inputs_embeds[special_video_mask].numel()) == int(video_features.numel())
+            assert int(inputs_embeds[special_video_mask].numel()) == int(
+                video_features.numel()
+            )
 
         return special_image_mask, special_video_mask
 
@@ -736,8 +803,12 @@ class Qwen3_5Model(FleetLayer):
         llm_w = w // spatial_merge_size
         seq_len = llm_t * llm_h * llm_w
 
-        pos_w = paddle.arange(start_position, start_position + llm_w).tile([llm_h * llm_t])
-        pos_h = paddle.arange(start_position, start_position + llm_h).repeat_interleave(llm_w * llm_t)
+        pos_w = paddle.arange(start_position, start_position + llm_w).tile(
+            [llm_h * llm_t]
+        )
+        pos_h = paddle.arange(
+            start_position, start_position + llm_h
+        ).repeat_interleave(llm_w * llm_t)
         pos_t = paddle.full([seq_len], start_position, dtype="int64")
         pos_t = pos_t * time_interval
 
@@ -774,7 +845,9 @@ class Qwen3_5Model(FleetLayer):
                 input_token_type = input_token_type[mask]
 
             input_type_group = []
-            for key, group in itertools.groupby(enumerate(input_token_type.tolist()), lambda x: x[1]):
+            for key, group in itertools.groupby(
+                enumerate(input_token_type.tolist()), lambda x: x[1]
+            ):
                 group = list(group)
                 input_type_group.append((key, group[0][0], group[-1][0] + 1))
 
@@ -783,7 +856,10 @@ class Qwen3_5Model(FleetLayer):
             for modality_type, start_idx, end_idx in input_type_group:
                 if modality_type == 0:
                     text_len = end_idx - start_idx
-                    llm_pos_ids_list.append(paddle.arange(text_len).reshape([1, -1]).expand([3, -1]) + current_pos)
+                    llm_pos_ids_list.append(
+                        paddle.arange(text_len).reshape([1, -1]).expand([3, -1])
+                        + current_pos
+                    )
                     current_pos += text_len
                 else:
                     grid_thw = next(grid_iters[modality_type])
@@ -794,11 +870,21 @@ class Qwen3_5Model(FleetLayer):
                         spatial_merge_size,
                     )
                     llm_pos_ids_list.append(vision_position_ids)
-                    h_val = int(grid_thw[1].item()) if isinstance(grid_thw, Tensor) else int(grid_thw[1])
-                    w_val = int(grid_thw[2].item()) if isinstance(grid_thw, Tensor) else int(grid_thw[2])
+                    h_val = (
+                        int(grid_thw[1].item())
+                        if isinstance(grid_thw, Tensor)
+                        else int(grid_thw[1])
+                    )
+                    w_val = (
+                        int(grid_thw[2].item())
+                        if isinstance(grid_thw, Tensor)
+                        else int(grid_thw[2])
+                    )
                     current_pos += max(h_val, w_val) // spatial_merge_size
 
-            llm_positions = paddle.concat(llm_pos_ids_list, axis=1).reshape([3, -1])
+            llm_positions = paddle.concat(llm_pos_ids_list, axis=1).reshape(
+                [3, -1]
+            )
 
             if attention_mask is not None:
                 mask = attention_mask[batch_idx].astype("bool")
@@ -806,9 +892,13 @@ class Qwen3_5Model(FleetLayer):
             else:
                 position_ids[:, batch_idx] = llm_positions
 
-            mrope_position_deltas.append(int(llm_positions.max().item()) + 1 - len(current_input_ids))
+            mrope_position_deltas.append(
+                int(llm_positions.max().item()) + 1 - len(current_input_ids)
+            )
 
-        mrope_position_deltas = paddle.to_tensor(mrope_position_deltas, dtype="int64").unsqueeze(1)
+        mrope_position_deltas = paddle.to_tensor(
+            mrope_position_deltas, dtype="int64"
+        ).unsqueeze(1)
 
         return position_ids, mrope_position_deltas
 
@@ -835,7 +925,9 @@ class Qwen3_5Model(FleetLayer):
             and (image_grid_thw is not None or video_grid_thw is not None)
         )
 
-        if can_compute_mrope and (self.rope_deltas is None or past_key_values_length == 0):
+        if can_compute_mrope and (
+            self.rope_deltas is None or past_key_values_length == 0
+        ):
             position_ids, rope_deltas = self.get_rope_index(
                 input_ids,
                 mm_token_type_ids=mm_token_type_ids,
@@ -851,7 +943,10 @@ class Qwen3_5Model(FleetLayer):
         # unavailable; fall back to input_ids, which carries the same two dims.
         shape_source = inputs_embeds if inputs_embeds is not None else input_ids
         if self.rope_deltas is not None and shape_source is not None:
-            batch_size, seq_length = shape_source.shape[0], shape_source.shape[1]
+            batch_size, seq_length = (
+                shape_source.shape[0],
+                shape_source.shape[1],
+            )
             if attention_mask is not None:
                 position_ids = attention_mask.astype("int64").cumsum(-1) - 1
                 position_ids = paddle.where(
@@ -859,7 +954,9 @@ class Qwen3_5Model(FleetLayer):
                     paddle.zeros_like(position_ids),
                     position_ids,
                 )
-                position_ids = position_ids.reshape([1, batch_size, -1]).tile([3, 1, 1])
+                position_ids = position_ids.reshape([1, batch_size, -1]).tile(
+                    [3, 1, 1]
+                )
             else:
                 position_ids = (
                     paddle.arange(
@@ -899,10 +996,14 @@ class Qwen3_5Model(FleetLayer):
         past_key_values = dict_args.get("past_key_values", None)
 
         if pixel_values is not None and self.visual is not None:
-            dict_args["image_embeds"] = self.get_image_features(pixel_values, image_grid_thw)
+            dict_args["image_embeds"] = self.get_image_features(
+                pixel_values, image_grid_thw
+            )
 
         if pixel_values_videos is not None and self.visual is not None:
-            dict_args["video_embeds"] = self.get_video_features(pixel_values_videos, video_grid_thw)
+            dict_args["video_embeds"] = self.get_video_features(
+                pixel_values_videos, video_grid_thw
+            )
 
         if position_ids is None:
             # Normally the collator supplies mRoPE position_ids via
@@ -986,14 +1087,18 @@ class FleetQwen3_5ForConditionalGeneration(FleetLayer, PretrainedModel):
         if self.model.language_model is not None:
             language_model = self.model.language_model._layers
             if hasattr(language_model, "sharded_state_dict"):
-                lm_sharded = language_model.sharded_state_dict(structured_name_prefix="")
+                lm_sharded = language_model.sharded_state_dict(
+                    structured_name_prefix=""
+                )
                 sharded_state_dict.update(lm_sharded)
 
         # Get sharded state dict from vision model (Qwen3_5VisionModel wrapped in NoPipelineParallel)
         if self.model.visual is not None:
             vision_model = self.model.visual._layers
             if hasattr(vision_model, "sharded_state_dict"):
-                vm_sharded = vision_model.sharded_state_dict(structured_name_prefix="")
+                vm_sharded = vision_model.sharded_state_dict(
+                    structured_name_prefix=""
+                )
                 sharded_state_dict.update(vm_sharded)
 
         # Get criterion parameters if any
@@ -1052,10 +1157,14 @@ class Qwen3_5VisionMergeLayer(paddle.nn.Layer):
         video_grid_thw = dict_args.get("video_grid_thw", None)
 
         if pixel_values is not None:
-            dict_args["image_embeds"] = self.encode(pixel_values, image_grid_thw)
+            dict_args["image_embeds"] = self.encode(
+                pixel_values, image_grid_thw
+            )
 
         if pixel_values_videos is not None:
-            dict_args["video_embeds"] = self.encode(pixel_values_videos, video_grid_thw)
+            dict_args["video_embeds"] = self.encode(
+                pixel_values_videos, video_grid_thw
+            )
 
         # Raise instead of assert: with ``python -O`` the assertion is stripped
         # and the run degrades to plain sequential positions instead of mRoPE,
@@ -1069,7 +1178,13 @@ class Qwen3_5VisionMergeLayer(paddle.nn.Layer):
 
         # Remove large vision tensors to save P2P communication bandwidth
         # (they're no longer needed after encoding)
-        for key in ["pixel_values", "pixel_values_videos", "image_grid_thw", "video_grid_thw", "mm_token_type_ids"]:
+        for key in [
+            "pixel_values",
+            "pixel_values_videos",
+            "image_grid_thw",
+            "video_grid_thw",
+            "mm_token_type_ids",
+        ]:
             dict_args.pop(key, None)
 
         return dict_args

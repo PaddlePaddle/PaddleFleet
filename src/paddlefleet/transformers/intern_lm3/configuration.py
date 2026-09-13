@@ -178,10 +178,16 @@ class InternLM3Config(PretrainedConfig):
         self.qkv_bias = qkv_bias
         self.attention_dropout = attention_dropout
         self.bias = bias
-        self.head_dim = head_dim if head_dim is not None else self.hidden_size // self.num_attention_heads
+        self.head_dim = (
+            head_dim
+            if head_dim is not None
+            else self.hidden_size // self.num_attention_heads
+        )
         if self.rope_scaling is not None and "type" in self.rope_scaling:
             self.rope_scaling["rope_type"] = self.rope_scaling["type"]
-        if self.rope_scaling is not None and not hasattr(self, "rope_parameters"):
+        if self.rope_scaling is not None and not hasattr(
+            self, "rope_parameters"
+        ):
             self.rope_parameters = {
                 **self.rope_scaling,
                 "rope_theta": self.rope_theta,

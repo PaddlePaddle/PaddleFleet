@@ -40,7 +40,11 @@ class TestParseArgs(unittest.TestCase):
         hidden = paddle.randn([2, 3])
         result = parse_args(hidden)
         h, am, pid, npk = result
-        self.assertTrue(paddle.equal(h, hidden).item() if h.numel() == 1 else paddle.equal(h, hidden).all().item())
+        self.assertTrue(
+            paddle.equal(h, hidden).item()
+            if h.numel() == 1
+            else paddle.equal(h, hidden).all().item()
+        )
         self.assertIsNone(am)
         self.assertIsNone(pid)
         self.assertIsNone(npk)
@@ -65,7 +69,9 @@ class TestParseArgs(unittest.TestCase):
         hidden = paddle.randn([2, 3])
         attn_mask = paddle.ones([2, 3])
         nbatch_pack_offset = paddle.ones([2])
-        h, am, pid, npk = parse_args((hidden, attn_mask, nbatch_pack_offset), mtp_enable=True)
+        h, am, pid, npk = parse_args(
+            (hidden, attn_mask, nbatch_pack_offset), mtp_enable=True
+        )
         self.assertIsNone(pid)
         self.assertTrue(paddle.equal(npk, nbatch_pack_offset).all().item())
 
@@ -74,23 +80,31 @@ class TestParseArgs(unittest.TestCase):
         attn_mask = paddle.ones([2, 3])
         position_ids = paddle.arange(3)
         nbatch_pack_offset = paddle.ones([2])
-        h, am, pid, npk = parse_args((hidden, attn_mask, position_ids, nbatch_pack_offset))
+        h, am, pid, npk = parse_args(
+            (hidden, attn_mask, position_ids, nbatch_pack_offset)
+        )
         self.assertTrue(paddle.equal(pid, position_ids).all().item())
         self.assertTrue(paddle.equal(npk, nbatch_pack_offset).all().item())
 
     def test_stop_gradient(self):
         position_ids = paddle.arange(3)
         attn_mask = paddle.ones([2, 3])
-        _, am, pid, _ = parse_args((paddle.randn([2, 3]), attn_mask, position_ids))
+        _, am, pid, _ = parse_args(
+            (paddle.randn([2, 3]), attn_mask, position_ids)
+        )
         self.assertTrue(pid.stop_gradient)
         self.assertTrue(am.stop_gradient)
 
 
-@unittest.skip("get_pp_vp_split_layers requires pp_size > 1 which conflicts with CI environment")
+@unittest.skip(
+    "get_pp_vp_split_layers requires pp_size > 1 which conflicts with CI environment"
+)
 class TestGetPPVPSplitLayers(unittest.TestCase):
     """Tests for get_pp_vp_split_layers function."""
 
-    @patch("paddlefleet.transformers.ernie4_5_moe_vl.model.modeling_moe_pp.get_hcg")
+    @patch(
+        "paddlefleet.transformers.ernie4_5_moe_vl.model.modeling_moe_pp.get_hcg"
+    )
     def test_basic(self, mock_get_hcg):
         mock_hcg = MagicMock()
         mock_hcg.get_pipe_parallel_world_size.return_value = 2
@@ -104,7 +118,9 @@ class TestGetPPVPSplitLayers(unittest.TestCase):
         result = get_pp_vp_split_layers(config)
         self.assertIsInstance(result, set)
 
-    @patch("paddlefleet.transformers.ernie4_5_moe_vl.model.modeling_moe_pp.get_hcg")
+    @patch(
+        "paddlefleet.transformers.ernie4_5_moe_vl.model.modeling_moe_pp.get_hcg"
+    )
     def test_pp_size_one_raises(self, mock_get_hcg):
         mock_hcg = MagicMock()
         mock_hcg.get_pipe_parallel_world_size.return_value = 1
@@ -118,7 +134,9 @@ class TestGetPPVPSplitLayers(unittest.TestCase):
         with self.assertRaises(AssertionError):
             get_pp_vp_split_layers(config)
 
-    @patch("paddlefleet.transformers.ernie4_5_moe_vl.model.modeling_moe_pp.get_hcg")
+    @patch(
+        "paddlefleet.transformers.ernie4_5_moe_vl.model.modeling_moe_pp.get_hcg"
+    )
     def test_skip_recompute_zero(self, mock_get_hcg):
         mock_hcg = MagicMock()
         mock_hcg.get_pipe_parallel_world_size.return_value = 2
@@ -132,7 +150,9 @@ class TestGetPPVPSplitLayers(unittest.TestCase):
         result = get_pp_vp_split_layers(config, skip_recompute_num=0)
         self.assertEqual(result, set())
 
-    @patch("paddlefleet.transformers.ernie4_5_moe_vl.model.modeling_moe_pp.get_hcg")
+    @patch(
+        "paddlefleet.transformers.ernie4_5_moe_vl.model.modeling_moe_pp.get_hcg"
+    )
     def test_vp_size_one_skip_all(self, mock_get_hcg):
         mock_hcg = MagicMock()
         mock_hcg.get_pipe_parallel_world_size.return_value = 2
@@ -161,7 +181,9 @@ class TestCreateSkipConfigForRefinedRecompute(unittest.TestCase):
         self.assertIn(0, config.skip_recompute_ops)
         self.assertEqual(config.skip_recompute_ops[0], {})
 
-    def test_recompute_granularity_none_with_non_empty_dict_modules_raises(self):
+    def test_recompute_granularity_none_with_non_empty_dict_modules_raises(
+        self,
+    ):
         """When recompute_granularity is None but recompute_modules has items,
         it raises ValueError because granularity != 'full'."""
         config = MagicMock()

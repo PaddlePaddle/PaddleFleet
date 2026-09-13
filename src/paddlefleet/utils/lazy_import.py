@@ -41,12 +41,21 @@ class _LazyModule(ModuleType):
         super().__init__(name)
 
         self._object_missing_backend = {}
-        self._explicit_import_shortcut = explicit_import_shortcut if explicit_import_shortcut else {}
+        self._explicit_import_shortcut = (
+            explicit_import_shortcut if explicit_import_shortcut else {}
+        )
 
         self._modules = set(import_structure.keys())
-        self._class_to_module = {value: key for key, values in import_structure.items() for value in values}
+        self._class_to_module = {
+            value: key
+            for key, values in import_structure.items()
+            for value in values
+        }
         # Needed for autocompletion in an IDE
-        self.__all__ = [*self._modules, *chain.from_iterable(import_structure.values())]
+        self.__all__ = [
+            *self._modules,
+            *chain.from_iterable(import_structure.values()),
+        ]
         self.__file__ = module_file
         self.__spec__ = module_spec
         self.__path__ = [os.path.dirname(module_file)]
@@ -90,7 +99,9 @@ class _LazyModule(ModuleType):
                     value = self._get_module(key)
 
             if value is None:
-                raise AttributeError(f"module {self.__name__} has no attribute {name}")
+                raise AttributeError(
+                    f"module {self.__name__} has no attribute {name}"
+                )
 
         # Cache the resolved value
         setattr(self, name, value)
@@ -105,4 +116,7 @@ class _LazyModule(ModuleType):
 
     def __reduce__(self):
         """Support for pickle protocol."""
-        return (self.__class__, (self._name, self.__file__, self._import_structure))
+        return (
+            self.__class__,
+            (self._name, self.__file__, self._import_structure),
+        )

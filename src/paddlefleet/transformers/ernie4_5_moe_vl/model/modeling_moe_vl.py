@@ -41,7 +41,10 @@ from .longcontext_ops import TensorBalanceByTokenType
 from .modeling import Ernie4_5_LMHead
 from .modeling import ErniePretrainingCriterion as ErniePretrainingCriterionBase
 from .modeling import RMSNorm
-from .modeling_moe import CausalLMOutputWithCrossAttentions, Ernie4_5_MoeForCausalLM
+from .modeling_moe import (
+    CausalLMOutputWithCrossAttentions,
+    Ernie4_5_MoeForCausalLM,
+)
 from .moe.moe_layer import manual_backward
 from .sequence_parallel_utils import (
     AllGatherOp,
@@ -108,7 +111,9 @@ def monkey_patch_param_hook(param):
                     if h is hook:
                         break
                 else:
-                    logger.error(f"can not remove hook {hook} from: {hook_list}")
+                    logger.error(
+                        f"can not remove hook {hook} from: {hook_list}"
+                    )
                     return False
                 hook_list.pop(i)
                 return True
@@ -132,9 +137,16 @@ def get_backbone_lm_param_regex(config):
         if config.moe_num_experts
         else config.moe_num_experts // moe_world_size
     )
-    num_freeze_expert = config.moe_num_experts[0] if config.moe_num_experts else config.moe_num_experts
+    num_freeze_expert = (
+        config.moe_num_experts[0]
+        if config.moe_num_experts
+        else config.moe_num_experts
+    )
 
-    freeze_part = [r"model\.norm.*", r"model\.layers.*norm.*"]  # freeze all norm
+    freeze_part = [
+        r"model\.norm.*",
+        r"model\.layers.*norm.*",
+    ]  # freeze all norm
     # we do not include gate weight
     # gate weight detach modality
     freeze_part += [
@@ -143,12 +155,16 @@ def get_backbone_lm_param_regex(config):
         r"model\.layers\.(\d+)\.self_attn.(q|k|v|o|qkv)_proj\.(weight|bias)",
         r"model\.layers\.(\d)+\.mlp\.gate\.weight$",
     ]
-    logger.info(f"FREEZE_DEBUG: { moe_rank * num_local_experts} {num_freeze_expert}")
+    logger.info(
+        f"FREEZE_DEBUG: {moe_rank * num_local_experts} {num_freeze_expert}"
+    )
     freeze_part += [r"model\.embed_tokens\.weight"]
     freeze_part += [r"lm_head\.weight", r"lm_head\.bias"]
 
     assert freeze_part, f"not freeze any part, moe: {moe_rank}/{moe_world_size}"
-    logger.info(f"freeze pattern: {freeze_part}, moe: {moe_rank}/{moe_world_size}")
+    logger.info(
+        f"freeze pattern: {freeze_part}, moe: {moe_rank}/{moe_world_size}"
+    )
     freeze_part = re.compile("|".join(freeze_part))
     return freeze_part
 
@@ -199,8 +215,12 @@ class ModalityDetach(PyLayer):
         assert fn is not None
         if not is_first_fwd:
             ctx.fn = fn
-        ctx.bwf, outputs = manual_backward(fn, is_first_fwd, token_type_ids, *args)
-        should_freeze = token_type_ids.astype("bool").any().item()  # one image-token appears then freeze.
+        ctx.bwf, outputs = manual_backward(
+            fn, is_first_fwd, token_type_ids, *args
+        )
+        should_freeze = (
+            token_type_ids.astype("bool").any().item()
+        )  # one image-token appears then freeze.
         if should_freeze:
             ctx.freeze_context = freeze_context
         else:
@@ -220,7 +240,9 @@ class VariableResolutionResamplerModel(nn.Layer):
     VariableResolutionResamplerModel, support variable resolution
     """
 
-    def __init__(self, in_dim, out_dim, spatial_conv_size, temporal_conv_size, config):
+    def __init__(
+        self, in_dim, out_dim, spatial_conv_size, temporal_conv_size, config
+    ):
         super().__init__()
         self.in_dim = in_dim
         self.out_dim = out_dim
@@ -232,12 +254,18 @@ class VariableResolutionResamplerModel(nn.Layer):
         self.tensor_model_parallel_size = config.tensor_model_parallel_size
 
         # compress spatial
-        self.spatial_dim = self.in_dim * self.spatial_conv_size * self.spatial_conv_size
+        self.spatial_dim = (
+            self.in_dim * self.spatial_conv_size * self.spatial_conv_size
+        )
         # compress temporal
-        self.temporal_dim = self.in_dim * self.spatial_conv_size * self.spatial_conv_size * self.temporal_conv_size
+        self.temporal_dim = (
+            self.in_dim
+            * self.spatial_conv_size
+            * self.spatial_conv_size
+            * self.temporal_conv_size
+        )
 
         with paddle.utils.unique_name.guard("mm_resampler_"):
-
             self.spatial_linear = nn.Sequential(
                 (
                     RowSequenceParallelLinear(
@@ -273,13 +301,21 @@ class VariableResolutionResamplerModel(nn.Layer):
 
             if config.tensor_model_parallel_size > 1:
                 for idx in [2, 3]:
-                    mark_as_sequence_parallel_parameter(self.spatial_linear[idx].weight)
-                    mark_as_sequence_parallel_parameter(self.spatial_linear[idx].bias)
+                    mark_as_sequence_parallel_parameter(
+                        self.spatial_linear[idx].weight
+                    )
+                    mark_as_sequence_parallel_parameter(
+                        self.spatial_linear[idx].bias
+                    )
 
                 if self.use_temporal_conv:
                     for idx in [0, 2, 3]:
-                        mark_as_sequence_parallel_parameter(self.temporal_linear[idx].weight)
-                        mark_as_sequence_parallel_parameter(self.temporal_linear[idx].bias)
+                        mark_as_sequence_parallel_parameter(
+                            self.temporal_linear[idx].weight
+                        )
+                        mark_as_sequence_parallel_parameter(
+                            self.temporal_linear[idx].bias
+                        )
 
                 mark_as_sequence_parallel_parameter(self.mlp.weight)
                 mark_as_sequence_parallel_parameter(self.mlp.bias)
@@ -313,8 +349,11 @@ class VariableResolutionResamplerModel(nn.Layer):
             num_pad = 0
             if self.tensor_model_parallel_size > 1:
                 num_pad = (
-                    x.shape[0] + self.tensor_model_parallel_size - 1
-                ) // self.tensor_model_parallel_size * self.tensor_model_parallel_size - x.shape[0]
+                    (x.shape[0] + self.tensor_model_parallel_size - 1)
+                    // self.tensor_model_parallel_size
+                    * self.tensor_model_parallel_size
+                    - x.shape[0]
+                )
 
             if num_pad > 0:
                 x = paddle.nn.functional.pad(x, [0, num_pad, 0, 0])
@@ -339,16 +378,24 @@ class VariableResolutionResamplerModel(nn.Layer):
             grid_t, grid_hw = grid_thw_cpu[:, 0], grid_thw_cpu[:, 1:]
             grid_hw_after_conv = grid_hw.prod(-1) // (self.spatial_conv_size**2)
 
-            tokens_per_img_or_vid = grid_thw_cpu.prod(-1) // (self.spatial_conv_size**2)
-            batch_offset = np.empty(tokens_per_img_or_vid.size, dtype=tokens_per_img_or_vid.dtype)
+            tokens_per_img_or_vid = grid_thw_cpu.prod(-1) // (
+                self.spatial_conv_size**2
+            )
+            batch_offset = np.empty(
+                tokens_per_img_or_vid.size, dtype=tokens_per_img_or_vid.dtype
+            )
             batch_offset[0] = 0
             batch_offset[1:] = tokens_per_img_or_vid.cumsum()[:-1]
 
-            assert self.temporal_conv_size == 2, f"Hard Code: temporal_conv_size==2, got:{self.temporal_conv_size}"
+            assert self.temporal_conv_size == 2, (
+                f"Hard Code: temporal_conv_size==2, got:{self.temporal_conv_size}"
+            )
 
             # TODO: support any temporal conv size
             slice_offsets = []
-            for temporoal_size, spatial_size, b_offset in zip(grid_t, grid_hw_after_conv, batch_offset):
+            for temporoal_size, spatial_size, b_offset in zip(
+                grid_t, grid_hw_after_conv, batch_offset
+            ):
                 for temp_offset in range(0, temporoal_size, 2):
                     slice_offsets.append(
                         np.arange(
@@ -356,18 +403,26 @@ class VariableResolutionResamplerModel(nn.Layer):
                             b_offset + (temp_offset + 1) * spatial_size,
                         )
                     )
-            slice_offsets = paddle.to_tensor(np.concatenate(slice_offsets, axis=-1))
+            slice_offsets = paddle.to_tensor(
+                np.concatenate(slice_offsets, axis=-1)
+            )
 
             slice_offsets2 = []
-            for temporoal_size, spatial_size, b_offset in zip(grid_t, grid_hw_after_conv, batch_offset):
-                for temp_offset in range(1 if temporoal_size > 1 else 0, temporoal_size, 2):
+            for temporoal_size, spatial_size, b_offset in zip(
+                grid_t, grid_hw_after_conv, batch_offset
+            ):
+                for temp_offset in range(
+                    1 if temporoal_size > 1 else 0, temporoal_size, 2
+                ):
                     slice_offsets2.append(
                         np.arange(
                             b_offset + (temp_offset) * spatial_size,
                             b_offset + (temp_offset + 1) * spatial_size,
                         )
                     )
-            slice_offsets2 = paddle.to_tensor(np.concatenate(slice_offsets2, axis=-1))
+            slice_offsets2 = paddle.to_tensor(
+                np.concatenate(slice_offsets2, axis=-1)
+            )
 
             x_timestep_1 = paddle.gather(x, slice_offsets, axis=0)
             x_timestep_2 = paddle.gather(x, slice_offsets2, axis=0)
@@ -379,8 +434,11 @@ class VariableResolutionResamplerModel(nn.Layer):
             num_pad = 0
             if self.tensor_model_parallel_size > 1:
                 num_pad = (
-                    x.shape[0] + self.tensor_model_parallel_size - 1
-                ) // self.tensor_model_parallel_size * self.tensor_model_parallel_size - x.shape[0]
+                    (x.shape[0] + self.tensor_model_parallel_size - 1)
+                    // self.tensor_model_parallel_size
+                    * self.tensor_model_parallel_size
+                    - x.shape[0]
+                )
             if num_pad > 0:
                 x = paddle.nn.functional.pad(x, [0, num_pad, 0, 0])
             if self.tensor_model_parallel_size > 1:
@@ -418,8 +476,9 @@ class VariableResolutionResamplerModel(nn.Layer):
 
     @classmethod
     def _get_tensor_parallel_mappings(cls, config, is_split=True):
-
-        from paddlefleet.transformers.conversion_utils import split_or_merge_func
+        from paddlefleet.transformers.conversion_utils import (
+            split_or_merge_func,
+        )
 
         fn = split_or_merge_func(
             is_split=is_split,
@@ -427,7 +486,9 @@ class VariableResolutionResamplerModel(nn.Layer):
             tensor_parallel_rank=config.tensor_parallel_rank,
             num_attention_heads=config.num_attention_heads,
         )
-        res = {"spatial_linear.0.weight": partial(fn, is_column=False)}  # row parallel
+        res = {
+            "spatial_linear.0.weight": partial(fn, is_column=False)
+        }  # row parallel
         return res
 
 
@@ -475,10 +536,12 @@ class ErniePretrainingCriterion(ErniePretrainingCriterionBase):
         ):
             with paddle.no_grad():
                 if token_type_ids_shifted.unique().shape[0] > 1:
-                    labels, token_type_ids_shifted = TensorBalanceByTokenType.apply(
-                        labels.squeeze(0),
-                        token_type_ids_shifted,
-                        is_tensor_sharded=False,
+                    labels, token_type_ids_shifted = (
+                        TensorBalanceByTokenType.apply(
+                            labels.squeeze(0),
+                            token_type_ids_shifted,
+                            is_tensor_sharded=False,
+                        )
                     )
                 else:
                     labels = ScatterOp.apply(labels, axis=-1)
@@ -489,16 +552,23 @@ class ErniePretrainingCriterion(ErniePretrainingCriterionBase):
                 and "loss_fn" in self.config.recompute_modules
                 or self.config.use_filtered_label_loss
             ):
-                loss, loss_sum = super().forward((scores_text.unsqueeze(0), lm_weight, lm_bias), labels.unsqueeze(0))
+                loss, loss_sum = super().forward(
+                    (scores_text.unsqueeze(0), lm_weight, lm_bias),
+                    labels.unsqueeze(0),
+                )
             else:
-                loss, loss_sum = super().forward(scores_text.unsqueeze(0), labels.unsqueeze(0))
+                loss, loss_sum = super().forward(
+                    scores_text.unsqueeze(0), labels.unsqueeze(0)
+                )
             self.update_log(loss, token_type_ids_untouched)
             return loss, loss_sum
 
         image_mask_shifted = token_type_ids_shifted == TokenType.image
         text_pos_shifted = token_type_ids_shifted == TokenType.text
 
-        assert scores_text is not None, f"no text or image token provided, text: {scores_text}"
+        assert scores_text is not None, (
+            f"no text or image token provided, text: {scores_text}"
+        )
 
         if scores_text is not None:
             labels_text = labels[text_pos_shifted]
@@ -514,7 +584,9 @@ class ErniePretrainingCriterion(ErniePretrainingCriterionBase):
                     labels_text.unsqueeze(0),
                 )
             else:
-                loss, loss_sum = super().forward(scores_text.unsqueeze(0), labels_text.unsqueeze(0))
+                loss, loss_sum = super().forward(
+                    scores_text.unsqueeze(0), labels_text.unsqueeze(0)
+                )
             self.update_log(loss, token_type_ids_untouched)
         else:
             assert 0
@@ -538,8 +610,12 @@ class ErniePretrainingCriterion(ErniePretrainingCriterionBase):
                     labels_image.unsqueeze(0),
                 )
             else:
-                loss_image, _ = super().forward(scores_image.unsqueeze(0), labels_image.unsqueeze(0))
-            global_training_logs.update(image_special_token_loss=loss_image.detach())
+                loss_image, _ = super().forward(
+                    scores_image.unsqueeze(0), labels_image.unsqueeze(0)
+                )
+            global_training_logs.update(
+                image_special_token_loss=loss_image.detach()
+            )
             loss = loss + loss_image - loss_image.detach()
 
         if router_loss is not None and isinstance(router_loss, paddle.Tensor):
@@ -552,8 +628,12 @@ class ErniePretrainingCriterion(ErniePretrainingCriterionBase):
         pure_text = (
             token_type_ids_untouched == TokenType.text
         ).all()  # if all tokens are textual, it's a pure text dataset
-        has_video = (token_type_ids_untouched == TokenType.video).any()  # if one token is video, then it's video data
-        has_image = (token_type_ids_untouched == TokenType.image).any()  # if one token is image, then it's image data
+        has_video = (
+            token_type_ids_untouched == TokenType.video
+        ).any()  # if one token is video, then it's video data
+        has_image = (
+            token_type_ids_untouched == TokenType.image
+        ).any()  # if one token is image, then it's image data
         if pure_text:
             global_training_logs.update(lm_loss=loss.detach())
         elif has_video:
@@ -561,7 +641,9 @@ class ErniePretrainingCriterion(ErniePretrainingCriterionBase):
         elif has_image:
             global_training_logs.update(image_loss=loss.detach())
         else:
-            raise RuntimeError(f"input token must be one of [text, video, image]: {token_type_ids_untouched}")
+            raise RuntimeError(
+                f"input token must be one of [text, video, image]: {token_type_ids_untouched}"
+            )
         return
 
 
@@ -595,19 +677,27 @@ def calc_multimodal_logits(
     ):
         if config.sequence_parallel:
             if token_type_ids_shifted.unique().shape[0] > 1:  # Multimodal data
-                last_hidden_state, token_type_ids_shifted = TensorBalanceByTokenType.apply(
-                    last_hidden_state, token_type_ids_shifted
+                last_hidden_state, token_type_ids_shifted = (
+                    TensorBalanceByTokenType.apply(
+                        last_hidden_state, token_type_ids_shifted
+                    )
                 )
             else:
                 with paddle.no_grad():
-                    token_type_ids_shifted = ScatterOp.apply(token_type_ids_shifted, axis=-1)
-                    token_type_ids_shifted = token_type_ids_shifted.reshape([-1])
+                    token_type_ids_shifted = ScatterOp.apply(
+                        token_type_ids_shifted, axis=-1
+                    )
+                    token_type_ids_shifted = token_type_ids_shifted.reshape(
+                        [-1]
+                    )
         else:
             token_type_ids_shifted = token_type_ids_shifted.reshape([-1])
     else:
         if config.sequence_parallel:
             last_hidden_state = GatherOp.apply(last_hidden_state)
-            last_hidden_state = last_hidden_state.reshape([1, -1, last_hidden_state.shape[-1]])
+            last_hidden_state = last_hidden_state.reshape(
+                [1, -1, last_hidden_state.shape[-1]]
+            )
 
         assert last_hidden_state.shape[:2] == token_type_ids_shifted.shape, (
             last_hidden_state.shape,
@@ -646,7 +736,11 @@ def calc_multimodal_logits(
         ):
             score_text = last_hidden_state[text_pos_shifted]
         else:
-            score_text = parallel_matmul_tp(last_hidden_state[text_pos_shifted], lm_head_weight, lm_head_bias)
+            score_text = parallel_matmul_tp(
+                last_hidden_state[text_pos_shifted],
+                lm_head_weight,
+                lm_head_bias,
+            )
     else:
         score_text = None
 
@@ -658,7 +752,11 @@ def calc_multimodal_logits(
         ):
             score_image = last_hidden_state[image_mask_shifted]
         else:
-            score_image = parallel_matmul_tp(last_hidden_state[image_mask_shifted], mm_head_weight, mm_head_bias)
+            score_image = parallel_matmul_tp(
+                last_hidden_state[image_mask_shifted],
+                mm_head_weight,
+                mm_head_bias,
+            )
     else:
         score_image = None
 
@@ -676,7 +774,9 @@ class Ernie4_5_MoeVLHead(Ernie4_5_LMHead):
             mm_vocab_config = deepcopy(config)
             mm_vocab_config.vocab_size = config.mm_vocab_size
             assert mm_vocab_config.vocab_size > 0, mm_vocab_config
-            assert mm_vocab_config.im_patch_id >= mm_vocab_config.max_text_id, mm_vocab_config
+            assert mm_vocab_config.im_patch_id >= mm_vocab_config.max_text_id, (
+                mm_vocab_config
+            )
             self.mm_head = Ernie4_5_LMHead(mm_vocab_config)
         else:
             self.mm_head = None
@@ -693,8 +793,12 @@ class Ernie4_5_MoeVLHead(Ernie4_5_LMHead):
             logits_image(paddle.Tensor): image logits
         """
         if not use_cache:
-            mm_head_weight = self.mm_head.weight if self.mm_head is not None else None
-            mm_head_bias = self.mm_head.bias if self.mm_head is not None else None
+            mm_head_weight = (
+                self.mm_head.weight if self.mm_head is not None else None
+            )
+            mm_head_bias = (
+                self.mm_head.bias if self.mm_head is not None else None
+            )
             logits_text, logits_image, *_ = calc_multimodal_logits(  # note!!
                 hidden_state,
                 self.weight,
@@ -708,8 +812,16 @@ class Ernie4_5_MoeVLHead(Ernie4_5_LMHead):
         else:
             if self.config.sequence_parallel:
                 hidden_state = GatherOp.apply(hidden_state)
-                logger.warning("you are trying to generate with sequence-parallel model")
-                hidden_state = hidden_state.reshape([-1, self.config.max_sequence_length, hidden_state.shape[-1]])
+                logger.warning(
+                    "you are trying to generate with sequence-parallel model"
+                )
+                hidden_state = hidden_state.reshape(
+                    [
+                        -1,
+                        self.config.max_sequence_length,
+                        hidden_state.shape[-1],
+                    ]
+                )
             # assert not self.config.sequence_parallel, "generate is not supported in sequence-parallel mode"
             # TODO，support lm_head decode only
             return (
@@ -763,9 +875,13 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
 
         if config.mm_vocab_size > 0:
             if config.tensor_model_parallel_size > 1:
-                self.mm_embed_tokens = VocabParallelEmbedding(config.mm_vocab_size, config.hidden_size)
+                self.mm_embed_tokens = VocabParallelEmbedding(
+                    config.mm_vocab_size, config.hidden_size
+                )
             else:
-                self.mm_embed_tokens = nn.Embedding(config.mm_vocab_size, config.hidden_size)
+                self.mm_embed_tokens = nn.Embedding(
+                    config.mm_vocab_size, config.hidden_size
+                )
         else:
             self.mm_embed_tokens = None
 
@@ -780,7 +896,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
         self._modality_param_mapping = None
         self.image_preprocess = None
         self.lm_head = Ernie4_5_MoeVLHead(config)
-        self.vision_model = DFNRopeVisionTransformerPretrainedModel(config=config)
+        self.vision_model = DFNRopeVisionTransformerPretrainedModel(
+            config=config
+        )
 
         self.tie_weights()  # maybe weight share
 
@@ -799,8 +917,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
 
     @classmethod
     def _get_tensor_parallel_mappings(cls, config, is_split=True):
-
-        from paddlefleet.transformers.conversion_utils import split_or_merge_func
+        from paddlefleet.transformers.conversion_utils import (
+            split_or_merge_func,
+        )
 
         fn = split_or_merge_func(
             is_split=is_split,
@@ -810,12 +929,25 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
         )
 
         def get_tensor_parallel_split_mappings(num_layers):
-            final_actions = Ernie4_5_MoeForCausalLM._get_tensor_parallel_mappings(config, is_split=is_split)
+            final_actions = (
+                Ernie4_5_MoeForCausalLM._get_tensor_parallel_mappings(
+                    config, is_split=is_split
+                )
+            )
             return final_actions
 
         mappings = get_tensor_parallel_split_mappings(config.num_hidden_layers)
-        resampler_actions = VariableResolutionResamplerModel._get_tensor_parallel_mappings(config, is_split=is_split)
-        mappings.update({f"model.resampler_model.{k}": v for k, v in resampler_actions.items()})
+        resampler_actions = (
+            VariableResolutionResamplerModel._get_tensor_parallel_mappings(
+                config, is_split=is_split
+            )
+        )
+        mappings.update(
+            {
+                f"model.resampler_model.{k}": v
+                for k, v in resampler_actions.items()
+            }
+        )
 
         if config.mm_vocab_size > 0:
             mappings.update(
@@ -830,10 +962,20 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
     @classmethod
     def _gen_aoa_config(cls, config):
         mapping = cls._checkpoint_conversion_mapping
-        llm_target = next((v for v in mapping.values() if v.startswith("model")), "model")
-        visual_target = next((v for v in mapping.values() if "vision_model" in v), "vision_model")
-        llm_prefix = f"{llm_target}." if not llm_target.endswith(".") else llm_target
-        visual_prefix = f"{visual_target}." if not visual_target.endswith(".") else visual_target
+        llm_target = next(
+            (v for v in mapping.values() if v.startswith("model")), "model"
+        )
+        visual_target = next(
+            (v for v in mapping.values() if "vision_model" in v), "vision_model"
+        )
+        llm_prefix = (
+            f"{llm_target}." if not llm_target.endswith(".") else llm_target
+        )
+        visual_prefix = (
+            f"{visual_target}."
+            if not visual_target.endswith(".")
+            else visual_target
+        )
 
         # language model
         aoa_config = {
@@ -900,10 +1042,20 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
     @classmethod
     def _gen_inv_aoa_config(cls, config):
         mapping = cls._checkpoint_conversion_mapping
-        llm_target = next((v for v in mapping.values() if v.startswith("model")), "model")
-        visual_target = next((v for v in mapping.values() if "vision_model" in v), "vision_model")
-        llm_prefix = f"{llm_target}." if not llm_target.endswith(".") else llm_target
-        visual_prefix = f"{visual_target}." if not visual_target.endswith(".") else visual_target
+        llm_target = next(
+            (v for v in mapping.values() if v.startswith("model")), "model"
+        )
+        visual_target = next(
+            (v for v in mapping.values() if "vision_model" in v), "vision_model"
+        )
+        llm_prefix = (
+            f"{llm_target}." if not llm_target.endswith(".") else llm_target
+        )
+        visual_prefix = (
+            f"{visual_target}."
+            if not visual_target.endswith(".")
+            else visual_target
+        )
 
         # language model
         aoa_config = {
@@ -975,16 +1127,27 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
             monkey_patch_param_hook(param)
             expert_type = getattr(param, "expert_type", None)
             if "vision_model" in name:
-                self._modality_param_mapping["vit"].append((name, param, create_freeze_hook(name, param)))
+                self._modality_param_mapping["vit"].append(
+                    (name, param, create_freeze_hook(name, param))
+                )
                 param.color = "vit"
             elif lm_pattern.match(name) or expert_type == "expert_type_0":
-                self._modality_param_mapping["lm"].append((name, param, create_freeze_hook(name, param)))
+                self._modality_param_mapping["lm"].append(
+                    (name, param, create_freeze_hook(name, param))
+                )
                 param.color = "lm"
             else:
-                self._modality_param_mapping["mm"].append((name, param, create_freeze_hook(name, param)))
+                self._modality_param_mapping["mm"].append(
+                    (name, param, create_freeze_hook(name, param))
+                )
                 param.color = "mm"
-        debug_msg = {k: [i[0] for i in v] for k, v in self._modality_param_mapping.items()}
-        logger.info(f"modality_param_mapping: {json.dumps(debug_msg, ensure_ascii=False, indent=2)}")
+        debug_msg = {
+            k: [i[0] for i in v]
+            for k, v in self._modality_param_mapping.items()
+        }
+        logger.info(
+            f"modality_param_mapping: {json.dumps(debug_msg, ensure_ascii=False, indent=2)}"
+        )
 
     def update_params_stat(self, param_group, stop_gradient):
         """freeze mm"""
@@ -1019,8 +1182,12 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
         """vision_forward"""
         if self.image_preprocess is not None:
             assert images.dtype == paddle.uint8, images.dtype
-            images = self.image_preprocess.rescale_factor * images.astype("float32")
-            images = (images - self.image_preprocess.image_mean_tensor) / self.image_preprocess.image_std_tensor
+            images = self.image_preprocess.rescale_factor * images.astype(
+                "float32"
+            )
+            images = (
+                images - self.image_preprocess.image_mean_tensor
+            ) / self.image_preprocess.image_std_tensor
             images = images.astype("bfloat16")
         else:
             assert images.dtype == paddle.bfloat16, images.dtype
@@ -1048,8 +1215,12 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
     ):
         """vision_mapping_forward"""
         if self.mm_embed_tokens is not None:
-            mm_ids_features = self.mm_embed_tokens(mm_input_ids - self.config.max_text_id)
-            inputs_embeds[token_type_ids == TokenType.image] = mm_ids_features[token_type_ids == TokenType.image]
+            mm_ids_features = self.mm_embed_tokens(
+                mm_input_ids - self.config.max_text_id
+            )
+            inputs_embeds[token_type_ids == TokenType.image] = mm_ids_features[
+                token_type_ids == TokenType.image
+            ]
         image_mask = input_ids == self.config.im_patch_id
         image_features = self.model.resampler_model(
             image_features,
@@ -1061,7 +1232,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
 
         if image_features.dim == 2:
             B, N, C = image_features.shape
-            image_features = image_features.reshape([B * N, C]).astype(inputs_embeds.dtype)
+            image_features = image_features.reshape([B * N, C]).astype(
+                inputs_embeds.dtype
+            )
         # Will overwrite the part of `ids==im_patch_id` in `mm_ids_features`
         inputs_embeds[image_mask] = image_features
         # # TODO Normalize some parameters, detach some text, print image token
@@ -1126,18 +1299,30 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
         image_start_token_id = self.config.image_start_token_id
         video_start_token_id = self.config.video_start_token_id
         mrope_position_deltas = []
-        if input_ids is not None and (image_grid_thw is not None or video_grid_thw is not None):
+        if input_ids is not None and (
+            image_grid_thw is not None or video_grid_thw is not None
+        ):
             total_input_ids = input_ids
             if attention_mask is None:
                 attention_mask = paddle.ones_like(total_input_ids)
             position_ids = paddle.ones(
-                3, input_ids.shape[0], input_ids.shape[1], dtype=input_ids.dtype, device=input_ids.device
+                3,
+                input_ids.shape[0],
+                input_ids.shape[1],
+                dtype=input_ids.dtype,
+                device=input_ids.device,
             )
             image_index, video_index = 0, 0
             for i, input_ids in enumerate(total_input_ids):
-                input_ids = input_ids[attention_mask[i].to(input_ids.device) == 1]
-                image_start_indices = paddle.nonzero(input_ids == image_start_token_id).squeeze(1)
-                video_start_indices = paddle.nonzero(input_ids == video_start_token_id).squeeze(1)
+                input_ids = input_ids[
+                    attention_mask[i].to(input_ids.device) == 1
+                ]
+                image_start_indices = paddle.nonzero(
+                    input_ids == image_start_token_id
+                ).squeeze(1)
+                video_start_indices = paddle.nonzero(
+                    input_ids == video_start_token_id
+                ).squeeze(1)
                 image_nums = len(image_start_indices)
                 video_nums = len(video_start_indices)
                 input_tokens = input_ids.tolist()
@@ -1145,12 +1330,22 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
                 st = 0
                 remain_images, remain_videos = image_nums, video_nums
                 for _ in range(image_nums + video_nums):
-                    if image_start_token_id in input_tokens and remain_images > 0:
-                        ed_image = input_tokens.index(image_start_token_id, st) + 1
+                    if (
+                        image_start_token_id in input_tokens
+                        and remain_images > 0
+                    ):
+                        ed_image = (
+                            input_tokens.index(image_start_token_id, st) + 1
+                        )
                     else:
                         ed_image = len(input_tokens) + 1
-                    if video_start_token_id in input_tokens and remain_videos > 0:
-                        ed_video = input_tokens.index(video_start_token_id, st) + 1
+                    if (
+                        video_start_token_id in input_tokens
+                        and remain_videos > 0
+                    ):
+                        ed_video = (
+                            input_tokens.index(video_start_token_id, st) + 1
+                        )
                     else:
                         ed_video = len(input_tokens) + 1
                     if ed_image < ed_video:
@@ -1172,38 +1367,89 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
                         remain_videos -= 1
                         ed = ed_video
                     llm_grid_t, llm_grid_h, llm_grid_w = (
-                        t.item() if t.item() == 1 else t.item() // temporal_conv_size,
+                        t.item()
+                        if t.item() == 1
+                        else t.item() // temporal_conv_size,
                         h.item() // spatial_merge_size,
                         w.item() // spatial_merge_size,
                     )
                     text_len = ed - st
 
-                    st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                    llm_pos_ids_list.append(paddle.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+                    st_idx = (
+                        llm_pos_ids_list[-1].max() + 1
+                        if len(llm_pos_ids_list) > 0
+                        else 0
+                    )
+                    llm_pos_ids_list.append(
+                        paddle.arange(text_len).view(1, -1).expand(3, -1)
+                        + st_idx
+                    )
 
-                    t_index = paddle.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten()
-                    h_index = paddle.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
-                    w_index = paddle.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
-                    llm_pos_ids_list.append(paddle.stack([t_index, h_index, w_index]) + text_len + st_idx)
+                    t_index = (
+                        paddle.arange(llm_grid_t)
+                        .view(-1, 1)
+                        .expand(-1, llm_grid_h * llm_grid_w)
+                        .flatten()
+                    )
+                    h_index = (
+                        paddle.arange(llm_grid_h)
+                        .view(1, -1, 1)
+                        .expand(llm_grid_t, -1, llm_grid_w)
+                        .flatten()
+                    )
+                    w_index = (
+                        paddle.arange(llm_grid_w)
+                        .view(1, 1, -1)
+                        .expand(llm_grid_t, llm_grid_h, -1)
+                        .flatten()
+                    )
+                    llm_pos_ids_list.append(
+                        paddle.stack([t_index, h_index, w_index])
+                        + text_len
+                        + st_idx
+                    )
                     st = ed + llm_grid_t * llm_grid_h * llm_grid_w
 
                 if st < len(input_tokens):
-                    st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
+                    st_idx = (
+                        llm_pos_ids_list[-1].max() + 1
+                        if len(llm_pos_ids_list) > 0
+                        else 0
+                    )
                     text_len = len(input_tokens) - st
-                    llm_pos_ids_list.append(paddle.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
+                    llm_pos_ids_list.append(
+                        paddle.arange(text_len).view(1, -1).expand(3, -1)
+                        + st_idx
+                    )
 
-                llm_positions = paddle.concat(llm_pos_ids_list, axis=1).reshape(3, -1)
-                position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(position_ids.device)
-                mrope_position_deltas.append(llm_positions.max() + 1 - len(total_input_ids[i]))
-            mrope_position_deltas = paddle.to_tensor(mrope_position_deltas).unsqueeze(1)
+                llm_positions = paddle.concat(llm_pos_ids_list, axis=1).reshape(
+                    3, -1
+                )
+                position_ids[..., i, attention_mask[i] == 1] = llm_positions.to(
+                    position_ids.device
+                )
+                mrope_position_deltas.append(
+                    llm_positions.max() + 1 - len(total_input_ids[i])
+                )
+            mrope_position_deltas = paddle.to_tensor(
+                mrope_position_deltas
+            ).unsqueeze(1)
             return position_ids, mrope_position_deltas
         else:
             if attention_mask is not None:
                 position_ids = attention_mask.long().cumsum(-1) - 1
                 position_ids.masked_fill_(attention_mask == 0, 1)
-                position_ids = position_ids.unsqueeze(0).expand(3, -1, -1).to(attention_mask.device)
-                max_position_ids = position_ids.max(0, keepdim=False)[0].max(-1, keepdim=True)[0]
-                mrope_position_deltas = max_position_ids + 1 - attention_mask.shape[-1]
+                position_ids = (
+                    position_ids.unsqueeze(0)
+                    .expand(3, -1, -1)
+                    .to(attention_mask.device)
+                )
+                max_position_ids = position_ids.max(0, keepdim=False)[0].max(
+                    -1, keepdim=True
+                )[0]
+                mrope_position_deltas = (
+                    max_position_ids + 1 - attention_mask.shape[-1]
+                )
             else:
                 position_ids = (
                     paddle.arange(input_ids.shape[1], device=input_ids.device)
@@ -1240,8 +1486,12 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
         last_image_pixel_index = 0
         last_video_pixel_index = 0
         for i, input_ids in enumerate(total_input_ids):
-            image_start_indices = paddle.nonzero(input_ids == image_start_token_id).squeeze(1)
-            video_start_indices = paddle.nonzero(input_ids == video_start_token_id).squeeze(1)
+            image_start_indices = paddle.nonzero(
+                input_ids == image_start_token_id
+            ).squeeze(1)
+            video_start_indices = paddle.nonzero(
+                input_ids == video_start_token_id
+            ).squeeze(1)
             image_nums = len(image_start_indices)
             video_nums = len(video_start_indices)
             input_tokens = input_ids.tolist()
@@ -1265,7 +1515,12 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
                     )
                     ed_grid_thw = image_grid_thw[image_index]
                     pixel_lenth = ed_grid_thw.prod().item()
-                    images.append(pixel_values[last_image_pixel_index : last_image_pixel_index + pixel_lenth])
+                    images.append(
+                        pixel_values[
+                            last_image_pixel_index : last_image_pixel_index
+                            + pixel_lenth
+                        ]
+                    )
                     grid_thw.append(ed_grid_thw)
                     image_index += 1
                     remain_images -= 1
@@ -1280,7 +1535,12 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
                     )
                     ed_grid_thw = video_grid_thw[video_index]
                     pixel_lenth = ed_grid_thw.prod().item()
-                    images.append(video_pixel_values[last_video_pixel_index : last_video_pixel_index + pixel_lenth])
+                    images.append(
+                        video_pixel_values[
+                            last_video_pixel_index : last_video_pixel_index
+                            + pixel_lenth
+                        ]
+                    )
                     grid_thw.append(ed_grid_thw)
                     video_index += 1
                     remain_videos -= 1
@@ -1288,7 +1548,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
                     last_video_pixel_index += pixel_lenth
                     vision_type = "video"
                 llm_grid_t, llm_grid_h, llm_grid_w = (
-                    t.item() if t.item() == 1 else t.item() // temporal_conv_size,
+                    t.item()
+                    if t.item() == 1
+                    else t.item() // temporal_conv_size,
                     h.item() // spatial_merge_size,
                     w.item() // spatial_merge_size,
                 )
@@ -1296,7 +1558,12 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
 
                 llm_token_type_ids.extend([IDS_TYPE_FLAG["text"]] * text_len)
                 llm_token_type_ids.extend([IDS_TYPE_FLAG["image"]])
-                llm_token_type_ids.extend([IDS_TYPE_FLAG[vision_type]] * llm_grid_t * llm_grid_h * llm_grid_w)
+                llm_token_type_ids.extend(
+                    [IDS_TYPE_FLAG[vision_type]]
+                    * llm_grid_t
+                    * llm_grid_h
+                    * llm_grid_w
+                )
                 llm_token_type_ids.extend([IDS_TYPE_FLAG["image"]])
                 st = ed + llm_grid_t * llm_grid_h * llm_grid_w + 2
 
@@ -1344,7 +1611,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
         if past_key_values:
             input_ids = input_ids[:, -1:]
             token_type_ids = token_type_ids[:, -1:]
-            image_type_ids = image_type_ids[:, -1:] if image_type_ids is not None else None
+            image_type_ids = (
+                image_type_ids[:, -1:] if image_type_ids is not None else None
+            )
 
         attention_mask = kwargs.get("attention_mask", None)
 
@@ -1367,7 +1636,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
                 "token_type_ids": paddle.concat(
                     [
                         token_type_ids,
-                        paddle.zeros([len(token_type_ids), 1], token_type_ids.dtype),
+                        paddle.zeros(
+                            [len(token_type_ids), 1], token_type_ids.dtype
+                        ),
                     ],
                     axis=-1,
                 ),
@@ -1436,7 +1707,11 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
         """
         if grid_thw is not None:
             grid_thw = grid_thw[grid_thw > 0].reshape([-1, 3])
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+        return_dict = (
+            return_dict
+            if return_dict is not None
+            else self.config.use_return_dict
+        )
 
         image_mask = input_ids == self.config.im_patch_id
 
@@ -1457,7 +1732,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
                 if self.config.tensor_model_parallel_size > 1:
                     S, C = image_features.shape
                     # When scatterOp cuts feature + 4-in-1, the features of the 4 tokens are merged together in advance.
-                    image_features = image_features.reshape([-1, C * self.config.spatial_conv_size**2])
+                    image_features = image_features.reshape(
+                        [-1, C * self.config.spatial_conv_size**2]
+                    )
                     image_features = ScatterOp.apply(image_features, axis=-1)
                     image_features = image_features.reshape([S, -1])
             else:
@@ -1469,11 +1746,13 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
         if token_type_ids is None:
             # assert 0, f"using default token_type_ids: {token_type_ids}, image_type_ids: {image_type_ids}"
             token_type_ids = image_mask.astype("int64")
-            token_type_ids_labels = paddle.concat([token_type_ids[:, 1:], token_type_ids[:, -1:]], 1)
+            token_type_ids_labels = paddle.concat(
+                [token_type_ids[:, 1:], token_type_ids[:, -1:]], 1
+            )
         else:
-            assert (
-                token_type_ids.shape[1] == input_ids.shape[1] + 1
-            ), f"token_type:{token_type_ids.shape}, ids:{input_ids.shape}"
+            assert token_type_ids.shape[1] == input_ids.shape[1] + 1, (
+                f"token_type:{token_type_ids.shape}, ids:{input_ids.shape}"
+            )
             token_type_ids_labels = token_type_ids[..., 1:]
             # token_type_ids = token_type_ids[..., :-1]
 
@@ -1481,7 +1760,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
         mm_input_ids = input_ids.clone()
         if self.mm_embed_tokens is not None:
             lm_input_ids[token_type_ids[..., :-1] == TokenType.image] = 0
-            mm_input_ids[token_type_ids[..., :-1] == TokenType.text] = self.config.max_text_id
+            mm_input_ids[token_type_ids[..., :-1] == TokenType.text] = (
+                self.config.max_text_id
+            )
         # During embedding lookup, `max_text_id` will be subtracted uniformly.
         # The text part id is replaced with `max_text_id` + 1 to distinguish it from `im_patch_id`.
         # The replacement part will not be added to the final input_embeds so it doesn't matter.
@@ -1490,7 +1771,12 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
 
         if self.training and self.modality_detach:
             assert not return_dict, "modality detach no support `return_dict`"
-            assert not use_cache and past_key_values is None and not output_attentions and not output_hidden_states
+            assert (
+                not use_cache
+                and past_key_values is None
+                and not output_attentions
+                and not output_hidden_states
+            )
             is_first_fwd = not framework._dygraph_tracer()._has_grad
 
             def fwdfn(
@@ -1499,11 +1785,19 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
                 _,
                 grid_thw,
             ):
-                nonlocal input_ids, token_type_ids_labels, mm_input_ids, image_type_ids
+                nonlocal \
+                    input_ids, \
+                    token_type_ids_labels, \
+                    mm_input_ids, \
+                    image_type_ids
                 """During the backward of this function, the stop_graident attribute of param is reset"""
-                inputs_embeds = self.model.embed_tokens(lm_input_ids).astype(self.embed_tokens.weight.dtype)
+                inputs_embeds = self.model.embed_tokens(lm_input_ids).astype(
+                    self.embed_tokens.weight.dtype
+                )
                 token_type_ids_w_video = token_type_ids[..., :-1].clone()
-                token_type_ids[token_type_ids == TokenType.video] = TokenType.image
+                token_type_ids[token_type_ids == TokenType.video] = (
+                    TokenType.image
+                )
                 if images is not None:
                     inputs_embeds = self.vision_mapping_forward(
                         token_type_ids[..., :-1],
@@ -1539,11 +1833,12 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
 
             @contextlib.contextmanager
             def freeze_context():
-                assert (
-                    self._modality_param_mapping
-                ), "call `model.freeze_lm(stop_gradient=False) first before modality detach`"
+                assert self._modality_param_mapping, (
+                    "call `model.freeze_lm(stop_gradient=False) first before modality detach`"
+                )
                 unfreeze_handler = [
-                    p.register_hook(hook, 0) for n, p, hook in self._modality_param_mapping["lm"]
+                    p.register_hook(hook, 0)
+                    for n, p, hook in self._modality_param_mapping["lm"]
                 ]  # param has been monkey-patched to have .hooks method
                 yield  # backward fun
                 for h in unfreeze_handler:
@@ -1600,8 +1895,16 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
             logits, logits_image = logits_all
             router_loss = outputs.router_loss
 
-        mm_head_weight = self.lm_head.mm_head.weight if self.lm_head.mm_head is not None else None
-        mm_head_bias = self.lm_head.mm_head.bias if self.lm_head.mm_head is not None else None
+        mm_head_weight = (
+            self.lm_head.mm_head.weight
+            if self.lm_head.mm_head is not None
+            else None
+        )
+        mm_head_bias = (
+            self.lm_head.mm_head.bias
+            if self.lm_head.mm_head is not None
+            else None
+        )
         if return_dict:  # aka Generate Decoding
             if labels is not None:
                 loss, _ = self.criterion(
@@ -1643,7 +1946,12 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
         return loss
 
     @staticmethod
-    def _resolve_prefix_keys(state_keys_base, state_keys_real, ignore_error=False, base_model_prefix=None):
+    def _resolve_prefix_keys(
+        state_keys_base,
+        state_keys_real,
+        ignore_error=False,
+        base_model_prefix=None,
+    ):
         """_resolve_prefix_keys"""
         # state_keys_map base to real
         state_keys_map = {}
@@ -1657,7 +1965,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
             return state_keys_map
 
         # sorted by length，match from long to short for A.key B.key ...
-        state_keys_base = sorted(state_keys_base, key=lambda x: len(x), reverse=True)
+        state_keys_base = sorted(
+            state_keys_base, key=lambda x: len(x), reverse=True
+        )
         state_keys_real = set(state_keys_real)
 
         for key in state_keys_base:
@@ -1671,7 +1981,9 @@ class Ernie4_5_VLMoeForConditionalGeneration(Ernie4_5_MoeForCausalLM):
                     break
             if key not in state_keys_map:
                 if not ignore_error:
-                    logger.error(f"could not find name {key} in loaded state dict!")
+                    logger.error(
+                        f"could not find name {key} in loaded state dict!"
+                    )
             else:
                 state_keys_real.remove(state_keys_map[key])
 

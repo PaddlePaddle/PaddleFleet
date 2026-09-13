@@ -35,8 +35,12 @@ class TestConvertDpoTxtData(unittest.TestCase):
         self.assertIn("rejected_response", result)
         self.assertIn("messages", result)
         # sort[0]=1 > sort[1]=0, so response[0] is chosen
-        self.assertEqual(result["chosen_response"][0]["content"], "good_response")
-        self.assertEqual(result["rejected_response"][0]["content"], "bad_response")
+        self.assertEqual(
+            result["chosen_response"][0]["content"], "good_response"
+        )
+        self.assertEqual(
+            result["rejected_response"][0]["content"], "bad_response"
+        )
 
     def test_dpo_reversed_sort(self):
         data = {
@@ -47,8 +51,12 @@ class TestConvertDpoTxtData(unittest.TestCase):
         }
         result = convert_dpo_txt_data(data)
         # sort[1]=1 > sort[0]=0, so response[1] is chosen
-        self.assertEqual(result["chosen_response"][0]["content"], "good_response")
-        self.assertEqual(result["rejected_response"][0]["content"], "bad_response")
+        self.assertEqual(
+            result["chosen_response"][0]["content"], "good_response"
+        )
+        self.assertEqual(
+            result["rejected_response"][0]["content"], "bad_response"
+        )
 
     def test_dpo_string_src_tgt(self):
         data = {
@@ -79,7 +87,10 @@ class TestConvertDpoTxtData(unittest.TestCase):
         data = {
             "src": ["question1", "question2"],
             "tgt": ["answer1"],
-            "response": [["resp1", "query2", "resp2"], ["resp1_bad", "query2_bad", "resp2_bad"]],
+            "response": [
+                ["resp1", "query2", "resp2"],
+                ["resp1_bad", "query2_bad", "resp2_bad"],
+            ],
             "sort": [1, 0],
         }
         result = convert_dpo_txt_data(data)
@@ -235,7 +246,10 @@ class TestConvertDpoTxtData(unittest.TestCase):
         data = {
             "src": ["q1", "q2"],
             "tgt": ["a1"],
-            "response": [["a1_good", "q2", "a2_good"], ["a1_bad", "q2", "a2_bad"]],
+            "response": [
+                ["a1_good", "q2", "a2_good"],
+                ["a1_bad", "q2", "a2_bad"],
+            ],
             "sort": [1, 0],
         }
         result = convert_dpo_txt_data(data)
@@ -407,7 +421,9 @@ class TestConvertMmData(unittest.TestCase):
                 {"tag": "mask", "text": "What is this?"},
                 {"tag": "no_mask", "text": "This is a cat"},
             ],
-            "image_info": [{"image_url": "http://img.jpg", "matched_text_index": 0}],
+            "image_info": [
+                {"image_url": "http://img.jpg", "matched_text_index": 0}
+            ],
         }
         result = convert_mm_data(item)
         self.assertIn("images", result)
@@ -420,7 +436,9 @@ class TestConvertMmData(unittest.TestCase):
                 {"tag": "mask", "text": "What is this?"},
                 {"tag": "no_mask", "text": "This is a video"},
             ],
-            "video_info": [{"image_url": "http://vid.mp4", "matched_text_index": 0}],
+            "video_info": [
+                {"image_url": "http://vid.mp4", "matched_text_index": 0}
+            ],
         }
         result = convert_mm_data(item)
         self.assertIn("videos", result)
@@ -458,7 +476,11 @@ class TestConvertMmData(unittest.TestCase):
     def test_no_mask_with_tool_calls(self):
         item = {
             "text_info": [
-                {"tag": "no_mask", "text": "Let me calculate", "tool_calls": '{"fn": "calc"}'},
+                {
+                    "tag": "no_mask",
+                    "text": "Let me calculate",
+                    "tool_calls": '{"fn": "calc"}',
+                },
             ],
         }
         result = convert_mm_data(item)
@@ -469,7 +491,11 @@ class TestConvertMmData(unittest.TestCase):
     def test_no_mask_with_tool_calls_list(self):
         item = {
             "text_info": [
-                {"tag": "no_mask", "text": "Tools", "tool_calls": [{"fn": "calc"}]},
+                {
+                    "tag": "no_mask",
+                    "text": "Tools",
+                    "tool_calls": [{"fn": "calc"}],
+                },
             ],
         }
         result = convert_mm_data(item)
@@ -481,12 +507,18 @@ class TestConvertMmData(unittest.TestCase):
             "text_info": [
                 {"tag": "mask", "text": "What is 2+2?"},
                 {"tag": "no_mask", "text": "4"},
-                {"tag": "mask", "text": "The answer is 4", "tool_response": True},
+                {
+                    "tag": "mask",
+                    "text": "The answer is 4",
+                    "tool_response": True,
+                },
             ],
         }
         result = convert_mm_data(item)
         # Should have observation role for tool response
-        has_observation = any(m["role"] == "observation" for m in result["messages"])
+        has_observation = any(
+            m["role"] == "observation" for m in result["messages"]
+        )
         self.assertTrue(has_observation)
 
     def test_no_mask_without_tool_calls(self):

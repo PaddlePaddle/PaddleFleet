@@ -99,7 +99,11 @@ class TestTrainingFunction(unittest.TestCase):
     def test_sft_stage_calls_run_sft(self):
         """Test _training_function calls run_sft for SFT stage."""
         mock_model_args = MagicMock(stage="SFT")
-        mock_data_args = MagicMock(dataset_type="sft", train_dataset_path="/path", eval_dataset_path="/path")
+        mock_data_args = MagicMock(
+            dataset_type="sft",
+            train_dataset_path="/path",
+            eval_dataset_path="/path",
+        )
         mock_preprocess_args = MagicMock()
         mock_generating_args = MagicMock()
         mock_finetuning_args = MagicMock()
@@ -122,7 +126,11 @@ class TestTrainingFunction(unittest.TestCase):
     def test_dpo_stage_calls_run_dpo(self):
         """Test _training_function calls run_dpo for DPO stage."""
         mock_model_args = MagicMock(stage="DPO")
-        mock_data_args = MagicMock(dataset_type="sft", train_dataset_path="/path", eval_dataset_path="/path")
+        mock_data_args = MagicMock(
+            dataset_type="sft",
+            train_dataset_path="/path",
+            eval_dataset_path="/path",
+        )
         mock_preprocess_args = MagicMock()
         mock_generating_args = MagicMock()
         mock_finetuning_args = MagicMock()
@@ -145,7 +153,11 @@ class TestTrainingFunction(unittest.TestCase):
     def test_unknown_stage_raises(self):
         """Test _training_function raises ValueError for unknown stage."""
         mock_model_args = MagicMock(stage="UNKNOWN")
-        mock_data_args = MagicMock(dataset_type="sft", train_dataset_path="/path", eval_dataset_path="/path")
+        mock_data_args = MagicMock(
+            dataset_type="sft",
+            train_dataset_path="/path",
+            eval_dataset_path="/path",
+        )
         mock_preprocess_args = MagicMock()
         mock_generating_args = MagicMock()
         mock_finetuning_args = MagicMock()
@@ -168,7 +180,9 @@ class TestTrainingFunction(unittest.TestCase):
     def test_vl_stage_skips_path_check(self):
         """Test _training_function skips path check for VL stage."""
         mock_model_args = MagicMock(stage="VL-SFT")
-        mock_data_args = MagicMock(dataset_type="sft", train_dataset_path=None, eval_dataset_path=None)
+        mock_data_args = MagicMock(
+            dataset_type="sft", train_dataset_path=None, eval_dataset_path=None
+        )
         mock_preprocess_args = MagicMock()
         mock_generating_args = MagicMock()
         mock_finetuning_args = MagicMock()
@@ -192,7 +206,11 @@ class TestTrainingFunction(unittest.TestCase):
     def test_pretrain_stage_skips_path_check(self):
         """Test _training_function skips path check for pretrain dataset_type."""
         mock_model_args = MagicMock(stage="SFT")
-        mock_data_args = MagicMock(dataset_type="pretrain", train_dataset_path=None, eval_dataset_path=None)
+        mock_data_args = MagicMock(
+            dataset_type="pretrain",
+            train_dataset_path=None,
+            eval_dataset_path=None,
+        )
         mock_preprocess_args = MagicMock()
         mock_generating_args = MagicMock()
         mock_finetuning_args = MagicMock()
@@ -215,7 +233,11 @@ class TestTrainingFunction(unittest.TestCase):
     def test_non_pretrain_null_train_path_raises(self):
         """Test _training_function raises when train_dataset_path is None for non-pretrain."""
         mock_model_args = MagicMock(stage="SFT")
-        mock_data_args = MagicMock(dataset_type="sft", train_dataset_path=None, eval_dataset_path="/path")
+        mock_data_args = MagicMock(
+            dataset_type="sft",
+            train_dataset_path=None,
+            eval_dataset_path="/path",
+        )
         mock_preprocess_args = MagicMock()
         mock_generating_args = MagicMock()
         mock_finetuning_args = MagicMock()
@@ -249,15 +271,23 @@ class TestRunTuner(unittest.TestCase):
 
     def test_run_tuner_delegates(self):
         """Test run_tuner reads args and calls _training_function."""
-        with patch.object(self.tuner_mod, "read_args", return_value={"output_dir": "/tmp/out"}) as mock_read_args:
-            with patch.object(self.tuner_mod, "_training_function") as mock_training_func:
+        with patch.object(
+            self.tuner_mod, "read_args", return_value={"output_dir": "/tmp/out"}
+        ) as mock_read_args:
+            with patch.object(
+                self.tuner_mod, "_training_function"
+            ) as mock_training_func:
                 self.tuner_mod.run_tuner({"output_dir": "/tmp/out"})
-                mock_read_args.assert_called_once_with({"output_dir": "/tmp/out"})
+                mock_read_args.assert_called_once_with(
+                    {"output_dir": "/tmp/out"}
+                )
                 mock_training_func.assert_called_once()
 
     def test_run_tuner_with_none_args(self):
         """Test run_tuner with None args delegates to read_args."""
-        with patch.object(self.tuner_mod, "read_args", return_value={}) as mock_read_args:
+        with patch.object(
+            self.tuner_mod, "read_args", return_value={}
+        ) as mock_read_args:
             with patch.object(self.tuner_mod, "_training_function"):
                 self.tuner_mod.run_tuner(None)
                 mock_read_args.assert_called_once_with(None)

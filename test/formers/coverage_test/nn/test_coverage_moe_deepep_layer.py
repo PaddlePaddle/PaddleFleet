@@ -32,7 +32,9 @@ def _make_compat_expert_class():
     class CompatExpert(MLP):
         """Expert class that accepts the same args as modular_moe_layer passes."""
 
-        def __init__(self, config, intermediate_size, fuse_up_gate=False, **kwargs):
+        def __init__(
+            self, config, intermediate_size, fuse_up_gate=False, **kwargs
+        ):
             super().__init__(
                 config=config,
                 intermediate_size=intermediate_size,
@@ -96,10 +98,15 @@ def _make_modular_moe_layer(
 
     expert_class = _make_compat_expert_class()
 
-    with patch("paddlefleet.nn.moe_deepep.modular_moe_layer.fleet") as mock_fleet, patch(
-        "paddlefleet.nn.moe_deepep.modular_moe_layer.dist"
-    ) as mock_dist:
-        mock_fleet.get_hybrid_communicate_group.side_effect = Exception("no fleet")
+    with (
+        patch(
+            "paddlefleet.nn.moe_deepep.modular_moe_layer.fleet"
+        ) as mock_fleet,
+        patch("paddlefleet.nn.moe_deepep.modular_moe_layer.dist") as mock_dist,
+    ):
+        mock_fleet.get_hybrid_communicate_group.side_effect = Exception(
+            "no fleet"
+        )
         mock_dist.get_world_size.return_value = 1
 
         layer = ModularMoELayer(
@@ -169,15 +176,23 @@ class TestModularMoELayer(unittest.TestCase):
 
     def test_pretrained_config_preserves_dispatcher_type(self):
         """Test default and explicit dispatcher types are preserved."""
-        from paddlefleet.transformers.configuration_utils import PretrainedConfig
+        from paddlefleet.transformers.configuration_utils import (
+            PretrainedConfig,
+        )
 
-        self.assertEqual(PretrainedConfig().moe_token_dispatcher_type, "alltoall")
         self.assertEqual(
-            PretrainedConfig(moe_token_dispatcher_type="deepep").moe_token_dispatcher_type,
+            PretrainedConfig().moe_token_dispatcher_type, "alltoall"
+        )
+        self.assertEqual(
+            PretrainedConfig(
+                moe_token_dispatcher_type="deepep"
+            ).moe_token_dispatcher_type,
             "deepep",
         )
         self.assertEqual(
-            PretrainedConfig(moe_token_dispatcher_type="alltoall").moe_token_dispatcher_type,
+            PretrainedConfig(
+                moe_token_dispatcher_type="alltoall"
+            ).moe_token_dispatcher_type,
             "alltoall",
         )
 
@@ -193,7 +208,9 @@ class TestModularMoELayer(unittest.TestCase):
     def test_init_deepep_communication(self):
         """Test that DeepEP communication module is created when dispatcher_type is deepep."""
         layer = _make_modular_moe_layer(moe_token_dispatcher_type="deepep")
-        from paddlefleet.nn.moe_deepep.moe_communication import DeepEPMoECommunication
+        from paddlefleet.nn.moe_deepep.moe_communication import (
+            DeepEPMoECommunication,
+        )
 
         self.assertIsInstance(layer.communication, DeepEPMoECommunication)
 
@@ -310,7 +327,9 @@ class TestModularMoELayer(unittest.TestCase):
         hidden_states = paddle.randn([8, 32])
         selected_experts = paddle.to_tensor([[0, 1]] * 8)
         topk_weights = paddle.ones([8, 2]) * 0.5
-        output = layer._forward_traditional_moe(hidden_states, selected_experts, topk_weights)
+        output = layer._forward_traditional_moe(
+            hidden_states, selected_experts, topk_weights
+        )
         self.assertEqual(output.shape, [8, 32])
 
 

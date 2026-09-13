@@ -51,13 +51,19 @@ class TestPhi4Modeling(unittest.TestCase):
 
         batch_size = 1
         seq_length = 3
-        input_ids = paddle.randint(0, config.vocab_size, [batch_size, seq_length], dtype="int64")
+        input_ids = paddle.randint(
+            0, config.vocab_size, [batch_size, seq_length], dtype="int64"
+        )
         with paddle.no_grad():
             outputs = model(input_ids=input_ids, use_cache=False)
 
         self.assertIsNotNone(outputs)
-        logits = outputs[0] if isinstance(outputs, (tuple, list)) else outputs.logits
-        self.assertEqual(list(logits.shape), [batch_size, seq_length, config.vocab_size])
+        logits = (
+            outputs[0] if isinstance(outputs, (tuple, list)) else outputs.logits
+        )
+        self.assertEqual(
+            list(logits.shape), [batch_size, seq_length, config.vocab_size]
+        )
         print(f"Model creation and forward pass OK, shape: {logits.shape}")
 
     def test_model_save_and_load(self):
@@ -87,7 +93,9 @@ class TestPhi4Modeling(unittest.TestCase):
         input_ids = paddle.randint(0, config.vocab_size, [1, 3], dtype="int64")
         with paddle.no_grad():
             outputs = loaded_model(input_ids=input_ids)
-        logits = outputs[0] if isinstance(outputs, (tuple, list)) else outputs.logits
+        logits = (
+            outputs[0] if isinstance(outputs, (tuple, list)) else outputs.logits
+        )
         self.assertEqual(logits.shape[-1], config.vocab_size)
         print(f"Model save and load OK, logits shape={tuple(logits.shape)}")
 
@@ -172,7 +180,9 @@ class TestPhi4InferenceUseHf(unittest.TestCase):
                 pad_token_id=self.tokenizer.pad_token_id,
             )[0]
 
-        response = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        response = self.tokenizer.decode(
+            output_ids[0], skip_special_tokens=True
+        )
         self.assertIsInstance(response, str)
         self.assertGreater(len(response), 0)
         print(f"\n{'=' * 60}")
@@ -233,7 +243,9 @@ class TestPhi4InferenceUsePaddle(unittest.TestCase):
                 pad_token_id=self.tokenizer.pad_token_id,
             )[0]
 
-        response = self.tokenizer.decode(output_ids[0], skip_special_tokens=True)
+        response = self.tokenizer.decode(
+            output_ids[0], skip_special_tokens=True
+        )
         self.assertIsInstance(response, str)
         self.assertGreater(len(response), 0)
         print(f"\n{'=' * 60}")
@@ -265,7 +277,9 @@ class TestPhi4InferenceUsePaddle(unittest.TestCase):
             generated.append(next_id)
             if next_id == eos_id:
                 break
-            cur_ids = paddle.concat([cur_ids, paddle.to_tensor([[next_id]], dtype="int64")], axis=1)
+            cur_ids = paddle.concat(
+                [cur_ids, paddle.to_tensor([[next_id]], dtype="int64")], axis=1
+            )
 
         response = self.tokenizer.decode(generated, skip_special_tokens=True)
         print(f"\n{'=' * 60}")
@@ -294,7 +308,9 @@ class TestPhi4InferenceUsePaddle(unittest.TestCase):
         for step in range(30):
             with paddle.no_grad():
                 out = self.model(
-                    input_ids=cur_ids if step == 0 else paddle.to_tensor([[generated[-1]]], dtype="int64"),
+                    input_ids=cur_ids
+                    if step == 0
+                    else paddle.to_tensor([[generated[-1]]], dtype="int64"),
                     use_cache=True,
                     past_key_values=past_key_values,
                 )
@@ -455,8 +471,12 @@ class TestPhi4LayerDiffAlignment(unittest.TestCase):
 
             return hook
 
-        h0 = self.model.model.layers[0].register_forward_post_hook(_capture(layer0_out))
-        hl = self.model.model.layers[-1].register_forward_post_hook(_capture(last_layer_out))
+        h0 = self.model.model.layers[0].register_forward_post_hook(
+            _capture(layer0_out)
+        )
+        hl = self.model.model.layers[-1].register_forward_post_hook(
+            _capture(last_layer_out)
+        )
         try:
             with paddle.no_grad():
                 self.model(input_ids=input_ids, use_cache=False)
@@ -465,7 +485,9 @@ class TestPhi4LayerDiffAlignment(unittest.TestCase):
             hl.remove()
 
         self.assertTrue(layer0_out, "Hook did not capture layer0 output")
-        self.assertTrue(last_layer_out, "Hook did not capture last_layer output")
+        self.assertTrue(
+            last_layer_out, "Hook did not capture last_layer output"
+        )
 
         l0 = layer0_out[0][0, 0, :20].tolist()
         ref_l0 = self.REF_LAYER0_FIRST_TOKEN_FIRST20
@@ -486,10 +508,14 @@ class TestPhi4LayerDiffAlignment(unittest.TestCase):
         diff_ll_last = np.abs(np.array(ll_last) - np.array(ref_ll_last))
         print(f"\nLastLayer[0,0,:20]  paddle : {ll_first}")
         print(f"LastLayer[0,0,:20]  pytorch: {ref_ll_first}")
-        print(f"LastLayer first token diff: max={diff_ll_first.max():.6f}, mean={diff_ll_first.mean():.6f}")
+        print(
+            f"LastLayer first token diff: max={diff_ll_first.max():.6f}, mean={diff_ll_first.mean():.6f}"
+        )
         print(f"\nLastLayer[0,-1,:20] paddle : {ll_last}")
         print(f"LastLayer[0,-1,:20] pytorch: {ref_ll_last}")
-        print(f"LastLayer last token diff: max={diff_ll_last.max():.6f}, mean={diff_ll_last.mean():.6f}")
+        print(
+            f"LastLayer last token diff: max={diff_ll_last.max():.6f}, mean={diff_ll_last.mean():.6f}"
+        )
 
         # Last layer cannot align due to accumulated CUDA op errors across layers
 
@@ -515,11 +541,15 @@ class TestPhi4LayerDiffAlignment(unittest.TestCase):
         match = sum(a == b for a, b in zip(first10, ref_ids))
         ref_text = self.tokenizer.decode(ref_ids, skip_special_tokens=True)
         print(f"\nFirst-10 token match: {match}/{len(ref_ids)}")
-        print(f"  Paddle : {first10}  -> {self.tokenizer.decode(first10, skip_special_tokens=True)}")
+        print(
+            f"  Paddle : {first10}  -> {self.tokenizer.decode(first10, skip_special_tokens=True)}"
+        )
         print(f"  PyTorch: {ref_ids}  -> {ref_text}")
         print(f"{'=' * 80}")
 
-        self.assertGreaterEqual(match, 10, f"Token match too low: {match}/{len(ref_ids)}")
+        self.assertGreaterEqual(
+            match, 10, f"Token match too low: {match}/{len(ref_ids)}"
+        )
 
 
 def run_tests():

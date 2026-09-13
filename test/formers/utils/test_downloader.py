@@ -24,11 +24,12 @@ class LockFileTest(unittest.TestCase):
     test_url = "https://bj.bcebos.com/paddlenlp/models/transformers/llama/tokenizer.json"
 
     def test_downloading_with_exist_file(self):
-
         from paddlefleet.utils.downloader import get_path_from_url_with_filelock
 
         with TemporaryDirectory() as tempdir:
-            lock_file_name = hashlib.md5((self.test_url + tempdir).encode("utf-8")).hexdigest()
+            lock_file_name = hashlib.md5(
+                (self.test_url + tempdir).encode("utf-8")
+            ).hexdigest()
             lock_file_path = os.path.join(tempdir, ".lock", lock_file_name)
             os.makedirs(os.path.dirname(lock_file_path), exist_ok=True)
 
@@ -37,15 +38,18 @@ class LockFileTest(unittest.TestCase):
                 f.write("temp test")
 
             # downloading with exist lock file
-            config_file = get_path_from_url_with_filelock(self.test_url, root_dir=tempdir)
+            config_file = get_path_from_url_with_filelock(
+                self.test_url, root_dir=tempdir
+            )
             self.assertIsNotNone(config_file)
 
     def test_downloading_with_opened_exist_file(self):
-
         from paddlefleet.utils.downloader import get_path_from_url_with_filelock
 
         with TemporaryDirectory() as tempdir:
-            lock_file_name = hashlib.md5((self.test_url + tempdir).encode("utf-8")).hexdigest()
+            lock_file_name = hashlib.md5(
+                (self.test_url + tempdir).encode("utf-8")
+            ).hexdigest()
             lock_file_path = os.path.join(tempdir, ".lock", lock_file_name)
             os.makedirs(os.path.dirname(lock_file_path), exist_ok=True)
 
@@ -56,5 +60,7 @@ class LockFileTest(unittest.TestCase):
             # downloading with opened lock file
             open_mode = os.O_RDWR | os.O_CREAT | os.O_TRUNC
             _ = os.open(lock_file_path, open_mode)
-            config_file = get_path_from_url_with_filelock(self.test_url, root_dir=tempdir)
+            config_file = get_path_from_url_with_filelock(
+                self.test_url, root_dir=tempdir
+            )
             self.assertIsNotNone(config_file)

@@ -125,7 +125,10 @@ class TestToolsUtils(unittest.TestCase):
         with patch("paddle.is_compiled_with_cuda", return_value=False):
             with patch("paddle.is_compiled_with_rocm", return_value=False):
                 with patch("paddle.is_compiled_with_xpu", return_value=False):
-                    with patch("paddle.device.get_all_custom_device_type", return_value=[]):
+                    with patch(
+                        "paddle.device.get_all_custom_device_type",
+                        return_value=[],
+                    ):
                         from paddlefleet.utils.tools import get_env_device
 
                         result = get_env_device()

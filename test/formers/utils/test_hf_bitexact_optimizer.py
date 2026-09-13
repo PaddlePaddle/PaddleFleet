@@ -121,5 +121,7 @@ class TestHFStepInOptimizerState:
         )
         _step(resumed, param)
 
-        both = paddle.equal_all(param.detach().astype("float32"), ref_p.astype("float32"))
+        both = paddle.equal_all(
+            param.detach().astype("float32"), ref_p.astype("float32")
+        )
         assert bool(both), "resumed step 3 must equal the continuous step 3"

@@ -108,15 +108,27 @@ class InternLM2Config(PretrainedConfig):
             return
 
         if not isinstance(self.rope_scaling, dict):
-            raise ValueError(f"`rope_scaling` must be a dictionary, got {self.rope_scaling}")
+            raise ValueError(
+                f"`rope_scaling` must be a dictionary, got {self.rope_scaling}"
+            )
         rope_scaling_type = self.rope_scaling.get("type", None)
         rope_scaling_factor = self.rope_scaling.get("factor", None)
         if rope_scaling_type is None or rope_scaling_factor is None:
-            raise ValueError("`rope_scaling` must contain 'type' and 'factor' keys, " f"got {self.rope_scaling}")
+            raise ValueError(
+                "`rope_scaling` must contain 'type' and 'factor' keys, "
+                f"got {self.rope_scaling}"
+            )
         if rope_scaling_type not in ["linear", "dynamic"]:
-            raise ValueError(f"`rope_scaling` type must be 'linear' or 'dynamic', got '{rope_scaling_type}'")
-        if not isinstance(rope_scaling_factor, (int, float)) or rope_scaling_factor < 1.0:
-            raise ValueError(f"`rope_scaling` factor must be a number >= 1, got {rope_scaling_factor}")
+            raise ValueError(
+                f"`rope_scaling` type must be 'linear' or 'dynamic', got '{rope_scaling_type}'"
+            )
+        if (
+            not isinstance(rope_scaling_factor, (int, float))
+            or rope_scaling_factor < 1.0
+        ):
+            raise ValueError(
+                f"`rope_scaling` factor must be a number >= 1, got {rope_scaling_factor}"
+            )
 
     @property
     def is_version_2_5(self):
