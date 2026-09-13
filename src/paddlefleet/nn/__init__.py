@@ -35,39 +35,9 @@ import_structure = {
         "sft_postprocess_loss",
         "sft_loss_forward",
     ],
-    "moe.abstract": ["MOELayerBase"],
-    "moe.all_gather": ["allgather_async", "reduce_scatter_async", "AlltoAllSmart", "AllGatherAsync"],
-    "moe.all_to_all": ["AlltoAll", "AlltoAllAsync"],
-    "moe.moe_allgather_layer": ["ReshardCombineWeight", "MOEAllGatherLayerV2"],
-    "moe.moe_alltoall_layer": ["GateCombine", "combining"],
-    "moe.moe_block": ["create_moe_block", "MoEStatics"],
-    "moe.top_gate": [
-        "masked_fill",
-        "compute_optimal_transport",
-        "cast_if_needed",
-        "FusedGateDetachMatmul",
-        "gate_detach_matmul",
-        "TopKGate",
-    ],
-    "moe.utils": [
-        "ReduceScatterGroupOp",
-        "AllGatherGroupOp",
-        "get_async_loader",
-        "hack_offload_wait",
-        "all_gather_group",
-        "reduce_scatter_group",
-        "detach_and_requires_grad_",
-        "FakeClone",
-        "manual_backward",
-        "_parse_moe_group",
-    ],
     "activation": ["ACT2FN", "ClassInstantier", "ACT2CLS"],
-    "embedding": ["Embedding"],
     "general": ["GeneralInterface"],
     "linear": ["Linear"],
-    "lm_head": ["LMHead"],
-    "mlp": ["MLP"],
-    "norm": ["Norm", "LayerNorm", "RMSNorm"],
     "pp_model": ["GeneralModelForCausalLMPipe"],
 }
 
@@ -75,13 +45,8 @@ if TYPE_CHECKING:
     from .activation import *
     from .attention import *
     from .criterion import *
-    from .embedding import *
     from .general import *
     from .linear import *
-    from .lm_head import *
-    from .mlp import *
-    from .moe import *
-    from .norm import *
     from .pp_model import *
 else:
     sys.modules[__name__] = _LazyModule(

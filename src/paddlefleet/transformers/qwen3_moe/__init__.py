@@ -18,15 +18,11 @@ from typing import TYPE_CHECKING
 from ...utils.lazy_import import _LazyModule
 
 import_structure = {
-    "model_utils": ["PipelinePretrainedModel"],
     "configuration": ["Qwen3MoeConfig"],
     "modeling": [
-        "Qwen3MoeDecoderLayer",
-        "Qwen3MoeModel",
         "Qwen3MoePretrainedModel",
         "Qwen3MoeForCausalLM",
         "Qwen3MoeForCausalLMPipe",
-        "Qwen3MoeForCausalLMDeprecated",
     ],
 }
 if TYPE_CHECKING:

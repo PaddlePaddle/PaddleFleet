@@ -20,14 +20,9 @@ from ...utils.lazy_import import _LazyModule
 import_structure = {
     "configuration": ["Qwen2MoeConfig"],
     "modeling": [
-        "Qwen2MoeGate",
-        "Qwen2MoeDecoderLayer",
-        "Qwen2MoeModel",
         "Qwen2MoePretrainedModel",
         "Qwen2MoeForCausalLM",
         "Qwen2MoeForCausalLMPipe",
-        "Qwen2MoeForCausalLMDeprecated",
-        "Qwen2MoeForCausalLMPipeDeprecated",
     ],
 }
 

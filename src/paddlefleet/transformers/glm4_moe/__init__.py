@@ -19,13 +19,8 @@ from ...utils.lazy_import import _LazyModule
 import_structure = {
     "configuration": ["Glm4MoeConfig"],
     "modeling": [
-        "Glm4MoeForCausalLMPipeFleet",
-        "Glm4MoeModelFleet",
-        "Glm4MoeForCausalLMFleet",
         "Glm4MoeForCausalLMPipe",
-        "Glm4MoeModel",
         "Glm4MoeForCausalLM",
-        "Glm4MoeForCausalLMDeprecated",
     ],
 }
 

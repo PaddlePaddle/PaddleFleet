@@ -21,15 +21,9 @@ from ...utils.lazy_import import _LazyModule
 import_structure = {
     "configuration": ["Qwen3VLMoeConfig", "Qwen3VLMoeTextConfig"],
     "modeling": [
-        "Qwen3VLMoeForConditionalGenerationDeprecated",
         "Qwen3VLMoeForConditionalGeneration",
-        "Qwen3VLMoeDeprecated",
         "Qwen3VLMoeModel",
-        "Qwen3VLMoePretrainedModel",
-        "Qwen3VLMoeTextModel",
     ],
-    "processor": ["Qwen3VLProcessor"],
-    "video_processor": ["Qwen3VLVideoProcessor"],
 }
 
 if TYPE_CHECKING:
