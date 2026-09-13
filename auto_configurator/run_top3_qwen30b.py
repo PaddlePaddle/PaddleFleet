@@ -37,9 +37,7 @@ import sys
 # Ensure project paths are on PYTHONPATH
 _this_dir = os.path.dirname(os.path.abspath(__file__))
 _project_root = os.path.dirname(_this_dir)
-_paddlefleet_root = os.path.join(
-    os.path.dirname(_project_root), "PaddleFleet"
-)
+_paddlefleet_root = os.path.join(os.path.dirname(_project_root), "PaddleFleet")
 for p in [
     _project_root,
     os.path.join(_project_root, "src"),

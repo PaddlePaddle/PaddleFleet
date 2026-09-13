@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from queue import Queue
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     try:
@@ -30,11 +30,11 @@ class BaseStreamer:
 
     def put(self, value):
         """Function that is called by `.generate()` to push new tokens"""
-        raise NotImplementedError()
+        raise NotImplementedError
 
     def end(self):
         """Function that is called by `.generate()` to signal the end of generation"""
-        raise NotImplementedError()
+        raise NotImplementedError
 
 
 class TextStreamer(BaseStreamer):
@@ -64,7 +64,12 @@ class TextStreamer(BaseStreamer):
         ```
     """
 
-    def __init__(self, tokenizer: PreTrainedTokenizer, skip_prompt: bool = False, **decode_kwargs):
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizer,
+        skip_prompt: bool = False,
+        **decode_kwargs,
+    ):
         self.tokenizer = tokenizer
         self.skip_prompt = skip_prompt
         self.decode_kwargs = decode_kwargs
@@ -196,8 +201,8 @@ class TextIteratorStreamer(TextStreamer):
         self,
         tokenizer: PreTrainedTokenizer,
         skip_prompt: bool = False,
-        timeout: Optional[float] = None,
-        **decode_kwargs
+        timeout: float | None = None,
+        **decode_kwargs,
     ):
         super().__init__(tokenizer, skip_prompt, **decode_kwargs)
         self.text_queue = Queue()
@@ -216,6 +221,6 @@ class TextIteratorStreamer(TextStreamer):
     def __next__(self):
         value = self.text_queue.get(timeout=self.timeout)
         if value == self.stop_signal:
-            raise StopIteration()
+            raise StopIteration
         else:
             return value

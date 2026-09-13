@@ -130,7 +130,7 @@ if [[ ${FLAGS_enable_CI} == "true" ]] || [[ ${FLAGS_enable_CE} == "true" ]];then
     export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES}
     set +e
     export PYTHONFAULTHANDLER=1
-    
+
     DOWNLOAD_SOURCE=aistudio WAIT_UNTIL_DONE=True PADDLEFLEET_TESTING=True \
     PYTHONPATH=$(pwd)/src:$(pwd) \
     COVERAGE_SOURCE=paddlefleet \

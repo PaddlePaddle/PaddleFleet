@@ -68,7 +68,7 @@ expert_model_parallel_size: 8
 recompute_granularity: full
 recompute_method: uniform
 recompute_num_layers: 1
-recompute_modules: 
+recompute_modules:
   flash_attn: 0
 
 # sharding

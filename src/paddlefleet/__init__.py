@@ -17,6 +17,8 @@ import sys
 from contextlib import suppress
 from typing import TYPE_CHECKING
 
+from paddlefleet.utils.log import logger
+
 from . import (
     parallel_state as parallel_state,
     training as training,
@@ -36,8 +38,6 @@ from .package_info import (
 )
 from .timers import Timers
 from .utils.lazy_import import _LazyModule
-
-from paddlefleet.utils.log import logger
 
 mpu = parallel_state
 
@@ -74,13 +74,16 @@ def compare_version(v1, v2):
 
 
 def _check_dependency_versions():
-    for pkg_names, min_version in [(["paddlepaddle-gpu", "paddlepaddle"], "3.3")]:
+    for pkg_names, min_version in [
+        (["paddlepaddle-gpu", "paddlepaddle"], "3.3")
+    ]:
         for pkg_name in pkg_names:
             try:
                 _version = metadata.version(pkg_name)
                 if compare_version(_version, min_version) < 0:
                     logger.warning(
-                        "Version check warning:\n" + f"{pkg_name} version {_version}, recommended >= {min_version}"
+                        "Version check warning:\n"
+                        + f"{pkg_name} version {_version}, recommended >= {min_version}"
                     )
             except:
                 pass
@@ -92,7 +95,7 @@ _check_dependency_versions()
 with suppress(Exception):
     import paddle
 
-    from .utils.paddle_patch import *
+    from .utils.paddle_patch import *  # noqa: F403
 
     paddle.disable_signal_handler()
 
@@ -104,7 +107,7 @@ PADDLEFLEET_TESTING = os.environ.get("PADDLEFLEET_TESTING", False)
 # breaks any downstream import that reaches ``transformers.processing_utils``.
 # Patch ``importlib.metadata.version`` so the missing torchcodec dist-info
 # resolves to a sentinel version instead of aborting the import chain.
-import importlib.metadata as _paddlefleet_im  # noqa: E402
+import importlib.metadata as _paddlefleet_im
 
 _paddlefleet_orig_version = _paddlefleet_im.version
 
@@ -148,10 +151,9 @@ logger.warning(
 # forward reference and raises ``NameError: name 'Module' is not defined``.
 if sys.modules.get("torch") is not None:
     with suppress(Exception):
-        import transformers.modeling_utils  # noqa: F401
+        import transformers.modeling_utils
 
 if "datasets" in sys.modules.keys():
-
     logger.warning(
         "Detected that datasets module was imported before paddlefleet. "
         "This may cause PaddleFleet datasets to be unavailable in intranet. "
@@ -198,27 +200,23 @@ import_structure["timers"] = ["Timers"]
 import_structure["transformers.tokenizer_utils"] = ["PreTrainedTokenizer"]
 
 if TYPE_CHECKING:
-    from . import datasets  # noqa
-    from . import transformer  # noqa
-    from . import transformers  # noqa
     from . import (
-        cli,
-        data,
-        generation,
-        mergekit,
-        nn,
-        ops,
-        package_info,
-        parallel_state,
-        peft,
-        quantization,
-        trainer,
-        training,
-        trl,
-        utils,
-        version,
+        cli as cli,
+        data as data,
+        datasets as datasets,
+        generation as generation,
+        mergekit as mergekit,
+        nn as nn,
+        ops as ops,
+        package_info as package_info,
+        peft as peft,
+        quantization as quantization,
+        trainer as trainer,
+        transformer as transformer,
+        transformers as transformers,
+        trl as trl,
+        utils as utils,
     )
-    from .timers import Timers
 else:
     sys.modules[__name__] = _LazyModule(
         __name__,

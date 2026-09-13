@@ -20,7 +20,7 @@ fi
 
 export root_dir=$(pwd)
 
-config_yaml=$root_dir/PaddleFleet/test/formers/config/ci/glm45_single_pt-test.yaml 
+config_yaml=$root_dir/PaddleFleet/test/formers/config/ci/glm45_single_pt-test.yaml
 
 
 rm -rf checkpoint/

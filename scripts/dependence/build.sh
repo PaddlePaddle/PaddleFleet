@@ -53,7 +53,7 @@ paddlefleet_build (){
     commit=${commit:-unknown}
     cp $formers_dir/dist/p****.whl ${upload_path}/
     cp $formers_dir/dist/p****.whl ${upload_path}/paddlefleet-0.0.0.dev-py3-none-any.whl
-    
+
     whl_file=$(ls $formers_dir/dist/paddlefleet-*.whl)
     base_name=$(basename $whl_file)
     new_name=$(echo $base_name | sed "s/\.dev[0-9]\+/&+${commit}/")

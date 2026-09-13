@@ -36,7 +36,7 @@ evaluation_strategy: steps
 save_steps: 100
 save_strategy: steps
 logging_steps: 1
-gradient_accumulation_steps: 32  # 16nodes
+gradient_accumulation_steps: 32 # 16nodes
 logging_dir: ./vdl_log
 output_dir: /root/ckpt
 disable_tqdm: true

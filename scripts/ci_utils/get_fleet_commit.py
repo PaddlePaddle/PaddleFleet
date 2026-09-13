@@ -17,9 +17,15 @@ def get_fleet_commit_id(setup_file_path):
     with open(setup_file_path, "r") as f:
         for line in f:
             if "paddlefleet==" in line:
-                commit_id = line.split("paddlefleet==")[1].strip().strip('"').strip("'")
-                commit_id = commit_id.split("+")[1].strip()  # 如果有版本号，取最后的commit id部分
-                commit_id = commit_id.split('"')[0].strip()  # 如果有版本号，取最后的commit id部分
+                commit_id = (
+                    line.split("paddlefleet==")[1].strip().strip('"').strip("'")
+                )
+                commit_id = commit_id.split("+")[
+                    1
+                ].strip()  # 如果有版本号，取最后的commit id部分
+                commit_id = commit_id.split('"')[
+                    0
+                ].strip()  # 如果有版本号，取最后的commit id部分
                 return commit_id
     raise ValueError("FLEET_COMMIT_ID not found in setup.py")
 

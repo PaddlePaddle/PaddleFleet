@@ -13,7 +13,7 @@ mix_strategy: concat
 template_backend: custom
 template: paddleocr_vl_v15
 custom_register_path: ./paddleocr_vl_v15_template.py
-                
+
 
 ### model
 model_name_or_path: PaddlePaddle/PaddleOCR-VL-1.5

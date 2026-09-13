@@ -548,7 +548,7 @@ class KimiK3Config(PretrainedConfig):
             text_config = KimiK3TextConfig()
         elif isinstance(text_config, dict):
             text_config = KimiK3TextConfig(**text_config)
-        
+
         if isinstance(vision_config, dict):
             vision_config = KimiK3VisionConfig(**vision_config)
 

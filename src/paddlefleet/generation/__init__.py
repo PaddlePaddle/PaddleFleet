@@ -1,3 +1,17 @@
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import sys
 from typing import TYPE_CHECKING
 
@@ -19,6 +33,8 @@ import_structure = {
         "TopPProcess",
         "get_scale_by_dtype",
         "validate_stopping_criteria",
+    ],
+    "sampling": [
         "apply_repetition_penalty",
         "sample_with_top_k",
         "sample_with_top_p",
@@ -28,7 +44,10 @@ import_structure = {
     "greedy_generator": ["DynamicKVCache", "GreedyGenerator"],
     "inference_utils": ["init_inference_fleet"],
     "model_outputs": ["ModelOutput"],
-    "configuration_utils": ["GenerationConfig", "resolve_hf_generation_config_path"],
+    "configuration_utils": [
+        "GenerationConfig",
+        "resolve_hf_generation_config_path",
+    ],
     "logits_process": [
         "MinLengthLogitsProcessor",
         "SequenceBiasLogitsProcessor",
@@ -60,37 +79,46 @@ import_structure = {
 }
 
 if TYPE_CHECKING:
-    from .config import FleetGenerationConfig
-    from .configuration_utils import GenerationConfig
-    from .csa_cache import CSADynamicCache
-    from .greedy_generator import DynamicKVCache, GreedyGenerator
-    from .inference_utils import init_inference_fleet
+    from .config import FleetGenerationConfig as FleetGenerationConfig
+    from .configuration_utils import GenerationConfig as GenerationConfig
+    from .csa_cache import CSADynamicCache as CSADynamicCache
+    from .greedy_generator import (
+        DynamicKVCache as DynamicKVCache,
+        GreedyGenerator as GreedyGenerator,
+    )
+    from .inference_utils import init_inference_fleet as init_inference_fleet
     from .logits_process import (
-        ForcedBOSTokenLogitsProcessor,
-        ForcedEOSTokenLogitsProcessor,
-        HammingDiversityLogitsProcessor,
-        LogitsProcessor,
-        LogitsProcessorList,
-        MinLengthLogitsProcessor,
-        RepetitionPenaltyLogitsProcessor,
-        TopKProcess,
-        TopPProcess,
+        ForcedBOSTokenLogitsProcessor as ForcedBOSTokenLogitsProcessor,
+        ForcedEOSTokenLogitsProcessor as ForcedEOSTokenLogitsProcessor,
+        HammingDiversityLogitsProcessor as HammingDiversityLogitsProcessor,
+        LogitsProcessor as LogitsProcessor,
+        LogitsProcessorList as LogitsProcessorList,
+        MinLengthLogitsProcessor as MinLengthLogitsProcessor,
+        RepetitionPenaltyLogitsProcessor as RepetitionPenaltyLogitsProcessor,
+        TopKProcess as TopKProcess,
+        TopPProcess as TopPProcess,
+    )
+    from .sampling import (
+        apply_repetition_penalty as apply_repetition_penalty,
+        sample_with_top_k as sample_with_top_k,
+        sample_with_top_p as sample_with_top_p,
     )
     from .stopping_criteria import (
-        MaxLengthCriteria,
-        MaxTimeCriteria,
-        StoppingCriteria,
-        StoppingCriteriaList,
-        validate_stopping_criteria,
+        MaxLengthCriteria as MaxLengthCriteria,
+        MaxTimeCriteria as MaxTimeCriteria,
+        StoppingCriteria as StoppingCriteria,
+        StoppingCriteriaList as StoppingCriteriaList,
+        validate_stopping_criteria as validate_stopping_criteria,
     )
-    from .streamers import BaseStreamer, TextIteratorStreamer, TextStreamer
+    from .streamers import (
+        BaseStreamer as BaseStreamer,
+        TextIteratorStreamer as TextIteratorStreamer,
+        TextStreamer as TextStreamer,
+    )
     from .utils import (
-        BeamSearchScorer,
-        GenerationMixin,
-        apply_repetition_penalty,
-        get_unfinished_flag,
-        sample_with_top_k,
-        sample_with_top_p,
+        BeamSearchScorer as BeamSearchScorer,
+        GenerationMixin as GenerationMixin,
+        get_unfinished_flag as get_unfinished_flag,
     )
 else:
     sys.modules[__name__] = _LazyModule(

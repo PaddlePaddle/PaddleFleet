@@ -357,11 +357,11 @@ class TestPaddleVersionUtils(unittest.TestCase):
         """Test is_paddle_min_version raises when packaging not available."""
         from paddlefleet.utils import is_paddle_min_version
 
-        with mock.patch(
-            "paddlefleet.utils._fleet_utils.HAVE_PACKAGING", False
-        ):  # noqa: SIM117
-            with self.assertRaises(ImportError):
-                is_paddle_min_version("3.0.0")
+        with (
+            mock.patch("paddlefleet.utils._fleet_utils.HAVE_PACKAGING", False),
+            self.assertRaises(ImportError),
+        ):
+            is_paddle_min_version("3.0.0")
 
 
 class TestPrepareInputTensors(unittest.TestCase):

@@ -88,7 +88,7 @@ skip_profile_timer: false
 load_via_cpu: false
 fp32_residual_connection: false
 
-# template 
+# template
 template_backend: custom
 template: gemma4
 

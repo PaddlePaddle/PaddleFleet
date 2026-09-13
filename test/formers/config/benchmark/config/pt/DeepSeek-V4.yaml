@@ -63,11 +63,11 @@ muon_extra_scale_factor: 0.2
 muon_ns_steps: 10
 muon_ns_coeff_type: "deepseekv4"
 muon_exclude_patterns:
-- "embed"
-- "bias"
-- "lm_head"
-- "mlp.gate"
-- "ape"
+  - "embed"
+  - "bias"
+  - "lm_head"
+  - "mlp.gate"
+  - "ape"
 muon_qkv_update_mode: "split_head"
 muon_ffn_split: true
 

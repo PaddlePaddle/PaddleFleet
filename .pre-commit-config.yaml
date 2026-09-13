@@ -43,6 +43,9 @@ repos:
           (?x)^(
             src/paddlefleet/(cli|data|datasets|mergekit|nn|peft|quantization|trainer|transformers|triton_kernels)/|
             src/paddlefleet/utils/(?!_fleet_utils\.py)|
+            docs/|
+            examples/|
+            scripts/(regression|unit_test)/|
             test/formers/
           )
   # For Python files

@@ -58,12 +58,12 @@ expert_model_parallel_size: 1
 sequence_parallel: false
 use_expert_parallel: false
 
-# compute 
+# compute
 moe_expert_fusion: true
 apply_rope_fusion: true
 moe_router_fusion: true
 
-# 
+#
 moe_ep_barrier: false
 moe_router_force_load_balancing: false
 moe_token_dispatcher_type: deepep
