@@ -44,7 +44,11 @@ import_structure = {
     "configuration_utils": ["PretrainedConfig"],
     "processing_utils": ["ProcessorMixin"],
     "feature_extraction_utils": ["BatchFeature", "FeatureExtractionMixin"],
-    "image_processing_utils": ["PaddleImageProcessingMixin", "ImageProcessingMixin", "BaseImageProcessor"],
+    "image_processing_utils": [
+        "PaddleImageProcessingMixin",
+        "ImageProcessingMixin",
+        "BaseImageProcessor",
+    ],
     "image_processing_utils_fast": ["BaseImageProcessorFast"],
     "video_processing_utils": ["BaseVideoProcessor"],
     "audio_processing_utils": ["SequenceFeatureExtractor"],
@@ -205,10 +209,17 @@ if TYPE_CHECKING:
     from .processing_utils import ProcessorMixin
     from .feature_extraction_utils import BatchFeature, FeatureExtractionMixin
     from .audio_processing_utils import SequenceFeatureExtractor
-    from .image_processing_utils import PaddleImageProcessingMixin, ImageProcessingMixin, BaseImageProcessor
+    from .image_processing_utils import (
+        PaddleImageProcessingMixin,
+        ImageProcessingMixin,
+        BaseImageProcessor,
+    )
     from .image_processing_utils_fast import BaseImageProcessorFast
     from .video_processing_utils import BaseVideoProcessor
-    from .sequence_parallel_utils import AllGatherVarlenOp, sequence_parallel_sparse_mask_labels
+    from .sequence_parallel_utils import (
+        AllGatherVarlenOp,
+        sequence_parallel_sparse_mask_labels,
+    )
     from .tensor_parallel_utils import parallel_matmul, fused_head_and_loss_fn
     from .moe_gate import *
 
@@ -258,5 +269,6 @@ else:
     )
 
 logging.getLogger("transformers").addFilter(
-    lambda record: "None of PyTorch, TensorFlow >= 2.0, or Flax have been found." not in str(record.getMessage())
+    lambda record: "None of PyTorch, TensorFlow >= 2.0, or Flax have been found."
+    not in str(record.getMessage())
 )

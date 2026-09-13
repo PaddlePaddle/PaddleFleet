@@ -19,8 +19,14 @@ from paddlefleet.version import git
 
 commit = "unknown"
 
-paddlefleet_dir = os.path.abspath(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-if commit.endswith("unknown") and git.is_git_repo(paddlefleet_dir) and git.have_git():
+paddlefleet_dir = os.path.abspath(
+    os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+)
+if (
+    commit.endswith("unknown")
+    and git.is_git_repo(paddlefleet_dir)
+    and git.have_git()
+):
     commit = git.git_revision(paddlefleet_dir).decode("utf-8")
     if git.is_dirty(paddlefleet_dir):
         commit += ".dirty"
@@ -51,5 +57,4 @@ def show():
     print("commit:", commit)
 
 
-from .._fleet_version import __version__ as __version__
-from .._fleet_version import commit as commit
+from .._fleet_version import __version__ as __version__, commit as commit

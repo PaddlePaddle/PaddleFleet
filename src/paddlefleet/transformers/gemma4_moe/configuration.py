@@ -45,7 +45,10 @@ class Gemma4MoeConfig(PretrainedConfig):
 
         TODO(VL): Move this extraction to Gemma4Config when VL model is implemented.
         """
-        if config_dict.get("model_type") == "gemma4" and "text_config" in config_dict:
+        if (
+            config_dict.get("model_type") == "gemma4"
+            and "text_config" in config_dict
+        ):
             config_dict = config_dict["text_config"]
         return super().from_dict(config_dict, **kwargs)
 
@@ -117,20 +120,30 @@ class Gemma4MoeConfig(PretrainedConfig):
         if rope_parameters is not None:
             sliding_rope = rope_parameters.get("sliding_attention", {})
             full_rope = rope_parameters.get("full_attention", {})
-            self.sliding_window_rope_base = sliding_rope.get("rope_theta", sliding_window_rope_base)
-            self.full_attention_rope_base = full_rope.get("rope_theta", full_attention_rope_base)
+            self.sliding_window_rope_base = sliding_rope.get(
+                "rope_theta", sliding_window_rope_base
+            )
+            self.full_attention_rope_base = full_rope.get(
+                "rope_theta", full_attention_rope_base
+            )
             self.full_attention_rope_partial_factor = full_rope.get(
                 "partial_rotary_factor", full_attention_rope_partial_factor
             )
         else:
             self.sliding_window_rope_base = sliding_window_rope_base
             self.full_attention_rope_base = full_attention_rope_base
-            self.full_attention_rope_partial_factor = full_attention_rope_partial_factor
+            self.full_attention_rope_partial_factor = (
+                full_attention_rope_partial_factor
+            )
 
         # Build layer_types from interleaved pattern if not provided
         if layer_types is None:
             sliding_count, global_count = self.interleaved_attn_pattern
-            pattern = ["sliding_attention"] * sliding_count + ["full_attention"] * global_count
-            self.layer_types = (pattern * ((num_hidden_layers // len(pattern)) + 1))[:num_hidden_layers]
+            pattern = ["sliding_attention"] * sliding_count + [
+                "full_attention"
+            ] * global_count
+            self.layer_types = (
+                pattern * ((num_hidden_layers // len(pattern)) + 1)
+            )[:num_hidden_layers]
         else:
             self.layer_types = layer_types

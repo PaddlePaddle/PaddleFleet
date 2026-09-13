@@ -44,7 +44,9 @@ from paddle.distributed.fleet.meta_optimizers.dygraph_optimizer.hybrid_parallel_
     HybridParallelClipGrad,
 )
 from paddle.distributed.fleet.utils.hybrid_parallel_util import unwrap_optimizer
-from paddle.distributed.fleet.utils.mix_precision_utils import MixPrecisionOptimizer
+from paddle.distributed.fleet.utils.mix_precision_utils import (
+    MixPrecisionOptimizer,
+)
 from paddle.framework import core
 from paddle.nn import clip
 
@@ -106,7 +108,9 @@ class HFBitexactHybridParallelClipGrad(HybridParallelClipGrad):
             # A parameter shared across pipeline stages is counted on the stage
             # that owns it, exactly as the base class does, so the pp all-reduce
             # in ``_global_norm`` does not add it twice.
-            if hasattr(p, "is_firstly_shared") and not getattr(p, "is_firstly_shared", True):
+            if hasattr(p, "is_firstly_shared") and not getattr(
+                p, "is_firstly_shared", True
+            ):
                 continue
             merge_grad = g
             if g.type == core.VarDesc.VarType.SELECTED_ROWS:
@@ -123,15 +127,21 @@ class HFBitexactHybridParallelClipGrad(HybridParallelClipGrad):
                 return paddle.zeros((1,), dtype=paddle.float32)
             return paddle.add_n(squares)
 
-        result = self._comm_and_clip(params_grads, total(sum_square_dist), total(sum_square_not_dist))
+        result = self._comm_and_clip(
+            params_grads, total(sum_square_dist), total(sum_square_not_dist)
+        )
         if self._timers:
             self._timers("dygraph-clip").stop()
         return result
 
-    def _comm_and_clip(self, params_grads, global_norm_var_dist, global_norm_var_not_dist):
+    def _comm_and_clip(
+        self, params_grads, global_norm_var_dist, global_norm_var_not_dist
+    ):
         self._global_norm(global_norm_var_dist, global_norm_var_not_dist)
 
-        global_norm = _hf_global_norm(global_norm_var_dist + global_norm_var_not_dist)
+        global_norm = _hf_global_norm(
+            global_norm_var_dist + global_norm_var_not_dist
+        )
         clip_coef = _hf_clip_coef(global_norm, self.clip_norm)
         self._clip.last_global_norm = float(global_norm)
         self._clip.last_clip_coef = float(clip_coef)
@@ -163,7 +173,9 @@ def restore_hf_bitexact_clip(dist_optimizer) -> bool:
         hf_clip = unwrap_hf_bitexact_clip(wrapper)
         if hf_clip is None:
             return None
-        return HFBitexactHybridParallelClipGrad(hf_clip, wrapper._hcg, wrapper.split_norm_comm, wrapper._timers)
+        return HFBitexactHybridParallelClipGrad(
+            hf_clip, wrapper._hcg, wrapper.split_norm_comm, wrapper._timers
+        )
 
     inner_opt = unwrap_optimizer(dist_optimizer._inner_opt, _WRAPPER_OPTIMIZERS)
     replaced = False

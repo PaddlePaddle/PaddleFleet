@@ -31,7 +31,9 @@ class SFTConfig(TrainingArguments):
     # NOTE(gongenlei): new add autotuner_benchmark
     autotuner_benchmark: bool = field(
         default=False,
-        metadata={"help": "Weather to run benchmark by autotuner. True for from_scratch and pad_max_length."},
+        metadata={
+            "help": "Weather to run benchmark by autotuner. True for from_scratch and pad_max_length."
+        },
     )
     eval_iters: int = field(
         default=-1,

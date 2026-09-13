@@ -134,7 +134,9 @@ def _calculate_fan_in_and_fan_out(tensor, reverse=False):
         Tuple[fan_in, fan_out]
     """
     if tensor.ndim < 2:
-        raise ValueError("Fan in and fan out can not be computed for tensor with fewer than 2 dimensions")
+        raise ValueError(
+            "Fan in and fan out can not be computed for tensor with fewer than 2 dimensions"
+        )
 
     if reverse:
         num_input_fmaps, num_output_fmaps = tensor.shape[0], tensor.shape[1]
@@ -187,7 +189,11 @@ def _calculate_correct_fan(tensor, mode, reverse=False):
     mode = mode.lower()
     valid_modes = ["fan_in", "fan_out"]
     if mode not in valid_modes:
-        raise ValueError("Mode {} not supported, please use one of {}".format(mode, valid_modes))
+        raise ValueError(
+            "Mode {} not supported, please use one of {}".format(
+                mode, valid_modes
+            )
+        )
 
     fan_in, fan_out = _calculate_fan_in_and_fan_out(tensor, reverse)
 
@@ -195,7 +201,15 @@ def _calculate_correct_fan(tensor, mode, reverse=False):
 
 
 def _calculate_gain(nonlinearity, param=None):
-    linear_fns = ["linear", "conv1d", "conv2d", "conv3d", "conv_transpose1d", "conv_transpose2d", "conv_transpose3d"]
+    linear_fns = [
+        "linear",
+        "conv1d",
+        "conv2d",
+        "conv3d",
+        "conv_transpose1d",
+        "conv_transpose2d",
+        "conv_transpose3d",
+    ]
     if nonlinearity in linear_fns or nonlinearity == "sigmoid":
         return 1
     elif nonlinearity == "tanh":
@@ -205,11 +219,17 @@ def _calculate_gain(nonlinearity, param=None):
     elif nonlinearity == "leaky_relu":
         if param is None:
             negative_slope = 0.01
-        elif not isinstance(param, bool) and isinstance(param, int) or isinstance(param, float):
+        elif (
+            not isinstance(param, bool)
+            and isinstance(param, int)
+            or isinstance(param, float)
+        ):
             # True/False are instances of int, hence check above
             negative_slope = param
         else:
-            raise ValueError("negative_slope {} not a valid number".format(param))
+            raise ValueError(
+                "negative_slope {} not a valid number".format(param)
+            )
         return math.sqrt(2.0 / (1 + negative_slope**2))
     elif nonlinearity == "selu":
         return 3.0 / 4
@@ -217,7 +237,9 @@ def _calculate_gain(nonlinearity, param=None):
         raise ValueError("Unsupported nonlinearity {}".format(nonlinearity))
 
 
-def kaiming_uniform_(tensor, a=0, mode="fan_in", nonlinearity="leaky_relu", reverse=False):
+def kaiming_uniform_(
+    tensor, a=0, mode="fan_in", nonlinearity="leaky_relu", reverse=False
+):
     """
     Modified tensor inspace using kaiming_uniform method
     Args:
@@ -235,7 +257,9 @@ def kaiming_uniform_(tensor, a=0, mode="fan_in", nonlinearity="leaky_relu", reve
     return _no_grad_uniform_(tensor, -k, k)
 
 
-def kaiming_normal_(tensor, a=0, mode="fan_in", nonlinearity="leaky_relu", reverse=False):
+def kaiming_normal_(
+    tensor, a=0, mode="fan_in", nonlinearity="leaky_relu", reverse=False
+):
     """
     Modified tensor inspace using kaiming_normal_
     Args:
@@ -283,7 +307,9 @@ def reset_initialized_parameter(model, include_self=True):
     """
     for _, m in model.named_sublayers(include_self=include_self):
         if isinstance(m, nn.Conv2D):
-            k = float(m._groups) / (m._in_channels * m._kernel_size[0] * m._kernel_size[1])
+            k = float(m._groups) / (
+                m._in_channels * m._kernel_size[0] * m._kernel_size[1]
+            )
             k = math.sqrt(k)
             _no_grad_uniform_(m.weight, -k, k)
             if hasattr(m, "bias") and getattr(m, "bias") is not None:

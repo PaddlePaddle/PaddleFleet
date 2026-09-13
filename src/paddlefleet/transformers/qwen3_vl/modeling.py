@@ -18,6 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Paddle Qwen3_VL model."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -72,8 +73,12 @@ class Qwen3VLVisionMLP(nn.Layer):
         self.hidden_size = config.hidden_size
         self.intermediate_size = config.intermediate_size
         self.act_type = config.get("hidden_act", "silu")
-        self.linear_fc1 = nn.Linear(self.hidden_size, self.intermediate_size, bias_attr=True)
-        self.linear_fc2 = nn.Linear(self.intermediate_size, self.hidden_size, bias_attr=True)
+        self.linear_fc1 = nn.Linear(
+            self.hidden_size, self.intermediate_size, bias_attr=True
+        )
+        self.linear_fc2 = nn.Linear(
+            self.intermediate_size, self.hidden_size, bias_attr=True
+        )
         self.act_fn = ACT2FN[self.act_type]
 
     def forward(self, hidden_state):
@@ -95,14 +100,26 @@ class Qwen3VLVisionPatchEmbed(nn.Layer):
         self.embed_dim = embed_dim
 
         kernel_size = [temporal_patch_size, patch_size, patch_size]
-        self.proj = nn.Conv3d(in_channels, embed_dim, kernel_size=kernel_size, stride=kernel_size, bias=True)
+        self.proj = nn.Conv3d(
+            in_channels,
+            embed_dim,
+            kernel_size=kernel_size,
+            stride=kernel_size,
+            bias=True,
+        )
 
     def forward(self, hidden_states: paddle.Tensor) -> paddle.Tensor:
         target_dtype = self.proj.weight.dtype
         hidden_states = hidden_states.reshape(
-            -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size
+            -1,
+            self.in_channels,
+            self.temporal_patch_size,
+            self.patch_size,
+            self.patch_size,
         )
-        hidden_states = self.proj(hidden_states.to(dtype=target_dtype)).reshape(-1, self.embed_dim)
+        hidden_states = self.proj(hidden_states.to(dtype=target_dtype)).reshape(
+            -1, self.embed_dim
+        )
         return hidden_states
 
 
@@ -111,7 +128,9 @@ class Qwen3VLVisionRotaryEmbedding(nn.Layer):
 
     def __init__(self, dim: int, theta: float = 10000.0) -> None:
         super().__init__()
-        inv_freq = 1.0 / (theta ** (paddle.arange(0, dim, 2, dtype=paddle.float32) / dim))
+        inv_freq = 1.0 / (
+            theta ** (paddle.arange(0, dim, 2, dtype=paddle.float32) / dim)
+        )
         self.register_buffer("inv_freq", inv_freq, persistable=False)
 
     def forward(self, seqlen: int) -> paddle.Tensor:
@@ -130,9 +149,15 @@ class Qwen3VLVisionPatchMerger(nn.Layer):
         use_postshuffle_norm: bool = False,
     ) -> None:
         super().__init__()
-        context_dim = context_dim if context_dim is not None else config.hidden_size
+        context_dim = (
+            context_dim if context_dim is not None else config.hidden_size
+        )
         dim = dim if dim is not None else config.out_hidden_size
-        spatial_merge_size = spatial_merge_size if spatial_merge_size is not None else config.spatial_merge_size
+        spatial_merge_size = (
+            spatial_merge_size
+            if spatial_merge_size is not None
+            else config.spatial_merge_size
+        )
 
         self.hidden_size = context_dim * (spatial_merge_size**2)
         self.use_postshuffle_norm = use_postshuffle_norm
@@ -167,7 +192,10 @@ def apply_rotary_pos_emb_vision(q, k, cos, sin):
     orig_k_dtype = k.dtype
     with paddle.amp.auto_cast(False):
         q, k = q.astype(dtype="float32"), k.astype(dtype="float32")
-        cos, sin = cos.unsqueeze(-2).astype(dtype="float32"), sin.unsqueeze(-2).astype(dtype="float32")
+        cos, sin = (
+            cos.unsqueeze(-2).astype(dtype="float32"),
+            sin.unsqueeze(-2).astype(dtype="float32"),
+        )
         q_embed = (q * cos) + (rotate_half(q) * sin)
         k_embed = (k * cos) + (rotate_half(k) * sin)
         return q_embed.astype(orig_q_dtype), k_embed.astype(orig_k_dtype)
@@ -201,22 +229,31 @@ class Qwen3VLVisionAttention(nn.Layer):
         hidden_states: paddle.Tensor,
         cu_seqlens: paddle.Tensor,
         rotary_pos_emb: Optional[paddle.Tensor] = None,
-        position_embeddings: Optional[tuple[paddle.Tensor, paddle.Tensor]] = None,
+        position_embeddings: Optional[
+            tuple[paddle.Tensor, paddle.Tensor]
+        ] = None,
         attn_mask_startend_row_indices: Optional[paddle.Tensor] = None,
         **kwargs,
     ) -> paddle.Tensor:
         seq_length = hidden_states.shape[0]
         query_states, key_states, value_states = (
-            self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
+            self.qkv(hidden_states)
+            .reshape(seq_length, 3, self.num_heads, -1)
+            .permute(1, 0, 2, 3)
+            .unbind(0)
         )
         cos, sin = position_embeddings
-        query_states, key_states = apply_rotary_pos_emb_vision(query_states, key_states, cos, sin)
+        query_states, key_states = apply_rotary_pos_emb_vision(
+            query_states, key_states, cos, sin
+        )
 
         query_states = query_states.transpose(0, 1).unsqueeze(0)
         key_states = key_states.transpose(0, 1).unsqueeze(0)
         value_states = value_states.transpose(0, 1).unsqueeze(0)
 
-        attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+        attention_interface = ALL_ATTENTION_FUNCTIONS[
+            self.config._attn_implementation
+        ]
 
         attn_output, attn_weights = attention_interface(
             self,
@@ -248,7 +285,9 @@ class Qwen3VLVisionBlock(nn.Layer):
         hidden_states: paddle.Tensor,
         cu_seqlens: paddle.Tensor,
         rotary_pos_emb: Optional[paddle.Tensor] = None,
-        position_embeddings: Optional[tuple[paddle.Tensor, paddle.Tensor]] = None,
+        position_embeddings: Optional[
+            tuple[paddle.Tensor, paddle.Tensor]
+        ] = None,
         attn_mask_startend_row_indices: Optional[paddle.Tensor] = None,
         **kwargs,
     ) -> paddle.Tensor:
@@ -286,10 +325,21 @@ class Qwen3VLPretrainedModel(PretrainedModel):
     @classmethod
     def _gen_aoa_config(cls, config: Qwen3VLConfig):
         mapping = cls._checkpoint_conversion_mapping
-        llm_target = next((v for v in mapping.values() if "language_model" in v), "language_model")
-        visual_target = next((v for v in mapping.values() if "visual" in v), "visual")
-        llm_prefix = f"{llm_target}." if not llm_target.endswith(".") else llm_target
-        visual_prefix = f"{visual_target}." if not visual_target.endswith(".") else visual_target
+        llm_target = next(
+            (v for v in mapping.values() if "language_model" in v),
+            "language_model",
+        )
+        visual_target = next(
+            (v for v in mapping.values() if "visual" in v), "visual"
+        )
+        llm_prefix = (
+            f"{llm_target}." if not llm_target.endswith(".") else llm_target
+        )
+        visual_prefix = (
+            f"{visual_target}."
+            if not visual_target.endswith(".")
+            else visual_target
+        )
 
         # language model
         aoa_config = {
@@ -376,10 +426,21 @@ class Qwen3VLPretrainedModel(PretrainedModel):
     @classmethod
     def _gen_inv_aoa_config(cls, config: Qwen3VLConfig):
         mapping = cls._checkpoint_conversion_mapping
-        llm_target = next((v for v in mapping.values() if "language_model" in v), "language_model")
-        visual_target = next((v for v in mapping.values() if "visual" in v), "visual")
-        llm_prefix = f"{llm_target}." if not llm_target.endswith(".") else llm_target
-        visual_prefix = f"{visual_target}." if not visual_target.endswith(".") else visual_target
+        llm_target = next(
+            (v for v in mapping.values() if "language_model" in v),
+            "language_model",
+        )
+        visual_target = next(
+            (v for v in mapping.values() if "visual" in v), "visual"
+        )
+        llm_prefix = (
+            f"{llm_target}." if not llm_target.endswith(".") else llm_target
+        )
+        visual_prefix = (
+            f"{visual_target}."
+            if not visual_target.endswith(".")
+            else visual_target
+        )
 
         # language model
         aoa_config = {
@@ -481,8 +542,12 @@ class Qwen3VLVisionModel(Qwen3VLPretrainedModel):
         super().__init__(config, *inputs, **kwargs)
         self.spatial_merge_size = config.spatial_merge_size
         self.patch_size = config.patch_size
-        self.spatial_merge_unit = self.spatial_merge_size * self.spatial_merge_size
-        self.pos_embed = nn.Embedding(config.num_position_embeddings, config.hidden_size)
+        self.spatial_merge_unit = (
+            self.spatial_merge_size * self.spatial_merge_size
+        )
+        self.pos_embed = nn.Embedding(
+            config.num_position_embeddings, config.hidden_size
+        )
         self.deepstack_visual_indexes = config.deepstack_visual_indexes
         self.deepstack_merger_list = nn.LayerList(
             [
@@ -504,7 +569,9 @@ class Qwen3VLVisionModel(Qwen3VLPretrainedModel):
         head_dim = config.hidden_size // config.num_heads
         self.rotary_pos_emb = Qwen3VLVisionRotaryEmbedding(head_dim // 2)
 
-        self.blocks = nn.LayerList([Qwen3VLVisionBlock(config) for _ in range(config.depth)])
+        self.blocks = nn.LayerList(
+            [Qwen3VLVisionBlock(config) for _ in range(config.depth)]
+        )
         self.merger = Qwen3VLVisionPatchMerger(
             config=config,
             dim=config.out_hidden_size,
@@ -539,7 +606,11 @@ class Qwen3VLVisionModel(Qwen3VLPretrainedModel):
             )
             wpos_ids = wpos_ids.transpose([0, 2, 1, 3])
             wpos_ids = wpos_ids.flatten()
-            pos_ids.append(paddle.stack(x=[hpos_ids, wpos_ids], axis=-1).tile(repeat_times=[t, 1]))
+            pos_ids.append(
+                paddle.stack(x=[hpos_ids, wpos_ids], axis=-1).tile(
+                    repeat_times=[t, 1]
+                )
+            )
         pos_ids = paddle.cat(x=pos_ids, axis=0)
         max_grid_size = grid_thw[:, 1:].max()
         rotary_pos_emb_full = self.rotary_pos_emb(max_grid_size)
@@ -553,7 +624,9 @@ class Qwen3VLVisionModel(Qwen3VLPretrainedModel):
         hidden_states: paddle.Tensor,
         cu_seqlens: paddle.Tensor,
         rotary_pos_emb: Optional[paddle.Tensor] = None,
-        position_embeddings: Optional[Tuple[paddle.Tensor, paddle.Tensor]] = None,
+        position_embeddings: Optional[
+            Tuple[paddle.Tensor, paddle.Tensor]
+        ] = None,
     ):
         def create_custom_forward(module):
             def custom_forward(*inputs):
@@ -571,7 +644,11 @@ class Qwen3VLVisionModel(Qwen3VLPretrainedModel):
         return hidden_states
 
     def fast_pos_embed_interpolate(self, grid_thw):
-        grid_ts, grid_hs, grid_ws = grid_thw[:, 0], grid_thw[:, 1], grid_thw[:, 2]
+        grid_ts, grid_hs, grid_ws = (
+            grid_thw[:, 0],
+            grid_thw[:, 1],
+            grid_thw[:, 2],
+        )
         device = paddle.get_device()
 
         idx_list = [[] for _ in range(4)]
@@ -583,8 +660,12 @@ class Qwen3VLVisionModel(Qwen3VLPretrainedModel):
 
             h_idxs_floor = h_idxs.int()
             w_idxs_floor = w_idxs.int()
-            h_idxs_ceil = (h_idxs.int() + 1).clip(max=self.num_grid_per_side - 1)
-            w_idxs_ceil = (w_idxs.int() + 1).clip(max=self.num_grid_per_side - 1)
+            h_idxs_ceil = (h_idxs.int() + 1).clip(
+                max=self.num_grid_per_side - 1
+            )
+            w_idxs_ceil = (w_idxs.int() + 1).clip(
+                max=self.num_grid_per_side - 1
+            )
 
             dh = h_idxs - h_idxs_floor.astype("float32")
             dw = w_idxs - w_idxs_floor.astype("float32")
@@ -611,18 +692,37 @@ class Qwen3VLVisionModel(Qwen3VLPretrainedModel):
                 weight_list[i].extend(weights[i].tolist())
 
         idx_tensor = paddle.tensor(idx_list, dtype=paddle.long, device=device)
-        weight_tensor = paddle.tensor(weight_list, dtype=self.pos_embed.weight.dtype, device=device)
-        pos_embeds = self.pos_embed(idx_tensor).to(device) * weight_tensor[:, :, None]
-        patch_pos_embeds = pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
+        weight_tensor = paddle.tensor(
+            weight_list, dtype=self.pos_embed.weight.dtype, device=device
+        )
+        pos_embeds = (
+            self.pos_embed(idx_tensor).to(device) * weight_tensor[:, :, None]
+        )
+        patch_pos_embeds = (
+            pos_embeds[0] + pos_embeds[1] + pos_embeds[2] + pos_embeds[3]
+        )
 
-        patch_pos_embeds = patch_pos_embeds.split([h * w for h, w in zip(grid_hs, grid_ws)])
+        patch_pos_embeds = patch_pos_embeds.split(
+            [h * w for h, w in zip(grid_hs, grid_ws)]
+        )
 
         patch_pos_embeds_permute = []
         merge_size = self.config.spatial_merge_size
-        for pos_embed, t, h, w in zip(patch_pos_embeds, grid_ts, grid_hs, grid_ws):
+        for pos_embed, t, h, w in zip(
+            patch_pos_embeds, grid_ts, grid_hs, grid_ws
+        ):
             pos_embed = pos_embed.tile([t, 1])
             pos_embed = (
-                pos_embed.reshape([t, h // merge_size, merge_size, w // merge_size, merge_size, -1])
+                pos_embed.reshape(
+                    [
+                        t,
+                        h // merge_size,
+                        merge_size,
+                        w // merge_size,
+                        merge_size,
+                        -1,
+                    ]
+                )
                 .permute(0, 1, 3, 2, 4, 5)
                 .flatten(0, 4)
             )
@@ -630,7 +730,9 @@ class Qwen3VLVisionModel(Qwen3VLPretrainedModel):
         patch_pos_embeds = paddle.cat(patch_pos_embeds_permute)
         return patch_pos_embeds
 
-    def forward(self, hidden_states: paddle.Tensor, grid_thw: paddle.Tensor) -> paddle.Tensor:
+    def forward(
+        self, hidden_states: paddle.Tensor, grid_thw: paddle.Tensor
+    ) -> paddle.Tensor:
         """
         Args:
             hidden_states (`paddle.Tensor` of shape `(batch_size, seq_len, hidden_size)`):
@@ -653,9 +755,9 @@ class Qwen3VLVisionModel(Qwen3VLPretrainedModel):
         emb = paddle.cat((rotary_pos_emb, rotary_pos_emb), axis=-1)
         position_embeddings = (emb.cos(), emb.sin())
 
-        cu_seqlens = paddle.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
-            axis=0, dtype="int32"
-        )
+        cu_seqlens = paddle.repeat_interleave(
+            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
+        ).cumsum(axis=0, dtype="int32")
         cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
 
         lengths = cu_seqlens[1:] - cu_seqlens[:-1]
@@ -668,9 +770,9 @@ class Qwen3VLVisionModel(Qwen3VLPretrainedModel):
             ],
             axis=1,
         )
-        attn_mask_startend_row_indices = paddle.repeat_interleave(indices_per_segment, lengths, axis=0)[
-            None, None, ...
-        ]
+        attn_mask_startend_row_indices = paddle.repeat_interleave(
+            indices_per_segment, lengths, axis=0
+        )[None, None, ...]
 
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
@@ -698,9 +800,9 @@ class Qwen3VLVisionModel(Qwen3VLPretrainedModel):
                     attn_mask_startend_row_indices=attn_mask_startend_row_indices,
                 )
             if layer_num in self.deepstack_visual_indexes:
-                deepstack_feature = self.deepstack_merger_list[self.deepstack_visual_indexes.index(layer_num)](
-                    hidden_states
-                )
+                deepstack_feature = self.deepstack_merger_list[
+                    self.deepstack_visual_indexes.index(layer_num)
+                ](hidden_states)
                 deepstack_feature_lists.append(deepstack_feature)
 
         hidden_states = self.merger(hidden_states)

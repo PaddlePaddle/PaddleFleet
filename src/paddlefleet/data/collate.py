@@ -65,7 +65,11 @@ class Stack(object):
                  [5, 6, 7, 8]]
                 '''
         """
-        data = np.stack(data, axis=self._axis).astype(self._dtype) if self._dtype else np.stack(data, axis=self._axis)
+        data = (
+            np.stack(data, axis=self._axis).astype(self._dtype)
+            if self._dtype
+            else np.stack(data, axis=self._axis)
+        )
         return data
 
 
@@ -92,7 +96,9 @@ class Pad(object):
             we pad to the left side. Default: True.
     """
 
-    def __init__(self, pad_val=0, axis=0, ret_length=None, dtype=None, pad_right=True):
+    def __init__(
+        self, pad_val=0, axis=0, ret_length=None, dtype=None, pad_right=True
+    ):
         self._pad_val = pad_val
         self._axis = axis
         self._ret_length = ret_length
@@ -133,8 +139,12 @@ class Pad(object):
         """
 
         # return data itself for rare unexpected cases when 1-D array is passed to Pad
-        if not isinstance(data[0], list) and not isinstance(data[0], np.ndarray):
-            return np.asarray(data, dtype=self._dtype if self._dtype is not None else np.int64)
+        if not isinstance(data[0], list) and not isinstance(
+            data[0], np.ndarray
+        ):
+            return np.asarray(
+                data, dtype=self._dtype if self._dtype is not None else np.int64
+            )
 
         arrs = [np.asarray(ele) for ele in data]
         original_length = [ele.shape[self._axis] for ele in arrs]
@@ -143,7 +153,9 @@ class Pad(object):
         ret_shape[self._axis] = max_size
         ret_shape = (len(arrs),) + tuple(ret_shape)
         ret = np.full(
-            shape=ret_shape, fill_value=self._pad_val, dtype=arrs[0].dtype if self._dtype is None else self._dtype
+            shape=ret_shape,
+            fill_value=self._pad_val,
+            dtype=arrs[0].dtype if self._dtype is None else self._dtype,
         )
         for i, arr in enumerate(arrs):
             if arr.shape[self._axis] == max_size:
@@ -153,13 +165,17 @@ class Pad(object):
                 if self._pad_right:
                     slices[self._axis] = slice(0, arr.shape[self._axis])
                 else:
-                    slices[self._axis] = slice(max_size - arr.shape[self._axis], max_size)
+                    slices[self._axis] = slice(
+                        max_size - arr.shape[self._axis], max_size
+                    )
 
                 if slices[self._axis].start != slices[self._axis].stop:
                     slices = [slice(i, i + 1)] + slices
                     ret[tuple(slices)] = arr
         if self._ret_length:
-            return ret, np.asarray(original_length, dtype="int32") if self._ret_length else np.asarray(
+            return ret, np.asarray(
+                original_length, dtype="int32"
+            ) if self._ret_length else np.asarray(
                 original_length, self._ret_length
             )
         else:
@@ -195,7 +211,10 @@ class Tuple(object):
         else:
             self._fn = (fn,) + args
         for i, ele_fn in enumerate(self._fn):
-            assert callable(ele_fn), "Batchify functions must be callable! type(fn[%d]) = %s" % (i, str(type(ele_fn)))
+            assert callable(ele_fn), (
+                "Batchify functions must be callable! type(fn[%d]) = %s"
+                % (i, str(type(ele_fn)))
+            )
 
     def __call__(self, data):
         """
@@ -231,9 +250,10 @@ class Tuple(object):
                 '''
         """
 
-        assert len(data[0]) == len(
-            self._fn
-        ), "The number of attributes in each data sample should contain" " {} elements".format(len(self._fn))
+        assert len(data[0]) == len(self._fn), (
+            "The number of attributes in each data sample should contain"
+            " {} elements".format(len(self._fn))
+        )
         ret = []
         for i, ele_fn in enumerate(self._fn):
             result = ele_fn([ele[i] for ele in data])
@@ -272,9 +292,12 @@ class Dict(object):
         self._fn = fn
 
         for col_name, ele_fn in self._fn.items():
-            assert callable(ele_fn), "Batchify functions must be callable! type(fn[%d]) = %s" % (
-                col_name,
-                str(type(ele_fn)),
+            assert callable(ele_fn), (
+                "Batchify functions must be callable! type(fn[%d]) = %s"
+                % (
+                    col_name,
+                    str(type(ele_fn)),
+                )
             )
 
     def __call__(self, data):

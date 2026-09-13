@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Paddle Qwen3Moe model."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -90,7 +91,9 @@ class Qwen3MoePretrainedModel(PretrainedModel):
         else:
             num_experts = config.num_experts
 
-        model_prefix = "" if cls == getattr(cls, "base_model_class", None) else "model."
+        model_prefix = (
+            "" if cls == getattr(cls, "base_model_class", None) else "model."
+        )
         using_sonic_moe = config.using_sonic_moe
         aoa_config = {
             "aoa_statements": [
@@ -151,15 +154,21 @@ class Qwen3MoePretrainedModel(PretrainedModel):
                 f"model.layers.$LAYER_ID.mlp.experts.$EXPERT_ID.gate_proj.weight^T, model.layers.$LAYER_ID.mlp.experts.$EXPERT_ID.up_proj.weight^T -> {model_prefix}layers.$LAYER_ID.mlp.experts.$EXPERT_ID.up_gate_proj.weight, fused_ffn",
             ]
 
-        if getattr(cls, "is_fleet", False) and (config.moe_expert_fusion or using_sonic_moe):
+        if getattr(cls, "is_fleet", False) and (
+            config.moe_expert_fusion or using_sonic_moe
+        ):
             for layer_idx in range(0, config.num_hidden_layers):
                 src_prefix = f"model.layers.{layer_idx}"
                 tgt_prefix = f"{model_prefix}layers.{layer_idx}"
                 ep_weight1 = []
                 ep_weight2 = []
                 for expert_id in range(num_experts):
-                    ep_weight1.append(f"{src_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight")
-                    ep_weight2.append(f"{src_prefix}.mlp.experts.{expert_id}.down_proj.weight")
+                    ep_weight1.append(
+                        f"{src_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                    )
+                    ep_weight2.append(
+                        f"{src_prefix}.mlp.experts.{expert_id}.down_proj.weight"
+                    )
                 group_gemm1 = ",".join(ep_weight1)
                 group_gemm2 = ",".join(ep_weight2)
                 aoa_config["aoa_statements"] += [
@@ -174,8 +183,12 @@ class Qwen3MoePretrainedModel(PretrainedModel):
                     ep_weight1 = []
                     ep_weight2 = []
                     for expert_id in range(num_experts):
-                        ep_weight1.append(f"{src_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight")
-                        ep_weight2.append(f"{src_prefix}.mlp.experts.{expert_id}.down_proj.weight")
+                        ep_weight1.append(
+                            f"{src_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                        )
+                        ep_weight2.append(
+                            f"{src_prefix}.mlp.experts.{expert_id}.down_proj.weight"
+                        )
                     group1 = ",".join(ep_weight1)
                     group2 = ",".join(ep_weight2)
                     aoa_config["aoa_statements"] += [
@@ -185,7 +198,9 @@ class Qwen3MoePretrainedModel(PretrainedModel):
 
         # lm_head
         if config.tie_word_embeddings:
-            aoa_config["aoa_statements"] += ["model.embed_tokens.weight -> lm_head.weight"]
+            aoa_config["aoa_statements"] += [
+                "model.embed_tokens.weight -> lm_head.weight"
+            ]
 
         return aoa_config
 
@@ -198,7 +213,9 @@ class Qwen3MoePretrainedModel(PretrainedModel):
         else:
             num_experts = config.num_experts
 
-        model_prefix = "" if cls == getattr(cls, "base_model_class", None) else "model."
+        model_prefix = (
+            "" if cls == getattr(cls, "base_model_class", None) else "model."
+        )
         using_sonic_moe = config.using_sonic_moe
         aoa_statements = [
             f"{model_prefix}layers.$LAYER_ID.self_attn.o_proj.weight^T -> model.layers.$LAYER_ID.self_attn.o_proj.weight",
@@ -236,13 +253,19 @@ class Qwen3MoePretrainedModel(PretrainedModel):
                 f"{model_prefix}layers.$LAYER_ID.self_attn.qkv_proj.bias -> model.layers.$LAYER_ID.self_attn.q_proj.bias, model.layers.$LAYER_ID.self_attn.k_proj.bias, model.layers.$LAYER_ID.self_attn.v_proj.bias, fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups={config.num_key_value_heads}, axis=0",
             ]
 
-        if getattr(cls, "is_fleet", False) and (config.moe_expert_fusion or using_sonic_moe):
+        if getattr(cls, "is_fleet", False) and (
+            config.moe_expert_fusion or using_sonic_moe
+        ):
             for layer_id in range(config.num_hidden_layers):
                 ep_weight1 = []
                 ep_weight2 = []
                 for expert_id in range(num_experts):
-                    ep_weight1.append(f"{model_prefix}layers.{layer_id}.mlp.experts.{expert_id}.up_gate_proj.weight")
-                    ep_weight2.append(f"{model_prefix}layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight")
+                    ep_weight1.append(
+                        f"{model_prefix}layers.{layer_id}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                    )
+                    ep_weight2.append(
+                        f"{model_prefix}layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight"
+                    )
                 group_gemm1 = ",".join(ep_weight1)
                 group_gemm2 = ",".join(ep_weight2)
                 aoa_statements += [
@@ -258,7 +281,9 @@ class Qwen3MoePretrainedModel(PretrainedModel):
                         ep_weight1.append(
                             f"{model_prefix}layers.{layer_id}.mlp.experts.{expert_id}.up_gate_proj.weight"
                         )
-                        ep_weight2.append(f"{model_prefix}layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight")
+                        ep_weight2.append(
+                            f"{model_prefix}layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight"
+                        )
                     group1 = ",".join(ep_weight1)
                     group2 = ",".join(ep_weight2)
                     aoa_statements += [
@@ -301,11 +326,19 @@ class Qwen3MoeForCausalLM(Qwen3MoePretrainedModel):
 
     def __new__(cls, config):
         # Hybrid parallel config convert.
-        config.tensor_model_parallel_size = max(config.tensor_model_parallel_size, 1)
+        config.tensor_model_parallel_size = max(
+            config.tensor_model_parallel_size, 1
+        )
         config.context_parallel_size = max(config.context_parallel_size, 1)
-        config.pipeline_model_parallel_size = max(config.pipeline_model_parallel_size, 1)
-        config.virtual_pipeline_model_parallel_size = max(config.virtual_pipeline_model_parallel_size, 1)
-        config.expert_model_parallel_size = max(config.expert_model_parallel_size, 1)
+        config.pipeline_model_parallel_size = max(
+            config.pipeline_model_parallel_size, 1
+        )
+        config.virtual_pipeline_model_parallel_size = max(
+            config.virtual_pipeline_model_parallel_size, 1
+        )
+        config.expert_model_parallel_size = max(
+            config.expert_model_parallel_size, 1
+        )
         config.fuse_rms_norm = True
 
         model_provider_class = Qwen3MoEModelProvider
@@ -316,23 +349,35 @@ class Qwen3MoeForCausalLM(Qwen3MoePretrainedModel):
         gpt_model = model_provider.provide(loss_fn=loss_fn)
         gpt_model._gen_aoa_config = cls._gen_aoa_config
         gpt_model._gen_inv_aoa_config = cls._gen_inv_aoa_config
-        gpt_model._get_tensor_parallel_mappings = cls._get_tensor_parallel_mappings
+        gpt_model._get_tensor_parallel_mappings = (
+            cls._get_tensor_parallel_mappings
+        )
         gpt_model.config_to_save = config
         gpt_model.is_fleet = cls.is_fleet
 
         return gpt_model
 
 
-class Qwen3MoeForCausalLMPipe(Qwen3MoePretrainedModel, GeneralModelForCausalLMPipe):
+class Qwen3MoeForCausalLMPipe(
+    Qwen3MoePretrainedModel, GeneralModelForCausalLMPipe
+):
     is_fleet = True
 
     def __new__(cls, config):
         # Hybrid parallel config convert.
-        config.tensor_model_parallel_size = max(config.tensor_model_parallel_size, 1)
+        config.tensor_model_parallel_size = max(
+            config.tensor_model_parallel_size, 1
+        )
         config.context_parallel_size = max(config.context_parallel_size, 1)
-        config.pipeline_model_parallel_size = max(config.pipeline_model_parallel_size, 1)
-        config.virtual_pipeline_model_parallel_size = max(config.virtual_pipeline_model_parallel_size, 1)
-        config.expert_model_parallel_size = max(config.expert_model_parallel_size, 1)
+        config.pipeline_model_parallel_size = max(
+            config.pipeline_model_parallel_size, 1
+        )
+        config.virtual_pipeline_model_parallel_size = max(
+            config.virtual_pipeline_model_parallel_size, 1
+        )
+        config.expert_model_parallel_size = max(
+            config.expert_model_parallel_size, 1
+        )
         config.fuse_rms_norm = True
 
         model_provider_class = Qwen3MoEModelProvider
@@ -343,7 +388,9 @@ class Qwen3MoeForCausalLMPipe(Qwen3MoePretrainedModel, GeneralModelForCausalLMPi
         gpt_model = model_provider.provide(loss_fn=loss_fn)
         gpt_model._gen_aoa_config = cls._gen_aoa_config
         gpt_model._gen_inv_aoa_config = cls._gen_inv_aoa_config
-        gpt_model._get_tensor_parallel_mappings = cls._get_tensor_parallel_mappings
+        gpt_model._get_tensor_parallel_mappings = (
+            cls._get_tensor_parallel_mappings
+        )
         gpt_model.config_to_save = config
         gpt_model.is_fleet = cls.is_fleet
         return gpt_model

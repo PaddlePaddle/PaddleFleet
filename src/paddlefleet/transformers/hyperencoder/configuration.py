@@ -23,11 +23,16 @@ fields to the Fleet side is done by the inherited
 ``TransformerConfig.from_config``, and the few values that need to be derived
 live in ``HyperEncoderProvider.__post_init__``.
 """
+
 from __future__ import annotations
 
 from ..configuration_utils import PretrainedConfig
 
-__all__ = ["HYPERENCODER_VOCAB_SIZE", "HYPERENCODER_HIDDEN_SIZE", "HyperEncoderConfig"]
+__all__ = [
+    "HYPERENCODER_VOCAB_SIZE",
+    "HYPERENCODER_HIDDEN_SIZE",
+    "HyperEncoderConfig",
+]
 
 # Special token ids, kept as a single source of truth on the Paddle side.
 IM_PATCH_TOKEN = 128815
@@ -160,7 +165,9 @@ class HyperEncoderConfig(PretrainedConfig):
         # HyperEncoder-specific geometry. json only carries a list, so normalize to a tuple.
         ql = tuple(int(v) for v in hyperencoder_query_lengths)
         if len(ql) != 2:
-            raise ValueError(f"hyperencoder_query_lengths must be (short, long), got {ql}")
+            raise ValueError(
+                f"hyperencoder_query_lengths must be (short, long), got {ql}"
+            )
         self.hyperencoder_query_lengths = ql
         self.hyperencoder_seq_align = int(hyperencoder_seq_align)
 

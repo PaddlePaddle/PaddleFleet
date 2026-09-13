@@ -235,7 +235,11 @@ class KimiK3TextConfig(PretrainedConfig):
         self.kv_lora_rank = kv_lora_rank
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
-        self.head_dim = linear_attn_config.get("head_dim", v_head_dim) if linear_attn_config else v_head_dim
+        self.head_dim = (
+            linear_attn_config.get("head_dim", v_head_dim)
+            if linear_attn_config
+            else v_head_dim
+        )
         self.v_head_dim = self.head_dim
         self.multi_latent_attention = multi_latent_attention
         self.mla_use_nope = mla_use_nope
@@ -301,6 +305,7 @@ class KimiK3TextConfig(PretrainedConfig):
             router_aux_loss_coef=router_aux_loss_coef,
             **kwargs,
         )
+
     def _build_layer_types(self):
         """Turn the one-based KDA/MLA schedule into a per-layer type list.
 
@@ -317,7 +322,8 @@ class KimiK3TextConfig(PretrainedConfig):
         overlap = kda_layers & full_attn_layers
         if overlap:
             raise ValueError(
-                "Kimi-K3 kda_layers and full_attn_layers must be disjoint; " f"overlap={sorted(overlap)}."
+                "Kimi-K3 kda_layers and full_attn_layers must be disjoint; "
+                f"overlap={sorted(overlap)}."
             )
         expected_layers = set(range(1, self.num_hidden_layers + 1))
         actual_layers = kda_layers | full_attn_layers
@@ -328,7 +334,9 @@ class KimiK3TextConfig(PretrainedConfig):
                 f"out_of_range={sorted(actual_layers - expected_layers)}."
             )
         return [
-            "kimi_delta_attention" if layer_number in kda_layers else "multi_latent_attention"
+            "kimi_delta_attention"
+            if layer_number in kda_layers
+            else "multi_latent_attention"
             for layer_number in range(1, self.num_hidden_layers + 1)
         ]
 
@@ -340,7 +348,9 @@ class KimiK3TextConfig(PretrainedConfig):
         if any(type(value) is not int for value in values):
             raise ValueError(f"Kimi-K3 {name} must contain only integers.")
         if len(values) != len(set(values)):
-            raise ValueError(f"Kimi-K3 {name} contains duplicate layer numbers.")
+            raise ValueError(
+                f"Kimi-K3 {name} contains duplicate layer numbers."
+            )
         return set(values)
 
     def _flatten_linear_attn_config(self):
@@ -365,6 +375,7 @@ class KimiK3TextConfig(PretrainedConfig):
         self.linear_gate_lora_rank = head_dim
         self.linear_use_full_rank_gate = cfg.get("use_full_rank_gate", False)
         self.linear_gate_lower_bound = cfg.get("gate_lower_bound")
+
 
 class KimiK3VisionConfig(PretrainedConfig):
     r"""
@@ -503,6 +514,7 @@ class KimiK3VisionConfig(PretrainedConfig):
             overrides[fleet_name] = getattr(self, hf_name)
         return overrides
 
+
 class KimiK3Config(PretrainedConfig):
     r"""
     Configuration class for the Kimi-K3 model wrapper.
@@ -532,7 +544,10 @@ class KimiK3Config(PretrainedConfig):
     """
 
     model_type = "kimi_k3"
-    sub_configs = {"text_config": KimiK3TextConfig, "vision_config": KimiK3VisionConfig}
+    sub_configs = {
+        "text_config": KimiK3TextConfig,
+        "vision_config": KimiK3VisionConfig,
+    }
     is_composition = True
     keys_to_ignore_at_inference = ["past_key_values"]
 
@@ -548,7 +563,7 @@ class KimiK3Config(PretrainedConfig):
             text_config = KimiK3TextConfig()
         elif isinstance(text_config, dict):
             text_config = KimiK3TextConfig(**text_config)
-        
+
         if isinstance(vision_config, dict):
             vision_config = KimiK3VisionConfig(**vision_config)
 

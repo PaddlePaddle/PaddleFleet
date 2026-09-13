@@ -56,12 +56,20 @@ class Qwen3VLMoePretrainedModelFleet(PretrainedModel):
 
     @classmethod
     def _gen_aoa_config(cls, config: Qwen3VLMoeConfig):
-
         mapping = cls._checkpoint_conversion_mapping
-        llm_target = next((v for v in mapping.values() if "language_model" in v), "language_model")
+        llm_target = next(
+            (v for v in mapping.values() if "language_model" in v),
+            "language_model",
+        )
         visual_target = "model.vision_model"
-        llm_prefix = f"{llm_target}." if not llm_target.endswith(".") else llm_target
-        visual_prefix = f"{visual_target}." if not visual_target.endswith(".") else visual_target
+        llm_prefix = (
+            f"{llm_target}." if not llm_target.endswith(".") else llm_target
+        )
+        visual_prefix = (
+            f"{visual_target}."
+            if not visual_target.endswith(".")
+            else visual_target
+        )
 
         # language model
         aoa_config = {
@@ -98,9 +106,7 @@ class Qwen3VLMoePretrainedModelFleet(PretrainedModel):
                 split_experts_up_gate = ""
                 split_experts_down = ""
                 for expert_id in range(config.text_config.num_experts):
-                    split_experts_up_gate += (
-                        f"{llm_prefix}layers.{layer_id}.mlp.experts.{expert_id}.up_gate_proj.weight,"
-                    )
+                    split_experts_up_gate += f"{llm_prefix}layers.{layer_id}.mlp.experts.{expert_id}.up_gate_proj.weight,"
                     split_experts_down += f"{llm_prefix}layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight,"
                 split_experts_down += "axis=0"
                 split_experts_up_gate += "axis=0"
@@ -129,11 +135,17 @@ class Qwen3VLMoePretrainedModelFleet(PretrainedModel):
             ]
             + [
                 f"model.visual.blocks.$LAYER_ID.mlp.{x}.weight^T -> {visual_prefix}decoder.layers.$LAYER_ID.mlp.{y}.weight"
-                for x, y in (("linear_fc1", "up_gate_proj"), ("linear_fc2", "down_proj"))
+                for x, y in (
+                    ("linear_fc1", "up_gate_proj"),
+                    ("linear_fc2", "down_proj"),
+                )
             ]
             + [
                 f"model.visual.blocks.$LAYER_ID.mlp.{x}.bias -> {visual_prefix}decoder.layers.$LAYER_ID.mlp.{y}.bias"
-                for x, y in (("linear_fc1", "up_gate_proj"), ("linear_fc2", "down_proj"))
+                for x, y in (
+                    ("linear_fc1", "up_gate_proj"),
+                    ("linear_fc2", "down_proj"),
+                )
             ]
         )
         aoa_config["aoa_statements"] += [
@@ -173,11 +185,20 @@ class Qwen3VLMoePretrainedModelFleet(PretrainedModel):
     @classmethod
     def _gen_inv_aoa_config(cls, config: Qwen3VLMoeConfig):
         mapping = cls._checkpoint_conversion_mapping
-        llm_target = next((v for v in mapping.values() if "language_model" in v), "language_model")
+        llm_target = next(
+            (v for v in mapping.values() if "language_model" in v),
+            "language_model",
+        )
         # visual_target = next((v for v in mapping.values() if "visual" in v), "visual")
         visual_target = "model.vision_model"
-        llm_prefix = f"{llm_target}." if not llm_target.endswith(".") else llm_target
-        visual_prefix = f"{visual_target}." if not visual_target.endswith(".") else visual_target
+        llm_prefix = (
+            f"{llm_target}." if not llm_target.endswith(".") else llm_target
+        )
+        visual_prefix = (
+            f"{visual_target}."
+            if not visual_target.endswith(".")
+            else visual_target
+        )
         # language model
         aoa_config = {
             "aoa_statements": [
@@ -214,11 +235,17 @@ class Qwen3VLMoePretrainedModelFleet(PretrainedModel):
             ]
             + [
                 f"{visual_prefix}decoder.layers.$LAYER_ID.mlp.{y}.weight^T -> model.visual.blocks.$LAYER_ID.mlp.{x}.weight"
-                for x, y in (("linear_fc1", "up_gate_proj"), ("linear_fc2", "down_proj"))
+                for x, y in (
+                    ("linear_fc1", "up_gate_proj"),
+                    ("linear_fc2", "down_proj"),
+                )
             ]
             + [
                 f"{visual_prefix}decoder.layers.$LAYER_ID.mlp.{y}.bias -> model.visual.blocks.$LAYER_ID.mlp.{x}.bias"
-                for x, y in (("linear_fc1", "up_gate_proj"), ("linear_fc2", "down_proj"))
+                for x, y in (
+                    ("linear_fc1", "up_gate_proj"),
+                    ("linear_fc2", "down_proj"),
+                )
             ]
         )
         aoa_config["aoa_statements"] += [
@@ -299,23 +326,37 @@ class Qwen3VLMoeModel(Qwen3VLMoePretrainedModelFleet):
     is_fleet = True
 
     def __new__(cls, config, have_criterion=True):
-        config.tensor_model_parallel_size = max(config.tensor_model_parallel_size, 1)
+        config.tensor_model_parallel_size = max(
+            config.tensor_model_parallel_size, 1
+        )
         config.context_parallel_size = max(config.context_parallel_size, 1)
-        config.pipeline_model_parallel_size = max(config.pipeline_model_parallel_size, 1)
-        config.virtual_pipeline_model_parallel_size = max(config.virtual_pipeline_model_parallel_size, 1)
-        config.expert_model_parallel_size = max(config.expert_model_parallel_size, 1)
+        config.pipeline_model_parallel_size = max(
+            config.pipeline_model_parallel_size, 1
+        )
+        config.virtual_pipeline_model_parallel_size = max(
+            config.virtual_pipeline_model_parallel_size, 1
+        )
+        config.expert_model_parallel_size = max(
+            config.expert_model_parallel_size, 1
+        )
         config.moe_expert_fusion = True
         criterion = None
         if have_criterion:
             criterion = CriterionLayer(config.text_config)
         model_provider_class = Qwen3VLProvider
         model_provider = model_provider_class.from_config(config)
-        qwen3vl_model = Qwen3VLModelDist(model_provider, model_version=config.model_type, criterion=criterion)
+        qwen3vl_model = Qwen3VLModelDist(
+            model_provider, model_version=config.model_type, criterion=criterion
+        )
         qwen3vl_model._gen_aoa_config = cls._gen_aoa_config
         qwen3vl_model._gen_inv_aoa_config = cls._gen_inv_aoa_config
-        qwen3vl_model._get_tensor_parallel_mappings = cls._get_tensor_parallel_mappings
+        qwen3vl_model._get_tensor_parallel_mappings = (
+            cls._get_tensor_parallel_mappings
+        )
         qwen3vl_model.config_to_save = config
-        qwen3vl_model.get_hardware_flops = types.MethodType(cls.get_hardware_flops, qwen3vl_model)
+        qwen3vl_model.get_hardware_flops = types.MethodType(
+            cls.get_hardware_flops, qwen3vl_model
+        )
 
         return qwen3vl_model
 
@@ -325,7 +366,9 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLMoePretrainedModelFleet):
         "^visual": "model.visual",
         r"^model(?!\.(language_model|visual))": "model.language_model",
     }
-    _tied_weights_keys = {"lm_head.weight": "model.language_model.embed_tokens.weight"}
+    _tied_weights_keys = {
+        "lm_head.weight": "model.language_model.embed_tokens.weight"
+    }
     config_class = Qwen3VLMoeConfig
 
     def __init__(self, config):
@@ -347,7 +390,9 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLMoePretrainedModelFleet):
             state_dict.pop(key)
         if self.model.language_model is not None:
             # Get language_model's state_dict
-            language_state_dict = self.model.language_model.state_dict(*args, **kwargs)
+            language_state_dict = self.model.language_model.state_dict(
+                *args, **kwargs
+            )
 
             # Merge language_model parameters into main state_dict
             for key, value in language_state_dict.items():
@@ -424,9 +469,15 @@ class Qwen3VLMoeForConditionalGeneration(Qwen3VLMoePretrainedModelFleet):
         ```
         """
 
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_attentions = (
+            output_attentions
+            if output_attentions is not None
+            else self.config.output_attentions
+        )
         output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+            output_hidden_states
+            if output_hidden_states is not None
+            else self.config.output_hidden_states
         )
 
         outputs = self.model(

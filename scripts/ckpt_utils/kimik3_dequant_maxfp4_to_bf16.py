@@ -106,7 +106,9 @@ def read_safetensors_header(path: Path) -> dict:
     expected_size = 8 + header_length + payload_end
     actual_size = path.stat().st_size
     if expected_size != actual_size:
-        raise ValueError(f"{path}: invalid size, expected {expected_size}, got {actual_size}")
+        raise ValueError(
+            f"{path}: invalid size, expected {expected_size}, got {actual_size}"
+        )
     return header
 
 
@@ -118,7 +120,9 @@ def e8m0_scale_to_float(scale: paddle.Tensor) -> paddle.Tensor:
     if bool(paddle.any(scale == 255).item()):
         raise ValueError("E8M0 scale contains reserved NaN encoding 255")
     exponent = scale.astype(paddle.int32) - 127
-    return paddle.ldexp(paddle.ones(scale.shape, dtype=paddle.float32), exponent)
+    return paddle.ldexp(
+        paddle.ones(scale.shape, dtype=paddle.float32), exponent
+    )
 
 
 def fp4_weight_to_bf16(
@@ -129,7 +133,9 @@ def fp4_weight_to_bf16(
     """Expand packed E2M1 FP4 weights and apply per-group E8M0 scales."""
 
     if packed_weight.dtype not in (paddle.uint8, paddle.int8):
-        raise TypeError(f"packed MXFP4 weight must be uint8/int8, got {packed_weight.dtype}")
+        raise TypeError(
+            f"packed MXFP4 weight must be uint8/int8, got {packed_weight.dtype}"
+        )
     if packed_weight.ndim != 2 or scale.ndim != 2:
         raise ValueError(
             "Kimi-K3 MXFP4 weight and scale must both be rank-2, got "
@@ -139,7 +145,10 @@ def fp4_weight_to_bf16(
     packed = packed_weight.view(paddle.uint8)
     unpacked_columns = packed.shape[1] * 2
     expected_columns = scale.shape[1] * group_size
-    if packed.shape[0] != scale.shape[0] or unpacked_columns != expected_columns:
+    if (
+        packed.shape[0] != scale.shape[0]
+        or unpacked_columns != expected_columns
+    ):
         raise ValueError(
             "MXFP4 packed/scale shape mismatch: "
             f"packed={tuple(packed.shape)}, scale={tuple(scale.shape)}, "
@@ -163,7 +172,9 @@ def fp4_weight_to_bf16(
     ).reshape(packed.shape[0], unpacked_columns)
     values = values.reshape(scale.shape[0], scale.shape[1], group_size)
     values = values * e8m0_scale_to_float(scale).unsqueeze(-1)
-    return values.reshape(scale.shape[0], expected_columns).astype(paddle.bfloat16)
+    return values.reshape(scale.shape[0], expected_columns).astype(
+        paddle.bfloat16
+    )
 
 
 def output_key(input_key: str) -> str | None:
@@ -209,7 +220,9 @@ def expected_output_spec(
         or packed_shape[0] != scale_shape[0]
         or packed_shape[1] * 2 != scale_shape[1] * FP4_GROUP_SIZE
     ):
-        raise ValueError(f"{input_key}: invalid packed={packed_shape}, scale={scale_shape}")
+        raise ValueError(
+            f"{input_key}: invalid packed={packed_shape}, scale={scale_shape}"
+        )
     return {
         "dtype": "BF16",
         "shape": [packed_shape[0], packed_shape[1] * 2],
@@ -235,7 +248,9 @@ def validate_output_shard(
     if set(output_header) != set(expected):
         missing = sorted(set(expected) - set(output_header))[:5]
         extra = sorted(set(output_header) - set(expected))[:5]
-        raise ValueError(f"{output_path}: key mismatch, missing={missing}, extra={extra}")
+        raise ValueError(
+            f"{output_path}: key mismatch, missing={missing}, extra={extra}"
+        )
 
     payload_bytes = 0
     for key, expected_spec in expected.items():
@@ -245,7 +260,9 @@ def validate_output_shard(
             "shape": actual["shape"],
         }
         if actual_spec != expected_spec:
-            raise ValueError(f"{output_path}: {key} expected {expected_spec}, got {actual_spec}")
+            raise ValueError(
+                f"{output_path}: {key} expected {expected_spec}, got {actual_spec}"
+            )
         payload_bytes += actual["data_offsets"][1] - actual["data_offsets"][0]
     return len(expected), payload_bytes
 
@@ -319,7 +336,9 @@ def write_json_atomic(path: Path, value: dict) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Dequantize Kimi-K3 MXFP4 routed-expert weights to BF16")
+    parser = argparse.ArgumentParser(
+        description="Dequantize Kimi-K3 MXFP4 routed-expert weights to BF16"
+    )
     parser.add_argument("--input_dir", required=True)
     parser.add_argument("--output_dir", required=True)
     parser.add_argument("--num_workers", type=int, default=4)
@@ -374,12 +393,17 @@ def main() -> None:
     if args.end_shard is None:
         args.end_shard = total_shards
     if not 0 <= args.start_shard <= args.end_shard <= total_shards:
-        raise ValueError(f"invalid shard range [{args.start_shard}, {args.end_shard}) " f"for {total_shards} shards")
+        raise ValueError(
+            f"invalid shard range [{args.start_shard}, {args.end_shard}) "
+            f"for {total_shards} shards"
+        )
 
     packed_keys = {key for key in weight_map if key.endswith(".weight_packed")}
     scale_keys = {key for key in weight_map if key.endswith(".weight_scale")}
     if len(packed_keys) != len(scale_keys):
-        raise ValueError(f"packed/scale count mismatch: {len(packed_keys)} vs {len(scale_keys)}")
+        raise ValueError(
+            f"packed/scale count mismatch: {len(packed_keys)} vs {len(scale_keys)}"
+        )
 
     expected_tensor_count = 0
     expected_payload_bytes = 0
@@ -400,7 +424,10 @@ def main() -> None:
             dtype_bytes = {"BF16": 2, "F32": 4}.get(spec["dtype"])
             if dtype_bytes is None:
                 source_spec = source_header[key]
-                expected_payload_bytes += source_spec["data_offsets"][1] - source_spec["data_offsets"][0]
+                expected_payload_bytes += (
+                    source_spec["data_offsets"][1]
+                    - source_spec["data_offsets"][0]
+                )
             else:
                 expected_payload_bytes += numel * dtype_bytes
 
@@ -415,7 +442,10 @@ def main() -> None:
     emit(f"Expected output tensors:  {expected_tensor_count}")
     emit(f"Expected payload bytes:   {expected_payload_bytes}")
     emit(f"Expected payload TiB:     {expected_payload_bytes / 2**40:.3f}")
-    emit(f"Mode:                     " f"{'sequential' if args.sequential else f'{args.num_workers} workers'}")
+    emit(
+        f"Mode:                     "
+        f"{'sequential' if args.sequential else f'{args.num_workers} workers'}"
+    )
     emit(f"Shard range:              [{args.start_shard}, {args.end_shard})")
     emit("")
 
@@ -444,7 +474,9 @@ def main() -> None:
     emit(f"Already valid output shards: {len(valid_shards)} / {total_shards}")
     if args.verify_only:
         if len(valid_shards) != total_shards:
-            raise RuntimeError(f"verification incomplete: {len(valid_shards)} / {total_shards}")
+            raise RuntimeError(
+                f"verification incomplete: {len(valid_shards)} / {total_shards}"
+            )
         emit("All output shards passed header verification.")
         return
 
@@ -455,7 +487,9 @@ def main() -> None:
             if args.resume:
                 emit(f"SKIP {shard_file}: existing output is valid")
                 continue
-            raise FileExistsError(f"{output_dir / shard_file} already exists; use --resume")
+            raise FileExistsError(
+                f"{output_dir / shard_file} already exists; use --resume"
+            )
         tasks.append((shard_file, shard_to_keys[shard_file]))
 
     completed_dequant = 0
@@ -530,7 +564,10 @@ def main() -> None:
     if not complete:
         emit("Partial conversion completed; index/config were not finalized.")
         return
-    if final_tensor_count != expected_tensor_count or final_payload_bytes != expected_payload_bytes:
+    if (
+        final_tensor_count != expected_tensor_count
+        or final_payload_bytes != expected_payload_bytes
+    ):
         raise RuntimeError(
             "final inventory mismatch: "
             f"tensors {final_tensor_count}/{expected_tensor_count}, "

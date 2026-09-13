@@ -49,10 +49,12 @@ def resampling(
     num_threads=4,
     **kwargs,
 ) -> paddle.Tensor:
-
     video_backend = kwargs.get("video_backend", "paddlecodec")
     frames, _ = VIDEO_READER_BACKENDS[video_backend](
-        video_bytes, num_threads=num_threads, sample_indices=sample_indices, return_video=True
+        video_bytes,
+        num_threads=num_threads,
+        sample_indices=sample_indices,
+        return_video=True,
     )
     return frames
 
@@ -86,29 +88,49 @@ class KimiK25VisionProcessor(BaseImageProcessor):
         # video_url should be base64 str or bytes
         video_spec = get_video_meta(video_url, **kwargs)
         sample_fps = min(self.media_proc_cfg["sample_fps"], video_spec.fps)
-        sampled_nframes = max(round(video_spec.num_frames * sample_fps / video_spec.fps), 1)
-        temporal_merge_kernel_size = self.media_proc_cfg["temporal_merge_kernel_size"]
+        sampled_nframes = max(
+            round(video_spec.num_frames * sample_fps / video_spec.fps), 1
+        )
+        temporal_merge_kernel_size = self.media_proc_cfg[
+            "temporal_merge_kernel_size"
+        ]
         # NOTE: Enforce temporal divisibility to maintain structural integrity
-        sampled_nframes = math.floor(sampled_nframes / temporal_merge_kernel_size) * temporal_merge_kernel_size
-        frame_inds = np.linspace(0, video_spec.num_frames - 1, sampled_nframes).round().astype(int)
+        sampled_nframes = (
+            math.floor(sampled_nframes / temporal_merge_kernel_size)
+            * temporal_merge_kernel_size
+        )
+        frame_inds = (
+            np.linspace(0, video_spec.num_frames - 1, sampled_nframes)
+            .round()
+            .astype(int)
+        )
         frame_inds = frame_inds.tolist()
         sampled_frame_ids = []
         num_chunks = 0
         chunk_timestamp = []
         for i in range(0, len(frame_inds), temporal_merge_kernel_size):
-            sampled_frame_ids.extend(frame_inds[i : i + temporal_merge_kernel_size])
+            sampled_frame_ids.extend(
+                frame_inds[i : i + temporal_merge_kernel_size]
+            )
             start_time = frame_inds[i] / float(video_spec.fps)
-            timestamp_text = timestamp_as_str(start_time, self.media_proc_cfg["timestamp_mode"])
+            timestamp_text = timestamp_as_str(
+                start_time, self.media_proc_cfg["timestamp_mode"]
+            )
             chunk_timestamp.append(timestamp_text)
             num_chunks += 1
 
         sampled_frames = resampling(video_url, sampled_frame_ids, **kwargs)
         chunks = []
         for chunk_id in range(num_chunks):
-            chunk = sampled_frames[chunk_id * temporal_merge_kernel_size : (chunk_id + 1) * temporal_merge_kernel_size]
+            chunk = sampled_frames[
+                chunk_id * temporal_merge_kernel_size : (chunk_id + 1)
+                * temporal_merge_kernel_size
+            ]
             chunks.append(
                 VideoChunkInput(
-                    type="video_chunk", video_chunk=chunk, prompt=self.make_chunk_prompt(chunk_timestamp[chunk_id])
+                    type="video_chunk",
+                    video_chunk=chunk,
+                    prompt=self.make_chunk_prompt(chunk_timestamp[chunk_id]),
                 )
             )
         return chunks
@@ -132,15 +154,21 @@ class KimiK25VisionProcessor(BaseImageProcessor):
             num_frames = len(media_input["video_chunk"])
             fps = 1.0
 
-            sample_fps, max_num_frames_each_video = real_sample_fps_and_max_num_frames(
-                media_input["type"],
-                self.media_proc_cfg["sample_fps"],
-                self.media_proc_cfg["max_num_frames_each_video"],
+            sample_fps, max_num_frames_each_video = (
+                real_sample_fps_and_max_num_frames(
+                    media_input["type"],
+                    self.media_proc_cfg["sample_fps"],
+                    self.media_proc_cfg["max_num_frames_each_video"],
+                )
             )
 
-            in_patch_limit_each_frame = self.media_proc_cfg["in_patch_limit_each_frame"]
+            in_patch_limit_each_frame = self.media_proc_cfg[
+                "in_patch_limit_each_frame"
+            ]
             if in_patch_limit_each_frame is None:
-                in_patch_limit_each_frame = self.media_proc_cfg["in_patch_limit"]
+                in_patch_limit_each_frame = self.media_proc_cfg[
+                    "in_patch_limit"
+                ]
 
             ret = navit_resize_video(
                 width,
@@ -161,7 +189,12 @@ class KimiK25VisionProcessor(BaseImageProcessor):
             raise ValueError("Unsupported type: {}".format(media_input["type"]))
 
     def resize_image(
-        self, image: Image.Image | paddle.Tensor, new_width: int, new_height: int, pad_width: int, pad_height: int
+        self,
+        image: Image.Image | paddle.Tensor,
+        new_width: int,
+        new_height: int,
+        pad_width: int,
+        pad_height: int,
     ) -> np.ndarray | paddle.Tensor:
         if isinstance(image, Image.Image):
             image_np = image_to_np(image, (new_width, new_height), "resize")
@@ -212,17 +245,33 @@ class KimiK25VisionProcessor(BaseImageProcessor):
                 )
                 if item["type"] == "image":
                     image = item["image"]
-                    image_np = self.resize_image(image, new_width, new_height, pad_width, pad_height)
-                    pixel_values.append(paddle.to_tensor(image_np.transpose(2, 0, 1)).unsqueeze(0))
+                    image_np = self.resize_image(
+                        image, new_width, new_height, pad_width, pad_height
+                    )
+                    pixel_values.append(
+                        paddle.to_tensor(image_np.transpose(2, 0, 1)).unsqueeze(
+                            0
+                        )
+                    )
                 elif item["type"] == "video_chunk":
-                    frame_np = self.resize_image(item["video_chunk"], new_width, new_height, pad_width, pad_height)
+                    frame_np = self.resize_image(
+                        item["video_chunk"],
+                        new_width,
+                        new_height,
+                        pad_width,
+                        pad_height,
+                    )
                     pixel_values.append(frame_np)
                 else:
-                    raise ValueError("Unsupported type: {}".format(item["type"]))
+                    raise ValueError(
+                        "Unsupported type: {}".format(item["type"])
+                    )
             pixel_values = paddle.stack(pixel_values, axis=0)
             image_std = paddle.to_tensor(self.media_proc_cfg["image_std"])
             image_mean = paddle.to_tensor(self.media_proc_cfg["image_mean"])
-            pixels = paddle_normalize((pixel_values / 255.0).astype("float32"), image_mean, image_std)
+            pixels = paddle_normalize(
+                (pixel_values / 255.0).astype("float32"), image_mean, image_std
+            )
             pixels_and_thw = navit_patchify(
                 pixels,
                 self.media_proc_cfg["patch_size"],
@@ -252,7 +301,13 @@ class KimiK25VisionProcessor(BaseImageProcessor):
         config = config_dict.copy()
         media_proc_cfg = config.pop("media_proc_cfg", {})
 
-        from_pretrained_only_keys = ["subfolder", "revision", "cache_dir", "local_files_only", "trust_remote_code"]
+        from_pretrained_only_keys = [
+            "subfolder",
+            "revision",
+            "cache_dir",
+            "local_files_only",
+            "trust_remote_code",
+        ]
         for key in from_pretrained_only_keys:
             kwargs.pop(key, None)
         merged_kwargs = {**config, **kwargs}

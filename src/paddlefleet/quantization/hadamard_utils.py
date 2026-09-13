@@ -18,11 +18,12 @@ from ..utils import infohub
 
 
 def matmul_hadU(X):
-
     input = X.clone().reshape((-1, X.shape[-1], 1))
     output = input.clone()
     while input.shape[1] > 1:
-        input = input.reshape((input.shape[0], input.shape[1] // 2, 2, input.shape[2]))
+        input = input.reshape(
+            (input.shape[0], input.shape[1] // 2, 2, input.shape[2])
+        )
         output = output.reshape(input.shape)
         output[:, :, 0, :] = input[:, :, 0, :] + input[:, :, 1, :]
         output[:, :, 1, :] = input[:, :, 0, :] - input[:, :, 1, :]

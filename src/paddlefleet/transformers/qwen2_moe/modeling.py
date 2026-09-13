@@ -50,7 +50,9 @@ class Qwen2MoeModelProvider(GPTModelProvider):
     persist_layer_norm: bool = True
     share_embeddings_and_output_weights: bool = False
 
-    def save_pretrained(self, save_directory: Union[str, os.PathLike], **kwargs):
+    def save_pretrained(
+        self, save_directory: Union[str, os.PathLike], **kwargs
+    ):
         """
         Save a configuration object to the directory `save_directory`, so that it can be re-loaded using the
         [`~PretrainedConfig.from_pretrained`] class method.
@@ -62,7 +64,9 @@ class Qwen2MoeModelProvider(GPTModelProvider):
                 Additional key word arguments passed along to the [`~utils.PushToHubMixin.push_to_hub`] method.
         """
         if os.path.isfile(save_directory):
-            raise AssertionError(f"Provided path ({save_directory}) should be a directory, not a file")
+            raise AssertionError(
+                f"Provided path ({save_directory}) should be a directory, not a file"
+            )
 
         os.makedirs(save_directory, exist_ok=True)
 
@@ -72,9 +76,17 @@ class Qwen2MoeModelProvider(GPTModelProvider):
         # Filter out non-serializable values
         def make_serializable(obj):
             if isinstance(obj, dict):
-                return {k: make_serializable(v) for k, v in obj.items() if make_serializable(v) is not None}
+                return {
+                    k: make_serializable(v)
+                    for k, v in obj.items()
+                    if make_serializable(v) is not None
+                }
             elif isinstance(obj, (list, tuple)):
-                return [make_serializable(item) for item in obj if make_serializable(item) is not None]
+                return [
+                    make_serializable(item)
+                    for item in obj
+                    if make_serializable(item) is not None
+                ]
             elif isinstance(obj, (str, int, float, bool, type(None))):
                 return obj
             else:
@@ -84,7 +96,15 @@ class Qwen2MoeModelProvider(GPTModelProvider):
         serializable_config = make_serializable(config_dict)
 
         with open(output_config_file, "w", encoding="utf-8") as writer:
-            writer.write(json.dumps(serializable_config, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+            writer.write(
+                json.dumps(
+                    serializable_config,
+                    indent=2,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
         logger.info(f"Configuration saved in {output_config_file}")
 
 
@@ -110,7 +130,9 @@ class Qwen2MoePretrainedModel(PretrainedModel):
             num_experts = config.n_routed_experts
         else:
             num_experts = config.num_experts
-        model_prefix = "" if cls == getattr(cls, "base_model_class", None) else "model."
+        model_prefix = (
+            "" if cls == getattr(cls, "base_model_class", None) else "model."
+        )
         is_fleet = getattr(cls, "is_fleet", False)
         aoa_config = {
             "aoa_statements": [
@@ -165,8 +187,12 @@ class Qwen2MoePretrainedModel(PretrainedModel):
                 ep_weight1 = []
                 ep_weight2 = []
                 for expert_id in range(num_experts):
-                    ep_weight1.append(f"{src_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight")
-                    ep_weight2.append(f"{src_prefix}.mlp.experts.{expert_id}.down_proj.weight")
+                    ep_weight1.append(
+                        f"{src_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                    )
+                    ep_weight2.append(
+                        f"{src_prefix}.mlp.experts.{expert_id}.down_proj.weight"
+                    )
                 group1 = ",".join(ep_weight1)
                 group2 = ",".join(ep_weight2)
                 aoa_config["aoa_statements"] += [
@@ -177,12 +203,18 @@ class Qwen2MoePretrainedModel(PretrainedModel):
         # lm_head
         if config.tie_word_embeddings:
             if is_fleet:
-                aoa_config["aoa_statements"] += [f"model.embed_tokens.weight -> {model_prefix}lm_head.weight"]
+                aoa_config["aoa_statements"] += [
+                    f"model.embed_tokens.weight -> {model_prefix}lm_head.weight"
+                ]
             else:
-                aoa_config["aoa_statements"] += ["model.embed_tokens.weight -> lm_head.weight"]
+                aoa_config["aoa_statements"] += [
+                    "model.embed_tokens.weight -> lm_head.weight"
+                ]
         else:
             if is_fleet:
-                aoa_config["aoa_statements"] += [f"lm_head.weight -> {model_prefix}lm_head.weight"]
+                aoa_config["aoa_statements"] += [
+                    f"lm_head.weight -> {model_prefix}lm_head.weight"
+                ]
 
         return aoa_config
 
@@ -192,7 +224,9 @@ class Qwen2MoePretrainedModel(PretrainedModel):
             num_experts = config.n_routed_experts
         else:
             num_experts = config.num_experts
-        model_prefix = "" if cls == getattr(cls, "base_model_class", None) else "model."
+        model_prefix = (
+            "" if cls == getattr(cls, "base_model_class", None) else "model."
+        )
         is_fleet = getattr(cls, "is_fleet", False)
         aoa_statements = [
             f"{model_prefix}layers.$LAYER_ID.self_attn.o_proj.weight^T -> model.layers.$LAYER_ID.self_attn.o_proj.weight",
@@ -235,8 +269,12 @@ class Qwen2MoePretrainedModel(PretrainedModel):
                 ep_weight1 = []
                 ep_weight2 = []
                 for expert_id in range(num_experts):
-                    ep_weight1.append(f"{model_prefix}layers.{layer_id}.mlp.experts.{expert_id}.up_gate_proj.weight")
-                    ep_weight2.append(f"{model_prefix}layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight")
+                    ep_weight1.append(
+                        f"{model_prefix}layers.{layer_id}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                    )
+                    ep_weight2.append(
+                        f"{model_prefix}layers.{layer_id}.mlp.experts.{expert_id}.down_proj.weight"
+                    )
                 group1 = ",".join(ep_weight1)
                 group2 = ",".join(ep_weight2)
                 aoa_statements += [
@@ -288,7 +326,9 @@ class Qwen2MoePretrainedModel(PretrainedModel):
                 aoa_statements += ["lm_head.weight -> _"]
         else:
             if is_fleet:
-                aoa_statements += [f"{model_prefix}lm_head.weight -> lm_head.weight"]
+                aoa_statements += [
+                    f"{model_prefix}lm_head.weight -> lm_head.weight"
+                ]
 
         aoa_config = {"aoa_statements": aoa_statements}
         return aoa_config
@@ -299,12 +339,23 @@ class Qwen2MoeForCausalLM(Qwen2MoePretrainedModel):
 
     def __new__(cls, config):
         # Hybrid parallel config convert.
-        config.tensor_model_parallel_size = max(config.tensor_model_parallel_size, 1)
+        config.tensor_model_parallel_size = max(
+            config.tensor_model_parallel_size, 1
+        )
         config.context_parallel_size = max(config.context_parallel_size, 1)
-        config.pipeline_model_parallel_size = max(config.pipeline_model_parallel_size, 1)
-        config.virtual_pipeline_model_parallel_size = max(config.virtual_pipeline_model_parallel_size, 1)
-        config.expert_model_parallel_size = max(config.expert_model_parallel_size, 1)
-        config.n_shared_experts = config.shared_expert_intermediate_size // config.moe_intermediate_size
+        config.pipeline_model_parallel_size = max(
+            config.pipeline_model_parallel_size, 1
+        )
+        config.virtual_pipeline_model_parallel_size = max(
+            config.virtual_pipeline_model_parallel_size, 1
+        )
+        config.expert_model_parallel_size = max(
+            config.expert_model_parallel_size, 1
+        )
+        config.n_shared_experts = (
+            config.shared_expert_intermediate_size
+            // config.moe_intermediate_size
+        )
 
         model_provider_class = Qwen2MoeModelProvider
         model_provider = model_provider_class.from_config(config)
@@ -319,17 +370,30 @@ class Qwen2MoeForCausalLM(Qwen2MoePretrainedModel):
         return gpt_model
 
 
-class Qwen2MoeForCausalLMPipe(Qwen2MoePretrainedModel, GeneralModelForCausalLMPipe):
+class Qwen2MoeForCausalLMPipe(
+    Qwen2MoePretrainedModel, GeneralModelForCausalLMPipe
+):
     is_fleet = True
 
     def __new__(cls, config):
         # Hybrid parallel config convert.
-        config.tensor_model_parallel_size = max(config.tensor_model_parallel_size, 1)
+        config.tensor_model_parallel_size = max(
+            config.tensor_model_parallel_size, 1
+        )
         config.context_parallel_size = max(config.context_parallel_size, 1)
-        config.pipeline_model_parallel_size = max(config.pipeline_model_parallel_size, 1)
-        config.virtual_pipeline_model_parallel_size = max(config.virtual_pipeline_model_parallel_size, 1)
-        config.expert_model_parallel_size = max(config.expert_model_parallel_size, 1)
-        config.n_shared_experts = config.shared_expert_intermediate_size // config.moe_intermediate_size
+        config.pipeline_model_parallel_size = max(
+            config.pipeline_model_parallel_size, 1
+        )
+        config.virtual_pipeline_model_parallel_size = max(
+            config.virtual_pipeline_model_parallel_size, 1
+        )
+        config.expert_model_parallel_size = max(
+            config.expert_model_parallel_size, 1
+        )
+        config.n_shared_experts = (
+            config.shared_expert_intermediate_size
+            // config.moe_intermediate_size
+        )
 
         model_provider_class = Qwen2MoeModelProvider
         model_provider = model_provider_class.from_config(config)

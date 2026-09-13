@@ -69,11 +69,21 @@ class Glm4MoePreTrainedModel(PretrainedModel):
     config_class = Glm4MoeConfig
     base_model_prefix = "model"
     _keep_in_fp32_modules = ["mlp.gate.weight", "e_score_correction_bias"]
-    transpose_weight_keys = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    transpose_weight_keys = [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
 
     @classmethod
     def _gen_aoa_config(cls, config: Glm4MoeConfig):
-        model_prefix = "" if cls == getattr(cls, "base_model_class", None) else "model."
+        model_prefix = (
+            "" if cls == getattr(cls, "base_model_class", None) else "model."
+        )
         is_fleet = getattr(cls, "is_fleet", False)
         using_sonic_moe = config.using_sonic_moe
         if hasattr(config, "n_routed_experts"):
@@ -90,9 +100,13 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                 f"model.embed_tokens.weight -> {model_prefix}embedding.embed_tokens.weight",
             ]
             if config.tie_word_embeddings:
-                aoa_config["aoa_statements"] += [f"model.embed_tokens.weight -> {model_prefix}lm_head.weight"]
+                aoa_config["aoa_statements"] += [
+                    f"model.embed_tokens.weight -> {model_prefix}lm_head.weight"
+                ]
             else:
-                aoa_config["aoa_statements"] += [f"lm_head.weight -> {model_prefix}lm_head.weight"]
+                aoa_config["aoa_statements"] += [
+                    f"lm_head.weight -> {model_prefix}lm_head.weight"
+                ]
         else:
             aoa_config["aoa_statements"] += [
                 f"model.embed_tokens.weight -> {model_prefix}embed_tokens.weight",
@@ -101,7 +115,8 @@ class Glm4MoePreTrainedModel(PretrainedModel):
         num_hidden_layers = config.num_hidden_layers
         num_head_empty_layers = (
             config.num_empty_layers_add_in_head
-            if hasattr(config, "num_empty_layers_add_in_head") and config.num_empty_layers_add_in_head
+            if hasattr(config, "num_empty_layers_add_in_head")
+            and config.num_empty_layers_add_in_head
             else 0
         )
         for layer_idx in range(config.first_k_dense_replace):
@@ -115,9 +130,17 @@ class Glm4MoePreTrainedModel(PretrainedModel):
         if config.mtp_num_layers > 0:
             num_nextn_predict_layers = config.mtp_num_layers
         else:
-            num_nextn_predict_layers = config.num_nextn_predict_layers if config.num_nextn_predict_layers else 0
+            num_nextn_predict_layers = (
+                config.num_nextn_predict_layers
+                if config.num_nextn_predict_layers
+                else 0
+            )
 
-        for layer_idx in reversed(range(num_hidden_layers, num_hidden_layers + num_nextn_predict_layers)):
+        for layer_idx in reversed(
+            range(
+                num_hidden_layers, num_hidden_layers + num_nextn_predict_layers
+            )
+        ):
             layer_idx_offset = layer_idx + num_head_empty_layers
             prefix = f"model.layers.{layer_idx}"
             prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
@@ -129,7 +152,9 @@ class Glm4MoePreTrainedModel(PretrainedModel):
             ]
 
         # layer0 - layer_num_hidden_layers
-        for layer_idx in reversed(range(0, num_hidden_layers + num_nextn_predict_layers)):
+        for layer_idx in reversed(
+            range(0, num_hidden_layers + num_nextn_predict_layers)
+        ):
             layer_idx_offset = layer_idx + num_head_empty_layers
             prefix = f"model.layers.{layer_idx}"
             prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
@@ -156,14 +181,21 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                     f"{prefix}.self_attn.q_proj.bias, {prefix}.self_attn.k_proj.bias, {prefix}.self_attn.v_proj.bias -> {prefix_offset}.self_attn.qkv_proj.bias, fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups={config.num_key_value_heads}, axis=0",
                 ]
         # layer1 - layer_num_hidden_layers
-        for layer_idx in reversed(range(config.first_k_dense_replace, num_hidden_layers + num_nextn_predict_layers)):
+        for layer_idx in reversed(
+            range(
+                config.first_k_dense_replace,
+                num_hidden_layers + num_nextn_predict_layers,
+            )
+        ):
             layer_idx_offset = layer_idx + num_head_empty_layers
             prefix = f"model.layers.{layer_idx}"
             prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
             if layer_idx >= num_hidden_layers:
                 # for mtp
                 prefix_offset += ".transformer_layer"
-            use_accuracy_compatible = getattr(config, "use_accuracy_compatible", False)
+            use_accuracy_compatible = getattr(
+                config, "use_accuracy_compatible", False
+            )
 
             if use_accuracy_compatible:
                 aoa_config["aoa_statements"] += [
@@ -209,8 +241,12 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                 ep_weight1 = []
                 ep_weight2 = []
                 for expert_id in range(num_experts):
-                    ep_weight1.append(f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight")
-                    ep_weight2.append(f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight")
+                    ep_weight1.append(
+                        f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                    )
+                    ep_weight2.append(
+                        f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight"
+                    )
                 group_gemm1 = ",".join(ep_weight1)
                 group_gemm2 = ",".join(ep_weight2)
                 aoa_config["aoa_statements"] += [
@@ -222,8 +258,12 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                     ep_weight1 = []
                     ep_weight2 = []
                     for expert_id in range(num_experts):
-                        ep_weight1.append(f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight")
-                        ep_weight2.append(f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight")
+                        ep_weight1.append(
+                            f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                        )
+                        ep_weight2.append(
+                            f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight"
+                        )
                     group1 = ",".join(ep_weight1)
                     group2 = ",".join(ep_weight2)
                     aoa_config["aoa_statements"] += [
@@ -236,7 +276,9 @@ class Glm4MoePreTrainedModel(PretrainedModel):
     # NOTE: These aoa_config items will be removed later. The subsequent AOA parsing module will automatically generate the reverse AOA based on the forward (from_pretrained) AOA.
     @classmethod
     def _gen_inv_aoa_config(cls, config: Glm4MoeConfig):
-        model_prefix = "" if cls == getattr(cls, "base_model_class", None) else "model."
+        model_prefix = (
+            "" if cls == getattr(cls, "base_model_class", None) else "model."
+        )
         using_sonic_moe = config.using_sonic_moe
         is_fleet = getattr(cls, "is_fleet", False)
         if hasattr(config, "n_routed_experts"):
@@ -254,7 +296,9 @@ class Glm4MoePreTrainedModel(PretrainedModel):
             if config.tie_word_embeddings:
                 aoa_statements += [f"{model_prefix}lm_head.weight -> _"]
             else:
-                aoa_statements += [f"{model_prefix}lm_head.weight -> lm_head.weight"]
+                aoa_statements += [
+                    f"{model_prefix}lm_head.weight -> lm_head.weight"
+                ]
         else:
             aoa_statements += [
                 f"{model_prefix}embed_tokens.weight -> model.embed_tokens.weight",
@@ -262,7 +306,8 @@ class Glm4MoePreTrainedModel(PretrainedModel):
         num_hidden_layers = config.num_hidden_layers
         num_head_empty_layers = (
             config.num_empty_layers_add_in_head
-            if hasattr(config, "num_empty_layers_add_in_head") and config.num_empty_layers_add_in_head
+            if hasattr(config, "num_empty_layers_add_in_head")
+            and config.num_empty_layers_add_in_head
             else 0
         )
 
@@ -277,9 +322,17 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                 f"model.layers.{num_head_empty_layers + layer_idx}.mlp.up_proj.weight^T -> model.layers.{layer_idx}.mlp.up_proj.weight",
             ]
 
-        num_nextn_predict_layers = config.num_nextn_predict_layers if config.num_nextn_predict_layers else 0
+        num_nextn_predict_layers = (
+            config.num_nextn_predict_layers
+            if config.num_nextn_predict_layers
+            else 0
+        )
 
-        for layer_idx in reversed(range(num_hidden_layers, num_hidden_layers + num_nextn_predict_layers)):
+        for layer_idx in reversed(
+            range(
+                num_hidden_layers, num_hidden_layers + num_nextn_predict_layers
+            )
+        ):
             layer_idx_offset = layer_idx + num_head_empty_layers
             prefix = f"model.layers.{layer_idx}"
             prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
@@ -314,7 +367,8 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                 f"{prefix_offset}.self_attn.qkv_proj.weight -> {prefix}.self_attn.q_proj.weight, {prefix}.self_attn.k_proj.weight, {prefix}.self_attn.v_proj.weight , fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups = {config.num_key_value_heads}",
             ]
             aoa_statements += [
-                f"{prefix}.self_attn.{x}_proj.weight^T -> {prefix}.self_attn.{x}_proj.weight" for x in ("q", "k", "v")
+                f"{prefix}.self_attn.{x}_proj.weight^T -> {prefix}.self_attn.{x}_proj.weight"
+                for x in ("q", "k", "v")
             ]
             if config.attention_bias:
                 aoa_statements += [
@@ -322,7 +376,10 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                 ]
 
         # layer 1 -> layer num_hidden_layers-1
-        for layer_idx in range(config.first_k_dense_replace, num_hidden_layers + num_nextn_predict_layers):
+        for layer_idx in range(
+            config.first_k_dense_replace,
+            num_hidden_layers + num_nextn_predict_layers,
+        ):
             layer_idx_offset = layer_idx + num_head_empty_layers
             prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
             prefix = f"model.layers.{layer_idx}"
@@ -334,8 +391,12 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                 ep_weight1 = []
                 ep_weight2 = []
                 for expert_id in range(config.n_routed_experts):
-                    ep_weight1.append(f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight")
-                    ep_weight2.append(f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight")
+                    ep_weight1.append(
+                        f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                    )
+                    ep_weight2.append(
+                        f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight"
+                    )
                 group_gemm1 = ",".join(ep_weight1)
                 group_gemm2 = ",".join(ep_weight2)
                 aoa_statements += [
@@ -347,8 +408,12 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                     ep_weight1 = []
                     ep_weight2 = []
                     for expert_id in range(num_experts):
-                        ep_weight1.append(f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight")
-                        ep_weight2.append(f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight")
+                        ep_weight1.append(
+                            f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                        )
+                        ep_weight2.append(
+                            f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight"
+                        )
                     group1 = ",".join(ep_weight1)
                     group2 = ",".join(ep_weight2)
                     aoa_statements += [
@@ -410,11 +475,19 @@ class Glm4MoeForCausalLM(Glm4MoePreTrainedModel):
 
     def __new__(cls, config):
         # Hybrid parallel config convert.
-        config.tensor_model_parallel_size = max(config.tensor_model_parallel_size, 1)
+        config.tensor_model_parallel_size = max(
+            config.tensor_model_parallel_size, 1
+        )
         config.context_parallel_size = max(config.context_parallel_size, 1)
-        config.pipeline_model_parallel_size = max(config.pipeline_model_parallel_size, 1)
-        config.virtual_pipeline_model_parallel_size = max(config.virtual_pipeline_model_parallel_size, 1)
-        config.expert_model_parallel_size = max(config.expert_model_parallel_size, 1)
+        config.pipeline_model_parallel_size = max(
+            config.pipeline_model_parallel_size, 1
+        )
+        config.virtual_pipeline_model_parallel_size = max(
+            config.virtual_pipeline_model_parallel_size, 1
+        )
+        config.expert_model_parallel_size = max(
+            config.expert_model_parallel_size, 1
+        )
         config.fuse_rms_norm = True
 
         model_provider_class = GLMMoEModelProvider
@@ -424,7 +497,9 @@ class Glm4MoeForCausalLM(Glm4MoePreTrainedModel):
             loss_fn = CriterionLayerPipe(config, use_infohub=True)
         gpt_model = model_provider.provide(loss_fn=loss_fn)
         gpt_model._keep_in_fp32_modules = (
-            ["e_score_correction_bias"] if model_provider.use_accuracy_compatible else cls._keep_in_fp32_modules
+            ["e_score_correction_bias"]
+            if model_provider.use_accuracy_compatible
+            else cls._keep_in_fp32_modules
         )
         gpt_model._gen_aoa_config = cls._gen_aoa_config
         gpt_model._gen_inv_aoa_config = cls._gen_inv_aoa_config
@@ -433,16 +508,26 @@ class Glm4MoeForCausalLM(Glm4MoePreTrainedModel):
         return gpt_model
 
 
-class Glm4MoeForCausalLMPipe(Glm4MoePreTrainedModel, GeneralModelForCausalLMPipe):
+class Glm4MoeForCausalLMPipe(
+    Glm4MoePreTrainedModel, GeneralModelForCausalLMPipe
+):
     is_fleet = True
 
     def __new__(cls, config):
         # Hybrid parallel config convert.
-        config.tensor_model_parallel_size = max(config.tensor_model_parallel_size, 1)
+        config.tensor_model_parallel_size = max(
+            config.tensor_model_parallel_size, 1
+        )
         config.context_parallel_size = max(config.context_parallel_size, 1)
-        config.pipeline_model_parallel_size = max(config.pipeline_model_parallel_size, 1)
-        config.virtual_pipeline_model_parallel_size = max(config.virtual_pipeline_model_parallel_size, 1)
-        config.expert_model_parallel_size = max(config.expert_model_parallel_size, 1)
+        config.pipeline_model_parallel_size = max(
+            config.pipeline_model_parallel_size, 1
+        )
+        config.virtual_pipeline_model_parallel_size = max(
+            config.virtual_pipeline_model_parallel_size, 1
+        )
+        config.expert_model_parallel_size = max(
+            config.expert_model_parallel_size, 1
+        )
         config.fuse_rms_norm = True
 
         model_provider_class = GLMMoEModelProvider
@@ -452,7 +537,9 @@ class Glm4MoeForCausalLMPipe(Glm4MoePreTrainedModel, GeneralModelForCausalLMPipe
             loss_fn = CriterionLayerPipe(config, use_infohub=True)
         gpt_model = model_provider.provide(loss_fn=loss_fn)
         gpt_model._keep_in_fp32_modules = (
-            ["e_score_correction_bias"] if model_provider.use_accuracy_compatible else cls._keep_in_fp32_modules
+            ["e_score_correction_bias"]
+            if model_provider.use_accuracy_compatible
+            else cls._keep_in_fp32_modules
         )
         gpt_model._gen_aoa_config = cls._gen_aoa_config
         gpt_model._gen_inv_aoa_config = cls._gen_inv_aoa_config

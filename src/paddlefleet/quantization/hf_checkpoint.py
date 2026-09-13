@@ -30,7 +30,10 @@ from paddle.distributed.flex_checkpoint.dcp.metadata import (
 )
 from paddle.distributed.flex_checkpoint.dcp.utils import create_hf_ckpt_metadata
 
-from .checkpoint_dequant import CheckpointDequantizer, get_checkpoint_dequantizer
+from .checkpoint_dequant import (
+    CheckpointDequantizer,
+    get_checkpoint_dequantizer,
+)
 
 _PADDLE_METADATA_FILE_NAME = "flex-ckpt.auto_generated.metadata"
 _HF_CONFIG_FILE_NAME = "config.json"
@@ -62,7 +65,9 @@ class HFQuantizationGroupSpec:
 
     def configure_geometry(self, block_axes: tuple[int, ...]) -> None:
         self.block_axes = tuple(block_axes)
-        self.dequantizer = self.dequantizer.configure_geometry(self.block_axes, self.block_shape)
+        self.dequantizer = self.dequantizer.configure_geometry(
+            self.block_axes, self.block_shape
+        )
 
 
 @dataclass
@@ -98,7 +103,9 @@ class QuanMetadata:
         for logical_key, spec in self.relations.items():
             group = self.groups.get(spec.group_name)
             if group is None:
-                raise ValueError(f"Quantized weight {logical_key!r} refers to unknown group {spec.group_name!r}.")
+                raise ValueError(
+                    f"Quantized weight {logical_key!r} refers to unknown group {spec.group_name!r}."
+                )
             self._validate_relation(logical_key, spec, group)
 
     @staticmethod
@@ -108,17 +115,37 @@ class QuanMetadata:
         group: HFQuantizationGroupSpec,
     ) -> None:
         if spec.logical_name != logical_key:
-            raise ValueError(f"Relation key {logical_key!r} does not match logical_name {spec.logical_name!r}.")
-        if not spec.logical_shape or any(not isinstance(dim, int) or dim <= 0 for dim in spec.logical_shape):
-            raise ValueError(f"Invalid logical shape for {logical_key!r}: {spec.logical_shape}.")
+            raise ValueError(
+                f"Relation key {logical_key!r} does not match logical_name {spec.logical_name!r}."
+            )
+        if not spec.logical_shape or any(
+            not isinstance(dim, int) or dim <= 0 for dim in spec.logical_shape
+        ):
+            raise ValueError(
+                f"Invalid logical shape for {logical_key!r}: {spec.logical_shape}."
+            )
         if "qweight" not in spec.components:
-            raise ValueError(f"Quantized weight {logical_key!r} does not define a qweight component.")
-        if any(not role or not source_key for role, source_key in spec.components.items()):
-            raise ValueError(f"Quantized weight {logical_key!r} contains an empty component role or source key.")
+            raise ValueError(
+                f"Quantized weight {logical_key!r} does not define a qweight component."
+            )
+        if any(
+            not role or not source_key
+            for role, source_key in spec.components.items()
+        ):
+            raise ValueError(
+                f"Quantized weight {logical_key!r} contains an empty component role or source key."
+            )
         if group.block_axes is None:
-            raise ValueError(f"Quantization group {group.name!r} does not define block_axes.")
-        if any(axis < 0 or axis >= len(spec.logical_shape) for axis in group.block_axes):
-            raise ValueError(f"Block axes for group {group.name!r} are outside logical shape {spec.logical_shape}.")
+            raise ValueError(
+                f"Quantization group {group.name!r} does not define block_axes."
+            )
+        if any(
+            axis < 0 or axis >= len(spec.logical_shape)
+            for axis in group.block_axes
+        ):
+            raise ValueError(
+                f"Block axes for group {group.name!r} are outside logical shape {spec.logical_shape}."
+            )
 
 
 # -----------------------------------------------------------------------------
@@ -139,7 +166,9 @@ def _physical_state_dict_metadata(
 ) -> dict[str, list[LocalTensorMetadata]]:
     state_dict_metadata = physical_metadata.state_dict_metadata
     if not isinstance(state_dict_metadata, dict) or not state_dict_metadata:
-        raise ValueError("Paddle checkpoint Metadata contains no physical tensors.")
+        raise ValueError(
+            "Paddle checkpoint Metadata contains no physical tensors."
+        )
     return state_dict_metadata
 
 
@@ -147,9 +176,13 @@ def _physical_tensor_metadata(
     physical_metadata: Metadata,
     tensor_key: str,
 ) -> LocalTensorMetadata:
-    tensor_items = _physical_state_dict_metadata(physical_metadata).get(tensor_key)
+    tensor_items = _physical_state_dict_metadata(physical_metadata).get(
+        tensor_key
+    )
     if not tensor_items:
-        raise KeyError(f"Physical tensor {tensor_key!r} does not exist in Paddle Metadata.")
+        raise KeyError(
+            f"Physical tensor {tensor_key!r} does not exist in Paddle Metadata."
+        )
     return tensor_items[0]
 
 
@@ -203,28 +236,51 @@ class QuanDescriptor:
 
     def _validate_descriptor(self) -> None:
         if not isinstance(self.raw, dict):
-            raise ValueError("Quantization descriptor must contain a JSON object.")
+            raise ValueError(
+                "Quantization descriptor must contain a JSON object."
+            )
         if self.raw.get("schema_version") != 1:
-            raise ValueError("Unsupported quan_desc schema_version; expected 1.")
+            raise ValueError(
+                "Unsupported quan_desc schema_version; expected 1."
+            )
         raw_groups = self.raw.get("groups")
         if not isinstance(raw_groups, list) or not raw_groups:
-            raise ValueError("Quantization descriptor must define a non-empty groups list.")
+            raise ValueError(
+                "Quantization descriptor must define a non-empty groups list."
+            )
         pairing = self.raw.get("component_pairing")
         if not isinstance(pairing, dict):
-            raise ValueError("quan_desc must define component_pairing as an object.")
+            raise ValueError(
+                "quan_desc must define component_pairing as an object."
+            )
         self.weight_suffix = pairing.get("weight_suffix")
         self.scale_suffix = pairing.get("scale_suffix")
-        if not isinstance(self.weight_suffix, str) or not isinstance(self.scale_suffix, str):
-            raise ValueError("quan_desc component_pairing must define string weight_suffix and scale_suffix.")
+        if not isinstance(self.weight_suffix, str) or not isinstance(
+            self.scale_suffix, str
+        ):
+            raise ValueError(
+                "quan_desc component_pairing must define string weight_suffix and scale_suffix."
+            )
         if not self.weight_suffix or not self.scale_suffix:
-            raise ValueError("quan_desc component suffixes must be non-empty strings.")
+            raise ValueError(
+                "quan_desc component suffixes must be non-empty strings."
+            )
         self.logical_name_suffix = self.raw.get("logic_name_suffix")
-        if not isinstance(self.logical_name_suffix, str) or not self.logical_name_suffix:
-            raise ValueError("quan_desc must define a non-empty string logic_name_suffix.")
-        compiled_groups = tuple(self._compile_group(group) for group in raw_groups)
+        if (
+            not isinstance(self.logical_name_suffix, str)
+            or not self.logical_name_suffix
+        ):
+            raise ValueError(
+                "quan_desc must define a non-empty string logic_name_suffix."
+            )
+        compiled_groups = tuple(
+            self._compile_group(group) for group in raw_groups
+        )
         group_names = [group.name for group in compiled_groups]
         if len(set(group_names)) != len(group_names):
-            raise ValueError(f"quan_desc group names must be unique, got {group_names}.")
+            raise ValueError(
+                f"quan_desc group names must be unique, got {group_names}."
+            )
         self._groups = compiled_groups
 
     @classmethod
@@ -237,26 +293,42 @@ class QuanDescriptor:
         scale_format = group.get("scale_format")
         block_shape = group.get("block_shape")
         if not isinstance(name, str) or not name.strip():
-            raise ValueError("Each quan_desc group must define a non-empty name.")
+            raise ValueError(
+                "Each quan_desc group must define a non-empty name."
+            )
         if not isinstance(method, str) or not method.strip():
-            raise ValueError(f"Quan_desc group {name!r} must define quant_method.")
+            raise ValueError(
+                f"Quan_desc group {name!r} must define quant_method."
+            )
         method = method.strip().lower()
         if not isinstance(value_format, str) or not value_format.strip():
-            raise ValueError(f"Quan_desc group {name!r} must define value_format.")
+            raise ValueError(
+                f"Quan_desc group {name!r} must define value_format."
+            )
         value_format = value_format.strip().lower()
         if not isinstance(scale_format, str) or not scale_format.strip():
-            raise ValueError(f"Quan_desc group {name!r} must define scale_format.")
+            raise ValueError(
+                f"Quan_desc group {name!r} must define scale_format."
+            )
         scale_format = scale_format.strip().lower()
         try:
-            dequantizer = get_checkpoint_dequantizer(method).configure_formats(value_format, scale_format)
+            dequantizer = get_checkpoint_dequantizer(method).configure_formats(
+                value_format, scale_format
+            )
         except (TypeError, ValueError) as exc:
-            raise ValueError(f"Invalid quan_desc formats for group {name!r}: {exc}") from exc
+            raise ValueError(
+                f"Invalid quan_desc formats for group {name!r}: {exc}"
+            ) from exc
         if (
             not isinstance(block_shape, list)
             or not block_shape
-            or any(not isinstance(size, int) or size <= 0 for size in block_shape)
+            or any(
+                not isinstance(size, int) or size <= 0 for size in block_shape
+            )
         ):
-            raise ValueError(f"Quan_desc group {name!r} must define a positive integer block_shape list.")
+            raise ValueError(
+                f"Quan_desc group {name!r} must define a positive integer block_shape list."
+            )
         return HFQuantizationGroupSpec(
             name=name,
             targets=cls._descriptor_patterns(group),
@@ -268,7 +340,9 @@ class QuanDescriptor:
         )
 
     @staticmethod
-    def _descriptor_patterns(group: dict[str, Any]) -> tuple[re.Pattern[str], ...]:
+    def _descriptor_patterns(
+        group: dict[str, Any],
+    ) -> tuple[re.Pattern[str], ...]:
         """Compile one group's ``targets`` entries into match patterns.
 
         Two forms are accepted, and the ``re:`` form is the preferred one:
@@ -299,14 +373,22 @@ class QuanDescriptor:
             or not raw_targets
             or any(not isinstance(item, str) for item in raw_targets)
         ):
-            raise ValueError("Each quan_desc group must define a non-empty string targets list.")
+            raise ValueError(
+                "Each quan_desc group must define a non-empty string targets list."
+            )
         patterns = []
         for target in raw_targets:
-            expression = target[3:] if target.startswith("re:") else rf"\A{re.escape(target)}\Z"
+            expression = (
+                target[3:]
+                if target.startswith("re:")
+                else rf"\A{re.escape(target)}\Z"
+            )
             try:
                 patterns.append(re.compile(expression))
             except re.error as exc:
-                raise ValueError(f"Invalid quan_desc target pattern {target!r}: {exc}") from exc
+                raise ValueError(
+                    f"Invalid quan_desc target pattern {target!r}: {exc}"
+                ) from exc
         return tuple(patterns)
 
     @staticmethod
@@ -316,13 +398,22 @@ class QuanDescriptor:
         block_shape: tuple[int, ...],
     ) -> tuple[int, ...]:
         if len(logical_shape) != len(scale_shape):
-            raise ValueError(f"Cannot infer block axes for ranks {len(logical_shape)} and {len(scale_shape)}.")
+            raise ValueError(
+                f"Cannot infer block axes for ranks {len(logical_shape)} and {len(scale_shape)}."
+            )
         if not block_shape or len(block_shape) > len(logical_shape):
-            raise ValueError(f"Block rank {len(block_shape)} is invalid for logical shape {logical_shape}.")
+            raise ValueError(
+                f"Block rank {len(block_shape)} is invalid for logical shape {logical_shape}."
+            )
         for axes in permutations(range(len(logical_shape)), len(block_shape)):
-            if _expected_scale_shape(logical_shape, axes, block_shape) == scale_shape:
+            if (
+                _expected_scale_shape(logical_shape, axes, block_shape)
+                == scale_shape
+            ):
                 return axes
-        raise ValueError(f"Cannot infer block axes for logical shape {logical_shape} and scale shape {scale_shape}.")
+        raise ValueError(
+            f"Cannot infer block axes for logical shape {logical_shape} and scale shape {scale_shape}."
+        )
 
     def build_metadata(
         self,
@@ -336,7 +427,11 @@ class QuanDescriptor:
         for weight_key in sorted(source_keys):
             if not weight_key.endswith(self.weight_suffix):
                 continue
-            matches = [group for group in self._groups if any(pattern.search(weight_key) for pattern in group.targets)]
+            matches = [
+                group
+                for group in self._groups
+                if any(pattern.search(weight_key) for pattern in group.targets)
+            ]
             if len(matches) > 1:
                 raise ValueError(
                     f"Quantized weight {weight_key!r} matches multiple quan_desc groups: "
@@ -346,19 +441,38 @@ class QuanDescriptor:
                 continue
             group = matches[0]
             name = group.name
-            scale_key = weight_key[: -len(self.weight_suffix)] + self.scale_suffix
+            scale_key = (
+                weight_key[: -len(self.weight_suffix)] + self.scale_suffix
+            )
             if scale_key not in source_keys:
                 raise ValueError(
                     f"Quan_desc group {name!r} matched {weight_key!r}, but paired scale {scale_key!r} is missing."
                 )
-            weight_shape = tuple(_physical_tensor_metadata(physical_metadata, weight_key).global_shape)
+            weight_shape = tuple(
+                _physical_tensor_metadata(
+                    physical_metadata, weight_key
+                ).global_shape
+            )
             logical_shape = group.dequantizer.logical_shape(weight_shape)
             if group.block_axes is None:
-                scale_shape = tuple(_physical_tensor_metadata(physical_metadata, scale_key).global_shape)
-                group.configure_geometry(self._infer_block_axes(logical_shape, scale_shape, group.block_shape))
-            logical_name = weight_key[: -len(self.weight_suffix)] + self.logical_name_suffix
+                scale_shape = tuple(
+                    _physical_tensor_metadata(
+                        physical_metadata, scale_key
+                    ).global_shape
+                )
+                group.configure_geometry(
+                    self._infer_block_axes(
+                        logical_shape, scale_shape, group.block_shape
+                    )
+                )
+            logical_name = (
+                weight_key[: -len(self.weight_suffix)]
+                + self.logical_name_suffix
+            )
             if logical_name in relations:
-                raise ValueError(f"Quan_desc produced duplicate logical weight name {logical_name!r}.")
+                raise ValueError(
+                    f"Quan_desc produced duplicate logical weight name {logical_name!r}."
+                )
             relations[logical_name] = HFQuantizedWeightSpec(
                 logical_name=logical_name,
                 logical_shape=logical_shape,
@@ -371,7 +485,8 @@ class QuanDescriptor:
             key
             for key in source_keys
             if key.endswith(self.scale_suffix)
-            and key[: -len(self.scale_suffix)] + self.weight_suffix in source_keys
+            and key[: -len(self.scale_suffix)] + self.weight_suffix
+            in source_keys
             and key not in matched_scales
         ]
         if unmatched:
@@ -379,7 +494,9 @@ class QuanDescriptor:
                 f"quan_desc did not match all quantized weight/scale pairs; unmatched examples: {unmatched[:5]}"
             )
         if not relations:
-            raise ValueError("quan_desc matched no quantized weight/scale pairs.")
+            raise ValueError(
+                "quan_desc matched no quantized weight/scale pairs."
+            )
         dtype = str(output_dtype).split(".")[-1]
         logical_metadata = {
             logical_key: LocalTensorMetadata(
@@ -451,7 +568,9 @@ class HFDequantLoadTransform:
         try:
             spec = self.quan_metadata.relations[logical_key]
         except KeyError as exc:
-            raise KeyError(f"Logical weight {logical_key!r} is not managed by this load transform.") from exc
+            raise KeyError(
+                f"Logical weight {logical_key!r} is not managed by this load transform."
+            ) from exc
         return spec, self.quan_metadata.groups[spec.group_name]
 
     def source_keys(self, logical_key: str) -> list[str]:
@@ -481,7 +600,9 @@ class HFDequantLoadTransform:
         global_shape = tuple(target_shard_metadata.global_shape)
         local_shape = tuple(target_shard_metadata.local_shape)
         global_offset = tuple(target_shard_metadata.global_offset)
-        source_metadata = self.quan_metadata.physical_metadata.state_dict_metadata
+        source_metadata = (
+            self.quan_metadata.physical_metadata.state_dict_metadata
+        )
         dequantizer = group.dequantizer
         logical_axes = group.block_axes
         block_shape = group.block_shape
@@ -494,33 +615,54 @@ class HFDequantLoadTransform:
         aligned = not force_global and dequantizer.logical_shard_is_aligned(
             spec.logical_shape, local_shape, global_offset
         )
-        mode = "local" if aligned and local_shape != spec.logical_shape else "global"
+        mode = (
+            "local"
+            if aligned and local_shape != spec.logical_shape
+            else "global"
+        )
         source_slices: dict[str, LocalTensorMetadata] = {}
         for role, source_key in spec.components.items():
             source_items = source_metadata.get(source_key)
             if not source_items:
-                raise ValueError(f"Read plan for {logical_key!r} is missing source metadata for {source_key!r}.")
+                raise ValueError(
+                    f"Read plan for {logical_key!r} is missing source metadata for {source_key!r}."
+                )
             physical_metadata = source_items[0]
             if role == "qweight":
-                physical_shape = dequantizer.physical_qweight_shape(spec.logical_shape)
+                physical_shape = dequantizer.physical_qweight_shape(
+                    spec.logical_shape
+                )
                 if mode == "local":
-                    physical_offset, physical_local_shape = dequantizer.physical_qweight_slice(
-                        global_offset,
-                        local_shape,
+                    physical_offset, physical_local_shape = (
+                        dequantizer.physical_qweight_slice(
+                            global_offset,
+                            local_shape,
+                        )
                     )
             elif role == "scale":
-                physical_shape = _expected_scale_shape(spec.logical_shape, logical_axes, block_shape)
+                physical_shape = _expected_scale_shape(
+                    spec.logical_shape, logical_axes, block_shape
+                )
                 if mode == "local":
                     # Map a block-aligned logical shard to the scale grid.  A
                     # shard ending at the logical tensor boundary may include
                     # one partial block, hence ceil on its local extent.
-                    scale_factors = tuple(axis_to_block.get(axis, 1) for axis in range(len(global_offset)))
-                    physical_offset = tuple(offset // factor for offset, factor in zip(global_offset, scale_factors))
+                    scale_factors = tuple(
+                        axis_to_block.get(axis, 1)
+                        for axis in range(len(global_offset))
+                    )
+                    physical_offset = tuple(
+                        offset // factor
+                        for offset, factor in zip(global_offset, scale_factors)
+                    )
                     physical_local_shape = tuple(
-                        math.ceil(size / factor) for size, factor in zip(local_shape, scale_factors)
+                        math.ceil(size / factor)
+                        for size, factor in zip(local_shape, scale_factors)
                     )
             else:
-                raise ValueError(f"Unsupported component role {role!r} for {logical_key!r}.")
+                raise ValueError(
+                    f"Unsupported component role {role!r} for {logical_key!r}."
+                )
             if mode == "global":
                 physical_offset = (0,) * len(physical_shape)
                 physical_local_shape = physical_shape
@@ -540,8 +682,12 @@ class HFDequantLoadTransform:
         plan = HFReadPlan(
             mode=mode,
             logical_slice=LocalTensorMetadata(
-                global_offset=global_offset if mode == "local" else (0,) * len(spec.logical_shape),
-                local_shape=local_shape if mode == "local" else spec.logical_shape,
+                global_offset=global_offset
+                if mode == "local"
+                else (0,) * len(spec.logical_shape),
+                local_shape=local_shape
+                if mode == "local"
+                else spec.logical_shape,
                 dtype=self.quan_metadata.logical_metadata[logical_key].dtype,
                 global_shape=spec.logical_shape,
             ),
@@ -558,7 +704,10 @@ class HFDequantLoadTransform:
     ) -> paddle.Tensor:
         spec, group = self._relation(logical_key)
 
-        components = {role: source_tensors[source_key] for role, source_key in spec.components.items()}
+        components = {
+            role: source_tensors[source_key]
+            for role, source_key in spec.components.items()
+        }
         plan = self._read_plans.get(logical_key)
         output = group.dequantizer.dequantize(components, output_dtype)
         expected_shape = spec.logical_shape

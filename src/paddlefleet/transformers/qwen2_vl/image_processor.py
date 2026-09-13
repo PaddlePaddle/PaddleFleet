@@ -19,6 +19,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """image processor class for Qwen2-VL."""
+
 import transformers as hf
 
 from ..image_processing_utils import warp_base_image_processor

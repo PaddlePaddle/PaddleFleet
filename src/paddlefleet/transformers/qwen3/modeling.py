@@ -18,6 +18,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Paddle Qwen3 model."""
+
 from __future__ import annotations
 
 import json
@@ -51,7 +52,9 @@ class Qwen3ModelProvider(GPTModelProvider):
     persist_layer_norm: bool = True
     share_embeddings_and_output_weights: bool = False
 
-    def save_pretrained(self, save_directory: Union[str, os.PathLike], **kwargs):
+    def save_pretrained(
+        self, save_directory: Union[str, os.PathLike], **kwargs
+    ):
         """
         Save a configuration object to the directory `save_directory`, so that it can be re-loaded using the
         [`~PretrainedConfig.from_pretrained`] class method.
@@ -63,7 +66,9 @@ class Qwen3ModelProvider(GPTModelProvider):
                 Additional key word arguments passed along to the [`~utils.PushToHubMixin.push_to_hub`] method.
         """
         if os.path.isfile(save_directory):
-            raise AssertionError(f"Provided path ({save_directory}) should be a directory, not a file")
+            raise AssertionError(
+                f"Provided path ({save_directory}) should be a directory, not a file"
+            )
 
         os.makedirs(save_directory, exist_ok=True)
 
@@ -73,9 +78,17 @@ class Qwen3ModelProvider(GPTModelProvider):
         # Filter out non-serializable values
         def make_serializable(obj):
             if isinstance(obj, dict):
-                return {k: make_serializable(v) for k, v in obj.items() if make_serializable(v) is not None}
+                return {
+                    k: make_serializable(v)
+                    for k, v in obj.items()
+                    if make_serializable(v) is not None
+                }
             elif isinstance(obj, (list, tuple)):
-                return [make_serializable(item) for item in obj if make_serializable(item) is not None]
+                return [
+                    make_serializable(item)
+                    for item in obj
+                    if make_serializable(item) is not None
+                ]
             elif isinstance(obj, (str, int, float, bool, type(None))):
                 return obj
             else:
@@ -85,7 +98,15 @@ class Qwen3ModelProvider(GPTModelProvider):
         serializable_config = make_serializable(config_dict)
 
         with open(output_config_file, "w", encoding="utf-8") as writer:
-            writer.write(json.dumps(serializable_config, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+            writer.write(
+                json.dumps(
+                    serializable_config,
+                    indent=2,
+                    sort_keys=True,
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
         logger.info(f"Configuration saved in {output_config_file}")
 
 
@@ -93,13 +114,27 @@ class Qwen3PretrainedModel(PretrainedModel):
     config_class = Qwen3Config
     base_model_prefix = "model"
     _keys_to_ignore_on_load_unexpected = [r"self_attn.rotary_emb.inv_freq"]
-    transpose_weight_keys = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    transpose_weight_keys = [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+    ]
 
     @classmethod
     def _gen_aoa_config(cls, config: Qwen3Config):
-        model_prefix = "" if cls == getattr(cls, "base_model_class", None) else "model."
+        model_prefix = (
+            "" if cls == getattr(cls, "base_model_class", None) else "model."
+        )
         is_fleet = getattr(cls, "is_fleet", False)
-        dtype_suffix = f", dtype='{config.dtype}'" if is_fleet and getattr(config, "dtype", None) else ""
+        dtype_suffix = (
+            f", dtype='{config.dtype}'"
+            if is_fleet and getattr(config, "dtype", None)
+            else ""
+        )
 
         aoa_config = {
             "aoa_statements": [
@@ -162,16 +197,22 @@ class Qwen3PretrainedModel(PretrainedModel):
                     f"model.embed_tokens.weight -> {model_prefix}lm_head.weight{dtype_suffix}"
                 ]
             else:
-                aoa_config["aoa_statements"] += ["model.embed_tokens.weight -> lm_head.weight"]
+                aoa_config["aoa_statements"] += [
+                    "model.embed_tokens.weight -> lm_head.weight"
+                ]
         else:
             if is_fleet:
-                aoa_config["aoa_statements"] += [f"lm_head.weight -> {model_prefix}lm_head.weight{dtype_suffix}"]
+                aoa_config["aoa_statements"] += [
+                    f"lm_head.weight -> {model_prefix}lm_head.weight{dtype_suffix}"
+                ]
 
         return aoa_config
 
     @classmethod
     def _gen_inv_aoa_config(cls, config: Qwen3Config):
-        model_prefix = "" if cls == getattr(cls, "base_model_class", None) else "model."
+        model_prefix = (
+            "" if cls == getattr(cls, "base_model_class", None) else "model."
+        )
         is_fleet = getattr(cls, "is_fleet", False)
 
         aoa_statements = [
@@ -224,7 +265,9 @@ class Qwen3PretrainedModel(PretrainedModel):
                 aoa_statements += ["lm_head.weight -> _"]
         else:
             if is_fleet:
-                aoa_statements += [f"{model_prefix}lm_head.weight -> lm_head.weight"]
+                aoa_statements += [
+                    f"{model_prefix}lm_head.weight -> lm_head.weight"
+                ]
         aoa_config = {"aoa_statements": aoa_statements}
         return aoa_config
 
@@ -234,11 +277,19 @@ class Qwen3ForCausalLM(Qwen3PretrainedModel):
 
     def __new__(cls, config):
         # Hybrid parallel config convert.
-        config.tensor_model_parallel_size = max(config.tensor_model_parallel_size, 1)
+        config.tensor_model_parallel_size = max(
+            config.tensor_model_parallel_size, 1
+        )
         config.context_parallel_size = max(config.context_parallel_size, 1)
-        config.pipeline_model_parallel_size = max(config.pipeline_model_parallel_size, 1)
-        config.virtual_pipeline_model_parallel_size = max(config.virtual_pipeline_model_parallel_size, 1)
-        config.expert_model_parallel_size = max(config.expert_model_parallel_size, 1)
+        config.pipeline_model_parallel_size = max(
+            config.pipeline_model_parallel_size, 1
+        )
+        config.virtual_pipeline_model_parallel_size = max(
+            config.virtual_pipeline_model_parallel_size, 1
+        )
+        config.expert_model_parallel_size = max(
+            config.expert_model_parallel_size, 1
+        )
 
         model_provider_class = Qwen3ModelProvider
         model_provider = model_provider_class.from_config(config)
@@ -258,11 +309,19 @@ class Qwen3ForCausalLMPipe(Qwen3PretrainedModel, GeneralModelForCausalLMPipe):
 
     def __new__(cls, config):
         # Hybrid parallel config convert.
-        config.tensor_model_parallel_size = max(config.tensor_model_parallel_size, 1)
+        config.tensor_model_parallel_size = max(
+            config.tensor_model_parallel_size, 1
+        )
         config.context_parallel_size = max(config.context_parallel_size, 1)
-        config.pipeline_model_parallel_size = max(config.pipeline_model_parallel_size, 1)
-        config.virtual_pipeline_model_parallel_size = max(config.virtual_pipeline_model_parallel_size, 1)
-        config.expert_model_parallel_size = max(config.expert_model_parallel_size, 1)
+        config.pipeline_model_parallel_size = max(
+            config.pipeline_model_parallel_size, 1
+        )
+        config.virtual_pipeline_model_parallel_size = max(
+            config.virtual_pipeline_model_parallel_size, 1
+        )
+        config.expert_model_parallel_size = max(
+            config.expert_model_parallel_size, 1
+        )
 
         model_provider_class = Qwen3ModelProvider
         model_provider = model_provider_class.from_config(config)

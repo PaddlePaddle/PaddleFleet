@@ -57,7 +57,12 @@ class KimiK3VisionProcessor(BaseImageProcessor):
         )
 
     def resize_image(
-        self, image: Image.Image, new_width: int, new_height: int, pad_width: int, pad_height: int
+        self,
+        image: Image.Image,
+        new_width: int,
+        new_height: int,
+        pad_width: int,
+        pad_height: int,
     ) -> np.ndarray:
         image_np = image_to_np(image, (new_width, new_height))
         return np.pad(
@@ -96,12 +101,23 @@ class KimiK3VisionProcessor(BaseImageProcessor):
                 resize_config["pad_width"],
                 resize_config["pad_height"],
             )
-            pixels = normalize(np.expand_dims(image_np, axis=0), image_mean, image_std_inv)
-            patchified.append(navit_patchify(pixels, self.media_proc_cfg["patch_size"]))
+            pixels = normalize(
+                np.expand_dims(image_np, axis=0), image_mean, image_std_inv
+            )
+            patchified.append(
+                navit_patchify(pixels, self.media_proc_cfg["patch_size"])
+            )
 
         data = {
-            "pixel_values": np.concatenate([item["pixel_values"] for item in patchified]),
-            "image_grid_thw": np.stack([np.asarray(item["grid_thw"], dtype=np.int64) for item in patchified]),
+            "pixel_values": np.concatenate(
+                [item["pixel_values"] for item in patchified]
+            ),
+            "image_grid_thw": np.stack(
+                [
+                    np.asarray(item["grid_thw"], dtype=np.int64)
+                    for item in patchified
+                ]
+            ),
         }
         return BatchFeature(data=data, tensor_type=return_tensors)
 
@@ -120,7 +136,13 @@ class KimiK3VisionProcessor(BaseImageProcessor):
         config = config_dict.copy()
         media_proc_cfg = config.pop("media_proc_cfg", {})
 
-        from_pretrained_only_keys = ["subfolder", "revision", "cache_dir", "local_files_only", "trust_remote_code"]
+        from_pretrained_only_keys = [
+            "subfolder",
+            "revision",
+            "cache_dir",
+            "local_files_only",
+            "trust_remote_code",
+        ]
         for key in from_pretrained_only_keys:
             kwargs.pop(key, None)
         merged_kwargs = {**config, **kwargs}

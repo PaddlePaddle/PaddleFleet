@@ -48,7 +48,9 @@ def _fma(a, b, c):
     product is exact there (48 mantissa bits) and the addend is FP32, so the sum
     rounds once on the way back to FP32.
     """
-    return (a.astype("float64") * b.astype("float64") + c.astype("float64")).astype("float32")
+    return (
+        a.astype("float64") * b.astype("float64") + c.astype("float64")
+    ).astype("float32")
 
 
 def _hf_bitexact_adamw_step(
@@ -86,7 +88,9 @@ def _hf_bitexact_adamw_step(
         p = current.astype(work)
         if weight_decay != 0.0:
             # _foreach_mul_(params, 1 - lr * weight_decay)
-            p = (p.astype("float32") * _f32(1.0 - lr * weight_decay)).astype(work)
+            p = (p.astype("float32") * _f32(1.0 - lr * weight_decay)).astype(
+                work
+            )
 
         g = grad.astype("float32")
 
@@ -144,7 +148,9 @@ class AdamWMini(AdamW):
 
         self._add_accumulator(self._moment1_acc_str, p, dtype=acc_dtype)
         # change moment2
-        self._add_accumulator(self._moment2_acc_str, p, dtype=acc_dtype, shape=[1])
+        self._add_accumulator(
+            self._moment2_acc_str, p, dtype=acc_dtype, shape=[1]
+        )
         try:
             type = core.VarDesc.VarType.DENSE_TENSOR
         except:
@@ -153,7 +159,9 @@ class AdamWMini(AdamW):
             name=self._beta1_pow_acc_str,
             param=p,
             dtype=acc_dtype,
-            fill_value=0.9 if isinstance(self._beta1, (Variable, Value)) else self._beta1,
+            fill_value=0.9
+            if isinstance(self._beta1, (Variable, Value))
+            else self._beta1,
             shape=[1],
             type=type,
             device="cpu",
@@ -162,7 +170,9 @@ class AdamWMini(AdamW):
             name=self._beta2_pow_acc_str,
             param=p,
             dtype=acc_dtype,
-            fill_value=0.999 if isinstance(self._beta2, (Variable, Value)) else self._beta2,
+            fill_value=0.999
+            if isinstance(self._beta2, (Variable, Value))
+            else self._beta2,
             shape=[1],
             type=type,
             device="cpu",
@@ -176,24 +186,55 @@ class AdamWMini(AdamW):
 
         # Whether we should do weight decay for the parameter.
         with_decay = True
-        if self._apply_decay_param_fun is not None and not self._apply_decay_param_fun(param.name):
+        if (
+            self._apply_decay_param_fun is not None
+            and not self._apply_decay_param_fun(param.name)
+        ):
             with_decay = False
 
-        moment1 = self._get_accumulator_master(self._moment1_acc_str, param_and_grad[0])
-        moment2 = self._get_accumulator_master(self._moment2_acc_str, param_and_grad[0])
-        beta1_pow_acc = self._get_accumulator_master(self._beta1_pow_acc_str, param_and_grad[0])
-        beta2_pow_acc = self._get_accumulator_master(self._beta2_pow_acc_str, param_and_grad[0])
-        find_master = self._multi_precision and self._is_dtype_fp16_or_bf16(param_and_grad[0].dtype)
-        master_weight = self._master_weights[param_and_grad[0].name] if find_master else None
+        moment1 = self._get_accumulator_master(
+            self._moment1_acc_str, param_and_grad[0]
+        )
+        moment2 = self._get_accumulator_master(
+            self._moment2_acc_str, param_and_grad[0]
+        )
+        beta1_pow_acc = self._get_accumulator_master(
+            self._beta1_pow_acc_str, param_and_grad[0]
+        )
+        beta2_pow_acc = self._get_accumulator_master(
+            self._beta2_pow_acc_str, param_and_grad[0]
+        )
+        find_master = self._multi_precision and self._is_dtype_fp16_or_bf16(
+            param_and_grad[0].dtype
+        )
+        master_weight = (
+            self._master_weights[param_and_grad[0].name]
+            if find_master
+            else None
+        )
         lr = self._create_param_lr(param_and_grad)
         # create the adamw optimize op
         if in_dynamic_or_pir_mode():
-            lr_ratio_ = 1.0 if self._lr_ratio is None else self._lr_ratio(param_and_grad[0])
+            lr_ratio_ = (
+                1.0
+                if self._lr_ratio is None
+                else self._lr_ratio(param_and_grad[0])
+            )
 
-            _beta1 = self._beta1 if not isinstance(self._beta1, Variable) else self._beta1.item(0)
-            _beta2 = self._beta2 if not isinstance(self._beta2, Variable) else self._beta2.item(0)
+            _beta1 = (
+                self._beta1
+                if not isinstance(self._beta1, Variable)
+                else self._beta1.item(0)
+            )
+            _beta2 = (
+                self._beta2
+                if not isinstance(self._beta2, Variable)
+                else self._beta2.item(0)
+            )
 
-            found_inf = self._get_auxiliary_var("found_inf") if in_pir_mode() else None
+            found_inf = (
+                self._get_auxiliary_var("found_inf") if in_pir_mode() else None
+            )
             self.adamw_python(
                 param_and_grad[0],
                 param_and_grad[1],
@@ -306,7 +347,11 @@ class AdamWCustom(AdamW):
             name=self._beta1_pow_acc_str,
             param=p,
             dtype=acc_dtype,
-            fill_value=(0.9 if isinstance(self._beta1, (Variable, Value)) else self._beta1),
+            fill_value=(
+                0.9
+                if isinstance(self._beta1, (Variable, Value))
+                else self._beta1
+            ),
             shape=[1],
             type=type,
         )
@@ -314,7 +359,11 @@ class AdamWCustom(AdamW):
             name=self._beta2_pow_acc_str,
             param=p,
             dtype=acc_dtype,
-            fill_value=(0.999 if isinstance(self._beta2, (Variable, Value)) else self._beta2),
+            fill_value=(
+                0.999
+                if isinstance(self._beta2, (Variable, Value))
+                else self._beta2
+            ),
             shape=[1],
             type=type,
         )
@@ -349,8 +398,13 @@ class AdamWCustom(AdamW):
                 self._add_hf_step_accumulator(master_p)
                 self._already_create_accumulator.add(p.name)
 
-            elif self._is_dtype_fp16_or_bf16(p.dtype) and not self._multi_precision:
-                raise NotImplementedError("AdamWCustom only support AMP training")
+            elif (
+                self._is_dtype_fp16_or_bf16(p.dtype)
+                and not self._multi_precision
+            ):
+                raise NotImplementedError(
+                    "AdamWCustom only support AMP training"
+                )
             else:
                 self._add_moments_pows(p)
                 self._add_hf_step_accumulator(p)
@@ -389,7 +443,11 @@ class AdamWCustom(AdamW):
             var_name = self._gen_master_weight_var_name(param)
             if param.name in self.weight_scale_mapping:
                 weight_scale = self.weight_scale_mapping[param.name]
-                if self.quantization_config.weight_quantize_algo in ["a8w8linear", "a8w4linear", "fp8linear"]:
+                if self.quantization_config.weight_quantize_algo in [
+                    "a8w8linear",
+                    "a8w4linear",
+                    "fp8linear",
+                ]:
                     var = dequantize(
                         param,
                         weight_scale,
@@ -417,13 +475,19 @@ class AdamWCustom(AdamW):
         """
         if dtype == paddle.int8 or dtype == paddle.float8_e4m3fn:
             return True
-        assert isinstance(
-            dtype, (core.VarDesc.VarType, core.DataType)
-        ), "The dtype should be an instance of core.VarDesc.VarType or core.DataType."
+        assert isinstance(dtype, (core.VarDesc.VarType, core.DataType)), (
+            "The dtype should be an instance of core.VarDesc.VarType or core.DataType."
+        )
         if isinstance(dtype, core.VarDesc.VarType):
-            return dtype == core.VarDesc.VarType.FP16 or dtype == core.VarDesc.VarType.BF16
+            return (
+                dtype == core.VarDesc.VarType.FP16
+                or dtype == core.VarDesc.VarType.BF16
+            )
         else:
-            return dtype == core.DataType.FLOAT16 or dtype == core.DataType.BFLOAT16
+            return (
+                dtype == core.DataType.FLOAT16
+                or dtype == core.DataType.BFLOAT16
+            )
 
     def _append_optimize_op(self, block, param_and_grad):
         assert isinstance(block, (framework.Block, pir.Block))
@@ -433,18 +497,35 @@ class AdamWCustom(AdamW):
 
         # Whether we should do weight decay for the parameter.
         with_decay = True
-        if self._apply_decay_param_fun is not None and not self._apply_decay_param_fun(param.name):
+        if (
+            self._apply_decay_param_fun is not None
+            and not self._apply_decay_param_fun(param.name)
+        ):
             with_decay = False
 
         if self.tensorwise_offload_optimizer:
             self.reload_optim(param)
 
-        moment1 = self._get_accumulator_master(self._moment1_acc_str, param_and_grad[0])
-        moment2 = self._get_accumulator_master(self._moment2_acc_str, param_and_grad[0])
-        beta1_pow_acc = self._get_accumulator_master(self._beta1_pow_acc_str, param_and_grad[0])
-        beta2_pow_acc = self._get_accumulator_master(self._beta2_pow_acc_str, param_and_grad[0])
-        find_master = self._multi_precision and self._is_dtype_fp16_or_bf16(param_and_grad[0].dtype)
-        master_weight = self._master_weights[param_and_grad[0].name] if find_master else None
+        moment1 = self._get_accumulator_master(
+            self._moment1_acc_str, param_and_grad[0]
+        )
+        moment2 = self._get_accumulator_master(
+            self._moment2_acc_str, param_and_grad[0]
+        )
+        beta1_pow_acc = self._get_accumulator_master(
+            self._beta1_pow_acc_str, param_and_grad[0]
+        )
+        beta2_pow_acc = self._get_accumulator_master(
+            self._beta2_pow_acc_str, param_and_grad[0]
+        )
+        find_master = self._multi_precision and self._is_dtype_fp16_or_bf16(
+            param_and_grad[0].dtype
+        )
+        master_weight = (
+            self._master_weights[param_and_grad[0].name]
+            if find_master
+            else None
+        )
         if param.name in self.weight_scale_mapping:
             weight_scale = self.weight_scale_mapping[param.name]
         else:
@@ -452,18 +533,36 @@ class AdamWCustom(AdamW):
         lr = self._create_param_lr(param_and_grad)
         # create the adamw optimize op
         if in_dynamic_or_pir_mode():
-            lr_ratio_ = 1.0 if self._lr_ratio is None else self._lr_ratio(param_and_grad[0])
+            lr_ratio_ = (
+                1.0
+                if self._lr_ratio is None
+                else self._lr_ratio(param_and_grad[0])
+            )
 
-            _beta1 = self._beta1 if not isinstance(self._beta1, Variable) else self._beta1.item(0)
-            _beta2 = self._beta2 if not isinstance(self._beta2, Variable) else self._beta2.item(0)
+            _beta1 = (
+                self._beta1
+                if not isinstance(self._beta1, Variable)
+                else self._beta1.item(0)
+            )
+            _beta2 = (
+                self._beta2
+                if not isinstance(self._beta2, Variable)
+                else self._beta2.item(0)
+            )
 
-            found_inf = self._get_auxiliary_var("found_inf") if in_pir_mode() else None
+            found_inf = (
+                self._get_auxiliary_var("found_inf") if in_pir_mode() else None
+            )
             skip_update_param = weight_scale is not None
             # ``adamw_triton`` keeps paddle's old FP32-opmath / repeated
             # ``beta_pow`` arithmetic, which diverges from torch's ``_multi_tensor_
             # adamw``; the HF target therefore always routes through
             # ``adamw_custom`` so it cannot silently lose its bit-exact recipe.
-            apply_adamw = self.adamw_custom if (adamw_triton is None or self.hf_bitexact) else adamw_triton
+            apply_adamw = (
+                self.adamw_custom
+                if (adamw_triton is None or self.hf_bitexact)
+                else adamw_triton
+            )
             apply_adamw(
                 param_and_grad[0],
                 param_and_grad[1],
@@ -484,10 +583,18 @@ class AdamWCustom(AdamW):
                 skip_update_param,
             )
             if skip_update_param:
-                if param.weight_quantize_algo in ["a8w8linear", "a8w4linear", "fp8linear"]:
+                if param.weight_quantize_algo in [
+                    "a8w8linear",
+                    "a8w4linear",
+                    "fp8linear",
+                ]:
                     if "parallel_quantization_linear" not in param.name:
                         group = None
-                    elif param.weight_quantize_algo in ["a8w8linear", "a8w4linear"] and "row" in param.name:
+                    elif (
+                        param.weight_quantize_algo
+                        in ["a8w8linear", "a8w4linear"]
+                        and "row" in param.name
+                    ):
                         group = None
                     else:
                         group = self.mp_group
@@ -546,7 +653,9 @@ class AdamWCustom(AdamW):
             # sharded checkpoint paths) carry it across a resume.
             step_acc = self._get_accumulator_master("hf_bitexact_step", param)
             step = int(step_acc.item()) + 1
-            step_acc.set_value(paddle.full(step_acc.shape, step, dtype=step_acc.dtype))
+            step_acc.set_value(
+                paddle.full(step_acc.shape, step, dtype=step_acc.dtype)
+            )
             new_p, new_m, new_v = _hf_bitexact_adamw_step(
                 param,
                 grad,
@@ -600,19 +709,27 @@ class AdamWCustom(AdamW):
         return
 
     def offload_optim(self, p):
-        find_master = self._multi_precision and self._is_dtype_fp16_or_bf16(p.dtype)
+        find_master = self._multi_precision and self._is_dtype_fp16_or_bf16(
+            p.dtype
+        )
         if find_master:
-            self._master_weights[p.name] = self._master_weights[p.name].pin_memory()
+            self._master_weights[p.name] = self._master_weights[
+                p.name
+            ].pin_memory()
             target_name = self._master_weights[p.name].name
         else:
             target_name = p.name
         for name in [self._moment1_acc_str, self._moment2_acc_str]:
             if self._name is not None:
                 name = self._name + "_" + name
-            self._accumulators[name][target_name] = self._accumulators[name][target_name].pin_memory()
+            self._accumulators[name][target_name] = self._accumulators[name][
+                target_name
+            ].pin_memory()
 
     def reload_optim(self, p):
-        find_master = self._multi_precision and self._is_dtype_fp16_or_bf16(p.dtype)
+        find_master = self._multi_precision and self._is_dtype_fp16_or_bf16(
+            p.dtype
+        )
         if find_master:
             self._master_weights[p.name] = self._master_weights[p.name].cuda()
             target_name = self._master_weights[p.name].name
@@ -621,4 +738,6 @@ class AdamWCustom(AdamW):
         for name in [self._moment1_acc_str, self._moment2_acc_str]:
             if self._name is not None:
                 name = self._name + "_" + name
-            self._accumulators[name][target_name] = self._accumulators[name][target_name].cuda()
+            self._accumulators[name][target_name] = self._accumulators[name][
+                target_name
+            ].cuda()
