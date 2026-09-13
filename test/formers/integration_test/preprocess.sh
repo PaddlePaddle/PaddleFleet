@@ -32,7 +32,7 @@ if [ ! -f $CACHE_DIR/qwen/Qwen3-30B-A3B-Base.tar ]; then
   tar -xf Qwen3-30B-A3B-Base.tar
 fi
 
-cd $root_dir/PaddleFleet/examples/experiments/paddlefleet
+cd $root_dir/PaddleFleet/examples
 
 # apt-get update
 #apt-get install jq -y

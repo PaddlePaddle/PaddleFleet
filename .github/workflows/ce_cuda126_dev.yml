@@ -296,8 +296,6 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
-          sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install https://paddle-qa.bj.bcebos.com/paddle-pipeline/Develop-TagBuild-Training-Linux-Gpu-Cuda12.6-Cudnn9.5-Trt10.5-Mkl-Avx-Gcc11-SelfBuiltPypiUse/latest/paddlepaddle_gpu-0.0.0-cp310-cp310-linux_x86_64.whl --index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu126/ --force-reinstall --no-cache-dir
@@ -449,7 +447,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
           cd PaddleFleet
-          cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
+          cp examples/glm45.json examples/glm45_fp8.json
           git config --global --add safe.directory /workspace/PaddleFleet
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
