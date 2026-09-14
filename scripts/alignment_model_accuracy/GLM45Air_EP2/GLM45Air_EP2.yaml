@@ -1,4 +1,4 @@
-# PaddleFormers 单机 EP2 训练配置 - 用于和 ms-swift EP2 精度对齐
+# PaddleFleet 单机 EP2 训练配置 - 用于和 ms-swift EP2 精度对齐
 # 基于 glm_sft_single.yaml; 仅修改并行相关字段
 # 单节点 2 卡: TP=1, PP=1, EP=2, DP=2 (dense 层在 2 卡间复制, 专家按 EP 切分)
 

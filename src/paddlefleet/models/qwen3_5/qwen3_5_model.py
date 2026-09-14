@@ -29,10 +29,13 @@ from typing import TYPE_CHECKING
 
 import paddle
 from paddle import Tensor
+from paddle.autograd import PyLayer
 from paddle.distributed.fleet.meta_parallel import LayerDesc, ScheduleNode
 from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     mark_as_sequence_parallel_parameter,
 )
+
+from paddlefleet.accuracy_target import targets_hf
 
 from ...transformer.transformer_encoder import TransformerEncoder
 
@@ -47,6 +50,54 @@ logger = logging.getLogger(__name__)
 # ======================================================================
 # 1-centered RMSNorm (matching HuggingFace Qwen3_5RMSNorm)
 # ======================================================================
+
+
+class _HFBroadcastScale(PyLayer):
+    """``normed * (1 + weight)`` with torch's weight-gradient reduction order.
+
+    ``weight`` is broadcast over the leading axes, so its gradient is a column
+    reduction of ``normed * grad_out``. Floating-point addition is not
+    associative, so the *row order* of that reduction is part of the answer, and
+    torch's ``TensorIterator`` reorders a reduction to follow the **physical**
+    layout of its operands rather than their logical shape.
+
+    That distinction is visible on the per-head q/k norms. The attention block
+    transposes q and k to head-major before consuming them, so the gradient
+    arriving here is a non-contiguous ``[b, s, h, d]`` view whose strides are
+    ``(b*s*h*d, d, s*d, 1)`` -- physically ``[b, h, s, d]``. torch therefore sums
+    every token of head 0, then every token of head 1, while a logical
+    ``[b, s, h, d]`` reduction interleaves the heads. Against torch's own
+    unrounded FP32 accumulator the logical order differs on 176/256 (``q_norm``)
+    and 197/256 (``k_norm``) elements; head-major matches all 256 exactly.
+
+    Most of those differences round away, but not all: on 14 real captures the
+    logical order leaves one BF16 element wrong in two of them, which is enough to
+    perturb ``k`` and, through attention, the whole layer. Head-major matches every
+    capture (``tools/search_qknorm_roworder.py``).
+
+    ``head_major`` is therefore passed by the caller, which knows whether its
+    output is consumed head-major. Rounding to the parameter dtype happens once, at
+    the end, as in the reference where the ``weight.float()`` cast node rounds the
+    accumulated FP32 gradient.
+    """
+
+    @staticmethod
+    def forward(ctx, normed, weight, head_major=False):
+        ctx.save_for_backward(normed, weight)
+        ctx.head_major = head_major
+        return normed * (1.0 + weight.astype("float32"))
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        normed, weight = ctx.saved_tensor()
+        grad_normed = grad_out * (1.0 + weight.astype("float32"))
+        product = grad_out * normed
+        cols = product.shape[-1]
+        if ctx.head_major and product.ndim == 4:
+            # [b, s, h, d] -> [b, h, s, d], the order torch's iterator walks.
+            product = product.transpose([0, 2, 1, 3])
+        grad_weight = product.reshape([-1, cols]).sum(axis=0, dtype="float32")
+        return grad_normed, grad_weight.astype(weight.dtype)
 
 
 class Qwen3_5RMSNorm(paddle.nn.Layer):
@@ -75,6 +126,7 @@ class Qwen3_5RMSNorm(paddle.nn.Layer):
         input_is_parallel: bool = False,
         normalized_shape: int | None = None,
         norm_eps: float | None = None,
+        head_major_grad: bool = False,
         **kwargs,
     ):
         super().__init__()
@@ -98,6 +150,11 @@ class Qwen3_5RMSNorm(paddle.nn.Layer):
             default_initializer=paddle.nn.initializer.Constant(0.0),
         )
         self.config = config
+        #: Whether this norm's output is consumed head-major, which decides the
+        #: row order of the bit-exact weight-gradient reduction. Set for the
+        #: per-head q/k norms, whose gradient arrives as a ``[b, h, s, d]``
+        #: physical view.
+        self.head_major_grad = head_major_grad
 
         if input_is_parallel:
             self.enable_sequence_parallel()
@@ -109,6 +166,13 @@ class Qwen3_5RMSNorm(paddle.nn.Layer):
         hidden_states = hidden_states * paddle.rsqrt(
             variance + self.variance_epsilon
         )
+        if (
+            targets_hf(getattr(self.config, "use_accuracy_compatible", False))
+            and not self.weight.stop_gradient
+        ):
+            return _HFBroadcastScale.apply(
+                hidden_states, self.weight, self.head_major_grad
+            ).astype(input_dtype)
         return (hidden_states * (1.0 + self.weight.astype("float32"))).astype(
             input_dtype
         )

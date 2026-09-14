@@ -110,8 +110,7 @@ jobs:
             export COMMIT_ID=${{ github.sha }}
             cd /workspace
             source /root/proxy
-            git clone https://github.com/PaddlePaddle/PaddleFormers.git
-            bash -x /workspace/PaddleFormers/tests/integration_test/update_precision.sh
+            bash -x /workspace/test/formers/integration_test/update_precision.sh
           fi
           '
 

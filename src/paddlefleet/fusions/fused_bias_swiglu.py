@@ -20,6 +20,7 @@ import logging
 import paddle
 import paddle.nn.functional as F
 
+from paddlefleet.accuracy_target import targets_hf
 from paddlefleet.jit import jit_fuser
 from paddlefleet.utils import nvtx_decorator
 
@@ -91,8 +92,13 @@ def swiglu_back(g, y):
     return dx
 
 
-def swiglu_back_eager(g, y):
+def swiglu_back_eager(g, y, accuracy_target=True):
+    # ``accuracy_target`` is the caller's ``use_accuracy_compatible`` value.
+    # It defaults to the Megatron arithmetic so that the historical two-argument
+    # call keeps its meaning; only the HF target changes the association order.
     y_1, y_2 = paddle.chunk(y, 2, axis=-1)
+    if targets_hf(accuracy_target):
+        return paddle.concat(swiglu_back_hf_bitexact(g, y_1, y_2), axis=-1)
     return paddle.concat(
         (
             g
@@ -103,6 +109,48 @@ def swiglu_back_eager(g, y):
         ),
         axis=-1,
     )
+
+
+def swiglu_back_hf_bitexact(g, y_1, y_2):
+    """Reproduce ``silu(y_1) * y_2``'s autograd under ``torch.autocast(bfloat16)``.
+
+    The reference graph is two nodes, so the reference gradients are::
+
+        gs  = g * y_2                     # BF16 mul
+        gy2 = g * silu(y_1)               # BF16 mul, silu in BF16
+        gy1 = silu_backward(gs, y_1)      # FP32 internally, result rounded to BF16
+
+    ``silu_backward`` evaluates ``go * s * (1 + x * (1 - s))`` with ``x`` and
+    ``go`` promoted to FP32 and ``s = sigmoid(x)``, rounding only the final
+    product. Three things matter, all confirmed against real captures:
+
+    * the intermediate ``gs`` rounding -- staying in BF16 throughout (the branch
+      above) moves ~28% of the elements;
+    * the factor grouping -- folding ``1 + x * (1 - s)`` differently (for example
+      ``s + x * s * (1 - s)``) moves elements as well; and
+    * the **multiplication order**. ATen's expression is a C++ statement, so it
+      left-associates: ``(go * s) * inner``, with an FP32 rounding after ``go * s``.
+      Writing it as ``go * (s * inner)`` instead rounds ``s * inner`` first and
+      lands one ULP away when the exact result sits near a BF16 tie. On layer 0 of
+      the step-21 capture that costs exactly 1 of 27136 elements
+      (``gate_pre=7.8125e-03``, ``g_act_gate=-4.5776e-05``: the true value is
+      1.8e-12 above the tie between BF16 ``0xb7c1`` and ``0xb7c2``, so the
+      right-associated form rounds the wrong way). That single element propagated
+      into the shared expert's ``gate_proj`` dgrad, then into 3 elements of the MoE
+      block's input gradient, and broke the run at step 23.
+      ``tools/search_silu_backward.py`` sweeps sigmoid formulation x grouping x FMA
+      contraction: every left-associated variant matches, every right-associated
+      one fails.
+    """
+    input_dtype = y_1.dtype
+    with paddle.amp.auto_cast(False):
+        grad_silu_out = g * y_2
+        x = y_1.astype(paddle.float32)
+        go = grad_silu_out.astype(paddle.float32)
+        s = F.sigmoid(x)
+        gy1 = ((go * s) * (1.0 + x * (1.0 - s))).astype(input_dtype)
+        gy2 = g * F.silu(y_1)
+    return gy1, gy2
 
 
 @jit_fuser
@@ -133,10 +181,10 @@ def weighted_swiglu_back(g, y, weights):
     return input_grad.to(input_dtype), weights_grad.to(w_dtype)
 
 
-def weighted_swiglu_back_eager(g, y, weights):
+def weighted_swiglu_back_eager(g, y, weights, accuracy_target=True):
     input_dtype = y.dtype
     w_dtype = weights.dtype
-    input_grad = swiglu_back_eager(g * weights, y)
+    input_grad = swiglu_back_eager(g * weights, y, accuracy_target)
     weights_grad = swiglu_eager(y) * g.cast(w_dtype)
     weights_grad = paddle.sum(weights_grad, axis=-1, keepdim=True)
     return input_grad.cast(input_dtype), weights_grad.cast(w_dtype)
@@ -356,7 +404,7 @@ class BiasSwiGLUFunction(paddle.autograd.PyLayer):
             )
         elif ctx.use_accuracy_compatible:
             y = input + bias
-            tmp = swiglu_back_eager(grad_output, y)
+            tmp = swiglu_back_eager(grad_output, y, ctx.use_accuracy_compatible)
         else:
             tmp = bias_swiglu_back(grad_output, input, bias)
         return tmp, tmp
@@ -422,7 +470,9 @@ class SwiGLUFunction(paddle.autograd.PyLayer):
         if ctx.clamp_value is not None and ctx.clamp_value > 0:
             tmp = clamped_swiglu_back(grad_output, input, ctx.clamp_value)
         elif ctx.use_accuracy_compatible:
-            tmp = swiglu_back_eager(grad_output, input)
+            tmp = swiglu_back_eager(
+                grad_output, input, ctx.use_accuracy_compatible
+            )
         else:
             tmp = swiglu_back(grad_output, input)
         return tmp
@@ -465,7 +515,9 @@ class WeightedSwiGLUFunction(paddle.autograd.PyLayer):
                 grad_output, input, weights, ctx.clamp_value
             )
         elif ctx.use_accuracy_compatible:
-            tmp, wgrad = weighted_swiglu_back_eager(grad_output, input, weights)
+            tmp, wgrad = weighted_swiglu_back_eager(
+                grad_output, input, weights, ctx.use_accuracy_compatible
+            )
         else:
             tmp, wgrad = weighted_swiglu_back(grad_output, input, weights)
         return tmp, wgrad
