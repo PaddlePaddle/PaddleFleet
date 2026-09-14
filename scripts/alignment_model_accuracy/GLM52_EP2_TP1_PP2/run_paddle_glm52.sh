@@ -61,7 +61,7 @@ export MODEL_REPRO_MODEL_REVISION=b4734de4facf877f85769a911abafc5283eab3d9
 export MRK_INVOCATION_ID="${RUN_TAG}"
 export PADDLEFORMERS_DIST_LOG="${RUN_DIR}/workers"
 
-"${VENV_ROOT}/paddle/bin/paddleformers-cli" train "${SCRIPT_DIR}/glm52_paddle.yaml" \
+"${VENV_ROOT}/paddle/bin/paddlefleet-cli" train "${SCRIPT_DIR}/glm52_paddle.yaml" \
     "model_name_or_path=${MODEL_DIR}" "tokenizer_name_or_path=${TOKENIZER_DIR}" \
     "train_dataset_path=${DATA_DIR}/alignment_paddle.jsonl" \
     "output_dir=${RUN_DIR}/trainer" "logging_dir=${RUN_DIR}/vdl" \

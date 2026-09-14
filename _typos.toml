@@ -31,6 +31,10 @@ feeded = 'feeded'
 grad = "grad"
 Halfs = 'Halfs'
 kinf = 'kinf'
+# Part of the HuggingFace dataset name "DoclingMatix" used by CI fixtures
+Matix = 'Matix'
+# Chat-template suffix selecting ERNIE's non-reasoning mode
+nothink = 'nothink'
 operants = 'operants'
 Optin = 'Optin'
 padd = 'padd'

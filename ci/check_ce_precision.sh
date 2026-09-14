@@ -26,7 +26,7 @@ if [[ ! -f "${case_name}.txt" && "$case_name" == *glm* ]]; then
 fi
 
 if [[ "$update_baseline" == "true" ]]; then
-    python PaddleFormers/tests/integration_test/check_loss.py \
+    python PaddleFleet/test/formers/integration_test/check_loss.py \
         --log_file ${case_name}.txt \
         --log_loss_file ${case_gt_file} \
         --extract_loss_only
@@ -55,7 +55,7 @@ if [ $exit_code -ne 0 ]; then
     echo "Failed to download ground truth file ${case_gt_file} for precision check."
     exit $exit_code
 fi
-python  PaddleFormers/tests/integration_test/check_loss.py --log_file ${case_name}.txt --gt_file ${case_gt_file}
+python  PaddleFleet/test/formers/integration_test/check_loss.py --log_file ${case_name}.txt --gt_file ${case_gt_file}
 exit_code=$?
 if [ $exit_code -ne 0 ]; then
     echo "Failed to check precision for ${case_name}."

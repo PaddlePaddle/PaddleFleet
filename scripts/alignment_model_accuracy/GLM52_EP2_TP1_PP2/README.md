@@ -1,12 +1,12 @@
 # GLM52 EP2 / TP1 / PP2 accuracy case
 
-Runs PaddleFormers and Megatron independently for 100 steps on four GPUs with
+Runs PaddleFleet and Megatron independently for 100 steps on four GPUs with
 EP2, TP1, PP2 and sequence parallelism disabled. The model is an official GLM-5.2
 subset: 3 dense layers, 1 MoE layer, 1 MTP layer and 16 experts.
 
 ## Prerequisites
 
-Use the GLM-5.2 implementations from PaddleFleet #1961, PaddleFormers #4956,
+Use the consolidated GLM-5.2 implementation from PaddleFleet #1961,
 PFCCLab/Megatron-LM #4 and PFCCLab/ms-swift #3. Before these changes reach the
 standard wheels, prepare matching environments explicitly and set
 `GLM52_VENV_ROOT` to their parent directory (`paddle/` and `torch/`). This case
@@ -54,7 +54,7 @@ The Paddle YAML sets `hybrid_parallel_expert_grad_scale: 1.0`: EP2/TP1 deferred
 token normalization must not apply the automatic TP/EP scale of 0.5 first.
 
 Both YAML files select numerical alignment with `use_accuracy_compatible: true`.
-PaddleFormers applies the corresponding Paddle backend flag before constructing
+PaddleFleet applies the corresponding Paddle backend flag before constructing
 the GLM model. Model layers receive the mode through configuration or explicit
 function arguments; no `MODEL_REPRO_IEEE_KERNEL` or FP32 accumulator override is
 required. Both sides set `bias_activation_fusion: false` in YAML. Pipeline

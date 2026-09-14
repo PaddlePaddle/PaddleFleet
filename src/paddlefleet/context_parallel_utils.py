@@ -15,16 +15,31 @@
 import inspect
 
 import paddle
-import paddlefleet_ops.flash_mask_facade
 from paddle import distributed as dist
 from paddle.autograd.py_layer import PyLayer
 from paddle.distributed import fleet
 from paddle.nn.functional.flash_attention import flashmask_attention
-from paddlefleet_ops import is_flash_mask_available
-from paddlefleet_ops.flash_mask_facade import (
-    get_fa_version,
-    uses_cutedsl_backend,
-)
+
+try:
+    import paddlefleet_ops.flash_mask_facade
+    from paddlefleet_ops import is_flash_mask_available
+    from paddlefleet_ops.flash_mask_facade import (
+        get_fa_version,
+        uses_cutedsl_backend,
+    )
+except ImportError:
+    # paddlefleet_ops is an optional dependency: the PaddleFormers-side entry
+    # points import this module without the compiled ops installed.
+
+    def is_flash_mask_available():
+        return False
+
+    def get_fa_version(*args, **kwargs):
+        return None
+
+    def uses_cutedsl_backend(*args, **kwargs):
+        return False
+
 
 if is_flash_mask_available():
     try:

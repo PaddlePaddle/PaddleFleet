@@ -299,15 +299,27 @@ class MLP(FleetLayer):
         self,
         hidden_states,
         per_token_scale=None,
+        hidden_states_up=None,
         accuracy_compatible_router_reduction_rows=None,
     ):
-        """Perform the forward pass through the MLP block."""
+        """Perform the forward pass through the MLP block.
+
+        ``hidden_states_up`` splits the fused gate/up projection into two
+        independent autograd consumers, matching a reference implementation that
+        keeps ``gate_proj`` and ``up_proj`` as separate ``nn.Linear`` modules
+        (e.g. HF ``Qwen3_5MoeMLP``). The fused K=2*inter dgrad is *not* bitwise
+        equal to the sum of the two K=inter dgrads, so reproducing the reference
+        gradient requires two projections whose grads enter the accumulation
+        chain separately. Each call sees a grad that is zero on the other half,
+        which is bitwise identical to the narrow per-half GEMM.
+        """
         # [s, b, 4 * h/p]
         nvtx_range_push(suffix="up_gate_proj")
         # Shared experts can inherit an expert-local config while their
         # projections use a larger TP group. Preserve those layers' collectives.
         if (
-            self.config.use_accuracy_compatible
+            hidden_states_up is None
+            and self.config.use_accuracy_compatible
             and self.config.tensor_model_parallel_size == 1
             and getattr(self.up_gate_proj, "world_size", None) == 1
             and get_tensor_model_parallel_world_size() > 1
@@ -317,12 +329,25 @@ class MLP(FleetLayer):
                     self.up_gate_proj, hidden_states
                 )
             )
-        else:
+        elif hidden_states_up is None:
             intermediate_parallel, bias_parallel = deferrable_linear(
                 self.config,
                 self._dw_up_gate_point,
                 self.up_gate_proj,
                 hidden_states,
+            )
+        else:
+            # Two independent consumers, so the shared dw deferral point is not
+            # usable here: it would be armed twice for one weight. The HF
+            # bit-exact path never runs with dw/p2p overlap, so call the
+            # projection directly and leave ``deferrable_linear`` to the default
+            # single-consumer branch above.
+            intermediate_gate, bias_parallel = self.up_gate_proj(hidden_states)
+            intermediate_up, _ = self.up_gate_proj(hidden_states_up)
+            half = intermediate_gate.shape[-1] // 2
+            intermediate_parallel = paddle.concat(
+                [intermediate_gate[..., :half], intermediate_up[..., half:]],
+                axis=-1,
             )
         nvtx_range_pop(suffix="up_gate_proj")
 
