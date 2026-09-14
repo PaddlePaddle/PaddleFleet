@@ -77,7 +77,7 @@ class Qwen3MoEModelProvider(GPTModelProvider):
         "num_experts": "n_routed_experts",
         "num_local_experts": "n_routed_experts",
     }
-
+    rope_theta: float = 1000000.0
     moe_router_pre_softmax: bool = False
     moe_permute_fusion: bool = True
     moe_router_dtype: str = "fp32"
