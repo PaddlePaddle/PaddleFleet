@@ -12,19 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Attention 治理管道（总体方案 §2.1 的 ①-④ 步）。
+"""Attention Plan (the four normalization/validation/resolution/print steps).
 
-在加载之后、层构建之前，对扁平 ``TransformerConfig`` 执行一条显式管道：
+After loading and before layer construction, run an explicit pipeline over the
+flat ``TransformerConfig``:
 
-    ① Normalizer  —— 字段归属注册表驱动的无损归一（别名、类型强转）
-    ② Validator   —— A/B 系列组合校验（只告警模式：默认只告警不报错）
-    ③ Resolver    —— 逐层产出 ``AttentionExecutionPlan``（契约见方案 §2.1.1）
-    ④ Plan 打印   —— rank0 打印 ``[ATTN-PLAN]`` 摘要表 + JSON 落盘
+    1. Normalizer  -- registry-driven lossless normalization (aliases, type
+       coercion)
+    2. Validator   -- combined validation of the A/B rule families (warn-only
+       mode: warn but do not raise by default)
+    3. Resolver    -- produce one ``AttentionExecutionPlan`` per layer
+    4. Plan print  -- rank0 prints the ``[ATTN-PLAN]`` summary table + JSON
+       dump to disk
 
-本模块是 **sidecar**：``gpt_layer_specs`` / ``TransformerBlock`` 的构建链路
-完全不消费这里的 Plan（P3 阶段才做等价重构）。Resolver 的决策树逐条复刻
-``gpt_layer_specs.get_gpt_layer_local_spec`` 的现状优先级，仅用于观测与快照，
-不改任何数值行为。
+This module is a sidecar: the construction chain of
+gpt_layer_specs / TransformerBlock will consume the Plan produced
+here.
+The Resolver's plan method implements the "plan resolution" decision
+tree replicates, branch by branch, the current priority order of
+gpt_layer_specs.get_gpt_layer_local_spec; it is used only for observation
+and snapshots and does not change any numerical behavior.
 """
 
 from __future__ import annotations
@@ -46,40 +53,44 @@ __all__ = [
 ]
 
 # ---------------------------------------------------------------------------
-# ① AttentionFieldRegistry —— 字段归属注册表（单一事实源，雏形）
+# (1) AttentionFieldRegistry -- field-ownership registry (single source of
+#     truth, initial version)
 # ---------------------------------------------------------------------------
 
 Owner = Literal[
-    "common",  # 通用字段，所有 attention 家族可读
-    "mla",  # 仅 MLA（含 dsv4 的 -2 层）
-    "dsv4",  # 仅 dsv4_hybrid 变体（CSA/HCA/window 层）
-    "dsa",  # 仅 DSA indexer
-    "vha",  # 仅 VHA
-    "swa",  # 仅 SWA 层 override
-    "business",  # 跨仓业务字段，PaddleFleet 不读取（显式隔离，如 use_attn_merger）
-    "alias",  # 已废弃别名（经 Normalizer 归一）
+    "common",  # common fields, readable by all attention families
+    "mla",  # MLA only (including dsv4 -2 layers)
+    "dsv4",  # dsv4_hybrid variant only (CSA/HCA/window layers)
+    "dsa",  # DSA indexer only
+    "vha",  # VHA only
+    "swa",  # SWA layer override only
+    "business",  # cross-repo business fields, not read by PaddleFleet
+    # (explicitly isolated, e.g. use_attn_merger)
+    "alias",  # deprecated aliases (normalized by the Normalizer)
 ]
 
 
 @dataclass(frozen=True)
 class FieldSpec:
-    """一条字段归属声明（方案 §2.2-(1)）。"""
+    """A single field-ownership declaration."""
 
     name: str
     owner: Owner
     type: str = "unknown"  # "int" / "float" / "bool" / "str" / "list"
     aliases: tuple[str, ...] = ()
     deprecated: bool = False
-    applies_to: str = ""  # 生效条件说明（人读 + 无人消费检查依据）
+    applies_to: str = ""  # applicability description (human-readable +
+    # input for the unconsumed-field check)
 
 
-# 注册表按 owner 分类登记：一个 owner 一个注册块，一行一个字段。
-# 条目格式：(字段名, 类型, 生效条件说明) 或追加第 4 项 dict 传
-# aliases/deprecated 等差异项。首版只登记治理对象字段（A/B/C/D 系列），
-# 全量登记在 P2/P4 扩展。
+# The registry is organized by owner: one registry block per owner, one field
+# per line. Entry format: (field name, type, applicability description), with
+# an optional 4th dict element carrying extras such as aliases/deprecated.
+# The first version registers only the governed fields (A/B/C/D series);
+# full registration is extended in P2/P4.
 _OWNER_FIELDS: dict[Owner, list[tuple]] = {
     "common": [
-        # --- 变体选择（A 系列） ---
+        # --- variant selection (A series) ---
         (
             "experimental_attention_variant",
             "str",
@@ -91,7 +102,7 @@ _OWNER_FIELDS: dict[Owner, list[tuple]] = {
             "仅当 experimental_attention_variant != dsv4_hybrid 时生效",
         ),
         ("layer_types", "list", "仅非 dsv4 路径逐层类型来源"),
-        # --- RoPE 基础（B 系列，详见 B_rope_config.md §3.1） ---
+        # --- RoPE basics (B series) ---
         ("rope_theta", "float", "唯一 RoPE base 主字段（B2 归一后）"),
         ("rope_type", "str", "MLA/DSA 路径的 rope|yarn 选择；dsv4 按层覆盖"),
         (
@@ -215,11 +226,13 @@ _ALIAS_TO_CANONICAL: dict[str, str] = {
 
 
 def _explicitly_set(config: Any, name: str) -> bool:
-    """字段是否被显式配置为非默认值（dataclass 默认值比对）。
+    """Whether the field is explicitly set to a non-default value
+    (comparison against the dataclass default).
 
-    ``__post_init__`` 会就地推导部分字段（如 ``swa_head_dim``），所以只能
-    近似为"当前值 != dataclass 默认"。只告警阶段该近似只影响告警噪声，不影响
-    正确性。
+    ``__post_init__`` derives some fields in place (e.g. ``swa_head_dim``),
+    so this can only approximate "current value != dataclass default".
+    In the warn-only phase this approximation only affects warning noise,
+    not correctness.
     """
     if not hasattr(config, name):
         return False
@@ -231,18 +244,20 @@ def _explicitly_set(config: Any, name: str) -> bool:
             return value != f.default
         if f.default_factory is not dataclasses.MISSING:  # type: ignore[misc]
             return value != f.default_factory()  # type: ignore[misc]
-    # TransformerConfig 是 dataclass，一般走不到这里；非 dataclass 视为显式。
+    # TransformerConfig is a dataclass, so this is normally unreachable;
+    # treat non-dataclass fields as explicitly set.
     return True
 
 
 # ---------------------------------------------------------------------------
-# Normalizer（①）—— 无损转换
+# Normalizer (1) -- lossless conversion
 # ---------------------------------------------------------------------------
 
 
 @dataclass
 class NormalizationReport:
-    """归一结果：只记录无损转换，不改变任何语义。"""
+    """Normalization result: records lossless conversions only, changing no
+    semantics."""
 
     changes: list[dict] = field(
         default_factory=list
@@ -253,20 +268,85 @@ class NormalizationReport:
         return {"changes": self.changes, "warnings": self.warnings}
 
 
+_SPEC_PY_TYPES: dict[str, type | tuple[type, ...]] = {
+    "int": int,
+    "float": (int, float),  # int is an acceptable float source, coerced below
+    "bool": bool,
+    "str": str,
+    "list": (list, tuple),
+}
+
+# Sentinel: coercion attempted but failed (warning already recorded).
+_COERCE_FAILED = object()
+
+
+def _coerce_value(
+    name: str, spec_type: str, value: Any, report: NormalizationReport
+) -> Any:
+    """Coerce ``value`` to the declared ``spec_type``; warn-only on failure.
+
+    Covers every mismatch between declared and actual type: numeric strings
+    ("160000.0", "3"), string bools ("true"/"false"), float->int (integral
+    only, lossy warned), int->str, and JSON-parseable list strings.
+    """
+    try:
+        if spec_type in ("int", "float"):
+            coerced: Any = float(value)
+            if spec_type == "int":
+                if coerced != int(coerced):
+                    raise ValueError(f"non-integral value {value!r}")
+                coerced = int(coerced)
+        elif spec_type == "bool":
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in ("true", "1", "yes"):
+                    return True
+                if lowered in ("false", "0", "no"):
+                    return False
+                raise ValueError(f"non-boolean string {value!r}")
+            return bool(value)
+        elif spec_type == "str":
+            return str(value)
+        elif spec_type == "list":
+            if isinstance(value, str):
+                parsed = json.loads(value)
+                if not isinstance(parsed, list):
+                    raise ValueError(f"non-list JSON {value!r}")
+                return parsed
+            return list(value)
+        else:  # "unknown" and anything undeclared: leave as-is
+            return _COERCE_FAILED
+    except (ValueError, TypeError):
+        report.warnings.append(
+            {
+                "field": name,
+                "message": (
+                    f"'{name}' declared {spec_type} but got "
+                    f"{type(value).__name__} {value!r} that cannot be coerced"
+                ),
+            }
+        )
+        return _COERCE_FAILED
+    return coerced
+
+
 def normalize_attention_config(
     config: Any, *, apply: bool = True
 ) -> NormalizationReport:
-    """按 registry 声明做无损归一（方案 §2.1 ①）。
+    """Lossless normalization driven by the registry declarations.
 
-    只做两类转换：
-    - 别名归一：旧名（``index_*``）出现在实例字典时映射到 ``dsa_index_*``
-      （TransformerConfig 经 transform_rules 已改名，这里兜直连/外部 config）；
-    - 类型强转：声明为 float/int 的字段喂进字符串数字（如 ``"160000.0"``，
-      B5）时强转，失败仅告警（只告警阶段不 raise）。
+    Only two kinds of conversion are performed:
+    - Alias normalization: when a legacy name (``index_*``) appears in the
+      instance dict, map it to ``dsa_index_*`` (TransformerConfig has already
+      been renamed via transform_rules; this covers direct-constructed /
+      external configs);
+    - Type coercion: fields declared float/int that receive numeric strings
+      (e.g. ``"160000.0"``) are coerced; failure only warns (no raise in the
+      warn-only phase).
     """
     report = NormalizationReport()
 
-    # 别名归一
+    # Alias normalization
     for old, canonical in _ALIAS_TO_CANONICAL.items():
         if old in getattr(config, "__dict__", {}):
             old_value = config.__dict__[old]
@@ -295,25 +375,15 @@ def normalize_attention_config(
                     }
                 )
 
-    # 类型强转（B5：声明类型 vs 实际类型）
+    # Type coercion (declared type vs actual type)
     for name, spec in ATTENTION_FIELD_REGISTRY.items():
-        if spec.type not in ("int", "float") or not hasattr(config, name):
+        if not hasattr(config, name):
             continue
         value = getattr(config, name)
-        if not isinstance(value, str):
+        if value is None or type(value) is _SPEC_PY_TYPES.get(spec.type):
             continue
-        try:
-            coerced: Any = float(value) if spec.type == "float" else int(value)
-        except ValueError:
-            report.warnings.append(
-                {
-                    "field": name,
-                    "message": (
-                        f"'{name}' declared {spec.type} but got "
-                        f"non-numeric string {value!r}"
-                    ),
-                }
-            )
+        coerced = _coerce_value(name, spec.type, value, report)
+        if coerced is _COERCE_FAILED:
             continue
         if apply:
             setattr(config, name, coerced)
@@ -322,7 +392,8 @@ def normalize_attention_config(
                 "field": name,
                 "old": value,
                 "new": coerced,
-                "reason": "numeric string coerced (registry type contract)",
+                "reason": f"{type(value).__name__} coerced to {spec.type} "
+                "(registry type contract)",
             }
         )
 
@@ -330,15 +401,16 @@ def normalize_attention_config(
 
 
 # ---------------------------------------------------------------------------
-# Validator（②）—— 组合校验，只告警模式
+# Validator (2) -- combined validation, warn-only mode
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
 class Finding:
-    """一条校验结果。severity 在只告警模式（log_only）下整体降级为 warning。"""
+    """A single validation result. Under warn-only (log_only) mode every
+    severity is downgraded to warning."""
 
-    rule_id: str  # 如 "V-VAR-01"，对应方案 §一 问题编号
+    rule_id: str  # e.g. "V-VAR-01"
     severity: Literal["error", "warning"]
     message: str
     remediation: str
@@ -347,7 +419,8 @@ class Finding:
 def _validate(
     config: Any, layer_plans: list[AttentionExecutionPlan]
 ) -> list[Finding]:
-    """A/B 系列组合校验（方案 §一 A1-A7、B1/B3）。返回 findings 列表。"""
+    """Combined validation of the rule families. Returns a list of
+    findings."""
     out: list[Finding] = []
     variant = getattr(config, "experimental_attention_variant", None)
     is_dsv4 = variant == "dsv4_hybrid"
@@ -355,7 +428,8 @@ def _validate(
     decoder_plans = [p for p in layer_plans if not p.is_mtp]
     mtp_plans = [p for p in layer_plans if p.is_mtp]
 
-    # VAR-01（§一 A1）：dsv4_hybrid 无条件抢占 multi_latent_attention 标志
+    # VAR-01: dsv4_hybrid unconditionally takes over the
+    # multi_latent_attention flag
     if is_dsv4 and getattr(config, "multi_latent_attention", False):
         out.append(
             Finding(
@@ -371,7 +445,8 @@ def _validate(
             )
         )
 
-    # VAR-02（§一 A2）：dsv4_hybrid 下 layer_types 被 csa_compress_ratios 覆盖
+    # VAR-02: under dsv4_hybrid, layer_types is overridden by
+    # csa_compress_ratios
     if is_dsv4 and getattr(config, "layer_types", None) is not None:
         out.append(
             Finding(
@@ -384,8 +459,9 @@ def _validate(
             )
         )
 
-    # VHA-01（§一 A3）：use_vha_attention 在 gdn/kda/gemma4 下无人读取（self 换类为
-    # SelfAttentionVHA；mla/dsv4 复用为 postmix/premix，是合法生效）
+    # VHA-01: use_vha_attention is read by nobody under gdn/kda/gemma4
+    # (self swaps the class to SelfAttentionVHA; mla/dsv4 reuse it as
+    # postmix/premix, which is a legitimate effect)
     _vha_unread = {"gdn", "kda", "gemma4"}
     if (
         getattr(config, "use_vha_attention", False)
@@ -404,7 +480,7 @@ def _validate(
                 "supports it (self / mla / dsv4).",
             )
         )
-    # VHA-02（§一 A3 细分）：vha_premix 仅 dsv4 层读
+    # VHA-02 (finer-grained): vha_premix is only read by dsv4 layers
     if getattr(config, "use_vha_premix", False) and not (families & {"dsv4"}):
         out.append(
             Finding(
@@ -417,7 +493,7 @@ def _validate(
             )
         )
 
-    # VAR-03（§一 A4）：MTP 层类型只看 multi_latent_attention 标志
+    # VAR-03: MTP layer types look only at the multi_latent_attention flag
     if mtp_plans and decoder_plans and not is_dsv4:
         mtp_families = {p.family for p in mtp_plans}
         decoder_families = {p.family for p in decoder_plans}
@@ -435,7 +511,8 @@ def _validate(
                 )
             )
 
-    # VAR-04（§一 A5）：gemma4 与 dsv4_hybrid 组合，gemma4 判定在 dsv4 重写之后
+    # VAR-04: gemma4 combined with dsv4_hybrid; the gemma4 branch is checked
+    # after the dsv4 rewrite
     layer_types = getattr(config, "layer_types", None)
     if (
         is_dsv4
@@ -453,7 +530,8 @@ def _validate(
             )
         )
 
-    # MLA-01（§一 A6）：MLA 不支持 GQA/MQA（num_key_value_heads 被钉死），报错晚
+    # MLA-01: MLA does not support GQA/MQA (num_key_value_heads is pinned);
+    # the error surfaces late
     if "mla" in families and not is_dsv4:
         nkv = getattr(config, "num_key_value_heads", None)
         nq = getattr(config, "num_attention_heads", None)
@@ -470,7 +548,8 @@ def _validate(
                 )
             )
 
-    # VAR-05（§一 A7）：hy_sparse 的 MLA 资格检查用重写之前的 attention_layer_type 形参
+    # VAR-05: hy_sparse's MLA eligibility check uses the pre-rewrite
+    # attention_layer_type argument
     if getattr(config, "enable_hy_sparse_attention", False) and is_dsv4:
         if not getattr(config, "multi_latent_attention", False) and not any(
             p.family == "mla" for p in decoder_plans
@@ -490,7 +569,7 @@ def _validate(
                 )
             )
 
-    # ROPE-01（§一 B1）：MLA 维度字段误配到 DSv4/CSA 层
+    # ROPE-01: MLA dimension fields misconfigured onto DSv4/CSA layers
     if is_dsv4 and any(p.family == "dsv4" for p in decoder_plans):
         for mla_field in ("qk_rope_head_dim", "qk_nope_head_dim"):
             if _explicitly_set(config, mla_field):
@@ -507,13 +586,16 @@ def _validate(
                 )
                 break
 
-    # ROPE-02（§一 B2）：dsv4 下 qk_pos_emb_head_dim None → RoPE 宽度静默为 0
+    # ROPE-02: under dsv4, qk_pos_emb_head_dim None -> RoPE width silently
+    # becomes 0
     if is_dsv4 and getattr(config, "qk_pos_emb_head_dim", None) is None:
         out.append(
             Finding(
                 "V-ROPE-02",
-                "error",  # 静默改变模型行为（RoPE 被关）：按 severity 标准是
-                # error；只告警模式下仍只打 W 行，观察期结束后随拦截模式生效
+                "error",  # silently changes model behavior (RoPE disabled):
+                # per the severity standard this is an error; warn-only mode
+                # still prints just a W line until the observation period ends
+                # and the blocking mode is enabled
                 "'qk_pos_emb_head_dim' is None on the dsv4_hybrid path: "
                 "DSv4/CSA layers resolve RoPE width to 0 (RoPE silently "
                 "disabled).",
@@ -522,7 +604,7 @@ def _validate(
             )
         )
 
-    # ROPE-03（§一 B3）：rotary_interleaved 在 DSv4/CSA eager 路径被硬编码忽略
+    # ROPE-03: rotary_interleaved is hardcoded away on the DSv4/CSA eager path
     if is_dsv4 and getattr(config, "rotary_interleaved", False):
         out.append(
             Finding(
@@ -532,11 +614,12 @@ def _validate(
                 "eager RoPE path (hardcoded non-interleaved layout); the "
                 "config is silently ignored.",
                 "Set rotary_interleaved=false, or wait for the DSv4 "
-                "interleaved implementation (B_rope_config.md §3.3).",
+                "interleaved implementation.",
             )
         )
 
-    # ROPE-04（§一 B4）：dsa_indexer_rotary_interleaved 仅在 DSA indexer 存在时生效
+    # ROPE-04: dsa_indexer_rotary_interleaved only takes effect when a DSA
+    # indexer exists
     if _explicitly_set(config, "dsa_indexer_rotary_interleaved") and not any(
         "indexer" in p.notes for p in layer_plans
     ):
@@ -555,32 +638,37 @@ def _validate(
 
 
 # ---------------------------------------------------------------------------
-# ③ AttentionExecutionPlan（数据契约，方案 §2.1.1）
+# (3) AttentionExecutionPlan (data contract)
 # ---------------------------------------------------------------------------
 
-# family 只表示"注意力计算结构"（self/mla/dsv4/gdn/kda/gemma4）。VHA、
-# gated_attention、hy_sparse、SWA 是横跨家族的纵向能力：VHA 用
-# qkv_layout=shared_kv 表达，其余进 capabilities / swa 列。
+# family only denotes the "attention computation structure"
+# (self/mla/dsv4/gdn/kda/gemma4). VHA, gated_attention, hy_sparse and SWA
+# are vertical capabilities that cut across families: VHA is expressed via
+# qkv_layout=shared_kv; the rest go into capabilities / the swa column.
 Family = Literal["self", "mla", "dsv4", "gdn", "kda", "gemma4", "cross"]
-# 纵向能力（可叠加，不互斥）
+# Vertical capabilities (stackable, not mutually exclusive)
 Capability = Literal[
-    "vha",  # self family：换整个类为 SelfAttentionVHA
-    "vha_postmix",  # mla/dsv4：复用开关，只在输出头空间加低秩 postmix
-    "vha_premix",  # dsv4：Q up-projection 换结构化 premix（需 vha_postmix 同开）
+    "vha",  # self family: swaps the whole class for SelfAttentionVHA
+    "vha_postmix",  # mla/dsv4: reuses the flag, only adds a low-rank postmix
+    # in the output head space
+    "vha_premix",  # dsv4: structured premix for the Q up-projection
+    # (requires vha_postmix as well)
     "gated_attention",
     "hy_sparse",
 ]
 Core = Literal[
-    "dot_product",  # 标准 backend.core_attention()（eager/sdpa 在运行期协商）
-    "linear",  # GDN/KDA 线性注意力
+    "dot_product",  # standard backend.core_attention() (eager/sdpa
+    # negotiated at runtime)
+    "linear",  # GDN/KDA linear attention
     "dsa",  # DSAttention + DSA indexer
-    "csa",  # CompressedSparseAttention（core_detail 区分 hca/csa/window/mqa）
-    "mqa_latent",  # MQALatentAttention（latent MQA 吸收路径）
+    "csa",  # CompressedSparseAttention (core_detail distinguishes
+    # hca/csa/window/mqa)
+    "mqa_latent",  # MQALatentAttention (latent MQA absorption path)
 ]
 QkvLayout = Literal["mha", "gqa", "latent", "shared_kv", "linear"]
 PositionType = Literal["none", "rope", "yarn", "mrope"]
 PositionLayout = Literal[
-    "STANDARD",  # 标准 partial rope（rope_first 段序）
+    "STANDARD",  # standard partial rope (rope_first segment order)
     "MLA_EAGER",
     "MLA_FUSED_PAIR",
     "MLA_FUSED_INPLACE_INTERLEAVED",
@@ -592,23 +680,27 @@ SegmentOrder = Literal["nope_first", "rope_first"]
 
 @dataclass(frozen=True)
 class RopeSpec:
-    """position 列的完整展开（方案 §2.1.2：RoPE 信息必须完整展示）。"""
+    """Full expansion of the position column (RoPE information must be shown
+    completely)."""
 
     type: PositionType
     base: float
     dim: int
     layout: PositionLayout
     segment_order: SegmentOrder
-    # True/False = 实际生效值；"ignored" = 该路径硬编码、config 被无视（挂 W 行）
+    # True/False = the effective value; "ignored" = hardcoded on that path,
+    # the config is disregarded (attached W line)
     interleave: Any
-    yarn_params: dict = field(default_factory=dict)  # 与默认不同的 yarn 参数
+    yarn_params: dict = field(default_factory=dict)  # yarn params that
+    # differ from defaults
 
     def render(self) -> str:
         text = (
             f"{self.type}(base={_fmt_num(self.base)}, dim={self.dim}, "
             f"layout={self.layout}, seg={self.segment_order}"
         )
-        # B3：被路径硬编码忽略的 interleave 也必须显式展示（方案 §2.1.2）
+        # An interleave ignored via a hardcoded path must also be shown
+        # explicitly
         text += f", interleave={self.interleave}"
         for key, value in sorted(self.yarn_params.items()):
             text += f", {key}={_fmt_num(value)}"
@@ -623,17 +715,21 @@ def _fmt_num(value: Any) -> str:
 
 @dataclass(frozen=True)
 class AttentionExecutionPlan:
-    """每层一条的执行计划（契约见总体方案 §2.1.1）。
+    """Per-layer execution plan (one entry per layer).
 
-    与方案的差异（登记于方案文档实现记录）：
-    - 新增 ``index`` / ``layer_number`` / ``is_mtp`` / ``core_detail`` /
-      ``notes``：快照与打印需要层定位与 core 细分（hca/csa/window/mqa）；
-    - ``precision`` / ``recompute`` 首版为摘要字符串（P3 重构时结构化）；
-    - 枚举新增 ``core=dot_product|linear``、``qkv_layout=linear``。
+    Differences from the original contract (recorded in the plan document's
+    implementation notes):
+    - Added ``index`` / ``layer_number`` / ``is_mtp`` / ``core_detail`` /
+      ``notes``: snapshots and printing need layer positioning and core
+      granularity (hca/csa/window/mqa);
+    - ``precision`` / ``recompute`` are summary strings in the first version
+      (to be structured during the P3 refactor);
+    - Enums gained ``core=dot_product|linear`` and ``qkv_layout=linear``.
     """
 
-    index: int  # 逻辑层下标（decoder 从 0，MTP 紧随其后）
-    layer_number: int  # 传给 get_gpt_layer_local_spec 的物理层号
+    index: int  # logical layer index (decoder from 0, MTP right after)
+    layer_number: int  # physical layer number passed to
+    # get_gpt_layer_local_spec
     is_mtp: bool
     family: Family
     core: Core
@@ -645,22 +741,26 @@ class AttentionExecutionPlan:
     precision: str = ""
     recompute: str = ""
     notes: tuple[str, ...] = ()
-    # 本层实际生效的维度字段（镜像各家族 __init__ 的读取点，C1-C3 的观测面）：
-    # MLA 读 q_lora_rank/qk_rope_head_dim 等，dsv4 -2 层读 hybrid_mla_*，
-    # CSA/HCA/window 层读 v_head_dim/qk_pos_emb_head_dim，VHA 读
-    # vha_q_lora_rank，GDN/KDA 读 linear_*。SWA 层记录 swa_* override 后的
-    # 取值。进 JSON（打印/落盘/快照），摘要表不展示以免过宽。
+    # Dimension fields actually effective on this layer (mirrors of each
+    # family's __init__ read points, the observation surface of C1-C3):
+    # MLA reads q_lora_rank/qk_rope_head_dim etc., dsv4 -2 layers read
+    # hybrid_mla_*, CSA/HCA/window layers read v_head_dim/qk_pos_emb_head_dim,
+    # VHA reads vha_q_lora_rank, GDN/KDA read linear_*. SWA layers record the
+    # values after swa_* overrides. Goes into JSON (print/dump/snapshot); the
+    # summary table omits it to stay narrow.
     dims: dict = field(default_factory=dict)
-    # 本层 q/k norm 实际类型（C4 的观测面）："none" | "LayerNorm" |
-    # "RMSNorm" | "L2" | "triton-rms"（qk_norm_fusion 融合核）
+    # Actual q/k norm type on this layer (observation surface of C4):
+    # "none" | "LayerNorm" | "RMSNorm" | "L2" | "triton-rms"
+    # (qk_norm_fusion fused kernel)
     qk_norm: str = "none"
-    # 纵向能力（横跨家族、可叠加）：vha / gated_attention / hy_sparse。
-    # 与 family（计算结构）正交：VHA 是 self 的投影变体（qkv_layout=
-    # shared_kv），门控是 self/mla/dsv4 都能挂的 gate_proj。
+    # Vertical capabilities (cross-family, stackable): vha / gated_attention /
+    # hy_sparse. Orthogonal to family (computation structure): VHA is a
+    # projection variant of self (qkv_layout=shared_kv); gating is a
+    # gate_proj that self/mla/dsv4 can all carry.
     capabilities: tuple[str, ...] = ()
 
     def to_json(self) -> dict:
-        """打印、落盘、快照三者共用的序列化（方案 §2.1.2）。"""
+        """Serialization shared by printing, disk dump and snapshot."""
         d = dataclasses.asdict(self)
         d["position"] = (
             dataclasses.asdict(self.position)
@@ -672,7 +772,7 @@ class AttentionExecutionPlan:
 
 @dataclass
 class AttentionPlanBundle:
-    """整个 config 的 resolve 结果。"""
+    """Resolve result for the whole config."""
 
     variant: str | None
     layers: list[AttentionExecutionPlan] = field(default_factory=list)
@@ -682,7 +782,7 @@ class AttentionPlanBundle:
     )
     log_only: bool = True
 
-    # -- 聚合统计（§2.1.2 头部） --
+    # -- Aggregate statistics (table header) --
     def family_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
         for p in self.layers:
@@ -690,7 +790,7 @@ class AttentionPlanBundle:
         return counts
 
     def rope_groups(self) -> int:
-        """RoPE base/type 不一致的层组数。"""
+        """Number of layer groups with inconsistent RoPE base/type."""
         return len(
             {
                 (p.position.type, p.position.base)
@@ -718,12 +818,13 @@ class AttentionPlanBundle:
 
 
 # ---------------------------------------------------------------------------
-# ④ 打印（rank0 摘要表，§2.1.2）
+# (4) Printing (rank0 summary table)
 # ---------------------------------------------------------------------------
 
 
 def format_plan_lines(bundle: AttentionPlanBundle) -> list[str]:
-    """渲染 ``[ATTN-PLAN]`` 摘要表（每行已带前缀）。"""
+    """Render the ``[ATTN-PLAN]`` summary table (each line already carries
+    the prefix)."""
     lines: list[str] = []
     n_warn = len(bundle.findings)
     lines.append(
@@ -762,12 +863,13 @@ def _is_rank0() -> bool:
         if not paddle.distributed.is_initialized():
             return True
         return paddle.distributed.get_rank() == 0
-    except Exception:  # pragma: no cover - 无 paddle 分布式环境
+    except Exception:  # pragma: no cover - no paddle distributed environment
         return True
 
 
 def _dump_plan_json(config: Any, bundle: AttentionPlanBundle) -> None:
-    """JSON 落盘：复用 config_logger（config_logger_dir 未设置则跳过）。"""
+    """Dump JSON to disk: reuses config_logger (skipped if
+    config_logger_dir is not set)."""
     try:
         from paddlefleet.config_logger import (
             has_config_logger_enabled,
@@ -784,12 +886,13 @@ def _dump_plan_json(config: Any, bundle: AttentionPlanBundle) -> None:
             prefix="attention_plan",
         )
     except Exception:
-        # 落盘失败不阻断构建（sidecar 约束）
+        # A dump failure must not block construction (sidecar constraint)
         pass
 
 
 # ---------------------------------------------------------------------------
-# ③ Resolver —— 复刻 gpt_layer_specs 的现状优先级（逐字节对齐，仅观测）
+# (3) Resolver -- replicates gpt_layer_specs' current priority order
+#     (byte-for-byte aligned, observation only)
 # ---------------------------------------------------------------------------
 
 _FAMILY_BY_LAYER_TYPE = {
@@ -805,11 +908,11 @@ _FAMILY_BY_LAYER_TYPE = {
 
 
 def _ratio_kind(ratio: int) -> tuple[str, str | None]:
-    """csa_compress_ratios 取值 → (family, core_detail)。
+    """csa_compress_ratios value -> (family, core_detail).
 
-    来源：gpt_layer_specs._get_dsv4_hybrid_attention_layer_type 与
-    hf_export.py 的 ratio 约定注释（-2 → MLA；-1 → CSA full-causal MQA；
-    0 → window；128 → HCA；[2,128) → CSA）。
+    Source: gpt_layer_specs._get_dsv4_hybrid_attention_layer_type and the
+    ratio convention comments in hf_export.py (-2 -> MLA; -1 -> CSA
+    full-causal MQA; 0 -> window; 128 -> HCA; [2,128) -> CSA).
     """
     if ratio == -2:
         return "mla", None
@@ -825,7 +928,8 @@ def _ratio_kind(ratio: int) -> tuple[str, str | None]:
 
 
 def _is_swa_layer(config: Any, logical_index: int) -> bool:
-    """标准路径 SWA 判定（attention.py:250-273 的镜像，逻辑层号）。"""
+    """Standard-path SWA decision (mirror of attention.py:250-273, by
+    logical layer index)."""
     sliding_window = getattr(config, "sliding_window", None)
     if not sliding_window:
         return False
@@ -853,7 +957,7 @@ def _yarn_extras(config: Any) -> dict:
 
 
 def _standard_rope_spec(config: Any, is_swa: bool) -> RopeSpec:
-    """标准 / VHA / gemma4 家族的 position。"""
+    """Position for the standard / VHA / gemma4 families."""
     pet = getattr(config, "position_embedding_type", "learned_absolute")
     if pet in ("learned_absolute", "none"):
         return RopeSpec(
@@ -889,7 +993,8 @@ def _standard_rope_spec(config: Any, is_swa: bool) -> RopeSpec:
 
 
 def _mla_rope_spec(config: Any, is_dsv4_hybrid: bool, is_swa: bool) -> RopeSpec:
-    """MLA 家族（含 dsv4 -2 层）的 position（multi_latent_attention.py:476-505）。"""
+    """Position for the MLA family (incl. dsv4 -2 layers)
+    (multi_latent_attention.py:476-505)."""
     pos_type = (
         "yarn" if getattr(config, "rope_type", "yarn") == "yarn" else "rope"
     )
@@ -914,7 +1019,8 @@ def _mla_rope_spec(config: Any, is_dsv4_hybrid: bool, is_swa: bool) -> RopeSpec:
 
 
 def _dsv4_rope_spec(config: Any, ratio: int) -> RopeSpec:
-    """DSv4/CSA/HCA/window 层的 position（dsv4_hybrid_attention.py:720-771 镜像）。"""
+    """Position for DSv4/CSA/HCA/window layers
+    (mirror of dsv4_hybrid_attention.py:720-771)."""
     if ratio == 128:
         per_type = getattr(config, "hca_rope_type", None)
     elif 2 <= ratio < 128:
@@ -934,7 +1040,8 @@ def _dsv4_rope_spec(config: Any, ratio: int) -> RopeSpec:
         dim=int(dim),
         layout="DSV4_CSA_EAGER",
         segment_order="nope_first",
-        interleave="ignored",  # B3：DSv4/CSA eager 路径硬编码非交错
+        interleave="ignored",  # the DSv4/CSA eager path hardcodes
+        # non-interleaved
         yarn_params=_yarn_extras(config) if pos_type == "yarn" else {},
     )
 
@@ -954,13 +1061,16 @@ def _recompute_summary(config: Any) -> str:
 
 
 def _qk_norm_of(config: Any, family: str, is_dsv4_hybrid: bool) -> str:
-    """本层 q/k norm 类型（gpt_layer_specs 的 q_norm/k_norm 选路镜像）。
+    """q/k norm type on this layer (mirror of the q_norm/k_norm selection in
+    gpt_layer_specs).
 
-    - self/vha：qk_l2_norm → L2；use_qk_norm → RMSNorm/LayerNorm，
-      RMSNorm + qk_norm_fusion（head_dim=128 限制在 kernel 内）→ triton-rms
-    - mla（含 dsv4 -2 层）：use_qk_norm → q_a/kv_a LayerNorm（RMSNorm 化）
-    - dsv4 CSA/HCA/window：qk_layernorm（缺省 True）→ RMSNorm 化
-    - gemma4：恒开标准 norm；gdn/kda：无 qk norm（仅 out_norm）
+    - self/vha: qk_l2_norm -> L2; use_qk_norm -> RMSNorm/LayerNorm,
+      RMSNorm + qk_norm_fusion (head_dim=128 limit enforced inside the
+      kernel) -> triton-rms
+    - mla (incl. dsv4 -2 layers): use_qk_norm -> q_a/kv_a LayerNorm
+      (RMSNorm-ified)
+    - dsv4 CSA/HCA/window: qk_layernorm (defaults to True) -> RMSNorm-ified
+    - gemma4: standard norm always on; gdn/kda: no qk norm (out_norm only)
     """
     if family in ("gdn", "kda"):
         return "none"
@@ -986,7 +1096,7 @@ def _qk_norm_of(config: Any, family: str, is_dsv4_hybrid: bool) -> str:
 
 
 def _dims_mla(config: Any, is_dsv4_hybrid: bool, is_swa: bool) -> dict:
-    """MLA 家族维度（multi_latent_attention.py:334-398 镜像）。"""
+    """MLA family dimensions (mirror of multi_latent_attention.py:334-398)."""
     if is_dsv4_hybrid:
         dims = {
             "q_lora_rank": config.hybrid_mla_q_lora_rank,
@@ -995,7 +1105,7 @@ def _dims_mla(config: Any, is_dsv4_hybrid: bool, is_swa: bool) -> dict:
             "qk_rope_head_dim": config.hybrid_mla_qk_rope_head_dim,
             "v_head_dim": config.hybrid_mla_v_head_dim,
             "num_attention_heads": config.hybrid_mla_num_attention_heads,
-            # num_key_value_heads 被钉死为 num_attention_heads（A6）
+            # num_key_value_heads is pinned to num_attention_heads
             "num_key_value_heads": config.hybrid_mla_num_attention_heads,
         }
         return dims
@@ -1006,9 +1116,9 @@ def _dims_mla(config: Any, is_dsv4_hybrid: bool, is_swa: bool) -> dict:
         "qk_rope_head_dim": config.qk_rope_head_dim,
         "v_head_dim": config.v_head_dim,
         "num_attention_heads": config.num_attention_heads,
-        "num_key_value_heads": config.num_attention_heads,  # A6：钉死
+        "num_key_value_heads": config.num_attention_heads,  # pinned
     }
-    if is_swa:  # D2：SWA 层整体换一套维度
+    if is_swa:  # SWA layers swap in a whole different dimension set
         if getattr(config, "swa_qk_nope_head_dim", None) is not None:
             dims["qk_nope_head_dim"] = config.swa_qk_nope_head_dim
         if getattr(config, "swa_qk_rope_head_dim", None) is not None:
@@ -1017,11 +1127,12 @@ def _dims_mla(config: Any, is_dsv4_hybrid: bool, is_swa: bool) -> dict:
 
 
 def _dims_dsv4(config: Any, ratio: int) -> dict:
-    """DSv4/CSA/HCA/window 层维度（dsv4_hybrid_attention.py:687-708 镜像）。"""
+    """DSv4/CSA/HCA/window layer dimensions
+    (mirror of dsv4_hybrid_attention.py:687-708)."""
     return {
         "num_attention_heads": config.num_attention_heads,  # n_local_heads
         "v_head_dim": config.v_head_dim,
-        "q_head_dim": config.v_head_dim,  # q_head_dim = v_head_dim（C3）
+        "q_head_dim": config.v_head_dim,  # q_head_dim = v_head_dim
         "qk_pos_emb_head_dim": getattr(config, "qk_pos_emb_head_dim", None)
         or 0,
         "compress_ratio": ratio,
@@ -1030,8 +1141,9 @@ def _dims_dsv4(config: Any, ratio: int) -> dict:
 
 
 def _dims_standard(config: Any, is_swa: bool) -> dict:
-    """标准 self/gemma4 家族维度（attention.py:275-303 镜像）。"""
-    if is_swa:  # SWA 层换用 swa_* override（attention.py:275-280）
+    """Standard self/gemma4 family dimensions
+    (mirror of attention.py:275-303)."""
+    if is_swa:  # SWA layers use the swa_* overrides (attention.py:275-280)
         return {
             "num_attention_heads": config.swa_num_attention_heads,
             "num_key_value_heads": config.swa_num_key_value_heads,
@@ -1050,7 +1162,7 @@ def _dims_standard(config: Any, is_swa: bool) -> dict:
 
 
 def _dims_vha(config: Any, is_swa: bool) -> dict:
-    """VHA 维度（attention.py:1197-1213 镜像；C2）。"""
+    """VHA dimensions (mirror of attention.py:1197-1213)."""
     nq = getattr(config, "num_attention_heads", None)
     dims = {
         "vha_shared_kv": getattr(config, "vha_shared_kv", False),
@@ -1059,7 +1171,7 @@ def _dims_vha(config: Any, is_swa: bool) -> dict:
             if is_swa and getattr(config, "swa_vha_q_lora_rank", None)
             else getattr(config, "vha_q_lora_rank", None)
         ),
-        # 缺省静默推导 num_attention_heads // 4（C2）
+        # num_attention_heads // 4 is silently derived by default
         "vha_postmix_rank": (
             config.swa_vha_postmix_rank
             if is_swa and getattr(config, "swa_vha_postmix_rank", None)
@@ -1072,7 +1184,7 @@ def _dims_vha(config: Any, is_swa: bool) -> dict:
 
 
 def _dims_linear(config: Any) -> dict:
-    """GDN/KDA 维度（gpt_layer_specs.py:284-291 的读取镜像）。"""
+    """GDN/KDA dimensions (mirror of the reads in gpt_layer_specs.py:284-291)."""
     return {
         "linear_conv_kernel_dim": getattr(config, "linear_conv_kernel_dim", 4),
         "linear_key_head_dim": getattr(config, "linear_key_head_dim", 128),
@@ -1096,7 +1208,8 @@ def _resolve_dsv4_layer(
     notes: list[str] = []
     capabilities: list[str] = []
     if getattr(config, "use_vha_attention", False):
-        # MLA(-2) 层与 CSA/HCA/window 层都复用该开关做 postmix（:667/:913）
+        # Both the MLA(-2) layers and the CSA/HCA/window layers reuse this
+        # flag for postmix (:667/:913)
         capabilities.append("vha_postmix")
     if (
         family == "dsv4"
@@ -1173,11 +1286,13 @@ def _resolve_standard_layer(
     notes: list[str] = []
     capabilities: list[str] = []
     if family == "self" and getattr(config, "use_vha_attention", False):
-        # VHA 不是独立 family：self 的投影变体，qkv_layout 表达布局，
-        # capabilities 记录能力开关（纵向，横跨家族）。
+        # VHA is not a separate family: it is a projection variant of self;
+        # qkv_layout expresses the layout, capabilities records the
+        # capability flag (vertical, cross-family).
         capabilities.append("vha")
     if family == "mla" and getattr(config, "use_vha_attention", False):
-        # MLA/MQA 不换类，复用开关只加输出头空间 postmix（:667）
+        # MLA/MQA does not swap the class; the flag is reused to only add an
+        # output-head-space postmix (:667)
         capabilities.append("vha_postmix")
     if getattr(config, "gated_attention", False) and family in (
         "self",
@@ -1263,12 +1378,14 @@ def _effective_mtp_layers(config: Any) -> int:
 def resolve_attention_plan(
     config: Any, *, log_only: bool = True
 ) -> AttentionPlanBundle:
-    """Resolve：逐层产出 AttentionExecutionPlan（方案 §2.1 ③）。
+    """Resolve: produce one AttentionExecutionPlan per layer.
 
-    决策树复刻 ``gpt_layer_specs.get_gpt_layer_local_spec`` 的现状优先级：
-    dsv4_hybrid（csa_compress_ratios 逐层）→ multi_latent_attention flag →
-    attention_layer_type（layer_types 或缺省）。第一个版本必须与现状逐字节
-    对齐（快照基线），之后才允许收敛。
+    The decision tree replicates the current priority order of
+    ``gpt_layer_specs.get_gpt_layer_local_spec``: dsv4_hybrid (per-layer
+    csa_compress_ratios) -> multi_latent_attention flag ->
+    attention_layer_type (layer_types or default). The first version must be
+    byte-for-byte aligned with current behavior (snapshot baseline); only
+    afterwards is convergence allowed.
     """
     variant = getattr(config, "experimental_attention_variant", None)
     is_dsv4 = variant == "dsv4_hybrid"
@@ -1281,8 +1398,9 @@ def resolve_attention_plan(
         for i in range(num_layers):
             ratio = ratios[i] if i < len(ratios) else None
             if ratio is None:
-                # 现状：_get_dsv4_hybrid_attention_layer_type 在此 raise；
-                # sidecar 只跳过（构建期会报，不重复）。
+                # Current behavior: _get_dsv4_hybrid_attention_layer_type
+                # raises here; the sidecar just skips (construction-time
+                # reporting already covers it, no duplication).
                 continue
             layers.append(
                 _resolve_dsv4_layer(
@@ -1307,20 +1425,23 @@ def resolve_attention_plan(
             )
             layer_types = [fallback] * num_layers
         for i, layer_type in enumerate(layer_types):
-            # get_attention_spec 里的同义映射（gpt_layer_specs.py:200-203）
+            # Synonym mapping in get_attention_spec
+            # (gpt_layer_specs.py:200-203)
             layer_type = {
                 "full_attention": "self_attention",
                 "linear_attention": "gated_delta_net",
             }.get(layer_type, layer_type)
             if layer_type not in _FAMILY_BY_LAYER_TYPE:
-                continue  # 构建期会 raise；sidecar 不重复
+                continue  # construction-time will raise; the sidecar does not
+                # duplicate
             layers.append(
                 _resolve_standard_layer(
                     config, i, i + head_offset, False, layer_type
                 )
             )
         for m in range(_effective_mtp_layers(config)):
-            # A4 现状：MTP 只看 multi_latent_attention 标志（gpt_layer_specs:877）
+            # Current behavior: MTP looks only at the
+            # multi_latent_attention flag (gpt_layer_specs:877)
             mtp_type = (
                 "multi_latent_attention"
                 if getattr(config, "multi_latent_attention", False)
@@ -1340,7 +1461,7 @@ def resolve_attention_plan(
 
 
 # ---------------------------------------------------------------------------
-# 管道入口（① → ② → ③ → ④）
+# Pipeline entry point (1 -> 2 -> 3 -> 4)
 # ---------------------------------------------------------------------------
 
 
@@ -1350,21 +1471,24 @@ def run_attention_plan(
     log_only: bool = True,
     print_plan: bool = True,
 ) -> AttentionPlanBundle:
-    """执行 ①-④ 全管道并返回 Plan（sidecar：不参与构建决策）。
+    """Run the full pipeline and return the Plan (sidecar: takes no part in
+    construction decisions).
 
-    只告警模式（``log_only=True``，默认）：Validator 的 error 也只作为
-    ``[ATTN-PLAN]`` 告警行输出，不 raise——观察一个版本周期后再转 hard
-    error（方案 §三 原则 3）。``log_only=False`` 时 error 级 finding 直接
-    抛出（含迁移指引文案）。
+    Warn-only mode (``log_only=True``, the default): the Validator's errors
+    are also emitted only as ``[ATTN-PLAN]`` warning lines, no raise --
+    switch to hard errors after observing for one release cycle. With
+    ``log_only=False``, error-severity findings raise directly (with
+    migration-guidance text).
     """
-    # ① Normalizer（无损转换，直接作用于 config）
+    # (1) Normalizer (lossless conversion, applied directly to config)
     report = normalize_attention_config(config)
 
-    # ③ Resolver（② Validator 在 resolve 内部跑，基于 resolve 后的层结构）
+    # (3) Resolver ((2) Validator runs inside resolve, based on the resolved
+    # layer structure)
     bundle = resolve_attention_plan(config, log_only=log_only)
     bundle.normalization = report
 
-    # ④ 打印 + 落盘
+    # (4) Print + dump to disk
     if print_plan and _is_rank0():
         for line in format_plan_lines(bundle):
             print(line)
