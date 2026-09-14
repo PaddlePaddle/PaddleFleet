@@ -865,7 +865,9 @@ class MultiTokenPredictionLayer(FleetLayer):
             # The canonical DSV4 replay stores these parameters in model dtype;
             # learned_output_contract() still widens the computation internally.
             hc_param_dtype = (
-                config.params_dtype if use_dsv4_accuracy_compatible() else "float32"
+                config.params_dtype
+                if use_dsv4_accuracy_compatible()
+                else "float32"
             )
             self.hc_head_fn = self.create_parameter(
                 shape=[hc_dim, n],

@@ -1098,7 +1098,11 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             handle.wait()
 
         seqfirst_grad_weight = None
-        if wgrad_compute and input is not None and use_dsv4_accuracy_compatible():
+        if (
+            wgrad_compute
+            and input is not None
+            and use_dsv4_accuracy_compatible()
+        ):
             from paddlefleet.accuracy_compatible_patch import (
                 linear_seqfirst_wgrad,
             )

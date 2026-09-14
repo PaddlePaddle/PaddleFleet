@@ -671,9 +671,7 @@ class DeepseekV4PreTrainedModel(PretrainedModel):
                 ]
 
             # --- MoE Gate ---
-            gate_weight_stmt = (
-                f"{src}.ffn.gate.weight -> {tgt}.mlp.gate.weight"
-            )
+            gate_weight_stmt = f"{src}.ffn.gate.weight -> {tgt}.mlp.gate.weight"
             if not use_accuracy_patch:
                 gate_weight_stmt += ", dtype='float32'"
             stmts += [gate_weight_stmt]

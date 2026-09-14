@@ -21,12 +21,15 @@ import os
 import sys
 from collections import OrderedDict
 from dataclasses import dataclass
-from typing import Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
 import paddle
 from paddle import Tensor
 from paddle.utils import dlpack as paddle_dlpack
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 try:
     from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (

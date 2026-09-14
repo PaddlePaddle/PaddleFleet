@@ -182,9 +182,7 @@ def compare(
             "FLAGS_use_accuracy_compatible_kernel / _use_accuracy_compatible"
         )
     if sorted(pf_order) != sorted(mg_order):
-        sys.exit(
-            f"两侧 loss 名字集合不一致: PF={pf_order} MG={mg_order}"
-        )
+        sys.exit(f"两侧 loss 名字集合不一致: PF={pf_order} MG={mg_order}")
 
     empty = {"per_token": [], "final": []}
     n_rec = max(

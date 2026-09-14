@@ -33,9 +33,7 @@ import paddle
 from paddlefleet import parallel_state
 from paddlefleet.context_parallel_utils import ContextParallelScatterOp
 
-_USE_DSV4_ACCURACY = (
-    os.environ.get("FLAGS_use_dsv4_accuracy", "0") == "1"
-)
+_USE_DSV4_ACCURACY = os.environ.get("FLAGS_use_dsv4_accuracy", "0") == "1"
 
 try:
     from packaging.version import Version as PkgVersion
