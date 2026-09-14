@@ -559,8 +559,45 @@ jobs:
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           '
 
+      - name: Prepare model tests
+        id: install_paddlefleet
+        run: |
+          docker exec -t ${{ env.container_name }} /bin/bash -ce '
+          source /root/proxy
+          source "$HOME/miniconda/etc/profile.d/conda.sh"
+          conda activate python${PYTHON_VERSION}
+          paddle_url=${PADDLE_URL}
+          if [ ${CUDA_VERSION} == "cu129" ]; then
+            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+            paddle_url="${PADDLE_URL}${paddle_whl}"
+          fi
+          if [ ${CUDA_VERSION} == "cu130" ]; then
+            pip install blinker==1.9.0 --ignore-installed
+          fi
+          cd PaddleFleet
+          git config --global --add safe.directory /workspace/PaddleFleet
+          git config user.name "PaddleCI"
+          git config user.email "paddle_ci@example.com"
+          git config pull.rebase false
+          git log -1
+          # sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
+          # sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
+          if [ "${use_release}" == "true" ]; then
+            echo "Using pre-built paddle package from develop branch."
+            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
+          fi
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
+          pip install librosa==0.11.0
+          echo "Paddle Commit"
+          python -c "import paddle; print(paddle.version.commit)"
+          echo "PaddleFleet Commit"
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          echo "paddlefleet Commit"
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          '
+
       - name: Proprocess for integration test
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -577,7 +614,7 @@ jobs:
           '
 
       - name: Integration test (GLM4.5 single-card)
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -597,7 +634,7 @@ jobs:
           '
 
       - name: Integration test (Qwen3-30B-A3B single-card)
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -617,7 +654,7 @@ jobs:
           '
 
       - name: Qwen3-vl-8k-single-card
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -755,6 +792,7 @@ jobs:
             -w /workspace --network host ${DOCKER_IMAGE}
 
       - name: Install PaddleFleet
+        id: install_paddlefleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           find . -maxdepth 1 -name "--*" -delete
@@ -796,38 +834,6 @@ jobs:
           pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/
           wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
-          '
-
-      - name: Prepare model tests
-        id: model_test_prepare
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate python${PYTHON_VERSION}
-          paddle_url=${PADDLE_URL}
-          if [ ${CUDA_VERSION} == "cu129" ]; then
-            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-            paddle_url="${PADDLE_URL}${paddle_whl}"
-          fi
-          if [ ${CUDA_VERSION} == "cu130" ]; then
-            pip install blinker==1.9.0 --ignore-installed
-          fi
-          cd PaddleFleet
-          cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
-          git config --global --add safe.directory /workspace/PaddleFleet
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
-          git log -1
-          if [ "${use_release}" == "true" ]; then
-            echo "Using pre-built paddle package from develop branch."
-            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
-          fi
-          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
-          pip install bce-python-sdk==0.8.74
-          pip install coverage==7.13.0
-          pip install librosa==0.11.0
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
@@ -837,7 +843,7 @@ jobs:
           '
 
       - name: GLM4.5 pre-train
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -857,7 +863,7 @@ jobs:
           '
 
       - name: GLM4.5 sft
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -877,7 +883,7 @@ jobs:
           '
 
       - name: GLM4.5 sft cp
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -897,7 +903,7 @@ jobs:
           '
 
       - name: GLM4.5 lora
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -917,7 +923,7 @@ jobs:
           '
 
       - name: GLM4.5 dpo
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -937,7 +943,7 @@ jobs:
           '
 
       - name: GLM4.5 dpo_lora
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -959,7 +965,7 @@ jobs:
 
 
       - name: GLM4.5 pre-train (Grouped GEMM)
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -982,7 +988,7 @@ jobs:
           '
 
       - name: Integration test (GLM4.5 multi-card FP8)
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1005,7 +1011,7 @@ jobs:
           '
 
       - name: GLM4.5 pre-train (EP4)
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1025,7 +1031,7 @@ jobs:
           '
 
       - name: Qwen pre-train
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1045,7 +1051,7 @@ jobs:
           '
 
       - name: Qwen sft
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1065,7 +1071,7 @@ jobs:
           '
 
       - name: Qwen lora
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
@@ -1085,7 +1091,7 @@ jobs:
           '
 
       - name: Qwen vl sft
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -1106,7 +1112,7 @@ jobs:
           '
 
       - name: Qwen vl lora
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -1127,7 +1133,7 @@ jobs:
           '
 
       - name: Qwen vl moe
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -1148,7 +1154,7 @@ jobs:
           '
 
       - name: Qwen3-vl-8k-fsdp
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -1331,7 +1337,7 @@ jobs:
           '
 
       - name: Prepare model tests
-        id: model_test_prepare
+        id: install_paddlefleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
@@ -1386,7 +1392,7 @@ jobs:
           '
 
       - name: GLM4.5 sft
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -1406,7 +1412,7 @@ jobs:
           '
 
       - name: GLM4.5 lora
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -1426,7 +1432,7 @@ jobs:
           '
 
       - name: GLM4.5 dpo
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -1446,7 +1452,7 @@ jobs:
           '
 
       - name: GLM4.5 dpo_lora
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -1466,7 +1472,7 @@ jobs:
           '
 
       - name: Qwen pre-train
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -1486,7 +1492,7 @@ jobs:
           '
 
       - name: Qwen sft
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -1506,7 +1512,7 @@ jobs:
           '
 
       - name: Qwen lora
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -1526,7 +1532,7 @@ jobs:
           '
 
       - name: Qwen vl sft
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -1546,7 +1552,7 @@ jobs:
           '
 
       - name: Qwen vl lora
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 5
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
@@ -1566,7 +1572,7 @@ jobs:
           '
 
       - name: Qwen vl moe
-        if: (success() || failure()) && steps.model_test_prepare.conclusion == 'success'
+        if: (success() || failure()) && steps.install_paddlefleet.conclusion == 'success'
         timeout-minutes: 10
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -c '
