@@ -330,6 +330,87 @@ class TestOnStepEndRefreshesGlobalStep(unittest.TestCase):
         self.assertIs(manager.global_step, sentinel)
 
 
+class TestOnStepEndDispatchesPipelineHook(unittest.TestCase):
+    """`on_step_end` must queue the offload hook on *both* offloading branches.
+
+    With `gradient_accumulation_steps == 1` the hook budget is
+    `pipeline_hooks_steps = max(int(1 * 0.6), 1) == 1`, while `on_substep_end` --
+    the usual source of `zcc_pipeline_hook` on non-PP models -- fires `acc - 1 == 0`
+    times per global step. The single `zcc_pipeline_hook(0)` at the end of
+    `on_step_end` is therefore the *only* OFFLOAD dispatch of that step.
+
+    A branch that prepares a worker without dispatching it leaves
+    `current_pipeline_hook_step` at 0, so the worker never publishes
+    `global_step.value` and the next step's `on_optimizer_begin` ->
+    `sync_offload_status` polls forever.
+    """
+
+    def _make_callback(self, manager):
+        cb = ZeroCostCheckpointCallback.__new__(ZeroCostCheckpointCallback)
+        cb.manager = manager
+        cb.runtime_timer = MagicMock()
+        cb.zcc_ema_interval = 2
+        # Stub the heavy collaborators; only the hook dispatch is under test.
+        cb.maybe_update_zcc_worker = MagicMock()
+        cb._get_save_infos_based_on_steps = MagicMock(return_value=(None, None))
+        cb.get_rng_states = MagicMock(return_value=None)
+        return cb
+
+    def _run(self, cb, should_save, ema_coef, global_step):
+        cb.on_step_end(
+            SimpleNamespace(
+                zcc_save_ema_coef=ema_coef, pipeline_model_parallel_size=1
+            ),
+            SimpleNamespace(global_step=global_step),
+            SimpleNamespace(should_save=should_save),
+            model=MagicMock(),  # not a PipelineLayer -> non-PP dispatch path
+            lr_scheduler=MagicMock(),
+            optimizer=MagicMock(),
+        )
+
+    def _assert_prepared_then_dispatched(self, manager):
+        manager.get_idle_worker_for_saving.assert_called_once()
+        manager.zcc_pipeline_hook.assert_called_once_with(0)
+        # Order matters: an OFFLOAD queued ahead of PREPARE would have the worker
+        # slice buffers whose meta it has not received. Call counts miss that.
+        names = [call[0] for call in manager.mock_calls]
+        self.assertLess(
+            names.index("get_idle_worker_for_saving"),
+            names.index("zcc_pipeline_hook"),
+        )
+
+    def test_ema_only_branch_dispatches_hook(self):
+        # should_save=False + EMA due: the branch that used to skip the hook
+        # entirely, hanging the next step whenever acc == 1.
+        manager = MagicMock()
+        cb = self._make_callback(manager)
+        self._run(
+            cb, should_save=False, ema_coef=0.999, global_step=8
+        )  # 8 % zcc_ema_interval(2) == 0
+        self._assert_prepared_then_dispatched(manager)
+
+    def test_regular_save_branch_dispatches_hook(self):
+        # The other half: the hook has to stay outside the if/else rather than
+        # being moved back inside a single branch.
+        manager = MagicMock()
+        cb = self._make_callback(manager)
+        self._run(cb, should_save=True, ema_coef=None, global_step=7)
+        self._assert_prepared_then_dispatched(manager)
+
+    def test_idle_step_prepares_no_worker(self):
+        # Neither branch offloads, so no worker is claimed. `zcc_pipeline_hook`
+        # is still called here and that is correct -- the no-op decision lives in
+        # the manager's `current_worker is None` guard, not in the callback. Do
+        # not tighten this into `zcc_pipeline_hook.assert_not_called()`; it would
+        # fail against correct code.
+        manager = MagicMock()
+        cb = self._make_callback(manager)
+        self._run(
+            cb, should_save=False, ema_coef=0.999, global_step=7
+        )  # 7 % 2 != 0
+        manager.get_idle_worker_for_saving.assert_not_called()
+
+
 _SLEEP = "paddlefleet.trainer.utils.zero_cost_checkpoint.time.sleep"
 
 
