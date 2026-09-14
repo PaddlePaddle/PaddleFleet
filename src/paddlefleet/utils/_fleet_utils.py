@@ -21,6 +21,7 @@ import functools
 import inspect
 import math
 import operator
+import os
 import warnings
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -31,6 +32,10 @@ import paddle
 
 from paddlefleet import parallel_state
 from paddlefleet.context_parallel_utils import ContextParallelScatterOp
+
+_USE_DSV4_ACCURACY = (
+    os.environ.get("FLAGS_use_dsv4_accuracy", "0") == "1"
+)
 
 try:
     from packaging.version import Version as PkgVersion
@@ -568,3 +573,12 @@ def deprecate_inference_params(inference_context, inference_params):
         )
         return inference_params
     return inference_context
+
+
+def use_dsv4_accuracy_compatible():
+    """Whether the accuracy-compatible (Megatron/Torch-aligned) paths are on.
+
+    Controlled by ``FLAGS_use_dsv4_accuracy``; defaults to off so
+    the original numeric paths are used.
+    """
+    return _USE_DSV4_ACCURACY
