@@ -23,7 +23,7 @@ import argparse
 import os
 import subprocess
 
-VL_DATA_DIR = "test/formers/fixtures/dummy/sft-vl"
+VL_DATA_DIR = "tests/formers/fixtures/dummy/sft-vl"
 
 VL_DATASETS = {
     "DoclingMatix": {
@@ -156,7 +156,7 @@ def prepare_datasets_for_train_type(
 
 
 def download_dpo_vl_images(force: bool = False) -> None:
-    """Download DPO-VL images to test/formers/fixtures/dummy/dpo-vl"""
+    """Download DPO-VL images to tests/formers/fixtures/dummy/dpo-vl"""
     if not force and os.path.isdir(f"{DPO_VL_DATA_DIR}/images"):
         print("[INFO] DPO VL images exists, skipping...")
         return
