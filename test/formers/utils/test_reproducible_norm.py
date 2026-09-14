@@ -122,6 +122,12 @@ def test_hybrid_owner_filter_and_coefficient(nested):
     [(False, 1.0, False), (True, 1.0, True), (True, 0.0, False)],
 )
 def test_trainer_clip_selection(accuracy, limit, expected):
+    # Other tests reload this module; compare against the class used by the
+    # production factory in this invocation rather than a collection-time alias.
+    from paddlefleet.utils.reproducible_norm import (
+        ReproducibleClipGradByGlobalNorm,
+    )
+
     trainer = Trainer.__new__(Trainer)
     trainer.args = SimpleNamespace(max_grad_norm=limit)
     trainer.model = SimpleNamespace(

@@ -507,7 +507,7 @@ class VocabParallelEmbedding(paddle.nn.Layer):
                 output_parallel, group=self.tp_group
             )
         elif (
-            self.config.use_accuracy_compatible
+            getattr(self.config, "use_accuracy_compatible", False)
             and get_pg_size(self.tp_group) <= 1
         ):
             output = output_parallel
@@ -1738,7 +1738,7 @@ class Linear(paddle.nn.Layer):
         """
         if self.is_expert:
             return
-        if not (self.config.use_accuracy_compatible):
+        if not getattr(self.config, "use_accuracy_compatible", False):
             return
         if not getattr(self.config, "sequence_parallel", False):
             return
@@ -2296,7 +2296,7 @@ class ColumnParallelLinear(paddle.nn.Layer):
             or (self.tp_group is not None and self.tp_group.world_size == -1)
             or self.tp_group is None
             or (
-                self.config.use_accuracy_compatible
+                getattr(self.config, "use_accuracy_compatible", False)
                 and get_pg_size(self.tp_group) <= 1
             )
         ):
@@ -2381,7 +2381,9 @@ class ColumnParallelLinear(paddle.nn.Layer):
             output = gather_from_tensor_model_parallel_region(
                 output_parallel,
                 group=self.tp_group,
-                use_accuracy_compatible=self.config.use_accuracy_compatible,
+                use_accuracy_compatible=getattr(
+                    self.config, "use_accuracy_compatible", False
+                ),
             )
         else:
             output = output_parallel
@@ -2701,7 +2703,7 @@ class RowParallelLinear(paddle.nn.Layer):
                 output_parallel, group=self.tp_group
             )
         elif (
-            self.config.use_accuracy_compatible
+            getattr(self.config, "use_accuracy_compatible", False)
             and get_pg_size(self.tp_group) <= 1
         ):
             output_ = output_parallel

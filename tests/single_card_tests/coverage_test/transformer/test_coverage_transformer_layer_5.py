@@ -60,7 +60,13 @@ class UnknownMLP(paddle.nn.Layer):
 
 
 class FakeBDA(paddle.nn.Layer):
-    def forward(self, training, bias_dropout_fusion):
+    def forward(
+        self,
+        training,
+        bias_dropout_fusion,
+        use_accuracy_compatible=False,
+        tensor_parallel_size=1,
+    ):
         del training, bias_dropout_fusion
 
         def apply(output_with_bias, residual, hidden_dropout_prob):
@@ -219,6 +225,9 @@ def get_gpt_transformer_layer():
 
 class TestTransformerLayerConstructorAndHelpers(unittest.TestCase):
     def setUp(self):
+        previous_device = paddle.get_device()
+        paddle.set_device("gpu:0")
+        self.addCleanup(paddle.set_device, previous_device)
         self.old_build_spec_layer = transformer_layer.build_spec_layer
         self.old_recompute = transformer_layer.recompute
         self.old_log_layer_md5 = TransformerLayer._LOG_LAYER_MD5

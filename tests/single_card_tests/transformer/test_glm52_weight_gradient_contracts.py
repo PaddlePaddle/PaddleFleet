@@ -107,6 +107,8 @@ class TestGLM52WeightGradientContracts(unittest.TestCase):
                 ctx = SimpleNamespace(
                     saved_tensor=lambda: (x, weight, weight),
                     sequence_shards=1,
+                    hf_bitexact=False,
+                    use_fp32_master=dtype == "float32",
                     dtype="float32",
                     defer_dw=False,
                     use_accuracy_compatible=enabled,

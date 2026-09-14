@@ -22,10 +22,13 @@ from unittest.mock import Mock, patch
 
 import paddle
 
+from paddlefleet.accuracy_target import targets_hf
+
 ROOT = Path(__file__).resolve().parents[3] / "src/paddlefleet"
 
 
 def load(path, names, namespace):
+    namespace.setdefault("targets_hf", targets_hf)
     source = ROOT / path
     tree = ast.parse(source.read_text())
     nodes = []
@@ -59,6 +62,11 @@ def load(path, names, namespace):
 
 
 class TestIEEETopologyContracts(unittest.TestCase):
+    def setUp(self):
+        previous_device = paddle.get_device()
+        paddle.set_device("gpu:0")
+        self.addCleanup(paddle.set_device, previous_device)
+
     def test_mtp_uses_own_indexer_only_for_ieee_tp2(self):
         state = SimpleNamespace(tp=1, ieee=True)
         ns = load(
@@ -123,7 +131,10 @@ class TestIEEETopologyContracts(unittest.TestCase):
             },
         )
         router = SimpleNamespace(
-            config=SimpleNamespace(gpt_model_use_experimental_version=False),
+            config=SimpleNamespace(
+                gpt_model_use_experimental_version=False,
+            ),
+            use_fp32_master=True,
             e_score_correction_bias=paddle.arange(16, dtype="float32") * 0.01,
             use_accuracy_compatible=True,
             tensor_model_parallel_size=1,
@@ -294,9 +305,10 @@ class TestIEEETopologyContracts(unittest.TestCase):
                 False,
                 use_accuracy_compatible=True,
             )
-            expected = paddle.nn.functional.linear(
-                right[0], right[1], right[2] if use_bias else None
-            )
+            # Accuracy mode rounds the GEMM result before adding BF16 bias.
+            expected = paddle.nn.functional.linear(right[0], right[1])
+            if use_bias:
+                expected = expected + right[2]
             dy = paddle.randn(y.shape).cast("bfloat16")
             y.backward(dy)
             expected.backward(dy)

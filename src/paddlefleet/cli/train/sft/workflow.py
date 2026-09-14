@@ -215,17 +215,27 @@ class ModelReproObservationCallback(TrainerCallback):
 
     def _environment_payload(self, args):
         config_path = os.environ.get("MODEL_REPRO_MODEL_CONFIG_PATH")
+        device = self._normalized_device()
+        try:
+            nccl_package = importlib.metadata.version("nvidia-nccl-cu12")
+        except importlib.metadata.PackageNotFoundError:
+            # Paddle wheels can bundle NCCL without installing the optional
+            # NVIDIA Python distribution. Missing package metadata is not a
+            # missing runtime library, and must not abort training.
+            nccl_package = None
         return {
             "schema": "glm52-environment/v1",
             "framework": "paddle",
             "framework_version": paddle.__version__,
             "python_version": platform.python_version(),
-            "device": self._normalized_device(),
-            "device_name": paddle.device.cuda.get_device_name(0),
+            "device": device,
+            "device_name": paddle.device.cuda.get_device_name()
+            if device == "cuda"
+            else paddle.device.get_device(),
             "dtype": self._normalized_dtype(args),
             "cuda": paddle.version.cuda(),
             "cudnn": paddle.version.cudnn(),
-            "nccl_package": importlib.metadata.version("nvidia-nccl-cu12"),
+            "nccl_package": nccl_package,
             "model_id": os.environ.get("MODEL_REPRO_MODEL_ID"),
             "revision": os.environ.get("MODEL_REPRO_MODEL_REVISION"),
             "model_config_sha256": self._sha256_file(config_path)

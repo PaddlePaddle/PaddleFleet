@@ -62,6 +62,8 @@ def _make_loss(
     K, *, distill, use_erndata=True, cp_balance_mode="dualchunk_allgather"
 ):
     loss = LanguageLoss.__new__(LanguageLoss)
+    loss.use_accuracy_compatible = False
+    loss.defer_token_normalization = False
     cfg = MagicMock()
     cfg.num_nextn_predict_layers = K
     cfg.mtp_load_weight_only = False

@@ -127,6 +127,7 @@ class TestMoELayerInitExpertParallel(unittest.TestCase):
         pg.expt_dp = MagicMock()
 
         layer = MoELayer.__new__(MoELayer)
+        layer.config = _make_config()
         layer.config = config
         layer.moe_token_dispatcher_type = config.moe_token_dispatcher_type
         # Derived in MoELayer.__init__; __new__ skips it, so mirror it here.
@@ -154,6 +155,7 @@ class TestMoELayerInitExpertParallel(unittest.TestCase):
         pg.expt_dp = MagicMock()
 
         layer = MoELayer.__new__(MoELayer)
+        layer.config = _make_config()
         layer.config = config
         layer.moe_token_dispatcher_type = config.moe_token_dispatcher_type
         layer.use_intermediate_ep_sharding = (
@@ -172,6 +174,7 @@ class TestMoELayerInitExpertParallel(unittest.TestCase):
         pg = MagicMock()
 
         layer = MoELayer.__new__(MoELayer)
+        layer.config = _make_config()
         layer.config = config
         layer.moe_token_dispatcher_type = config.moe_token_dispatcher_type
         layer.pg_collection = pg
@@ -194,6 +197,7 @@ class TestMoELayerExpertForward(unittest.TestCase):
     def test_expert_forward(self, mock_size):
         config = _make_config()
         layer = MoELayer.__new__(MoELayer)
+        layer.config = _make_config()
         layer.config = config
         layer.moe_rank = 0
         layer.num_experts_per_device = 4
@@ -214,6 +218,7 @@ class TestMoELayerExpertForward(unittest.TestCase):
     def test_expert_forward_no_tokens(self):
         config = _make_config()
         layer = MoELayer.__new__(MoELayer)
+        layer.config = _make_config()
         layer.config = config
         layer.num_experts = 4
         layer.moe_rank = 0
@@ -236,6 +241,7 @@ class TestMoELayerUseFp8(unittest.TestCase):
     def test_use_fp8_disabled(self):
         config = _make_config(fp8=False, moe_use_fusion_node=False)
         layer = MoELayer.__new__(MoELayer)
+        layer.config = _make_config()
         layer.config = config
         layer.moe_use_fusion_node = False
         layer.fp8 = False
@@ -244,6 +250,7 @@ class TestMoELayerUseFp8(unittest.TestCase):
     def test_use_fp8_enabled(self):
         config = _make_config(fp8=True, moe_use_fusion_node=True)
         layer = MoELayer.__new__(MoELayer)
+        layer.config = _make_config()
         layer.config = config
         layer.moe_use_fusion_node = True
         layer.fp8 = True
@@ -255,6 +262,7 @@ class TestMoELayerSetLayerNumber(unittest.TestCase):
 
     def test_set_layer_number(self):
         layer = MoELayer.__new__(MoELayer)
+        layer.config = _make_config()
         # set_layer_number re-resolves the layer-scoped recompute flags, which
         # reads config.
         layer.config = _make_config()
@@ -270,6 +278,7 @@ class TestMoELayerSetLayerNumber(unittest.TestCase):
     def test_set_layer_number_no_set_method(self):
         layer = MoELayer.__new__(MoELayer)
         layer.config = _make_config()
+        layer.config = _make_config()
         layer.gate = MagicMock()
         layer.expert_model_parallel_size = 1
         del layer.gate.set_layer_number
@@ -282,6 +291,7 @@ class TestMoELayerDispatchPermuteUnpermute(unittest.TestCase):
 
     def test_permute_delegates(self):
         layer = MoELayer.__new__(MoELayer)
+        layer.config = _make_config()
         layer.token_dispatcher = MagicMock()
         hidden = paddle.randn([4, 64])
         layer.token_dispatcher.dispatch_postprocess.return_value = (
@@ -294,6 +304,7 @@ class TestMoELayerDispatchPermuteUnpermute(unittest.TestCase):
 
     def test_unpermute_delegates(self):
         layer = MoELayer.__new__(MoELayer)
+        layer.config = _make_config()
         layer.token_dispatcher = MagicMock()
         hidden = paddle.randn([4, 64])
         layer.token_dispatcher.combine_preprocess.return_value = hidden
@@ -303,6 +314,7 @@ class TestMoELayerDispatchPermuteUnpermute(unittest.TestCase):
 
     def test_combine_delegates(self):
         layer = MoELayer.__new__(MoELayer)
+        layer.config = _make_config()
         layer.moe_token_dispatcher_type = "deepep"
         layer.token_dispatcher = MagicMock()
         layer.use_rr_deepep_combine = False
@@ -321,6 +333,7 @@ class TestMoELayerFp8QuantWeight(unittest.TestCase):
     def test_early_return_when_not_fp8(self):
         config = _make_config(fp8=False, moe_use_fusion_node=False)
         layer = MoELayer.__new__(MoELayer)
+        layer.config = _make_config()
         layer.config = config
         layer.moe_use_fusion_node = False
         layer.fp8 = False
@@ -343,6 +356,7 @@ class TestMoELayerForwardLogging(unittest.TestCase):
         z_loss = paddle.to_tensor(2.5, dtype="float32")
 
         layer = MoELayer.__new__(MoELayer)
+        layer.config = _make_config()
         layer.moe_token_dispatcher_type = "deepep"
         layer.sequence_parallel = False
         layer.expert_model_parallel_size = 1
