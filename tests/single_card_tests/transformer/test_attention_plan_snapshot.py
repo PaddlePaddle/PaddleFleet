@@ -26,7 +26,9 @@ config → AttentionExecutionPlan 的黄金快照：Resolver 的决策树复刻
 - ``[ATTN-PLAN]`` 打印格式与 ``to_json`` 单一序列化源。
 """
 
+import dataclasses
 import unittest
+from types import SimpleNamespace
 
 import paddle
 
@@ -34,6 +36,14 @@ from paddlefleet.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_spec,
 )
 from paddlefleet.transformer.attention_plan import (
+    _COERCE_FAILED,
+    NormalizationReport,
+    _coerce_value,
+    _effective_mtp_layers,
+    _explicitly_set,
+    _fmt_num,
+    _qk_norm_of,
+    _ratio_kind,
     format_plan_lines,
     normalize_attention_config,
     resolve_attention_plan,
@@ -157,6 +167,52 @@ class TestDsv4HybridSnapshot(unittest.TestCase):
                 self.assertEqual(plan.core_detail, detail)
                 self.assertEqual(plan.swa, swa)
                 self.assertEqual(plan.window_size, window)
+
+    def test_mla_layer_swa_follows_sliding_window(self):
+        """-2 MLA 层按真实层号做 SWA 判定，不再钉死 swa=False。
+
+        MultiLatentAttention 继承 Attention.__init__：sliding_window /
+        window_attn_skip_freq 命中时 is_swa=True，并换用 swa_* 维度与
+        RoPE（multi_latent_attention.py:388-398 / attention.py:281）。
+        """
+        cfg = _dsv4_config(
+            sliding_window=64,
+            window_attn_skip_freq=[1] * 6,  # 全部层命中 SWA
+            swa_rope_theta=16000.0,
+            swa_qk_nope_head_dim=128,
+            swa_qk_rope_head_dim=32,
+        )
+        bundle = resolve_attention_plan(cfg)
+        mla_plan = bundle.layers[0]
+        self.assertEqual(mla_plan.family, "mla")
+        self.assertTrue(mla_plan.swa)
+        self.assertEqual(mla_plan.window_size, 64)
+        # rope_theta 换成 swa_rope_theta，qk_rope_head_dim 换成 swa_*
+        self.assertEqual(mla_plan.position.base, 16000.0)
+        self.assertEqual(mla_plan.position.dim, 32)
+        self.assertEqual(mla_plan.position.layout, "MLA_EAGER")
+        # swa_* 覆盖 hybrid_mla_* 维度
+        self.assertEqual(mla_plan.dims["qk_nope_head_dim"], 128)
+        self.assertEqual(mla_plan.dims["qk_rope_head_dim"], 32)
+        # 未被 swa_* 覆盖的维度仍读 hybrid_mla_*
+        self.assertEqual(mla_plan.dims["v_head_dim"], 256)
+        self.assertIn(
+            "swa layer despite hybrid MLA (sliding_window hit)", mla_plan.notes
+        )
+
+        # 混合配置：层 0（-2 MLA）不命中，层 1（window）仍为 swa
+        cfg = _dsv4_config(
+            sliding_window=64,
+            window_attn_skip_freq=[0, 1, 0, 1, 0, 1],
+            swa_rope_theta=16000.0,
+            swa_qk_nope_head_dim=128,
+            swa_qk_rope_head_dim=32,
+        )
+        bundle = resolve_attention_plan(cfg)
+        self.assertFalse(bundle.layers[0].swa)
+        self.assertEqual(bundle.layers[0].position.base, 10000.0)
+        self.assertEqual(bundle.layers[0].dims["qk_nope_head_dim"], 192)
+        self.assertTrue(bundle.layers[1].swa)
 
     def test_rope_resolution_per_layer(self):
         bundle = resolve_attention_plan(_dsv4_config())
@@ -430,6 +486,42 @@ class TestStandardPathsSnapshot(unittest.TestCase):
         bundle = resolve_attention_plan(cfg)
         self.assertNotIn("gated_attention", bundle.layers[0].capabilities)
 
+    def test_gdn_with_sliding_window_not_flagged_swa(self):
+        """线性注意力（GDN/KDA）不读 sliding_window，不得误标 swa。
+
+        GatedDeltaNet / KimiDeltaAttention 是独立 FleetLayer 实现，没有
+        Attention.__init__ 的 is_swa 逻辑；即便配置了 sliding_window，
+        Plan 的 swa/window_size 也必须为 False/None。
+        """
+        cfg = TransformerConfig(
+            num_hidden_layers=3,
+            hidden_size=128,
+            num_attention_heads=4,
+            normalization="RMSNorm",
+            sliding_window=[128, 128, 128],
+            window_attn_skip_freq=None,  # 全部层都会命中 SWA 判定
+        )
+        cfg.layer_types = ["gated_delta_net"] * 3
+        bundle = resolve_attention_plan(cfg)
+        for plan in bundle.layers:
+            with self.subTest(index=plan.index):
+                self.assertEqual(plan.family, "gdn")
+                self.assertFalse(plan.swa)
+                self.assertIsNone(plan.window_size)
+
+        # 同一配置下 self_attention 层照常被标记（对照组）
+        cfg.layer_types = [
+            "gated_delta_net",
+            "self_attention",
+            "gated_delta_net",
+        ]
+        cfg.position_embedding_type = "rope"
+        bundle = resolve_attention_plan(cfg)
+        self.assertFalse(bundle.layers[0].swa)
+        self.assertTrue(bundle.layers[1].swa)
+        self.assertEqual(bundle.layers[1].window_size, 128)
+        self.assertFalse(bundle.layers[2].swa)
+
     def test_swa_standard_path(self):
         cfg = TransformerConfig(
             num_hidden_layers=4,
@@ -458,6 +550,63 @@ class TestStandardPathsSnapshot(unittest.TestCase):
         )
         bundle = resolve_attention_plan(cfg)
         self.assertEqual(bundle.layers[0].qkv_layout, "gqa")
+
+    def test_unknown_layer_type_records_error_finding(self):
+        """未知 layer_types 不得静默丢层：真实构建链路会抛
+        'Unknown attention_layer_type'，Plan 必须留下 error finding。"""
+        cfg = TransformerConfig(
+            num_hidden_layers=2,
+            hidden_size=128,
+            num_attention_heads=4,
+        )
+        cfg.layer_types = ["bogus", "self_attention"]
+        bundle = resolve_attention_plan(cfg)
+        errors = [f for f in bundle.findings if f.rule_id == "V-RES-03"]
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0].severity, "error")
+        self.assertIn("bogus", errors[0].message)
+        self.assertEqual([f.rule_id for f in bundle.findings[:1]], ["V-RES-03"])
+        # JSON 序列化同样携带该 finding（打印/落盘不丢）
+        data = bundle.to_json()
+        self.assertEqual(data["findings"][0]["rule_id"], "V-RES-03")
+
+    def test_layer_types_length_mismatch_records_error_finding(self):
+        cfg = TransformerConfig(
+            num_hidden_layers=2,
+            hidden_size=128,
+            num_attention_heads=4,
+        )
+        cfg.layer_types = ["self_attention"]
+        bundle = resolve_attention_plan(cfg)
+        errors = [f for f in bundle.findings if f.rule_id == "V-RES-02"]
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(errors[0].severity, "error")
+        self.assertIn("1 entries", errors[0].message)
+
+    def test_dsv4_missing_ratio_records_error_finding(self):
+        """csa_compress_ratios 缺项同理：真实链路抛错，Plan 记 error。"""
+        cfg = _dsv4_config()
+        # 构造后截短，模拟外部/直连 config 的不完整 ratios
+        cfg.csa_compress_ratios = [-2, 0]
+        bundle = resolve_attention_plan(cfg)
+        errors = [f for f in bundle.findings if f.rule_id == "V-RES-01"]
+        # 层 2/3/4 主层 + 层 5 MTP 共 4 项缺失
+        self.assertEqual(len(errors), 4)
+        self.assertTrue(all(f.severity == "error" for f in errors))
+        # 只解析出前两层，但 findings 明确解释了缺失
+        self.assertEqual(len(bundle.layers), 2)
+
+    def test_run_attention_plan_raises_on_resolver_error_when_not_log_only(
+        self,
+    ):
+        cfg = TransformerConfig(
+            num_hidden_layers=2,
+            hidden_size=128,
+            num_attention_heads=4,
+        )
+        cfg.layer_types = ["bogus"]
+        with self.assertRaises(ValueError):
+            run_attention_plan(cfg, log_only=False, print_plan=False)
 
 
 class TestValidatorShadowMode(unittest.TestCase):
@@ -572,6 +721,35 @@ class TestNormalizer(unittest.TestCase):
         self.assertEqual(cfg.dsa_index_n_heads, 4)
         self.assertTrue(
             any(c["field"] == "index_n_heads" for c in report.changes)
+        )
+
+    def test_index_alias_on_external_config_creates_canonical(self):
+        # 外部 config（SimpleNamespace 等）可能完全没有 canonical 字段：
+        # 归一后必须新建该属性，报告与实例保持一致，resolver 才能读到。
+        from types import SimpleNamespace
+
+        cfg = SimpleNamespace(index_n_heads=4)
+        report = normalize_attention_config(cfg)
+        self.assertEqual(
+            getattr(cfg, "dsa_index_n_heads", None),
+            4,
+            "canonical must be created when missing",
+        )
+        self.assertEqual(
+            [c["field"] for c in report.changes], ["index_n_heads"]
+        )
+        # 多个别名 + 无任何 canonical 字段
+        cfg = SimpleNamespace(index_n_heads=4, index_head_dim=32, index_topk=8)
+        report = normalize_attention_config(cfg)
+        self.assertEqual(cfg.dsa_index_n_heads, 4)
+        self.assertEqual(cfg.dsa_index_head_dim, 32)
+        self.assertEqual(cfg.dsa_index_topk, 8)
+        # apply=False（dry-run）不改实例
+        cfg = SimpleNamespace(index_n_heads=4)
+        report = normalize_attention_config(cfg, apply=False)
+        self.assertFalse(hasattr(cfg, "dsa_index_n_heads"))
+        self.assertEqual(
+            [c["field"] for c in report.changes], ["index_n_heads"]
         )
 
     def test_non_numeric_string_only_warns(self):
@@ -700,6 +878,330 @@ class TestPlanPrinting(unittest.TestCase):
         # print_plan=True 走 stdout（rank0 单进程）；不 raise 即通过
         bundle = run_attention_plan(_mla_config())
         self.assertEqual(len(bundle.layers), 2)
+
+
+class TestCoverageGaps(unittest.TestCase):
+    """覆盖 Normalizer/Validator/Resolver/格式化中未触达的分支。"""
+
+    # -- Normalizer: _coerce_value 各分支与报告序列化 --
+
+    def test_coerce_int_float_bool_str_list(self):
+        # int: 整数浮点可无损强转
+        ns = SimpleNamespace(qk_nope_head_dim=16.0)
+        report = normalize_attention_config(ns)
+        self.assertEqual(ns.qk_nope_head_dim, 16)
+        # int: 非整数值只告警不改
+        ns = SimpleNamespace(qk_nope_head_dim=16.5)
+        report = normalize_attention_config(ns)
+        self.assertEqual(ns.qk_nope_head_dim, 16.5)
+        self.assertTrue(
+            any(w["field"] == "qk_nope_head_dim" for w in report.warnings)
+        )
+        # bool 字符串
+        ns = SimpleNamespace(use_qk_norm="true")
+        normalize_attention_config(ns)
+        self.assertIs(ns.use_qk_norm, True)
+        ns = SimpleNamespace(use_qk_norm="FALSE")
+        normalize_attention_config(ns)
+        self.assertIs(ns.use_qk_norm, False)
+        # 非布尔字符串只告警
+        ns = SimpleNamespace(use_qk_norm="bogus")
+        report = normalize_attention_config(ns)
+        self.assertEqual(ns.use_qk_norm, "bogus")
+        self.assertTrue(
+            any(w["field"] == "use_qk_norm" for w in report.warnings)
+        )
+        # bool 非字符串原值（如 int）走 bool()
+        ns = SimpleNamespace(use_qk_norm=1)
+        normalize_attention_config(ns)
+        self.assertIs(ns.use_qk_norm, True)
+        # str: 非字符串强转 str
+        ns = SimpleNamespace(rope_type=123)
+        normalize_attention_config(ns)
+        self.assertEqual(ns.rope_type, "123")
+        # list: JSON 字符串解析 / tuple 转 list
+        ns = SimpleNamespace(layer_types='["a", "b"]')
+        normalize_attention_config(ns)
+        self.assertEqual(ns.layer_types, ["a", "b"])
+        ns = SimpleNamespace(layer_types=(1, 2))
+        normalize_attention_config(ns)
+        self.assertEqual(ns.layer_types, [1, 2])
+        # list: 非 list 的 JSON 只告警
+        ns = SimpleNamespace(layer_types='{"a": 1}')
+        report = normalize_attention_config(ns)
+        self.assertEqual(ns.layer_types, '{"a": 1}')
+        self.assertTrue(
+            any(w["field"] == "layer_types" for w in report.warnings)
+        )
+
+    def test_alias_none_value_and_conflict(self):
+        # 别名值为 None：跳过
+        ns = SimpleNamespace(index_n_heads=None)
+        report = normalize_attention_config(ns)
+        self.assertEqual(report.changes, [])
+        self.assertEqual(report.warnings, [])
+        # 别名与 canonical 冲突：只告警不覆盖
+        ns = SimpleNamespace(index_n_heads=4, dsa_index_n_heads=8)
+        report = normalize_attention_config(ns)
+        self.assertEqual(ns.dsa_index_n_heads, 8)
+        self.assertEqual(report.changes, [])
+        self.assertTrue(
+            any("conflicts" in w["message"] for w in report.warnings)
+        )
+
+    def test_normalization_report_and_bundle_json_str(self):
+        cfg = _dsv4_config()
+        report = normalize_attention_config(cfg)
+        data = report.to_json()
+        self.assertIn("changes", data)
+        self.assertIn("warnings", data)
+        bundle = resolve_attention_plan(cfg)
+        text = bundle.to_json_str()
+        self.assertIsInstance(text, str)
+        self.assertIn('"variant": "dsv4_hybrid"', text)
+
+    # -- _explicitly_set: dataclass default / default_factory / 非字段属性 --
+
+    def test_explicitly_set_dataclass_paths(self):
+        @dataclasses.dataclass
+        class _Cfg:
+            x: int = 0
+            ys: list = dataclasses.field(default_factory=list)
+
+        cfg = _Cfg()
+        self.assertFalse(_explicitly_set(cfg, "missing"))  # 不存在
+        self.assertFalse(_explicitly_set(cfg, "x"))  # 等于 default
+        cfg.x = 1
+        self.assertTrue(_explicitly_set(cfg, "x"))
+        self.assertFalse(_explicitly_set(cfg, "ys"))  # 等于 default_factory
+        cfg.ys.append(1)
+        self.assertTrue(_explicitly_set(cfg, "ys"))
+        cfg.extra = 5  # 非字段属性：视为显式设置
+        self.assertTrue(_explicitly_set(cfg, "extra"))
+
+    # -- Validator 未触达规则 --
+
+    def test_var02_layer_types_decorative_under_dsv4(self):
+        cfg = _dsv4_config()
+        cfg.layer_types = ["self_attention"] * 5
+        bundle = resolve_attention_plan(cfg)
+        self.assertIn("V-VAR-02", [f.rule_id for f in bundle.findings])
+
+    def test_var04_gemma4_in_layer_types_under_dsv4(self):
+        cfg = _dsv4_config()
+        cfg.layer_types = ["gemma4"] * 5
+        bundle = resolve_attention_plan(cfg)
+        self.assertIn("V-VAR-04", [f.rule_id for f in bundle.findings])
+
+    def test_var03_mtp_family_disagrees_with_decoder(self):
+        cfg = _mla_config(num_nextn_predict_layers=1)
+        cfg.layer_types = ["gated_delta_net"]
+        bundle = resolve_attention_plan(cfg)
+        self.assertIn("V-VAR-03", [f.rule_id for f in bundle.findings])
+
+    def test_mla01_gqa_heads_mismatch(self):
+        cfg = _mla_config(num_key_value_heads=2)
+        bundle = resolve_attention_plan(cfg)
+        self.assertIn("V-MLA-01", [f.rule_id for f in bundle.findings])
+
+    def test_var05_hy_sparse_requires_mla_flag_under_dsv4(self):
+        # 无 -2（MLA）层的 dsv4：hy_sparse 的资格检查在逐层改写前运行，
+        # 仅靠 csa_compress_ratios 无法满足
+        cfg = _dsv4_config(
+            multi_latent_attention=False, enable_hy_sparse_attention=True
+        )
+        cfg.csa_compress_ratios = [0, 0, 4, -1, 128, 4]
+        bundle = resolve_attention_plan(cfg)
+        self.assertIn("V-VAR-05", [f.rule_id for f in bundle.findings])
+
+    def test_rope02_qk_pos_emb_head_dim_none(self):
+        cfg = _dsv4_config()
+        cfg.qk_pos_emb_head_dim = None
+        bundle = resolve_attention_plan(cfg)
+        self.assertIn("V-ROPE-02", [f.rule_id for f in bundle.findings])
+
+    def test_rope04_dsa_indexer_rotary_interleaved_without_indexer(self):
+        cfg = _dsv4_config(csa_dense_mode=True)
+        cfg.dsa_indexer_rotary_interleaved = True
+        bundle = resolve_attention_plan(cfg)
+        self.assertIn("V-ROPE-04", [f.rule_id for f in bundle.findings])
+
+    def test_vha01_vha_unread_by_linear_layers(self):
+        cfg = TransformerConfig(
+            num_hidden_layers=1,
+            hidden_size=128,
+            num_attention_heads=4,
+            normalization="RMSNorm",
+            use_vha_attention=True,
+        )
+        cfg.layer_types = ["gated_delta_net"]
+        bundle = resolve_attention_plan(cfg)
+        self.assertIn("V-VHA-01", [f.rule_id for f in bundle.findings])
+
+    def test_vha02_premix_without_dsv4_layers(self):
+        cfg = TransformerConfig(
+            num_hidden_layers=1,
+            hidden_size=128,
+            num_attention_heads=4,
+            use_vha_premix=True,
+        )
+        bundle = resolve_attention_plan(cfg)
+        self.assertIn("V-VHA-02", [f.rule_id for f in bundle.findings])
+
+    # -- Resolver 未触达分支 --
+
+    def test_unknown_csa_ratio_raises(self):
+        with self.assertRaises(ValueError):
+            _ratio_kind(1)
+
+    def test_hybrid_mla_attention_modes(self):
+        # mqa_dsa: -2 层换 latent MQA + DSA indexer note
+        cfg = _dsv4_config(
+            hybrid_mla_attention="mqa_dsa", dsa_index_head_dim=128
+        )
+        bundle = resolve_attention_plan(cfg)
+        mla = bundle.layers[0]
+        self.assertEqual(mla.core, "mqa_latent")
+        self.assertEqual(mla.qkv_layout, "latent")
+        self.assertIn("indexer: DSA (hybrid_mla_attention=mqa_dsa)", mla.notes)
+        # mqa_full_causal: 无 indexer note
+        cfg = _dsv4_config(hybrid_mla_attention="mqa_full_causal")
+        bundle = resolve_attention_plan(cfg)
+        mla = bundle.layers[0]
+        self.assertEqual(mla.core, "mqa_latent")
+        self.assertIn(
+            "no indexer (hybrid_mla_attention=mqa_full_causal)", mla.notes
+        )
+
+    def test_standard_mla_swa_dim_overrides(self):
+        # 非 dsv4 的 MLA SWA 路径：swa_* 覆盖 qk_nope/qk_rope 维度
+        cfg = _mla_config(
+            sliding_window=64,
+            window_attn_skip_freq=None,
+            swa_qk_nope_head_dim=24,
+            swa_qk_rope_head_dim=12,
+        )
+        bundle = resolve_attention_plan(cfg)
+        for plan in bundle.layers:
+            self.assertTrue(plan.swa)
+            self.assertEqual(plan.dims["qk_nope_head_dim"], 24)
+            self.assertEqual(plan.dims["qk_rope_head_dim"], 12)
+        # 只设置 nope 覆盖：rope 维持原值
+        cfg = _mla_config(
+            sliding_window=64,
+            window_attn_skip_freq=None,
+            swa_qk_nope_head_dim=24,
+        )
+        bundle = resolve_attention_plan(cfg)
+        self.assertEqual(bundle.layers[0].dims["qk_nope_head_dim"], 24)
+        self.assertEqual(bundle.layers[0].dims["qk_rope_head_dim"], 8)
+
+    def test_hy_sparse_standard_mla(self):
+        cfg = _mla_config(enable_hy_sparse_attention=True)
+        bundle = resolve_attention_plan(cfg)
+        for plan in bundle.layers:
+            self.assertEqual(plan.core, "mqa_latent")
+            self.assertEqual(plan.qkv_layout, "latent")
+            self.assertIn("hy_sparse", plan.capabilities)
+            self.assertIn(
+                "hy_sparse swaps the class to MQASelfAttention", plan.notes
+            )
+
+    def test_effective_mtp_layers_non_int(self):
+        self.assertEqual(
+            _effective_mtp_layers(
+                SimpleNamespace(num_nextn_predict_layers="2")
+            ),
+            0,
+        )
+        self.assertEqual(
+            _effective_mtp_layers(
+                SimpleNamespace(num_nextn_predict_layers=None)
+            ),
+            0,
+        )
+
+    # -- _qk_norm_of 各家族返回值 --
+
+    def test_qk_norm_of_families(self):
+        self.assertEqual(
+            _qk_norm_of(
+                SimpleNamespace(normalization="LayerNorm"), "gemma4", False
+            ),
+            "LayerNorm",
+        )
+        self.assertEqual(
+            _qk_norm_of(SimpleNamespace(qk_layernorm=False), "dsv4", True),
+            "none",
+        )
+        self.assertEqual(
+            _qk_norm_of(
+                SimpleNamespace(
+                    normalization="LayerNorm",
+                    qk_l2_norm=False,
+                    use_qk_norm=True,
+                    qk_norm_fusion=False,
+                ),
+                "self",
+                False,
+            ),
+            "LayerNorm",
+        )
+
+    # -- RoPE 展示辅助（yarn 参数 / _fmt_num） --
+
+    def test_rope_repr_with_yarn_params(self):
+        cfg = _dsv4_config(
+            rotary_scaling_factor=2.0,
+            original_max_position_embeddings=8192,
+            mscale=1.3,
+            mscale_all_dim=1.0,
+        )
+        bundle = resolve_attention_plan(cfg)
+        # 压缩层（ratio>1）为 yarn，携带非默认 yarn 参数
+        yarn_pos = bundle.layers[2].position
+        self.assertEqual(yarn_pos.type, "yarn")
+        text = yarn_pos.render()
+        self.assertIn("rotary_scaling_factor=2", text)
+        self.assertIn("original_max_position_embeddings=8192", text)
+        self.assertIn("mscale=1.3", text)
+        self.assertIn("mscale_all_dim=1", text)
+        # _fmt_num: 整数值浮点收敛为整数串
+        self.assertEqual(_fmt_num(2.0), "2")
+        self.assertEqual(_fmt_num(1.3), "1.3")
+        self.assertEqual(_fmt_num("x"), "x")
+
+    # -- dump 落盘失败不得阻断（sidecar 约束） --
+
+    def test_dump_failure_does_not_raise(self):
+        # 无 save 目录/分布式环境：log_config_to_disk 失败被吞掉，
+        # run_attention_plan 正常返回
+        cfg = TransformerConfig(
+            num_hidden_layers=1, hidden_size=128, num_attention_heads=4
+        )
+        bundle = run_attention_plan(cfg, print_plan=False)
+        self.assertEqual(len(bundle.layers), 1)
+
+    def test_dump_with_config_logger_enabled_does_not_raise(self):
+        # config_logger_dir 已设置：dump 走完整路径（单进程下
+        # parallel_state.get_all_ranks 失败），任何异常都被吞掉，
+        # run_attention_plan 正常返回（sidecar 约束）
+        import tempfile
+
+        cfg = TransformerConfig(
+            num_hidden_layers=1, hidden_size=128, num_attention_heads=4
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg.config_logger_dir = tmpdir
+            bundle = run_attention_plan(cfg, print_plan=False)
+            self.assertEqual(len(bundle.layers), 1)
+
+    def test_coerce_unknown_spec_type_leaves_as_is(self):
+        # 未声明类型的字段：不做强转（哨兵返回，不产生告警）
+        report = NormalizationReport()
+        result = _coerce_value("whatever", "unknown", 123, report)
+        self.assertIs(result, _COERCE_FAILED)
+        self.assertEqual(report.warnings, [])
 
 
 if __name__ == "__main__":
