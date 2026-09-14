@@ -569,6 +569,8 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
             num_attention_heads=4,
             num_key_value_heads=4,
             rope_theta=10000.0,
+            rotary_embed_cache=False,
+            use_accuracy_compatible=False,
             sliding_window=None,
             rotary_percent=1.0,
             attention_value_scale=None,
