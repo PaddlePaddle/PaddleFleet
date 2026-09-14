@@ -97,6 +97,7 @@ class TestIEEEProjectionSelection(unittest.TestCase):
                         "_accuracy_compatible_projection": direct,
                         "deferrable_linear": native,
                         "hidden_states": "input",
+                        "hidden_states_up": None,
                         "intermediate_parallel": "activation",
                     }
                     exec(

@@ -333,8 +333,13 @@ class ApplyPermutedProbs(PyLayer):
             grad_probs = (
                 permuted_tokens.cast("float32") * grad_output.cast("float32")
             ).sum(axis=-1)
-        return grad_tokens.cast(ctx.input_dtype), grad_probs.cast(
-            permuted_probs.dtype
+        return (
+            None
+            if permuted_tokens.stop_gradient
+            else grad_tokens.cast(ctx.input_dtype),
+            None
+            if permuted_probs.stop_gradient
+            else grad_probs.cast(permuted_probs.dtype),
         )
 
 

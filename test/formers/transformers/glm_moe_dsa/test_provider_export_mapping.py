@@ -22,13 +22,13 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-ROOT = Path(__file__).resolve().parents[3]
-BASE = ROOT / "paddlefleet/transformers/aoa_config_base.py"
+ROOT = Path(__file__).resolve().parents[4]
+BASE = ROOT / "src/paddlefleet/transformers/aoa_config_base.py"
 spec = importlib.util.spec_from_file_location("provider_export_aoa_base", BASE)
 base = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = base
 spec.loader.exec_module(base)
-SOURCE = ROOT / "paddlefleet/transformers/glm_moe_dsa/modeling.py"
+SOURCE = ROOT / "src/paddlefleet/transformers/glm_moe_dsa/modeling.py"
 tree = ast.parse(SOURCE.read_text())
 method = next(
     n

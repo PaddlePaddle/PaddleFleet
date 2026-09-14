@@ -70,7 +70,6 @@ from .moe_shared_expert import StandardMLPSharedExpert
 from .moe_utils import (
     AddAuxiliaryLoss,
     _build_aligned_gather_index,
-    use_accuracy_compatible_kernel,
 )
 from .token_dispatcher import (
     AllGatherTokenDispatcher,
