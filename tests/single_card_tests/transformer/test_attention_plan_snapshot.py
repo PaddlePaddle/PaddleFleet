@@ -22,7 +22,7 @@ config → AttentionExecutionPlan 的黄金快照：Resolver 的决策树复刻
 - dsv4_hybrid 全 ratio 组合（-2/-1/0/4/128）+ MTP 层；
 - 标准 MLA（含 DSA indexer）、GDN（layer_types）、VHA、SWA 标准路径；
 - Validator 只告警模式：A1/A3/A4/A6/B1/B3 的 findings；
-- Normalizer：B5 字符串数字强转、index_* 别名归一；
+- Normalizer：字符串数字强转、index_* 别名归一；
 - ``[ATTN-PLAN]`` 打印格式与 ``to_json`` 单一序列化源。
 """
 
@@ -930,6 +930,78 @@ class TestCoverageGaps(unittest.TestCase):
         ns = SimpleNamespace(layer_types='{"a": 1}')
         report = normalize_attention_config(ns)
         self.assertEqual(ns.layer_types, '{"a": 1}')
+        self.assertTrue(
+            any(w["field"] == "layer_types" for w in report.warnings)
+        )
+
+    def test_coerce_int_string_beyond_2p53_lossless(self):
+        # int: 超过 2^53 的整数字符串不经过 float，精确无损
+        big = "9007199254740993"
+        ns = SimpleNamespace(qk_nope_head_dim=big)
+        report = normalize_attention_config(ns)
+        self.assertEqual(ns.qk_nope_head_dim, 9007199254740993)
+        self.assertTrue(
+            any(c["field"] == "qk_nope_head_dim" for c in report.changes)
+        )
+        # 大整数 int 值（非字符串）同样不被改写
+        ns = SimpleNamespace(qk_nope_head_dim=2**60 + 1)
+        normalize_attention_config(ns)
+        self.assertEqual(ns.qk_nope_head_dim, 2**60 + 1)
+        # int: 整数字符串与浮点形式字符串
+        ns = SimpleNamespace(qk_nope_head_dim="3")
+        normalize_attention_config(ns)
+        self.assertIs(ns.qk_nope_head_dim, 3)
+        ns = SimpleNamespace(qk_nope_head_dim=" 16.0 ")
+        normalize_attention_config(ns)
+        self.assertIs(ns.qk_nope_head_dim, 16)
+        # int: 非整数/非数值字符串、不可强转对象只告警
+        for bad in ("16.5", "abc", None, object()):
+            if bad is None:
+                continue
+            ns = SimpleNamespace(qk_nope_head_dim=bad)
+            report = normalize_attention_config(ns)
+            self.assertEqual(ns.qk_nope_head_dim, bad)
+            self.assertTrue(
+                any(w["field"] == "qk_nope_head_dim" for w in report.warnings),
+                msg=f"expected warning for {bad!r}",
+            )
+
+    def test_coerce_bool_strict_inputs(self):
+        # bool: 仅接受 bool、int 0/1、布尔字符串；其余只告警不改
+        sentinel = object()
+        for bad in (2, 1.0, "maybe", sentinel, [True]):
+            ns = SimpleNamespace(use_qk_norm=bad)
+            report = normalize_attention_config(ns)
+            self.assertIs(ns.use_qk_norm, bad)
+            self.assertTrue(
+                any(w["field"] == "use_qk_norm" for w in report.warnings),
+                msg=f"expected warning for {bad!r}",
+            )
+        # int 0/1 仍可转
+        ns = SimpleNamespace(use_qk_norm=0)
+        normalize_attention_config(ns)
+        self.assertIs(ns.use_qk_norm, False)
+
+    def test_coerce_str_scalar_only(self):
+        # str: 仅接受标量；容器对象只告警
+        for bad in ([1], {"a": 1}):
+            ns = SimpleNamespace(rope_type=bad)
+            report = normalize_attention_config(ns)
+            self.assertEqual(ns.rope_type, bad)
+            self.assertTrue(
+                any(w["field"] == "rope_type" for w in report.warnings)
+            )
+
+    def test_coerce_list_iterable_only(self):
+        # list: dict / bytes / 非迭代对象只告警；set/tuple 可转
+        ns = SimpleNamespace(layer_types={"a": 1})
+        report = normalize_attention_config(ns)
+        self.assertEqual(ns.layer_types, {"a": 1})
+        self.assertTrue(
+            any(w["field"] == "layer_types" for w in report.warnings)
+        )
+        ns = SimpleNamespace(layer_types=object())
+        report = normalize_attention_config(ns)
         self.assertTrue(
             any(w["field"] == "layer_types" for w in report.warnings)
         )

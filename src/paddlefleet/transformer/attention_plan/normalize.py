@@ -57,6 +57,17 @@ _SPEC_PY_TYPES: dict[str, type | tuple[type, ...]] = {
     "list": (list, tuple),
 }
 
+# Exact-type skip table for the coercion loop: values already of the
+# canonical type are left untouched (int-for-float, tuple-for-list, and
+# bool-for-int are still coerced; ``type`` keeps bool from matching int).
+_SPEC_EXACT_TYPES: dict[str, type] = {
+    "int": int,
+    "float": float,
+    "bool": bool,
+    "str": str,
+    "list": list,
+}
+
 # Sentinel: coercion attempted but failed (warning already recorded).
 _COERCE_FAILED = object()
 
@@ -67,16 +78,48 @@ def _coerce_value(
     """Coerce ``value`` to the declared ``spec_type``; warn-only on failure.
 
     Covers every mismatch between declared and actual type: numeric strings
-    ("160000.0", "3"), string bools ("true"/"false"), float->int (integral
-    only, lossy warned), int->str, and JSON-parseable list strings.
+    ("160000.0", "3", arbitrary-precision integers), string bools
+    ("true"/"false"), float->int (integral only, lossy warned), int->str,
+    and JSON-parseable list strings.
+
+    Accepted input shapes per spec type:
+    - ``int``: ``bool``/``int`` (bool counts as 0/1), integral ``float``,
+      or ``str`` holding a decimal integer (``"3"``) or integral float
+      (``"16.0"``). Parsed with ``int()`` first so integers beyond 2^53
+      keep exact precision; the float fallback only handles integral
+      values.
+    - ``bool``: ``bool``, ``int`` 0/1, or ``str`` in
+      "true"/"1"/"yes"/"false"/"0"/"no" (case-insensitive). Anything else
+      warns instead of being truthiness-coerced.
+    - ``str``: any non-container scalar (``int``/``float``/``bool``).
+      Containers (list/dict/...) warn rather than silently stringify.
+    - ``list``: ``str`` holding a JSON array, ``tuple``/other non-dict
+      iterables (element-wise ``list()``).
     """
     try:
-        if spec_type in ("int", "float"):
-            coerced: Any = float(value)
-            if spec_type == "int":
-                if coerced != int(coerced):
+        if spec_type == "int":
+            if isinstance(value, str):
+                text = value.strip()
+                try:
+                    coerced: Any = int(text, 10)
+                except ValueError:
+                    # integral numeric strings like "16.0"
+                    coerced = float(text)
+                    if not coerced.is_integer():
+                        raise ValueError(f"non-integral value {value!r}")
+                    coerced = int(coerced)
+            elif isinstance(value, bool):
+                coerced = int(value)
+            elif isinstance(value, int):
+                coerced = value
+            elif isinstance(value, float):
+                if not value.is_integer():
                     raise ValueError(f"non-integral value {value!r}")
-                coerced = int(coerced)
+                coerced = int(value)
+            else:
+                raise ValueError(f"cannot coerce {value!r} to int")
+        elif spec_type == "float":
+            coerced = float(value)
         elif spec_type == "bool":
             if isinstance(value, str):
                 lowered = value.strip().lower()
@@ -85,15 +128,25 @@ def _coerce_value(
                 if lowered in ("false", "0", "no"):
                     return False
                 raise ValueError(f"non-boolean string {value!r}")
-            return bool(value)
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, int) and value in (0, 1):
+                return bool(value)
+            raise ValueError(f"cannot coerce {value!r} to bool")
         elif spec_type == "str":
-            return str(value)
+            if isinstance(value, (bool, int, float)):
+                return str(value)
+            raise ValueError(f"cannot coerce {value!r} to str")
         elif spec_type == "list":
             if isinstance(value, str):
                 parsed = json.loads(value)
                 if not isinstance(parsed, list):
                     raise ValueError(f"non-list JSON {value!r}")
                 return parsed
+            if isinstance(value, (dict, bytes)) or not hasattr(
+                value, "__iter__"
+            ):
+                raise ValueError(f"cannot coerce {value!r} to list")
             return list(value)
         else:  # "unknown" and anything undeclared: leave as-is
             return _COERCE_FAILED
@@ -161,7 +214,13 @@ def normalize_attention_config(
         if not hasattr(config, name):
             continue
         value = getattr(config, name)
-        if value is None or type(value) is _SPEC_PY_TYPES.get(spec.type):
+        # Exact-type skip: only the canonical type of each spec matches;
+        # int-for-float / tuple-for-list still coerce (declared acceptable
+        # sources). ``type`` (not isinstance) so bool never masquerades
+        # as int.
+        if value is None or type(value) is _SPEC_EXACT_TYPES.get(
+            spec.type, type(value)
+        ):
             continue
         coerced = _coerce_value(name, spec.type, value, report)
         if coerced is _COERCE_FAILED:
