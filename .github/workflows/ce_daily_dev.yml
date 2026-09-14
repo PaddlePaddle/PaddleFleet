@@ -1292,6 +1292,7 @@ jobs:
             -w /workspace --network host ${DOCKER_IMAGE}
 
       - name: Install PaddleFleet
+        id: install_paddlefleet
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           find . -maxdepth 1 -name "--*" -delete
@@ -1330,41 +1331,11 @@ jobs:
           wget -q "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          pip install librosa==0.11.0
           uv build --wheel --package paddlefleet --out-dir dist --clear -v
           pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/
           wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
-          '
-
-      - name: Prepare model tests
-        id: install_paddlefleet
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -ce '
-          source /root/proxy
-          source "$HOME/miniconda/etc/profile.d/conda.sh"
-          conda activate python${PYTHON_VERSION}
-          paddle_url=${PADDLE_URL}
-          if [ ${CUDA_VERSION} == "cu129" ]; then
-            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-            paddle_url="${PADDLE_URL}${paddle_whl}"
-          fi
-          if [ ${CUDA_VERSION} == "cu130" ]; then
-            pip install blinker==1.9.0 --ignore-installed
-          fi
-          cd PaddleFleet
-          git config --global --add safe.directory /workspace/PaddleFleet
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
-          git log -1
-          if [ "${use_release}" == "true" ]; then
-            echo "Using pre-built paddle package from develop branch."
-            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
-          fi
-          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
-          pip install bce-python-sdk==0.8.74
-          pip install coverage==7.13.0
-          pip install librosa==0.11.0
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
           echo "PaddleFleet Commit"
