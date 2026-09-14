@@ -126,7 +126,7 @@ class Qwen3_5TextModelProvider(GPTModelProvider):
     bias_activation_fusion: bool = True
     normalization: str = "RMSNorm"
     position_embedding_type: str = "mrope"
-    rope_theta: float = 1000000.0
+    rope_theta: float = 10000000.0
     rotary_percent: float = 0.25
     mrope_section: list = None
 

@@ -169,6 +169,7 @@ class TestFP8SimulateQAT(unittest.TestCase):
             rms_norm_eps=1e-5,
             num_hidden_layers=1,
             use_fp8_qat=True,
+            high_precision_rope=False,
         )
 
         spec = CompressorSublayersSpec(

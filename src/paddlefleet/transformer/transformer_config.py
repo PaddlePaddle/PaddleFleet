@@ -1414,9 +1414,8 @@ class TransformerConfig(ModelParallelConfig):
 
     rotary_base: float | None = None
     """
-    ``__post_init__`` forwards it: when only ``rotary_base`` is set, the value
-    is written into ``rope_theta`` (with a deprecation warning); when both are
-    set with different values, startup raises. All attention paths read
+    ``__post_init__`` forwards it:  when rotary_base is different from
+    rope_theta will raises error. All attention paths read
     ``rope_theta`` only.
     """
 
@@ -2136,10 +2135,7 @@ class TransformerConfig(ModelParallelConfig):
         # None and consumers can key on ``> 0`` instead of ``is not None``.
         self.dsa_indexer_loss_coeff = float(self.dsa_indexer_loss_coeff or 0.0)
 
-        # rope_theta is the single RoPE base field; rotary_base
-        # is its deprecated alias. Forward the alias when it is the only one
-        # set, and reject the historical silent split where DSv4 used
-        # rotary_base while every other path used rope_theta.
+        # rope_theta is the single RoPE base field
         if self.rotary_base is not None:
             if not math.isclose(
                 float(self.rope_theta), float(self.rotary_base)

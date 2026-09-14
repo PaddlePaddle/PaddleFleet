@@ -29,7 +29,7 @@ import tempfile
 import unittest
 
 from paddlefleet.trainer import Trainer, TrainingArguments
-from tests.trainer.trainer_utils import (
+from formers.trainer.trainer_utils import (
     RegressionModelConfig,
     RegressionPretrainedModel,
 )
