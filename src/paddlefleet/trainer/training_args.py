@@ -786,6 +786,16 @@ class TrainingArguments:
             )
         },
     )
+    sharding_machine_balanced_2d_partition: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to balance the 2D (Muon) parameter bytes across machines when partitioning them "
+                "to owner ranks, instead of the default greedy per-group partition. This only takes effect "
+                "when using the Muon optimizer."
+            )
+        },
+    )
     sharding_offload_opt_buffersize_GB: int = field(
         default=-1,
         metadata={
@@ -2749,6 +2759,21 @@ class TrainingArguments:
                             strategy.hybrid_configs[
                                 "sharding_configs"
                             ].comm_group_call_opt = True
+
+                        if self.sharding_machine_balanced_2d_partition:
+                            assert self.optim == OptimizerNames.MUON, (
+                                "sharding_machine_balanced_2d_partition only supports Muon optimizer."
+                            )
+                            assert hasattr(
+                                strategy.hybrid_configs["sharding_configs"],
+                                "machine_balanced_2d_partition",
+                            ), (
+                                "sharding_machine_balanced_2d_partition is not supported by current "
+                                "version of Paddle. Please try latest develop Paddle."
+                            )
+                            strategy.hybrid_configs[
+                                "sharding_configs"
+                            ].machine_balanced_2d_partition = True
 
                         if self.split_param:
                             strategy.hybrid_configs[
