@@ -24,7 +24,8 @@ readonly TORCH_VERSION="2.12.0+cu130"
 readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
 readonly TE_VERSION="2.17.1"
 readonly TRANSFORMERS_VERSION="4.57.1"
-readonly PADDLE_INDEX_URL="https://www.paddlepaddle.org.cn/packages/stable/cu130/"
+readonly PADDLE_INDEX_URL="https://www.paddlepaddle.org.cn/packages/stable/cu129/"
+readonly PADDLE_NIGHTLY_INDEX_URL="https://www.paddlepaddle.org.cn/packages/nightly/cu129/"
 readonly NIGHTLY_WHL_BASE="https://paddle-whl.bj.bcebos.com/nightly/cu130"
 # readonly PADDLE_VERSION="xx"
 # PaddleFleet will install default paddle"
@@ -128,6 +129,7 @@ setup_paddle_venv() {
     local -a paddle_index=(
         --no-config
         --index-url "${PADDLE_INDEX_URL}"
+        --extra-index-url "${PADDLE_NIGHTLY_INDEX_URL}"
         --extra-index-url https://pypi.org/simple/
         --index-strategy unsafe-best-match
     )
