@@ -85,7 +85,7 @@ python -m pytest -s -v --models=all scripts/regression/test_models.py --update-b
 1、自动回归对应模型
 
 修改PaddleFleet/paddlefleet/transformers/*.py
-修改PaddleFleet/test/formers/transformers/*.py
+修改PaddleFleet/tests/formers/transformers/*.py
 
 2、回归glm4_moe模型
 

@@ -201,8 +201,8 @@ url = "https://www.paddlepaddle.org.cn/packages/nightly/xpu-p800/"
 explicit = true
 
 [tool.pytest.ini_options]
-pythonpath = [".", "test"]
-testpaths = ["tests", "test/formers"]
+pythonpath = ["."]
+testpaths = ["tests"]
 filterwarnings = [
     "ignore::UserWarning",
     "ignore::DeprecationWarning",

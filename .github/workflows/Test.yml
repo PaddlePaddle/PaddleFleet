@@ -414,7 +414,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/preprocess.sh
+          bash -x PaddleFleet/tests/formers/integration_test/preprocess.sh
           preprocess_exit_code=$?
           if [[ "$preprocess_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mPreprocess failed.\033[0m"
@@ -429,7 +429,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_single_card.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
@@ -444,7 +444,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen3_single_card.sh
+          bash -x PaddleFleet/tests/formers/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
@@ -548,7 +548,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_pt.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_pt.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -563,7 +563,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_sft.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_sft.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -578,7 +578,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_lora.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_lora.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -593,7 +593,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_dpo.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_dpo.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
@@ -608,7 +608,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_fp8.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_pt_fp8.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -623,7 +623,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_grouped_gemm.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_pt_grouped_gemm.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 Grouped GEMM.\033[0m"
@@ -638,7 +638,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen.sh pt
+          bash -x PaddleFleet/tests/formers/integration_test/qwen.sh pt
           '
 
       - name: Qwen sft
@@ -646,7 +646,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen.sh sft
+          bash -x PaddleFleet/tests/formers/integration_test/qwen.sh sft
           '
 
       - name: Qwen lora
@@ -654,7 +654,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen.sh lora
+          bash -x PaddleFleet/tests/formers/integration_test/qwen.sh lora
           '
 
       - name: Terminate and delete the container
@@ -748,7 +748,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
 
-          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_a100.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_pt_a100.sh
           glm45_exit_code=$?
 
           if [[ "$glm45_exit_code" != "0" ]]; then

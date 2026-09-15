@@ -46,7 +46,7 @@ repos:
             docs/|
             examples/|
             scripts/(regression|unit_test)/|
-            test/formers/
+            tests/formers/
           )
   # For Python files
   - repo: https://github.com/astral-sh/ruff-pre-commit

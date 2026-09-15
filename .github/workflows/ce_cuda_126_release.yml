@@ -341,7 +341,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/preprocess.sh
+          bash -x PaddleFleet/tests/formers/integration_test/preprocess.sh
           preprocess_exit_code=$?
           if [[ "$preprocess_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mPreprocess failed.\033[0m"
@@ -356,7 +356,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_single_card.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_pt_single_card.sh
           glm45_single_card_exit_code=$?
           if [[ "$glm45_single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 single-card.\033[0m"
@@ -371,7 +371,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen3_single_card.sh
+          bash -x PaddleFleet/tests/formers/integration_test/qwen3_single_card.sh
           qwen3_single_card_exit_code=$?
           if [[ "$qwen3_single_card_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: Qwen3-30B-A3B single-card.\033[0m"
@@ -387,7 +387,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft_single_card.sh single
+          bash -x PaddleFleet/tests/formers/integration_test/qwen3vl_sft_single_card.sh single
           '
 
       - name: Terminate and delete the container
@@ -496,7 +496,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_pt.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_pt.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -511,7 +511,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_sft.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_sft.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -527,7 +527,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_sft_cp.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_sft_cp.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 sft cp.\033[0m"
@@ -542,7 +542,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_lora.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_lora.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5.\033[0m"
@@ -557,7 +557,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_dpo.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_dpo.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 dpo.\033[0m"
@@ -573,7 +573,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_dpo_lora.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_dpo_lora.sh
           '
 
 
@@ -582,7 +582,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_grouped_gemm.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_pt_grouped_gemm.sh
           glm45_exit_code=$?
           if [[ "$glm45_exit_code" != "0" ]]; then
             echo -e "::error:: \033[31mIntegration test failed: GLM4.5 Grouped GEMM.\033[0m"
@@ -598,7 +598,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_pt_ep4.sh
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_pt_ep4.sh
           '
 
       - name: Qwen pre-train
@@ -606,7 +606,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen.sh pt
+          bash -x PaddleFleet/tests/formers/integration_test/qwen.sh pt
           '
 
       - name: Qwen sft
@@ -614,7 +614,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen.sh sft
+          bash -x PaddleFleet/tests/formers/integration_test/qwen.sh sft
           '
 
       - name: Qwen lora
@@ -622,7 +622,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen.sh lora
+          bash -x PaddleFleet/tests/formers/integration_test/qwen.sh lora
           '
 
       - name: Qwen vl sft
@@ -631,7 +631,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh tp8 h20
+          bash -x PaddleFleet/tests/formers/integration_test/qwen3vl_sft.sh tp8 h20
           '
 
       - name: Qwen vl lora
@@ -640,7 +640,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_lora.sh h20
+          bash -x PaddleFleet/tests/formers/integration_test/qwen3vl_lora.sh h20
           '
 
       - name: Qwen vl moe
@@ -649,7 +649,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh moe h20
+          bash -x PaddleFleet/tests/formers/integration_test/qwen3vl_sft.sh moe h20
           '
 
       - name: Qwen3-vl-8k-fsdp
@@ -658,7 +658,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh fsdp h20
+          bash -x PaddleFleet/tests/formers/integration_test/qwen3vl_sft.sh fsdp h20
           '
 
       - name: Terminate and delete the container
@@ -768,7 +768,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh pt
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_a100.sh pt
           '
 
       - name: GLM4.5 sft
@@ -777,7 +777,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh sft
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_a100.sh sft
           '
 
       - name: GLM4.5 lora
@@ -786,7 +786,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh lora
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_a100.sh lora
           '
 
       - name: GLM4.5 dpo
@@ -795,7 +795,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh dpo
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_a100.sh dpo
           glm45_exit_code=$?
           '
 
@@ -805,7 +805,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/glm45_a100.sh dpo_lora
+          bash -x PaddleFleet/tests/formers/integration_test/glm45_a100.sh dpo_lora
           '
 
       - name: Qwen pre-train
@@ -814,7 +814,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen3_a100.sh pt
+          bash -x PaddleFleet/tests/formers/integration_test/qwen3_a100.sh pt
           '
 
       - name: Qwen sft
@@ -823,7 +823,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen3_a100.sh sft
+          bash -x PaddleFleet/tests/formers/integration_test/qwen3_a100.sh sft
           '
 
       - name: Qwen lora
@@ -832,7 +832,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen3_a100.sh lora
+          bash -x PaddleFleet/tests/formers/integration_test/qwen3_a100.sh lora
           '
 
       - name: Qwen vl sft
@@ -841,7 +841,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh tp8 a100
+          bash -x PaddleFleet/tests/formers/integration_test/qwen3vl_sft.sh tp8 a100
           '
 
 
@@ -851,7 +851,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh tp8 a100
+          bash -x PaddleFleet/tests/formers/integration_test/qwen3vl_sft.sh tp8 a100
           '
 
       - name: Qwen vl lora
@@ -860,7 +860,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_lora.sh a100
+          bash -x PaddleFleet/tests/formers/integration_test/qwen3vl_lora.sh a100
           '
 
 
@@ -870,7 +870,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           source /root/proxy
-          bash -x PaddleFleet/test/formers/integration_test/qwen3vl_sft.sh moe a100
+          bash -x PaddleFleet/tests/formers/integration_test/qwen3vl_sft.sh moe a100
           '
 
 
