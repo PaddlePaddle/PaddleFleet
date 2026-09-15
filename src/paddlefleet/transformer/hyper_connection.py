@@ -31,7 +31,10 @@ import paddle
 import paddle.nn.functional as F
 from paddle import Tensor, nn
 
-from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
+from paddlefleet.tensor_parallel.random import (
+    RecomputeWithoutOutput,
+    get_cuda_rng_tracker,
+)
 from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -234,7 +237,14 @@ def native_h_post_bda(
 
     Args:
         h_res: [..., n, n] - residual mixing matrix
-        original_residual: [..., n, C] - n-stream hidden states
+        original_residual: [..., n*C] - n-stream hidden states, **flat**. Passed
+            un-reshaped to match ``fused_h_post_bda``, which needs it flat so
+            that what it saves for backward is the caller's own tensor rather
+            than a view of it: a ``reshape`` view is a separate ``DenseTensor``
+            holding its own reference to the same buffer, and while it lives the
+            caller's ``_clear_data()`` frees nothing. This reference composition
+            cannot make that promise -- its ops save the internal view -- so a
+            caller that means to free the residual must hand this path a copy.
         h_post: [..., n] - expansion weights
         x: [..., C] - layer output
         bias: [C] or None
@@ -242,8 +252,10 @@ def native_h_post_bda(
     Returns:
         output: [..., n, C]
     """
-    leading_shape = original_residual.shape[:-2]
-    n, C = original_residual.shape[-2], original_residual.shape[-1]
+    leading_shape = original_residual.shape[:-1]
+    n = h_res.shape[-1]
+    C = original_residual.shape[-1] // n
+    original_residual = original_residual.reshape([*leading_shape, n, C])
     num_tokens = math.prod(leading_shape)
 
     h_res_batched = h_res.reshape([num_tokens, n, n]).transpose([0, 2, 1])
@@ -288,16 +300,41 @@ class _FixedOrderMappings(paddle.autograd.PyLayer):
       walking the inner graph. The detached views share their data, so this
       costs nothing; ``save_for_backward`` keeps the undetached ones, whose
       ``grad_fn`` it preserves, and those are what backward walks.
+
+    ``mappings_cache`` lets a recompute replay reuse ``compute_mappings`` while
+    still preserving the gradient order: the first pass builds the mapping graph,
+    replay reruns ``aggregate``, and ``backward`` combines both graphs.
+
+    The cache lives for one half-layer and must not pin a reshape alias of the
+    residual state. ``h_res`` and ``h_post`` stay owned by the caller; see
+    :class:`MhcAggregateRecompute`.
     """
 
     @staticmethod
-    def forward(ctx, module, x, build_graph):
-        x_map = x.detach()
+    def forward(ctx, module, x, build_graph, mappings_cache=None):
         x_agg = x.detach()
-        x_map.stop_gradient = x.stop_gradient
         x_agg.stop_gradient = x.stop_gradient
+
+        if mappings_cache is None or "h_pre" not in mappings_cache:
+            x_map = x.detach()
+            x_map.stop_gradient = x.stop_gradient
+            # With a cache the mapping graph must exist on the first pass and
+            # survive to the replay's backward, so grad is forced on -- the
+            # enclosing recompute body runs under no_grad.
+            mapping_grad = build_graph if mappings_cache is None else True
+            with paddle.set_grad_enabled(mapping_grad):
+                h_pre, h_post, h_res = module.compute_mappings(x_map)
+            if mappings_cache is not None:
+                mappings_cache.update(
+                    x_map=x_map, h_pre=h_pre, h_post=h_post, h_res=h_res
+                )
+        else:
+            x_map = mappings_cache["x_map"]
+            h_pre = mappings_cache["h_pre"]
+            h_post = mappings_cache["h_post"]
+            h_res = mappings_cache["h_res"]
+
         with paddle.set_grad_enabled(build_graph):
-            h_pre, h_post, h_res = module.compute_mappings(x_map)
             aggregated = module.aggregate(x_agg, h_pre)
         ctx.x_stop_gradient = x.stop_gradient
         ctx.build_graph = build_graph
@@ -323,6 +360,22 @@ class _FixedOrderMappings(paddle.autograd.PyLayer):
                 [out for out, _ in pairs], [grad for _, grad in pairs]
             )
         return x_map.grad + x_agg.grad
+
+
+class MhcAggregateRecompute(RecomputeWithoutOutput):
+    """Recompute mHC aggregation while retaining ``h_res`` and ``h_post``.
+
+    Only the leading ``aggregated`` output is subject to discard. Keeping the
+    other two resident keeps downstream saved aliases valid and lets the mapping
+    cache survive a replay that never recreates them. Narrowing to a prefix
+    preserves the output positions ``_recompute`` aligns on.
+    """
+
+    def recompute(self, *args, **kwargs):
+        """Run the forward, then narrow ownership to the leading output."""
+        outputs = super().recompute(*args, **kwargs)
+        self.outputs = self.outputs[:1]
+        return outputs
 
 
 class HyperConnectionModule(nn.Layer):
@@ -748,12 +801,19 @@ class HyperConnectionModule(nn.Layer):
         )
         return x_out, bias_out
 
-    def forward(self, hidden_states: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    def forward(
+        self, hidden_states: Tensor, mappings_cache: dict | None = None
+    ) -> tuple[Tensor, Tensor, Tensor]:
         """
         Full mHC forward pass.
 
         Args:
             hidden_states: [..., n*C] - n-stream hidden states
+            mappings_cache: when given, ``compute_mappings`` runs on the first
+                call and is reused afterwards, so a recompute span around this
+                method replays only ``aggregate``. Requires
+                :attr:`supports_mappings_cache`. See
+                :class:`_FixedOrderMappings`.
 
         Returns:
             aggregated: [..., C] - aggregated input for layer computation
@@ -762,11 +822,7 @@ class HyperConnectionModule(nn.Layer):
         """
         with paddle.amp.auto_cast(enable=False):
             # Compute mappings
-            if (
-                not _use_accuracy_compatible_kernel()
-                and self.config.high_precision_mhc
-                and not self._widen_in_kernel
-            ):
+            if self.materializes_fp32_input:
                 hidden_states = hidden_states.astype("float32")
 
             if _use_accuracy_compatible_kernel():
@@ -780,10 +836,28 @@ class HyperConnectionModule(nn.Layer):
                 # ``_FixedOrderMappings``. ``is_grad_enabled`` has to be read
                 # out here, since it always reads False inside the node.
                 aggregated, h_res, h_post = _FixedOrderMappings.apply(
-                    self, hidden_states, paddle.is_grad_enabled()
+                    self,
+                    hidden_states,
+                    paddle.is_grad_enabled(),
+                    mappings_cache,
                 )
 
         return aggregated, h_res, h_post
+
+    @property
+    def materializes_fp32_input(self) -> bool:
+        """Whether the native path creates an fp32 ``[..., n*C]`` input copy."""
+        return (
+            not _use_accuracy_compatible_kernel()
+            and self.config.high_precision_mhc
+            and not self._widen_in_kernel
+        )
+
+    @property
+    def supports_mappings_cache(self) -> bool:
+        return not self.materializes_fp32_input and not (
+            _use_accuracy_compatible_kernel()
+        )
 
     # ==================== Block-level utilities ====================
 
@@ -902,8 +976,8 @@ class HyperConnectionModule(nn.Layer):
           accuracy-compatible kernel is off, since that switch keeps the mHC
           input in the incoming dtype.
 
-        With neither, the call saves only tensors that are live anyway and a
-        span would cost a replay plus the caller's ``h_res``/``h_post`` clones.
+        With neither, the call saves only tensors that are live anyway, so a
+        span would cost a replay and buy nothing.
         An already-fp32 residual makes the fast-path up-cast a no-op, i.e. a
         wash rather than a loss, and is not special-cased here.
         """
@@ -961,26 +1035,26 @@ class HyperConnectionModule(nn.Layer):
                 leading_shape = original_residual.shape[:-1]
                 n = self.n
                 C = self.hidden_size
-                orig_reshaped = original_residual.reshape(
-                    [*leading_shape, n, C]
-                )
                 # ``fuse_cast`` hands the two large operands to the kernel in
                 # their incoming dtype instead; it widens them in-register and
-                # writes the result back in ``orig_reshaped``'s dtype.
+                # writes the result back in the residual's dtype.
                 # ``_widen_in_kernel`` already folds in ``high_precision_mhc``,
                 # the only mode that widens at all. A present bias opts out on
                 # top of that (the kernel declines it too): its gradient
                 # reduces over ``g_x``, which would then be narrow.
                 fuse_cast = self._widen_in_kernel and bias is None
                 if self.config.high_precision_mhc and not fuse_cast:
-                    orig_reshaped = orig_reshaped.astype("float32")
+                    original_residual = original_residual.astype("float32")
                     x = x.astype("float32")
                     if bias is not None:
                         bias = bias.astype("float32")
+                # Passed flat on purpose: a ``[.., n, C]`` view made here would be
+                # a separate ``DenseTensor`` sharing the buffer, which pins the
+                # residual state against the recompute's ``_clear_data()``.
                 if fuse_cast:
                     output = self._h_post_bda_op(
                         h_res,
-                        orig_reshaped,
+                        original_residual,
                         h_post,
                         x,
                         bias,
@@ -988,7 +1062,7 @@ class HyperConnectionModule(nn.Layer):
                     )
                 else:
                     output = self._h_post_bda_op(
-                        h_res, orig_reshaped, h_post, x, bias
+                        h_res, original_residual, h_post, x, bias
                     )
                 return output.reshape([*leading_shape, n * C])
 

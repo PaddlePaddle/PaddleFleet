@@ -162,6 +162,11 @@ def apply_learnable_routed_scaling(top_gate, top_idx, param):
     return top_gate * gathered_scales
 
 
+def _flatten_tokens(x):
+    """Collapse the leading dims of an activation to ``[N, x.shape[-1]]``."""
+    return x if len(x.shape) == 2 else x.reshape([-1, x.shape[-1]])
+
+
 class HFBitexactSoftmax(paddle.autograd.PyLayer):
     """FP32 softmax whose autograd matches ``F.softmax(x, dtype=torch.float)``.
 
@@ -208,6 +213,15 @@ class HFBitexactSoftmax(paddle.autograd.PyLayer):
 class FusedGateDetachMatmul(paddle.autograd.PyLayer):
     """
     FusedGateDetachMatmul
+
+    ``x`` may be rank-3 ``[s, b, d]`` or rank-2 ``[N, d]``; the flattening
+    happens here rather than in the caller, so what ``save_for_backward`` keeps
+    is the caller's own tensor. A ``[N, d]`` view of a rank-3 activation is a
+    separate ``DenseTensor`` sharing the same ``phi::Allocation``, so holding one
+    until backward makes the caller's ``_clear_data()`` free nothing -- which is
+    how this node used to pin whole mHC layernorm outputs. The reshape is
+    metadata only, so redoing it in backward costs nothing. The output is always
+    2D ``[N, E]``.
     """
 
     @staticmethod
@@ -223,6 +237,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
         w = w.T
+        x = _flatten_tokens(x)
         if ctx.hf_bitexact:
             # Qwen3_5MoeTopKRouter keeps the gate projection in the activation
             # dtype and only upcasts inside the softmax, whereas Megatron runs
@@ -241,6 +256,12 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
 
         w_stop_grad = w.stop_gradient
         x_stop_grad = x.stop_gradient
+        # Redone here rather than kept from forward; see the class docstring.
+        x_shape = x.shape
+        x = _flatten_tokens(x)
+
+        def _to_input_shape(x_grad):
+            return None if x_grad is None else x_grad.reshape(x_shape)
 
         def _compute_weight_grad(x_cast, y_grad, weight):
             with paddle.amp.auto_cast(False):
@@ -274,7 +295,9 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
             w_cast = w.cast(ctx.dtype)
 
             x_g = paddle.matmul(y_grad, w_cast.T, transpose_y=True)
-            x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+            x_grad = (
+                _to_input_shape(x_g.cast(x.dtype)) if not x_stop_grad else None
+            )
 
             if w_stop_grad:
                 return x_grad, None
@@ -309,7 +332,11 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                 # gradient cast back to its own storage dtype.
                 x_g = paddle.matmul(y_grad, w.cast(ctx.dtype))
                 w_g = paddle.matmul(y_grad, x.cast(ctx.dtype), transpose_x=True)
-                x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+                x_grad = (
+                    _to_input_shape(x_g.cast(x.dtype))
+                    if not x_stop_grad
+                    else None
+                )
                 w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
                 return x_grad, w_grad
             else:
@@ -322,7 +349,11 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                     False,
                 )
 
-                x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+                x_grad = (
+                    _to_input_shape(x_g.cast(x.dtype))
+                    if not x_stop_grad
+                    else None
+                )
                 w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
                 if w_grad is not None:
                     w_grad = w_grad.T
@@ -343,7 +374,9 @@ def gate_detach_matmul(
             x, weight, defer_dw, use_accuracy_compatible
         )
     else:
-        x = x.cast(paddle.float32)
+        # Flattened before the cast: the cast makes a copy, so no view of the
+        # caller's activation survives to pin it.
+        x = _flatten_tokens(x).cast(paddle.float32)
         score = F.linear(x, weight)
 
     if moe_router_force_load_balancing:
@@ -1574,6 +1607,10 @@ class TopKRouter(StandardMoERouter):
         self._setup_hash_layer(layer_number, is_mtp_layer=is_mtp_layer)
 
     def forward(self, input, input_ids=None, origin_input_ids=None):
+        # The gate matmul gets this tensor, not the flattened view made below:
+        # FusedGateDetachMatmul keeps what it is given until backward, so a view
+        # would pin the mHC layernorm output against the recompute's _clear_data().
+        gate_input = input
         if len(input.shape) == 3:
             if not self.sequence_parallel:
                 batch_size, seq_len, d_model = input.shape
@@ -1723,7 +1760,7 @@ class TopKRouter(StandardMoERouter):
                 # reuse the fused gate matmul so they share the
                 # force-load-balancing and defer_dw paths.
                 logits_0 = gate_detach_matmul(
-                    input,
+                    gate_input,
                     self.weight,
                     True,
                     self.config.moe_router_force_load_balancing,
@@ -1731,7 +1768,7 @@ class TopKRouter(StandardMoERouter):
                     self.use_accuracy_compatible,
                 )
                 logits_1 = gate_detach_matmul(
-                    input,
+                    gate_input,
                     self.weight_1,
                     True,
                     self.config.moe_router_force_load_balancing,
@@ -1759,7 +1796,7 @@ class TopKRouter(StandardMoERouter):
                 logits = logits_0 + logits_1  # used by z-loss
             else:
                 logits = gate_detach_matmul(
-                    input,
+                    gate_input,
                     self.weight,
                     True,
                     self.config.moe_router_force_load_balancing,

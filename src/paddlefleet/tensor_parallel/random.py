@@ -472,6 +472,8 @@ class RecomputeWithoutOutput:
         self.run_function = None
         self.ctx = None
         self.outputs = None
+        # Debug label for the release log; set by the block manager.
+        self.label = None
 
     def recompute(
         self,
@@ -601,11 +603,18 @@ class RecomputeWithoutOutput:
         """
         self._recompute(None)
 
-    def discard_output_and_register_recompute(self, hook_tensor):
-        """Clear saved output data and register the recomputation hook on the target tensor."""
+    def _discard_outputs(self):
+        """Clear outputs without registering a replay hook.
+
+        The manager uses this only after arranging a block-level replay.
+        """
         for output in self.outputs:
             if output is not None:
                 output._clear_data()
+
+    def discard_output_and_register_recompute(self, hook_tensor):
+        """Clear saved output data and register the recomputation hook on the target tensor."""
+        self._discard_outputs()
 
         if not hook_tensor.stop_gradient:
             hook_tensor.register_hook(self._recompute)
@@ -613,3 +622,146 @@ class RecomputeWithoutOutput:
                 # Offer this span to the pp scheduler as p2p filler. If it is
                 # never taken, the hook above still runs it at the normal time.
                 RecomputeStore.put(self)
+
+
+class RecomputeWithoutOutputManager:
+    """Replay a group of interdependent recomputes in forward order.
+
+    A consumer may read a producer's cleared output through its saved
+    holder-sharing alias. Replaying in registration order restores producers
+    first; ``_share_buffer_to`` also restores their saved aliases.
+
+    One hook on the block's boundary tensor drives the whole group, which is
+    what lets a block span several layers while keeping that order.
+    """
+
+    def __init__(self):
+        self.recomputes = []
+        # Last registration position; see get_mhc_recompute_manager().
+        self.position = None
+
+    def add(self, recompute, label=None):
+        """Register ``recompute`` in forward order.
+
+        ``label`` is a human-readable origin (e.g. ``"L18 bda"``) used only by
+        the one-shot release log; ``None`` falls back to a positional index.
+        """
+        if label is not None:
+            recompute.label = label
+        self.recomputes.append(recompute)
+
+    def discard_all_outputs_and_register_unified_recompute(self, hook_tensor):
+        """Discard the block outputs and hook its boundary tensor.
+
+        A boundary that carries no gradient skips both operations, since a
+        discarded output cannot be recovered without a hook.
+        """
+        recomputes, self.recomputes = self.recomputes, []
+        if not recomputes:
+            return
+        if hook_tensor.stop_gradient:
+            return
+        if _release_log_pending():
+            _log_block_release(recomputes)
+        else:
+            for recompute in recomputes:
+                recompute._discard_outputs()
+
+        def _unified_recompute(grad, recomputes=recomputes):
+            # Repeated hook fires are harmless: each member replays once.
+            for recompute in recomputes:
+                recompute._recompute(None)
+
+        hook_tensor.register_hook(_unified_recompute)
+        # Not offered to RecomputeStore: the pp scheduler would replay
+        # individual members out of order.
+
+
+# NOTE(Difers): ``_clear_data`` only decrements the reference count by one; it
+# does not free at the allocator level, and implicit aliases can keep the buffer
+# alive. We therefore add this log to help ensure that recompute here truly
+# clears the data.
+
+_release_logged = False
+
+
+def _release_log_pending():
+    """True only before the first block discard, which is the one that logs."""
+    return not _release_logged
+
+
+def _log_block_release(recomputes):
+    """Discard each span's outputs, measuring what returns to the allocator."""
+    global _release_logged
+    _release_logged = True
+
+    logger = logging.getLogger(__name__)
+    mib = 1024.0 * 1024.0
+    lines = []
+    total_freed = 0
+    total_accounted = 0
+    idx = 0
+    for recompute in recomputes:
+        outputs = recompute.outputs or ()
+        for out_pos, output in enumerate(outputs):
+            if output is None or not isinstance(output, paddle.Tensor):
+                continue
+            name = recompute.label or f"#{idx}"
+            if len(outputs) > 1:
+                name = f"{name}[{out_pos}]"
+            try:
+                held = output._holder_size()
+            except Exception:
+                held = 0
+            shape = list(output.shape)
+            dtype = str(output.dtype).replace("paddle.", "")
+            before = paddle.device.cuda.memory_allocated()
+            output._clear_data()
+            freed = before - paddle.device.cuda.memory_allocated()
+            total_freed += freed
+            total_accounted += held
+            verdict = (
+                "FREED"
+                if freed >= held * 0.99 and held > 0
+                else f"PINNED (holder {held / mib:.1f} MiB)"
+            )
+            lines.append(
+                f"  {name:<16} {shape!s:<20} {dtype:<8} "
+                f"{freed / mib:8.1f} MiB  {verdict}"
+            )
+            idx += 1
+
+    header = (
+        f"[MHC-RECOMPUTE-RELEASE] block replay: "
+        f"{len(recomputes)} spans, {idx} outputs"
+    )
+    footer = (
+        f"  total: freed {total_freed / mib:.1f} / "
+        f"accounted {total_accounted / mib:.1f} MiB  "
+        f"(pinned {(total_accounted - total_freed) / mib:.1f})"
+    )
+    logger.info("\n".join([header, *lines, footer]))
+
+
+_MHC_RECOMPUTE_MANAGERS = {}
+"""Live mHC block managers, created lazily and removed at block boundaries."""
+
+
+def get_mhc_recompute_manager(block_id, position):
+    """Return the current manager for ``block_id``, creating it if needed."""
+    manager = _MHC_RECOMPUTE_MANAGERS.get(block_id)
+    if manager is not None and position <= manager.position:
+        manager = None
+    if manager is None:
+        manager = RecomputeWithoutOutputManager()
+        _MHC_RECOMPUTE_MANAGERS[block_id] = manager
+    manager.position = position
+    return manager
+
+
+def finalize_mhc_recompute_block(block_id, hook_tensor):
+    """Close the block ending on ``hook_tensor`` and unregister it."""
+    manager = _MHC_RECOMPUTE_MANAGERS.pop(block_id, None)
+    if manager is None:
+        return
+    manager.discard_all_outputs_and_register_unified_recompute(hook_tensor)

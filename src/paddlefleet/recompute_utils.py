@@ -153,6 +153,92 @@ def need_recompute_in_block(layer_number, config, recompute_num_layers):
     return False
 
 
+def _pipeline_chunk_size(config):
+    """Return ``(total decoder layers, layers per pipeline chunk, rounded up)``."""
+    total_num_hidden_layers = (
+        config.num_empty_layers_add_in_head
+        + config.num_hidden_layers
+        + config.num_empty_layers_add_in_tail
+    )
+    vpp_size = (
+        config.virtual_pipeline_model_parallel_size
+        if config.virtual_pipeline_model_parallel_size
+        else 1
+    )
+    parallel_size = config.pipeline_model_parallel_size * vpp_size
+    chunk_size = (total_num_hidden_layers + parallel_size - 1) // parallel_size
+    return total_num_hidden_layers, chunk_size
+
+
+def explicit_mhc_recompute_blocks(config):
+    """Return the explicit mHC block list, or ``None`` for uniform sizing.
+
+    ``recompute_modules['mhc_block']`` accepts a *nested* layer list, one inner
+    list per block::
+
+        recompute_modules:
+          mhc_block: [[3, 4, 5], [9, 10]]
+
+    Layers outside every block do no mHC recompute. Layer ids use the
+    ``logical_layer_index`` space, as everywhere else in ``recompute_modules``.
+    Nesting is what separates "one block of layers 3-5" from "three one-layer
+    blocks", so a flat list is rejected rather than guessed at.
+    """
+    _, layer_selector = _get_module_recompute_config("mhc_block", config)
+    if not isinstance(layer_selector, (list, tuple)) or not layer_selector:
+        return None
+    nested = [isinstance(block, (list, tuple)) for block in layer_selector]
+    if not any(nested):
+        return None
+    if not all(nested):
+        raise ValueError(
+            "recompute_modules['mhc_block'] mixes blocks with bare layer ids "
+            f"({layer_selector!r}): give one inner list per block, e.g. "
+            "[[3, 4, 5], [9, 10]]"
+        )
+    return tuple(tuple(block) for block in layer_selector)
+
+
+def mhc_recompute_block_plan(layer_number, config, is_mtp_layer=False):
+    """Return ``(block_id, is_block_end)`` for an mHC layer.
+
+    ``(None, False)`` means this layer does no mHC recompute, which only an
+    explicit block list can produce.
+
+    Without an explicit list, blocks are split within each pipeline chunk so
+    they never cross a stage; ``mhc_recompute_layer_num=None`` means one block
+    per chunk. An explicit list is held to the same constraint by
+    ``_validate_mhc_block_recompute``. MTP layers always form independent
+    one-layer blocks, since their layer numbers are separate from the
+    backbone's.
+    """
+    if is_mtp_layer:
+        return ("mtp", int(layer_number)), True
+
+    blocks = explicit_mhc_recompute_blocks(config)
+    if blocks is not None:
+        layer_id = logical_layer_index(config, layer_number)
+        for index, block in enumerate(blocks):
+            if layer_id in block:
+                return ("explicit", index), layer_id == block[-1]
+        return None, False
+
+    total_num_hidden_layers, chunk_size = _pipeline_chunk_size(config)
+    chunk_index, index_in_chunk = divmod(layer_number, chunk_size)
+    # The final chunk can be short, so its last index is not chunk_size - 1.
+    last_index_in_chunk = (
+        min(chunk_size, total_num_hidden_layers - chunk_index * chunk_size) - 1
+    )
+
+    block_size = config.mhc_recompute_layer_num or chunk_size
+    block_in_chunk, index_in_block = divmod(index_in_chunk, block_size)
+    is_block_end = (
+        index_in_block == block_size - 1
+        or index_in_chunk == last_index_in_chunk
+    )
+    return (chunk_index, block_in_chunk), is_block_end
+
+
 def need_recompute_in_first_n(layer_number, config, recompute_num_layers):
     assert recompute_num_layers is not None, (
         "recompute_num_layers cannot be none"
@@ -221,6 +307,10 @@ LAYER_AGNOSTIC_RECOMPUTE_MODULES = frozenset({"lm_head", "loss_fn"})
 
 REFINED_RECOMPUTE_MODULES = frozenset({"flash_attn", "moe_combine"})
 """RR modules: count-based selectors always use ``first_n``."""
+
+BLOCK_SCOPED_RECOMPUTE_MODULES = frozenset({"mhc_block"})
+"""Modules spanning layers: a flat layer selector is rejected, a nested one is
+the explicit block list."""
 
 
 def effective_mtp_layers(config):
@@ -391,6 +481,10 @@ def module_needs_recompute(
         # No layer to filter on; a layer list is rejected during validation.
         _log_recompute_decision("plain", module_name, layer_number, True)
         return True
+    if module_name in BLOCK_SCOPED_RECOMPUTE_MODULES:
+        # Per-layer participation comes from the block plan, not the selector.
+        _log_recompute_decision("plain", module_name, layer_number, True)
+        return True
     enabled = _selector_matches_layer(
         layer_selector,
         layer_number,
@@ -470,6 +564,152 @@ def module_needs_refined_recompute(
     return enabled
 
 
+def _validate_mhc_block_recompute(config):
+    """Cross-field checks for ``recompute_modules=['mhc_block']``."""
+    if "mhc_block" not in (config.recompute_modules or ()):
+        return
+    if not config.enable_hyper_connections:
+        raise ValueError(
+            "recompute_modules['mhc_block'] requires "
+            "enable_hyper_connections=True: there is no mHC recompute to "
+            "group otherwise."
+        )
+    if config.recompute_granularity != "selective":
+        raise ValueError(
+            "recompute_modules['mhc_block'] requires "
+            "recompute_granularity='selective', got "
+            f"{config.recompute_granularity!r}. Under 'full' the whole layer is "
+            "replayed, so the block manager would collect each span twice in "
+            "one micro-batch."
+        )
+    if "mhc_forward" in config.recompute_modules:
+        raise ValueError(
+            "recompute_modules cannot contain both 'mhc_block' and "
+            "'mhc_forward': they are the block-scoped and half-layer-scoped "
+            "versions of the same mechanism. 'mhc_block' strictly subsumes "
+            "'mhc_forward'."
+        )
+    block_size = config.mhc_recompute_layer_num
+    if block_size is not None and (
+        isinstance(block_size, bool)
+        or not isinstance(block_size, int)
+        or block_size < 1
+    ):
+        raise ValueError(
+            "mhc_recompute_layer_num must be a positive integer or None, got "
+            f"{block_size!r}"
+        )
+    if block_size is not None:
+        _, chunk_size = _pipeline_chunk_size(config)
+        if block_size > chunk_size:
+            raise ValueError(
+                f"mhc_recompute_layer_num={block_size} exceeds the "
+                f"{chunk_size} decoder layers per pipeline chunk. A recompute "
+                "block cannot span a pipeline stage."
+            )
+    _validate_explicit_mhc_blocks(config, block_size)
+
+
+def _validate_explicit_mhc_blocks(config, block_size):
+    """Check the nested ``recompute_modules['mhc_block']`` block list."""
+    blocks = explicit_mhc_recompute_blocks(config)
+    if blocks is None:
+        return
+    if block_size is not None:
+        raise ValueError(
+            f"recompute_modules['mhc_block']={list(map(list, blocks))} lists "
+            "the blocks explicitly, so mhc_recompute_layer_num="
+            f"{block_size} has nothing to size. Drop one of the two."
+        )
+
+    seen = {}
+    for index, block in enumerate(blocks):
+        _validate_one_mhc_block(config, index, block, seen)
+
+
+def _validate_one_mhc_block(config, index, block, seen):
+    """Check one inner block list and record its layer ids in ``seen``."""
+    where = f"recompute_modules['mhc_block'][{index}]"
+    if not block:
+        raise ValueError(f"{where} is empty")
+    for layer_id in block:
+        if isinstance(layer_id, bool) or not isinstance(layer_id, int):
+            raise ValueError(f"{where} layer ids must be ints, got {block!r}")
+    if list(block) != list(range(block[0], block[0] + len(block))):
+        raise ValueError(
+            f"{where}={list(block)} is not a run of consecutive layers. A "
+            "block hooks its last layer's residual state and replays the rest "
+            "off it, so a gap inside a block would keep the skipped layers' "
+            "activations alive for the whole block instead of their own span."
+        )
+    if block[0] < 0 or block[-1] >= config.num_hidden_layers:
+        raise ValueError(
+            f"{where}={list(block)} is out of range for the "
+            f"{config.num_hidden_layers} backbone layers (0-based, excluding "
+            "empty head/tail layers; MTP layers always form their own blocks)"
+        )
+    for layer_id in block:
+        if layer_id in seen:
+            raise ValueError(
+                f"{where} repeats layer {layer_id}, already in "
+                f"recompute_modules['mhc_block'][{seen[layer_id]}]. A layer "
+                "belongs to at most one block."
+            )
+        seen[layer_id] = index
+
+    head_offset = getattr(config, "num_empty_layers_add_in_head", 0) or 0
+    _, chunk_size = _pipeline_chunk_size(config)
+    first_chunk = (block[0] + head_offset) // chunk_size
+    last_chunk = (block[-1] + head_offset) // chunk_size
+    if first_chunk != last_chunk:
+        boundary = (first_chunk + 1) * chunk_size - head_offset
+        raise ValueError(
+            f"{where}={list(block)} crosses a pipeline chunk boundary at layer "
+            f"{boundary}. A block cannot span a pipeline stage: the earlier "
+            "stage would never see the boundary tensor its hook goes on.\n"
+            + mhc_chunk_layout_text(config)
+            + f"\nEach block must sit inside one of those spans; split "
+            f"{list(block)} at layer {boundary}."
+        )
+
+
+def mhc_chunk_layout_text(config):
+    """Human-readable map of which layer ids each pipeline chunk holds.
+
+    Empty head/tail layers occupy chunk slots without being addressable, which
+    is what makes an explicit block list easy to get wrong -- hence printing the
+    layout in error messages instead of leaving the arithmetic to the reader.
+    """
+    head_offset = getattr(config, "num_empty_layers_add_in_head", 0) or 0
+    tail_offset = getattr(config, "num_empty_layers_add_in_tail", 0) or 0
+    total, chunk_size = _pipeline_chunk_size(config)
+    spans = []
+    for chunk_index in range(-(-total // chunk_size)):
+        first = chunk_index * chunk_size - head_offset
+        last = min(first + chunk_size - 1, config.num_hidden_layers - 1)
+        if last >= max(first, 0):
+            spans.append(f"chunk {chunk_index}: layers {max(first, 0)}-{last}")
+
+    empties = []
+    if head_offset:
+        empties.append(f"{head_offset} empty head")
+    if tail_offset:
+        empties.append(f"{tail_offset} empty tail")
+    note = ""
+    if empties:
+        note = (
+            f" ({' + '.join(empties)} layers take up chunk slots without being "
+            "addressable, which is why the first/last chunk is short)"
+        )
+    return (
+        f"{config.num_hidden_layers} backbone layers, "
+        f"pipeline_model_parallel_size={config.pipeline_model_parallel_size} x "
+        "virtual_pipeline_model_parallel_size="
+        f"{config.virtual_pipeline_model_parallel_size} => {chunk_size} layers "
+        f"per chunk{note}:\n  " + "\n  ".join(spans)
+    )
+
+
 def validate_recompute_modules(config):
     """Structural check of ``config.recompute_modules``, run from config init.
 
@@ -486,12 +726,14 @@ def validate_recompute_modules(config):
                     "recompute_modules entries must be str, got "
                     f"{module_name!r}"
                 )
+        _validate_mhc_block_recompute(config)
         return
     if not isinstance(recompute_modules, dict):
         raise ValueError(
             "recompute_modules must be a sequence or dict, got "
             f"{type(recompute_modules).__name__}"
         )
+    _validate_mhc_block_recompute(config)
 
     # Layer lists live in the logical_layer_index space: backbone layers then
     # MTP layers. Empty head/tail layers hold no module and are not addressable.
@@ -503,6 +745,20 @@ def validate_recompute_modules(config):
             )
         if layer_selector is None or layer_selector == RECOMPUTE_ALL_LAYERS:
             continue
+        if module_name in BLOCK_SCOPED_RECOMPUTE_MODULES:
+            if explicit_mhc_recompute_blocks(config) is not None:
+                # Already checked by _validate_mhc_block_recompute above.
+                continue
+            raise ValueError(
+                f"recompute_modules['{module_name}'] does not support a flat "
+                f"layer selector ({layer_selector!r}): '{module_name}' groups "
+                "consecutive layers into a block and hooks the block's last "
+                "residual state, so a flat list cannot say whether [3, 4, 5] "
+                "is one block or three. Nest one list per block, e.g. "
+                "[[3, 4, 5], [9, 10]]; or use "
+                f"'{RECOMPUTE_ALL_LAYERS}' with mhc_recompute_layer_num for "
+                "uniformly sized blocks over every layer."
+            )
         if isinstance(layer_selector, (list, tuple, set, frozenset)):
             layer_ids = normalize_recompute_layer_ids(
                 layer_selector, module_name
