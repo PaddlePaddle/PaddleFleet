@@ -33,7 +33,7 @@ export NPROC_PER_NODE=2
 export NNODES="${NNODES:-1}"
 export NODE_RANK="${NODE_RANK:-0}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
-export MASTER_PORT="${MASTER_PORT:-29500}"
+export MASTER_PORT="${MASTER_PORT:-$((29500 + $$ % 1000))}"
 
 export CUBLAS_WORKSPACE_CONFIG=":4096:8"
 # 本机 NVLS multicast 内存注册失败（CUDA error 401），NCCL init 会直接崩：
