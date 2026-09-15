@@ -14,6 +14,7 @@
 
 """FP32 clipping preserves its result across layouts and parameter ownership."""
 
+import importlib
 from types import SimpleNamespace
 
 import paddle
@@ -24,7 +25,6 @@ from paddlefleet.utils.moe_hybrid_parallel_optimizer import (
     MoEHybridParallelClipGrad,
 )
 from paddlefleet.utils.reproducible_norm import (
-    ReproducibleClipGradByGlobalNorm,
     ReproducibleL2Norm,
 )
 
@@ -94,6 +94,10 @@ def _parameter(name, **kwargs):
 
 @pytest.mark.parametrize("nested", [False, True])
 def test_hybrid_owner_filter_and_coefficient(nested):
+    from paddlefleet.utils.reproducible_norm import (
+        ReproducibleClipGradByGlobalNorm,
+    )
+
     clip = ReproducibleClipGradByGlobalNorm(1.0)
     if nested:
         clip = MoEHybridParallelClipGrad(clip, hcg=None)
@@ -140,7 +144,15 @@ def test_trainer_clip_selection(accuracy, limit, expected):
 
 
 @pytest.mark.parametrize("moe", [False, True])
-def test_trainer_norm_logging_keeps_the_clipping_recipe(monkeypatch, moe):
+@pytest.mark.parametrize("reload_module", [False, True])
+def test_trainer_norm_logging_keeps_the_clipping_recipe(
+    monkeypatch, moe, reload_module
+):
+    if reload_module:
+        importlib.reload(
+            importlib.import_module("paddlefleet.utils.reproducible_norm")
+        )
+
     from paddle.distributed import fleet
     from paddle.distributed.fleet.meta_optimizers.dygraph_optimizer.hybrid_parallel_optimizer import (
         HybridParallelClipGrad,
@@ -148,6 +160,7 @@ def test_trainer_norm_logging_keeps_the_clipping_recipe(monkeypatch, moe):
     )
 
     from paddlefleet.utils.reproducible_norm import (
+        ReproducibleClipGradByGlobalNorm,
         ReproducibleHybridParallelClipGrad,
     )
 
@@ -175,6 +188,11 @@ def test_trainer_norm_logging_keeps_the_clipping_recipe(monkeypatch, moe):
     trainer.optimizer = optimizer
     trainer.global_training_logs = {}
     actual_optimizer = trainer._wrap_distributed_optimizer(optimizer._inner_opt)
+    if not moe:
+        assert isinstance(
+            actual_optimizer._inner_opt._grad_clip,
+            ReproducibleHybridParallelClipGrad,
+        )
     gradient = paddle.to_tensor([3.0, 4.0])
     actual_optimizer._inner_opt._grad_clip._dygraph_clip(
         [(_parameter("w"), gradient)]
