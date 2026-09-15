@@ -29,8 +29,10 @@ import paddle.distributed as dist
 import paddle.nn as nn
 from paddle.distributed.fleet.meta_parallel import (
     ColumnParallelLinear,
+    LocalSharedLayerDesc,
     PipelineLayer,
     RowParallelLinear,
+    SharedLayerDesc,
 )
 from paddle.incubate.nn import FusedLinear
 
@@ -267,21 +269,16 @@ class LoRAModel(nn.Layer):
         pipeline_layer_types = [PipelineLayer]
         if issubclass(type(self.model), tuple(pipeline_layer_types)):
             self.is_pipelinemodel = True
-            self.model._single_to_pp_mapping = None
 
         self.use_paddlefleet = False
         if is_paddlefleet_available():
             if isinstance(self.model, FleetGPTModel):
                 self.use_paddlefleet = True
 
-        # For composite models (e.g., VL models), the inner language_model may be a
-        # PaddleFleet PipelineLayer. Invalidate its cached name mapping so it gets
-        # rebuilt on next state_dict() call with the newly added LoRA parameter keys.
-        if not self.is_pipelinemodel and self.use_paddlefleet:
-            for sublayer in self.model.sublayers():
-                if isinstance(sublayer, PipelineLayer):
-                    sublayer._pipeline_name_mapping = None
-                    sublayer._pp_to_single_mapping = None
+        # Wrapping the model in LoRA adds new parameters, so any pipeline name
+        # mapping cached before `get_lora_model` no longer covers all the
+        # state_dict keys.
+        self._invalidate_pp_name_mapping()
 
         if (
             self.lora_config.tensor_model_parallel_size
@@ -301,6 +298,24 @@ class LoRAModel(nn.Layer):
 
         logger.info("Mark only lora and trainable_module as trainable.")
         self.mark_only_lora_as_trainable()
+
+    def _invalidate_pp_name_mapping(self):
+        """Drop the cached pipeline <-> single card name mappings.
+
+        Covers both the wrapped model itself and any nested PipelineLayer (for
+        composite models such as VL models, whose inner language_model is the
+        PipelineLayer).
+        """
+        targets = [self.model] if self.is_pipelinemodel else []
+        targets += [
+            sublayer
+            for sublayer in self.model.sublayers()
+            if isinstance(sublayer, PipelineLayer)
+        ]
+        for target in targets:
+            target._single_to_pp_mapping = None
+            target._pp_to_single_mapping = None
+            target._pipeline_name_mapping = None
 
     def add_lora_split_mapping(self, module_name, is_column=False):
         self.lora_split_mapping[module_name] = is_column
@@ -330,14 +345,26 @@ class LoRAModel(nn.Layer):
             # rename lora_split_mapping
             prefixes = self.model.get_sequential_name_prefixes()
             keys = self.lora_split_mapping.keys()
-            first_key = ""
-            for k in keys:
-                first_key = k
-                break
-            first_key = first_key.split(".")
+            # Whether the layers are chunked is a property of the model, not
+            # something the key shapes can tell: a chunk key is
+            # `{chunk_start}.{local_idx}.xxx`, but an ordinary PP
+            # `LayerDesc(nn.Sequential, ...)` also yields
+            # `{global_idx}.{sublayer_idx}.xxx`, and conversely the first key of
+            # a chunked stage may be a shared layer alias or a directly added
+            # layer, both of which keep a non digit second segment. Ask the
+            # pipeline layer itself; dualpipev chunks the layers as well.
             use_virtual_pipeline_model_parallel_size = (
-                first_key[0].isdigit() and first_key[1].isdigit()
+                self.model._num_virtual_pipeline_stages > 1
+                or self.model._use_dualpipev
             )
+            layers_desc = getattr(self.model, "_layers_desc", None)
+            if layers_desc is None:
+                layers_desc = getattr(self.model, "layers", [])
+            shared_layer_names = {
+                layer.layer_name
+                for layer in layers_desc
+                if isinstance(layer, SharedLayerDesc)
+            }
 
             for k in keys:
                 name_splited = k.split(".")
@@ -349,33 +376,68 @@ class LoRAModel(nn.Layer):
                             )
                             single_name = [prefixes[idx]]
                             single_name.extend(name_splited[2:])
-                        else:
-                            single_name = [prefixes[str(len(prefixes) - 1)]]
+                        elif name_splited[1] in shared_layer_names:
+                            # A SharedLayerDesc with `forward_func` is
+                            # registered on the chunk itself under VPP, so its
+                            # key is `{chunk_start}.{shared_name}.rest`.
+                            single_name = [
+                                self.model.get_shardlayer_prefix(name_splited)
+                            ]
                             single_name.extend(name_splited[2:])
-                            logger.warning(
-                                f"Please check! we treat this key as last layer, get {k}, set origin name as {'.'.join(single_name)}"
+                        else:
+                            # Layers directly added to the PipelineLayer under
+                            # VPP (e.g. lm_head) are named `{global_idx}.rest`
+                            # instead of `{chunk_start}.{local_idx}.rest`, so
+                            # the first segment is already the global index.
+                            # Resolve them per layer like the non-VPP branch,
+                            # otherwise every such key collapses onto the last
+                            # layer prefix and collides with its siblings.
+                            idx = name_splited[0]
+                            single_name = (
+                                [] if prefixes[idx] == "" else [prefixes[idx]]
                             )
+                            single_name.extend(name_splited[1:])
+                    elif name_splited[0] == "shared_layers":
+                        single_name = [
+                            self.model.get_shardlayer_prefix(name_splited)
+                        ]
+                        single_name.extend(name_splited[2:])
+                    elif name_splited[0] == "local_shared_layers":
+                        single_name = [
+                            self.model.get_shardlayer_prefix(
+                                name_splited, LocalSharedLayerDesc
+                            )
+                        ]
+                        single_name.extend(name_splited[2:])
                     else:
                         raise ValueError(
-                            f"Please check! {k} is not a valid key."
+                            f"Unexpected key: {k} for pp lora layer."
                         )
                 else:
                     idx = name_splited[0]
                     # for normal pp layer name
                     if idx.isdigit():
-                        single_name = [prefixes[idx]]
-                        single_name.extend(name_splited[1:])
-                    elif "shared_layers" in idx:
-                        if (
-                            getattr(self.model, "pipe_model_type", None)
-                            == "torch"
-                        ):
-                            single_name = ["model"]
-                        else:
-                            single_name = ["ernie"]
-                        single_name.extend(
-                            k.split("shared_layers.embed_weight_share.")[1:]
+                        # allow empty prefix
+                        single_name = (
+                            [] if prefixes[idx] == "" else [prefixes[idx]]
                         )
+                        single_name.extend(name_splited[1:])
+                    elif idx == "shared_layers":
+                        # The prefix depends on which SharedLayerDesc lives on
+                        # this stage (the embedding or the tied lm_head), so ask
+                        # the pipeline layer instead of hardcoding a model name
+                        # and a shared layer key.
+                        single_name = [
+                            self.model.get_shardlayer_prefix(name_splited)
+                        ]
+                        single_name.extend(name_splited[2:])
+                    elif idx == "local_shared_layers":
+                        single_name = [
+                            self.model.get_shardlayer_prefix(
+                                name_splited, LocalSharedLayerDesc
+                            )
+                        ]
+                        single_name.extend(name_splited[2:])
                     else:
                         raise ValueError(
                             f"Unexpected key: {k} for pp lora layer."
@@ -720,13 +782,7 @@ class LoRAModel(nn.Layer):
             safetensors = True
         logger.info(f"Saving LoRA weights use safetensors: {safetensors}")
 
-        if self.is_pipelinemodel:
-            self.model._single_to_pp_mapping = None
-        if not self.is_pipelinemodel and self.use_paddlefleet:
-            for sublayer in self.model.sublayers():
-                if isinstance(sublayer, PipelineLayer):
-                    sublayer._pipeline_name_mapping = None
-                    sublayer._pp_to_single_mapping = None
+        self._invalidate_pp_name_mapping()
         if (
             self.is_pipelinemodel
             and merge_tensor_parallel
