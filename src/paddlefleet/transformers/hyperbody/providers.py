@@ -74,6 +74,7 @@ _ENC_MOE_FFN_HIDDEN = 896
 _ENC_NUM_MOE_EXPERTS = 64
 _ENC_NUM_LAYERS = 12
 
+
 class HyperEncoderConfig(PretrainedConfig):
     """Transient HF-style config for the encoder view.
 
@@ -179,13 +180,24 @@ def build_hyperbody_decoder_model(config, *, num_stages: int, loss_fn=None):
     if getattr(config, "mtp_num_layers", None):
         raise NotImplementedError("HyperBody decoder has no MTP layers.")
     if getattr(config, "separate_mtp_headloss", False):
-        raise NotImplementedError("HyperBody decoder does not use separate_mtp_headloss.")
-    if config.num_empty_layers_add_in_head or config.num_empty_layers_add_in_tail:
-        raise NotImplementedError("HyperBody decoder inserts no EmptyLayer (pp split relies on seg_method).")
+        raise NotImplementedError(
+            "HyperBody decoder does not use separate_mtp_headloss."
+        )
+    if (
+        config.num_empty_layers_add_in_head
+        or config.num_empty_layers_add_in_tail
+    ):
+        raise NotImplementedError(
+            "HyperBody decoder inserts no EmptyLayer (pp split relies on seg_method)."
+        )
     if getattr(config, "moe_token_dispatcher_type", None) == "ringmoe":
-        raise NotImplementedError("ringmoe needs world-level subgroup init, not supported by this model.")
+        raise NotImplementedError(
+            "ringmoe needs world-level subgroup init, not supported by this model."
+        )
     if getattr(config, "init_model_with_meta_device", False):
-        raise NotImplementedError("HyperBody decoder does not use meta-device init.")
+        raise NotImplementedError(
+            "HyperBody decoder does not use meta-device init."
+        )
 
     gpt_spec = get_gpt_spec(
         config=config,
@@ -270,7 +282,9 @@ class HyperBodyDecoderModelProvider(GPTModelProvider):
         "dtype": "params_dtype",
     }
 
-    def provide(self, pre_process=None, post_process=None, vp_stage=None, loss_fn=None) -> GPTModel:
+    def provide(
+        self, pre_process=None, post_process=None, vp_stage=None, loss_fn=None
+    ) -> GPTModel:
         """Override the parent's ``provide()``, swapping assembly for :func:`build_hyperbody_decoder_model`.
 
         The parent's version calls ``gpt_builder`` (which picks its own layer spec);
@@ -283,7 +297,10 @@ class HyperBodyDecoderModelProvider(GPTModelProvider):
                 self.rope_type = self.rope_parameters["rope_type"]
             if "rope_theta" in self.rope_parameters:
                 self.rope_theta = self.rope_parameters["rope_theta"]
-        if isinstance(self.rope_scaling, dict) and "mscale_all_dim" in self.rope_scaling:
+        if (
+            isinstance(self.rope_scaling, dict)
+            and "mscale_all_dim" in self.rope_scaling
+        ):
             self.mscale_all_dim = self.rope_scaling["mscale_all_dim"]
 
         fleet_model = build_hyperbody_decoder_model(

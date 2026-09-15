@@ -33,6 +33,7 @@ The decoder field set / ``super().__init__`` routing mirrors
 ``super().__init__(**kwargs)``, else ``set_expected_keys`` resets them to
 defaults -- see ``HyperBodyDecoderConfig`` docstring step 2).
 """
+
 from __future__ import annotations
 
 from ..configuration_utils import PretrainedConfig
@@ -88,16 +89,19 @@ _ENC_NUM_LAYERS = 12
 _ENC_NUM_HEADS = 10
 
 
-def build_moe_layer_freq(num_hidden_layers: int = HYPERBODY_DECODER_NUM_LAYERS) -> list[int]:
+def build_moe_layer_freq(
+    num_hidden_layers: int = HYPERBODY_DECODER_NUM_LAYERS,
+) -> list[int]:
     """Per-layer dense/MoE 0-1 table: ``[0] + [1]*(L-1)`` (layer 0 dense, rest MoE).
 
     WARNING: must be a list. Passing an int makes Paddle take ``i % N``, which is
     not the intended per-layer semantics.
     """
     if num_hidden_layers < 1:
-        raise ValueError(f"num_hidden_layers must be >= 1, got {num_hidden_layers}")
+        raise ValueError(
+            f"num_hidden_layers must be >= 1, got {num_hidden_layers}"
+        )
     return [0] + [1] * (num_hidden_layers - 1)
-
 
 
 class HyperBodyConfig(PretrainedConfig):
@@ -231,8 +235,16 @@ class HyperBodyConfig(PretrainedConfig):
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
         self.num_attention_heads = num_attention_heads
-        self.num_key_value_heads = num_key_value_heads if num_key_value_heads is not None else num_attention_heads
-        self.head_dim = head_dim if head_dim is not None else hidden_size // num_attention_heads
+        self.num_key_value_heads = (
+            num_key_value_heads
+            if num_key_value_heads is not None
+            else num_attention_heads
+        )
+        self.head_dim = (
+            head_dim
+            if head_dim is not None
+            else hidden_size // num_attention_heads
+        )
         self.intermediate_size = intermediate_size
         self.hidden_act = hidden_act
         self.rms_norm_eps = rms_norm_eps
@@ -255,7 +267,9 @@ class HyperBodyConfig(PretrainedConfig):
         self.num_experts_per_tok = num_experts_per_tok
         self.n_shared_experts = n_shared_experts
         self.moe_layer_freq = (
-            build_moe_layer_freq(num_hidden_layers) if moe_layer_freq is None else list(moe_layer_freq)
+            build_moe_layer_freq(num_hidden_layers)
+            if moe_layer_freq is None
+            else list(moe_layer_freq)
         )
         self.first_k_dense_replace = first_k_dense_replace
         self.n_group = n_group
