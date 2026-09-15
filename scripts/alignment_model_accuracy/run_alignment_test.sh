@@ -23,6 +23,8 @@ cd "${SCRIPT_DIR}"
 CASES=(
     "MinimaxV2.5_EP2 ./MinimaxV2.5_EP2/run_paddle_minimax.sh ./MinimaxV2.5_EP2/run_torch_minimax.sh"
     "GLM45Air_EP2 ./GLM45Air_EP2/run_paddle_glm45.sh ./GLM45Air_EP2/run_torch_glm45.sh"
+    # KimiK2_EP2: 用例文件已就位，2 卡 TP1/EP2 的 step1 md5 基线待首次 smoke 确立后再放开
+    # "KimiK2_EP2 ./KimiK2_EP2/run_paddle_kimik2.sh ./KimiK2_EP2/run_torch_kimik2.sh"
     # "transformer ./paddlepaddle_transformer/run_paddle_minimax.sh ./pytorch_transformer/run_torch_minimax.sh"
 )
 
