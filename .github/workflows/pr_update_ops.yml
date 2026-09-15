@@ -207,6 +207,8 @@ jobs:
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
+          # After `source /root/proxy`, which may return non-zero.
+          set -e
           git reset --hard ${{ github.sha }}
           uv cache clean paddlepaddle-gpu
           git submodule update --init --recursive
@@ -217,8 +219,10 @@ jobs:
           fi
           export IS_NVIDIA=True
           uv build --wheel --package paddlefleet --out-dir dist --clear -v
-          pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
           rm dist/paddlefleet-*.whl
+          # Compiling ops needs paddle only, not the rest of the fleet dep tree.
+          PADDLE_REQ=$(grep -oE "paddlepaddle-gpu==[0-9a-zA-Z.+]+" pyproject.toml | head -1)
+          pip install "${PADDLE_REQ}" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
           pip install packaging "setuptools>=66.1.0" wheel "ninja==1.11.1.1" "pybind11[global]>=2.13,<3" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/
           if [[ ${{ matrix.cuda.bos_CUDA }} == "cu129" ]]; then
             pip install "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
@@ -237,6 +241,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
+          set -e
           wget --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
@@ -386,6 +391,7 @@ jobs:
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
+          set -e
           git reset --hard ${{ github.sha }}
           uv cache clean paddlepaddle-gpu
           git submodule update --init --recursive
@@ -414,6 +420,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
+          set -e
           wget --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
@@ -518,6 +525,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
           source /root/proxy
+          set -e
           wget --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
           tar -xf PaddleFleet.tar.gz --strip-components=1
@@ -543,7 +551,9 @@ jobs:
           git reset --hard ${{ github.sha }}
           uv cache clean paddlepaddle-gpu
           uv build --wheel -v
-          python -m pip install --break-system-packages dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
+          # Compiling ops needs paddle only, not the rest of the fleet dep tree.
+          PADDLE_REQ=$(grep -oE "paddlepaddle-gpu==[0-9a-zA-Z.+]+" pyproject.toml | head -1)
+          python -m pip install --break-system-packages "${PADDLE_REQ}" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
           git submodule update --init --recursive
           git submodule foreach --recursive "git config --global --add safe.directory \$toplevel/\$sm_path"
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
@@ -563,6 +573,7 @@ jobs:
       - name: Upload wheel
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          set -e
           wget --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
