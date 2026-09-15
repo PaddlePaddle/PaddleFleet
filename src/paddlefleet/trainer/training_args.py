@@ -2761,16 +2761,19 @@ class TrainingArguments:
                             ].comm_group_call_opt = True
 
                         if self.sharding_machine_balanced_2d_partition:
-                            assert self.optim == OptimizerNames.MUON, (
-                                "sharding_machine_balanced_2d_partition only supports Muon optimizer."
-                            )
-                            assert hasattr(
+                            if self.optim != OptimizerNames.MUON:
+                                raise ValueError(
+                                    "sharding_machine_balanced_2d_partition only supports Muon "
+                                    f"optimizer, but got optim={self.optim}."
+                                )
+                            if not hasattr(
                                 strategy.hybrid_configs["sharding_configs"],
                                 "machine_balanced_2d_partition",
-                            ), (
-                                "sharding_machine_balanced_2d_partition is not supported by current "
-                                "version of Paddle. Please try latest develop Paddle."
-                            )
+                            ):
+                                raise ValueError(
+                                    "sharding_machine_balanced_2d_partition is not supported by "
+                                    "current version of Paddle. Please try latest develop Paddle."
+                                )
                             strategy.hybrid_configs[
                                 "sharding_configs"
                             ].machine_balanced_2d_partition = True
