@@ -44,6 +44,8 @@
 
 测试细则见[单测规则](unit-test-rules.md)：仓库模块主表、各模块的无卡/单卡/多卡适用范围与证据要求、用例设计与运行方式，反例见[典型单测反例](unit-test-antipatterns.md)。评审测试时按该文件判定。
 
+- 修改 `ci/rules` 时同步检查 `ci/rule-tests` 和快照；新增 blacklist 不能替代回归测试。
+
 ## PR 信息与评论
 
 - 检查 PR 标题是否清晰概括修改对象和目的；类别前缀可参考 PaddleFleet 仓库惯例，不强制单一格式。
