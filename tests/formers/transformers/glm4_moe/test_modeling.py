@@ -20,11 +20,11 @@ import unittest
 import numpy as np
 import paddle
 
-from paddlefleet.transformers import Glm4MoeConfig
 from paddlefleet.transformers import (
+    Glm4MoeConfig,
     Glm4MoeForCausalLMDeprecated as Glm4MoeForCausalLM,
+    Glm4MoeModel,
 )
-from paddlefleet.transformers import Glm4MoeModel
 from paddlefleet.transformers.glm4_moe.modeling import GLMMoEModelProvider
 from tests.formers.testing_utils import gpu_device_initializer, require_package
 from tests.formers.transformers.test_configuration_common import ConfigTester

@@ -190,7 +190,11 @@ def test_glm52_provider_selects_numeric_contract_without_changing_glm4_default()
         GlmMoeDsaModelProvider,
     )
 
-    values = dict(num_hidden_layers=1, hidden_size=8, num_attention_heads=1)
+    values = {
+        "num_hidden_layers": 1,
+        "hidden_size": 8,
+        "num_attention_heads": 1,
+    }
     assert not GLMMoEModelProvider(**values).moe_router_use_fp32_master
     assert GlmMoeDsaModelProvider(**values).moe_router_use_fp32_master
     assert not GlmMoeDsaModelProvider(
