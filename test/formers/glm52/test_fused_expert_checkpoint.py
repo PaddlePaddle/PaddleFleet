@@ -235,11 +235,15 @@ class TestFusedExpertOptimizerSave(unittest.TestCase):
                         "paddle.distributed", fromlist=["save_state_dict"]
                     )
                 )
-                with patch.object(
-                    target, location, side_effect=RuntimeError("save failure")
+                with (
+                    patch.object(
+                        target,
+                        location,
+                        side_effect=RuntimeError("save failure"),
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "save failure"),
                 ):
-                    with self.assertRaisesRegex(RuntimeError, "save failure"):
-                        trainer._save_flex_optimizer_state(directory)
+                    trainer._save_flex_optimizer_state(directory)
                 self.assert_unchanged(snapshot)
                 self.step(trainer)
 
