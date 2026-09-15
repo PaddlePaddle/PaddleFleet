@@ -223,11 +223,19 @@ def mhc_recompute_block_plan(layer_number, config, is_mtp_layer=False):
                 return ("explicit", index), layer_id == block[-1]
         return None, False
 
-    total_num_hidden_layers, chunk_size = _pipeline_chunk_size(config)
+    _, chunk_size = _pipeline_chunk_size(config)
     chunk_index, index_in_chunk = divmod(layer_number, chunk_size)
-    # The final chunk can be short, so its last index is not chunk_size - 1.
-    last_index_in_chunk = (
-        min(chunk_size, total_num_hidden_layers - chunk_index * chunk_size) - 1
+    # The block ends on the last *real* mHC layer of the chunk, not the last
+    # physical slot: tail EmptyLayers occupy chunk slots but never run
+    # finalize_mhc_recompute_block, so counting them would leave the block's
+    # is_block_end permanently False and the manager never discarded. The last
+    # real layer is head_offset + num_hidden_layers - 1; in every chunk before
+    # the one holding it the last real index is chunk_size - 1.
+    head_offset = getattr(config, "num_empty_layers_add_in_head", 0) or 0
+    last_real_layer = head_offset + config.num_hidden_layers - 1
+    last_index_in_chunk = min(
+        chunk_size - 1,
+        last_real_layer - chunk_index * chunk_size,
     )
 
     block_size = config.mhc_recompute_layer_num or chunk_size

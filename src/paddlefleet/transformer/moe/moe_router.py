@@ -321,7 +321,11 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                 g = y_grad.cast(x.dtype)
                 x_g = paddle.matmul(g, w.cast(x.dtype))
                 w_g = paddle.matmul(g, x, transpose_x=True)
-                x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+                x_grad = (
+                    _to_input_shape(x_g.cast(x.dtype))
+                    if not x_stop_grad
+                    else None
+                )
                 w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
                 return x_grad, w_grad
             if ctx.use_accuracy_compatible:

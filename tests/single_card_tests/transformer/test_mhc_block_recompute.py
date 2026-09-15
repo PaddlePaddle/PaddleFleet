@@ -355,6 +355,45 @@ class TestBlockPlan(unittest.TestCase):
             [False, True, False, True, False, True, True],
         )
 
+    def _real_layer_plan(self, config):
+        """Plan for the real mHC layers only (head_offset .. +num_hidden).
+
+        Empty head/tail layers are ``EmptyLayer``, not
+        ``HyperConnectionTransformerLayer``, so they never call
+        ``mhc_recompute_block_plan``; querying them would not model anything.
+        """
+        head = config.num_empty_layers_add_in_head
+        return [
+            mhc_recompute_block_plan(head + i, config)
+            for i in range(config.num_hidden_layers)
+        ]
+
+    def test_tail_empty_layers_do_not_swallow_the_block_end(self):
+        # 4 real layers + 1 tail EmptyLayer, one chunk (chunk_size 5). The last
+        # real layer is index 3, not the chunk's last slot (4, an EmptyLayer),
+        # so without the fix is_block_end would be False everywhere and the
+        # manager would never be discarded.
+        config = _PlanConfig(4, pp=1, tail=1)
+        plan = self._real_layer_plan(config)
+        self.assertEqual([block for block, _ in plan], [(0, 0)] * 4)
+        self.assertEqual([end for _, end in plan], [False, False, False, True])
+
+    def test_tail_empty_layers_across_multiple_chunks(self):
+        # 6 real layers + 2 tail empty over pp=1 vpp=2 -> chunk_size 4.
+        # chunk 0 = layers 0-3 (all real), chunk 1 = layers 4-7 where 4,5 are
+        # real and 6,7 are tail empty. Each chunk must still end its block on
+        # its last real layer (3 and 5).
+        config = _PlanConfig(6, pp=1, vpp=2, tail=2)
+        plan = self._real_layer_plan(config)
+        self.assertEqual(
+            [block for block, _ in plan],
+            [(0, 0)] * 4 + [(1, 0)] * 2,
+        )
+        self.assertEqual(
+            [end for _, end in plan],
+            [False, False, False, True, False, True],
+        )
+
     def test_vpp_chunks_get_separate_blocks(self):
         config = _PlanConfig(8, pp=2, vpp=2)
         blocks = [block for block, _ in self._plan(config, 8)]

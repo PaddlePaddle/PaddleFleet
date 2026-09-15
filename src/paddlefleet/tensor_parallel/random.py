@@ -715,9 +715,9 @@ def _log_block_release(recomputes):
                 held = 0
             shape = list(output.shape)
             dtype = str(output.dtype).replace("paddle.", "")
-            before = paddle.device.cuda.memory_allocated()
+            before = paddle.device.memory_allocated()
             output._clear_data()
-            freed = before - paddle.device.cuda.memory_allocated()
+            freed = before - paddle.device.memory_allocated()
             total_freed += freed
             total_accounted += held
             verdict = (
