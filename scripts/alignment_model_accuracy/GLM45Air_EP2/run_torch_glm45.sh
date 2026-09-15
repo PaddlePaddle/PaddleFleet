@@ -130,6 +130,7 @@ ARGS=(
     --adam_beta2 0.95
     --weight_decay 0.1
     --clip_grad 1.0
+    --reproducible_grad_norm True
     --use_distributed_optimizer False
     --accumulate_allreduce_grads_in_fp32 True
 
