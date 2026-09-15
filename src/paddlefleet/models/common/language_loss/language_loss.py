@@ -308,6 +308,9 @@ class LanguageLoss(FleetLayer):
                     labels, axis=1, mode=self.config.cp_balance_mode
                 )
 
+            observer = getattr(self, "_eval_token_loss_hook", None)
+            if observer is not None:
+                observer(loss, labels)
             lossmask = labels != self.ignored_index
             if (~lossmask).all():
                 return paddle.mean(loss) * 0.0
@@ -384,6 +387,9 @@ class LanguageLoss(FleetLayer):
                 flush=True,
             )
 
+        observer = getattr(self, "_eval_token_loss_hook", None)
+        if observer is not None:
+            observer(loss, labels)
         lossmask = labels != self.ignored_index
         if (~lossmask).all():
             loss = paddle.mean(loss) * 0.0
