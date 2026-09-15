@@ -228,17 +228,45 @@ class TestCompatibleEmbeddingIndexBackward(unittest.TestCase):
 
 
 class TestMoEInputBranches(unittest.TestCase):
-    """The three branches fan in as ``(routed + router) + shared``."""
+    """The three branches fan in as ``(routed + router) + shared``.
 
-    def test_forward_clones_and_backward_sums_every_branch(self):
+    BF16 coefficients make the order observable: ``512 + (-512)`` cancels first
+    and keeps the exact ``3``, whereas any other order rounds ``512 + 3`` to
+    ``516`` (the BF16 ULP at 512 is 4) and ends at ``4``.
+    """
+
+    COEFFS = (512.0, -512.0, 3.0)
+
+    def test_forward_clones_the_input(self):
         x = paddle.to_tensor([1.0, 2.0], dtype="float32")
+
+        with paddle.no_grad():
+            routed, router, shared = acp.MoEInputBranches.apply(x)
+
+        for branch in (routed, router, shared):
+            self.assertIsNot(branch, x)
+            np.testing.assert_allclose(branch.numpy(), x.numpy())
+
+    def test_backward_cancels_the_routed_and_router_grads_first(self):
+        x = paddle.ones([2], dtype="bfloat16")
         x.stop_gradient = False
+        g_routed, g_router, g_shared = self.COEFFS
 
         routed, router, shared = acp.MoEInputBranches.apply(x)
-        (routed * 1.0 + router * 2.0 + shared * 3.0).sum().backward()
+        (
+            routed * g_routed + router * g_router + shared * g_shared
+        ).sum().backward()
 
-        np.testing.assert_allclose(routed.numpy(), x.numpy())
-        np.testing.assert_allclose(x.grad.numpy(), [6.0, 6.0])
+        expected = (
+            (
+                paddle.to_tensor([g_routed] * 2, dtype="bfloat16")
+                + paddle.to_tensor([g_router] * 2, dtype="bfloat16")
+            )
+            + paddle.to_tensor([g_shared] * 2, dtype="bfloat16")
+        ).astype("float32")
+        np.testing.assert_array_equal(
+            x.grad.astype("float32").numpy(), expected.numpy()
+        )
 
 
 class TestIndicesToMultihot(unittest.TestCase):

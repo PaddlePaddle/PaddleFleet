@@ -332,6 +332,24 @@ class MoELayer(nn.Layer):
         )
         self.moe_allgather_gate_overlap = config.moe_allgather_gate_overlap
         if self.use_accuracy_compatible and not use_dsv4_accuracy_compatible():
+            # The rewrite swaps the communication implementation only: the
+            # layout flags above stay keyed to the *configured* dispatcher so
+            # expert construction and the checkpoint shard declarations keep
+            # agreeing. That is consistent only for dispatchers using the plain
+            # per-device expert layout, so reject the intermediate-EP ones
+            # instead of pairing all-to-all communication with I // EP experts.
+            if self.use_intermediate_ep_sharding:
+                raise ValueError(
+                    "use_accuracy_compatible=True forces the all-to-all token "
+                    "dispatcher, which is incompatible with "
+                    "moe_token_dispatcher_type="
+                    f"'{self.moe_token_dispatcher_type}': 'allgather' and "
+                    "'ringmoe' shard every expert along its intermediate "
+                    "dimension, so the experts would be built for a layout "
+                    "the all-to-all path never produces. Please set "
+                    "moe_token_dispatcher_type='alltoall' (or 'deepep') in "
+                    "the configuration yaml."
+                )
             self.moe_token_dispatcher_type = "alltoall"
         self.use_hybrid_ep_backend = False
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
@@ -1860,6 +1878,8 @@ class MoELayer(nn.Layer):
             hidden_states = hidden_states.transpose([1, 0, 2]).contiguous()
             if input_ids is not None and input_ids.ndim == 2:
                 input_ids = input_ids.transpose([1, 0]).contiguous()
+            if residual is not None and residual.ndim == 3:
+                residual = residual.transpose([1, 0, 2]).contiguous()
 
         orig_shape = hidden_states.shape
         residuals = hidden_states

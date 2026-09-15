@@ -155,21 +155,61 @@ class TestMoeUnpermuteGating(unittest.TestCase):
 
 
 class TestThreePathCloneBackwardOrder(unittest.TestCase):
-    """The MG-aligned fan-in order only applies with the flag on."""
+    """Only the flag may switch the fan-in order, and the order is visible.
+
+    The two orders differ solely in BF16 rounding, so the coefficients below are
+    chosen to make that difference observable: ``512 + 3`` rounds up to ``516``
+    at BF16 precision (the ULP at 512 is 4), so adding ``-512`` afterwards keeps
+    ``4``, while cancelling ``512 + (-512)`` first keeps the exact ``3``. An
+    FP32 or same-magnitude probe would return the same value either way and
+    would not pin the order down at all.
+    """
+
+    # (g_router, g_dispatcher, g_shared) as seen by backward().
+    COEFFS = (-512.0, 512.0, 3.0)
 
     def _backward_grad(self, enabled):
-        x = paddle.to_tensor([1.0, 2.0], dtype="float32")
+        x = paddle.ones([2], dtype="bfloat16")
         x.stop_gradient = False
+        g_router, g_dispatcher, g_shared = self.COEFFS
         with _dsv4_flag(moe_layer, enabled):
             router, dispatcher, shared = moe_layer.ThreePathCloneAlignMG.apply(
                 x
             )
-            (router * 1.0 + dispatcher * 2.0 + shared * 4.0).sum().backward()
-        return x.grad.numpy()
+            (
+                router * g_router
+                + dispatcher * g_dispatcher
+                + shared * g_shared
+            ).sum().backward()
+        return x.grad.astype("float32").numpy()
 
-    def test_both_orders_sum_every_branch(self):
-        np.testing.assert_allclose(self._backward_grad(False), [7.0, 7.0])
-        np.testing.assert_allclose(self._backward_grad(True), [7.0, 7.0])
+    def _reference(self, order):
+        g_router, g_dispatcher, g_shared = (
+            paddle.to_tensor([value] * 2, dtype="bfloat16")
+            for value in self.COEFFS
+        )
+        if order == "megatron":
+            out = (g_dispatcher + g_router) + g_shared
+        else:
+            out = (g_dispatcher + g_shared) + g_router
+        return out.astype("float32").numpy()
+
+    def test_flag_off_keeps_the_historical_fan_in_order(self):
+        np.testing.assert_array_equal(
+            self._backward_grad(False), self._reference("historical")
+        )
+
+    def test_flag_on_uses_the_megatron_fan_in_order(self):
+        np.testing.assert_array_equal(
+            self._backward_grad(True), self._reference("megatron")
+        )
+
+    def test_the_two_orders_are_actually_distinguishable(self):
+        self.assertFalse(
+            np.array_equal(
+                self._backward_grad(False), self._backward_grad(True)
+            )
+        )
 
 
 class TestTopkGateNormalization(unittest.TestCase):
