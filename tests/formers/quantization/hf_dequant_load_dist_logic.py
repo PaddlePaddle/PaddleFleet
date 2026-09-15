@@ -11,12 +11,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Per-rank worker for test_coverage_hf_dequant_load_dist.py.
+"""Per-rank worker for test_hf_dequant_load_dist.py.
 
 Loads one fp8_block weight into a ``Shard(0)`` target on two cards.  Each rank
 holds two of the four logical rows, which is block-aligned, so the transform
 plans a ``"local"`` read: the physical qweight/scale slices this rank reads
 cover its rows only, and the dequantized output is written without slicing.
+
+This file is launched directly by ``paddle.distributed.launch`` from the
+companion unittest, so it is a standalone script (``main()`` under
+``__main__``), not an importable helper module.
 """
 
 import json
