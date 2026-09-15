@@ -27,6 +27,8 @@ shape、dtype、类型、调用次数、异常和 skip 都可能是有效契约�
 | [9. 断言未执行或失败未传播](#execution) | pass 覆写、未收集、空循环、提前 skip | mixin、初始化时机、runner、退出码 |
 | [10. 异常被吞成成功或 skip](#exceptions) | except Exception/pass、错误导入当缺依赖 | 精确能力探测、明确异常契约 |
 | [11. 共享状态污染或自造前提](#state) | 全局 patch 不恢复、清空后断言为空 | RNG、环境变量、类属性、tracker、缓存 |
+| [12. 随意 mock 盖住被测逻辑](#mock) | patch 被测方法/构造、替身返回与输入无关的张量 | 被测 kernel 数值、构造装配与参数校验 |
+| [13. 多卡行为只在单卡/单进程取证](#single-card) | 伪造 world_size+mock collective、CPU 手算模拟 collective、只跑单卡 helper | 通信方向与 peer、切分尺寸、专家归位、跨 rank 拼回与归约、reshard 张量 |
 
 <a id="entry"></a>
 ## 1. 生产入口不在验证链上
@@ -822,3 +824,310 @@ AllToAll 反向应开启梯度、实际调用 backward，并核对按 rank 可�
 核对保存的对象/内容和反向消费，而不是仅断言前向 shape 或一个名字存在。
 优化器用例须沿真实调用链确认消费的是 `.grad` 还是 `main_grad`，把参考更新量与实际被消费的
 梯度对应起来，避免给错梯度槽却宣称验证了优化器算法。
+
+<a id="restore"></a>
+## 8. 保存恢复由原状态自证
+
+**典型写法**
+
+```python
+def test_prepare_tensor_transpose(self):
+    t = paddle.randn([8, 4])
+    out = prepare_tensor(t, need_transpose=True)
+    self.assertEqual(out.shape, [4, 8])   # 只看形状
+
+def test_optimizer_state_unchanged(self):
+    state = {"beta1_pow_acc": paddle.randn([4]), "moment1": paddle.randn([4])}
+    restored = dequant_unified_optimizer(state, stage="O0")
+    self.assertIn("moment1", restored)    # 只看键还在
+```
+
+**为什么漏检。** 转置只查 shape，把值搬错、转置方向反、漏掉复制都不影响 `[4, 8]`；
+恢复只查键存在，同键换成任意张量、moment 数值恢复错、量化误差超限都能通过。
+`save` 后在同一对象上 `load`、或恢复后只比较对象内部字段彼此一致，都是拿被测状态给自己背书；
+`test_save_load` 整个函数体 `pass` 更是连保存恢复都没执行。
+
+**修正写法**
+
+```python
+def test_prepare_tensor_transpose(self):
+    t = paddle.arange(32, dtype="float32").reshape([8, 4])  # 可区分内容
+    out = prepare_tensor(t, need_transpose=True)
+    np.testing.assert_array_equal(out.numpy(), t.numpy().T)  # 值与方向都核对
+
+def test_optimizer_roundtrip_restores_values(self):
+    ckpt = tempfile.mkdtemp()
+    m = SmallModel(); opt = AdamWCustom(m.parameters())
+    step_once(m, opt, fixed_batch())          # 让 moment/step 非平凡
+    save_checkpoint(m, opt, ckpt)
+    m2 = SmallModel(); opt2 = AdamWCustom(m2.parameters())
+    load_checkpoint(m2, opt2, ckpt)           # 新对象加载
+    for (n, p), (n2, p2) in zip(m.named_parameters(), m2.named_parameters()):
+        np.testing.assert_allclose(p.numpy(), p2.numpy())
+    self.assertEqual(opt2.state_dict()["LR_Scheduler"]["last_epoch"],
+                     opt.state_dict()["LR_Scheduler"]["last_epoch"])
+    grad = fixed_batch_grad()
+    ref = expected_update_from(opt.state_dict(), grad)   # 独立推导下一步更新
+    opt2.step_with(grad)
+    np.testing.assert_allclose(m2.param.numpy(), ref, rtol=1e-5)
+```
+
+恢复必须用新模型/新优化器加载，比较参数与优化器状态（moment、step、master weight）的真实值，
+再输入相同后续梯度确认恢复后能按算法继续更新；续训还要核对数据位置和 scheduler 总计划。
+只查文件存在、键存在或恢复后内部自洽，都不能证明持久化与跨 rank 重分片的数值正确。
+
+<a id="execution"></a>
+## 9. 断言未执行或失败未传播
+
+**典型写法**
+
+```python
+def test_save_load(self):
+    pass                                   # 覆写基类用例，什么都不跑
+
+class MixinChecks:                          # 不继承 TestCase，用例不会被收集
+    def test_merge_single_element(self):
+        out = merge_splited_param(state)
+        self.assertIn("beta1_pow_acc", out)  # 只查键，且这个类根本不被执行
+
+def run_all(self):
+    for f in self.collected_files:
+        subprocess.run([sys.executable, f])  # 不看返回码
+```
+
+**为什么漏检。** `pass` 覆写把声称验证 save/load 的用例清空，实现坏掉也“通过”；
+断言写在没被 runner 收集的 mixin/裸类里，永远不执行；launcher 直接跑文件却不校验退出码，
+子进程里 `assert` 失败、collect 为零、全 skip 都被吞成成功。多卡文件只定义 pytest 函数、
+由 `paddle.distributed.launch` 直接执行时，同样可能一条断言都没跑。
+
+**修正写法**
+
+```python
+def test_save_load(self):
+    self._run_save_load_contract(self.model_cls, atol=1e-5)  # 真正执行契约
+
+class MergeParamTest(unittest.TestCase):    # 继承 TestCase，确保被收集
+    def test_merge_single_element(self):
+        out = merge_splited_param(make_state(beta1=paddle.to_tensor([1., 2.])))
+        np.testing.assert_array_equal(out["beta1_pow_acc"].numpy(), [1., 2.])
+
+def run_all(self):
+    for f in self.collected_files:
+        r = subprocess.run([sys.executable, f], capture_output=True)
+        self.assertEqual(r.returncode, 0, r.stderr.decode())  # 失败必须传播
+        self.assertIn("Ran", r.stderr.decode())               # 确认真的跑了用例
+```
+
+覆写基类用例要么实现真实契约、要么按不支持条件显式 `skipTest` 并记录原因，不能留空体。
+断言必须落在会被 runner 收集执行的用例里；由 launcher/子进程执行的路径要校验退出码和实际
+运行的用例数，某个 rank 的 `OK`、零收集或全 skip 都不能当作目标行为通过。
+
+<a id="exceptions"></a>
+## 10. 异常被吞成成功或 skip
+
+**典型写法**
+
+```python
+def test_recv_meta_reverse(self):
+    try:
+        obj._recv_meta(reverse=True)       # 抛错也没关系
+    except Exception:
+        pass
+    self.assertFalse(obj.has_cache)         # 断言的还是构造时就为 False 的标记
+
+def test_init_with_tensorboard(self):
+    try:
+        cb = TensorBoardCallback(output_dir=tmp)
+    except Exception:
+        pass                                # 初始化失败被吞，无成功路径观察
+
+@unittest.skipUnless(_can_import(), "no dep")
+def _can_import():
+    try:
+        import paddlefleet.triton_ops  # noqa
+        return True
+    except Exception:                       # 任何错误都当“缺依赖”跳过
+        return False
+```
+
+**为什么漏检。** `except Exception: pass` 把被测入口的真实错误全部吞掉，实现第一行抛异常也“通过”；
+断言的对象要么是构造时早已确定的值，要么根本没有。用宽泛 `except` 探测能力会把
+真实的 import 错误、编译失败、API 变更误判成“环境缺依赖”而 skip，掩盖回归。
+
+**修正写法**
+
+```python
+def test_recv_meta_reverse(self):
+    meta = encode_meta(shapes=[[2, 3]], dtypes=["float32"], src=1)
+    decoded = obj._recv_meta(meta, reverse=True)   # 真实解码，不吞异常
+    self.assertEqual(decoded.src_rank, 1)
+    self.assertEqual(decoded.shapes, [[2, 3]])
+
+def test_recv_meta_rejects_corrupt(self):
+    with self.assertRaises(MetaDecodeError):        # 明确异常契约
+        obj._recv_meta(b"\x00\x01", reverse=True)
+
+def test_triton_ops_importable(self):
+    import importlib
+    mod = importlib.import_module("paddlefleet.triton_ops")  # 精确探测
+    self.assertTrue(hasattr(mod, "fused_rms_norm"))
+```
+
+不要用 `try/except: pass` 包住被测调用。预期成功就断言真实输出，预期失败就用 `assertRaises`
+锁定具体异常类型；能力探测只捕获精确的 `ImportError`/`ModuleNotFoundError` 并记录 skip 原因，
+不把编译或 API 错误也当作缺依赖。
+
+<a id="state"></a>
+## 11. 共享状态污染或自造前提
+
+**典型写法**
+
+```python
+def test_register_cls_attr(self):
+    GeneralModelForCausalLMPipe.config_class = DummyConfig   # 直接改生产类属性
+    GeneralModelForCausalLMPipe._init_weights = "noop"
+    self.assertEqual(GeneralModelForCausalLMPipe.config_class, DummyConfig)
+    # 没有 tearDown / addCleanup，污染后续真实 PP 模型构造
+
+def test_expert_rank(self):
+    parallel_state._EXPERT_PARALLEL_RANK = 3                 # 设全局拓扑不还原
+    self.assertEqual(get_expert_model_parallel_rank(), 3)
+
+def test_tracker_empty(self):
+    tracker.clear()
+    self.assertEqual(tracker.values, [])                    # 清空后断言为空，恒真
+```
+
+**为什么漏检。** 前两例直接改生产类属性/全局拓扑且无 `tearDown`、`addCleanup` 或 `finally`
+恢复，即使本例断言成立，也会把伪配置、伪 rank 留给同进程后续测试，制造隐性串扰；
+断言的还是自己刚设进去的值，等于自证。最后一例先 `clear()` 再断言为空是自造前提，
+无论生产逻辑对错都成立。RNG seed、环境变量、导入时缓存的后端开关同理。
+
+**修正写法**
+
+```python
+def test_register_cls_attr(self):
+    class _Probe(GeneralModelForCausalLMPipe):   # 在独立子类上验证，不碰生产类
+        pass
+    register_cls_attr(_Probe, config_class=DummyConfig)
+    self.assertIs(_Probe.config_class, DummyConfig)
+
+def test_expert_rank(self):
+    orig = parallel_state._EXPERT_PARALLEL_RANK
+    self.addCleanup(lambda: setattr(parallel_state, "_EXPERT_PARALLEL_RANK", orig))
+    parallel_state._EXPERT_PARALLEL_RANK = 3
+    self.assertEqual(get_expert_model_parallel_rank(), 3)   # 失败时也会清理
+
+def test_tracker_accumulates(self):
+    tracker.clear()
+    self.addCleanup(tracker.clear)
+    helper.record(0.5); helper.record(1.5)      # 走真实生产写入路径
+    self.assertEqual(tracker.values, [0.5, 1.5])  # 断言生产行为，而非自己塞的值
+```
+
+修改全局/类属性、RNG、环境变量或缓存的用例必须保存原值并在 `addCleanup`/`tearDown` 里恢复，
+断言失败时也要执行清理；不要直接改生产类，改用独立子类或 `patch.object`。若目标是“清空后
+避免重复查询”，清洁初始状态后应断言生产逻辑产生的结果，而不是断言刚被自己清空的容器为空。
+
+<a id="mock"></a>
+## 12. 随意 mock 盖住被测逻辑
+
+mock 用来隔离**不被测**的协作者是合法的（见[类型 3](#consumption)）；本类型针对另一种失效：
+替身盖住的恰好是本用例声称要验证的行为，于是无论断言怎么写都无法拒绝错误实现。两个高频信号：
+
+**（1）patch 掉被测对象的构造或被测方法本身**
+
+```python
+def test_trainer_setup(self):
+    with mock.patch.object(SFTTrainer, "__init__", return_value=None):
+        trainer = SFTTrainer.__new__(SFTTrainer)   # __init__ 被架空
+        trainer.args = FakeArgs()
+        trainer.setup_something()
+    self.assertEqual(trainer.args.x, 1)             # 只断言自己塞进去的属性
+```
+
+`__init__` 被替换成 `return None`，对象成了空壳；真实构造里的参数校验、组件装配、状态初始化
+一行都没跑，改坏 `__init__` 用例照过。criterion、量化 linear 的构造被 patch 成 `None` 同理。
+应保留真实构造，用小配置实例化后断言可观察的组件/参数/状态；确要跳过某个昂贵子步骤时，
+只 mock 那个子步骤并核对它被真实构造以正确参数调用。
+
+**（2）mock 掉被测 kernel/算子，替身返回与输入无关的张量，只查 shape 或 called**
+
+```python
+@mock.patch("....attention.scaled_dot_product_attention")
+def test_attention_forward(self, sdpa):
+    sdpa.return_value = paddle.randn([2, 8, 4, 16])   # 与 q/k/v/mask 无关
+    out = sdpa_attention(module, q, k, v, mask, is_causal=None)
+    self.assertEqual(out.shape, [2, 8, 4, 16])
+    sdpa.assert_called_once()
+```
+
+被测的正是这条注意力路径，核心计算却被随机张量顶替：`is_causal` 推断、mask 传递、
+`softmax_scale`、GQA 展开是否正确，输出全由 `randn` 决定，测不出来。
+应对支持 CPU 的算子跑真实计算并与独立参考比数值；确需替身时，让替身按输入返回可区分标记，
+并断言传入 kernel 的 q/k/v/mask/scale/causal 等实参精确正确（见[类型 3](#consumption) 的 marker 写法），
+同时声明未验证真实 kernel 数值。
+
+**边界。** mock 一个真正不被测的协作者、给它可区分响应再核对消费，是[类型 3](#consumption)的正确做法；
+本类型的错误在于 mock 的对象就是被测逻辑或决定其正确性的依赖，此时任何断言都无法证明目标行为。
+伪造 world_size、mock 集合通信把单卡冒充多卡的写法归入[类型 13](#single-card)。
+
+<a id="single-card"></a>
+## 13. 多卡行为只在单卡/单进程取证
+
+切分、跨 rank 通信、专家分发、重分片、并行恢复等行为的正确性取决于**多个 rank 各自持有不同数据后交换的结果**。
+若只在单卡、单进程或 CPU 手算里取证再宣称这些行为已验证，则发错方向、peer 取错、切分尺寸错、
+归约漏项都不会被拒绝——本需真实进程组的语义被本地路径冒充。三个高频信号：
+
+**（1）伪造 world_size/拓扑 + mock collective，只 assert_called**
+
+```python
+@mock.patch("....all_to_all.dist.get_world_size", return_value=4)
+@mock.patch("....all_to_all.stream.alltoall_single")
+def test_forward_multi_rank(self, alltoall, _ws):
+    alltoall.return_value = None
+    out = AllToAll.apply(x, group=MagicMock(), sync_op=True)
+    alltoall.assert_called_once()
+
+def test_p2p_ops_send_recv(self):
+    with mock.patch("paddle.distributed.isend", return_value=MagicMock()), \
+         mock.patch("paddle.distributed.irecv", return_value=MagicMock()):
+        reqs = _p2p_ops(tensor, None, tensor, None, MagicMock())
+    self.assertGreater(len(reqs), 0)      # 只数排队的通信请求
+```
+
+`get_world_size` 写成 4 以进入“多卡”分支，实际单进程；alltoall/all_gather/reduce_scatter/isend
+被替身吞掉，只断言“被调用”或“请求数 > 0”。切分尺寸、专家归位、group/轴、收发方向、peer 取错、
+发错 tensor 都不影响这些断言。
+
+**（2）CPU 手算或本地循环模拟 collective，替代真实进程组**
+
+```python
+def test_all_gather_shard(self):
+    shards = [make_shard(r) for r in range(4)]     # 单进程造出 4 份
+    gathered = paddle.concat(shards, axis=0)       # 手动拼接“模拟” all_gather
+    expected = paddle.concat(shards, axis=0)       # 与上面同一路拼接
+    np.testing.assert_array_equal(gathered.numpy(), expected.numpy())
+```
+
+拼接、比较全在本地完成，`all_gather` 本身、rank 排序、通信后 contiguous/dualchunk 的位置映射
+一次都没跑；expected 又与被测走同一条本地拼接（叠加[类型 4](#reference)），改坏真实聚合仍过。
+
+**（3）只跑单卡 helper/局部分片函数，宣称跨 rank 重分布正确**
+
+```python
+def test_muon_ep_slice(self):
+    local = slice_expert_weight(full_w, ep_rank=0, ep_size=4)   # 只取 rank0 的本地块
+    self.assertEqual(local.shape, [full_w.shape[0] // 4, full_w.shape[1]])
+```
+
+只验证单个 rank 的本地切分形状，各 rank 内容是否互不重叠、拼回是否等于完整权重、
+EP 归约后的更新是否正确都没触及；reshard 只查元数据键映射同理，真实张量重分片没有发生。
+
+**修正方向。** 通信、分片、专家分发、重分片、并行恢复在受支持的真实进程组里运行（卡数按待测拓扑选取），
+各 rank 用可区分内容，读取前等待异步任务完成，核对**对端实际收到**的分片/张量与方向、还原后的聚合结果
+及相关梯度，并验证任一 rank 失败可传播（见[分布式训练模块](unit-test-rules.md)的多卡要求）。
+
+**边界。** 接口本身支持的 world-size=1、本地分片或单卡回退路径，单卡取证是恰当的，但只能声明验证了该本地路径；
+错误在于把单卡/单进程/CPU 手算结果表述为跨 rank 通信或分布式数值已验证。无卡下允许用通信替身检查
+group/axis/peer 与被发送内容，但须显式声明真实进程组未运行（见[类型 12](#mock) 的 mock 边界）。
