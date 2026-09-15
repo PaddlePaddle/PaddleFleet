@@ -1026,7 +1026,7 @@ class _DeepEPManager(_DispatchManager):
                 self.dispatched_indices, self.dispatched_probs
             )
         )
-        if self.use_accuracy_compatible:
+        if self.use_accuracy_compatible and use_dsv4_accuracy_compatible():
             self.global_input_probs = (
                 self.dispatched_probs.T.contiguous().masked_select(
                     self.dispatched_routing_map.T.contiguous().cast(paddle.bool)
@@ -1054,7 +1054,12 @@ class _DeepEPManager(_DispatchManager):
             restore_shape=self.hidden_shape_before_permute,
             routing_map=self.dispatched_routing_map,
             probs=(
-                None if self.use_accuracy_compatible else self.dispatched_probs
+                None
+                if (
+                    self.use_accuracy_compatible
+                    and use_dsv4_accuracy_compatible()
+                )
+                else self.dispatched_probs
             ),
             use_accuracy_compatible=self.use_accuracy_compatible,
         )

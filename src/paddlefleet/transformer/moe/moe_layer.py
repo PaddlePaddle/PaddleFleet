@@ -57,6 +57,7 @@ from paddlefleet.transformer.dw_overlap import (
 from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
 from paddlefleet.transformer.transformer_config import dw_overlap_enabled
 from paddlefleet.transformer.utils import profile
+from paddlefleet.utils import use_dsv4_accuracy_compatible
 
 from .fp8_utils import fused_stack_quant_without_cache
 from .fused_a2a import configure_buffer
@@ -156,8 +157,12 @@ class ThreePathCloneAlignMG(PyLayer):
 
     @staticmethod
     def backward(ctx, g_router, g_dispatcher, g_shared):
-        partial = g_dispatcher + g_router
-        out = partial + g_shared
+        if use_dsv4_accuracy_compatible():
+            partial = g_dispatcher + g_router
+            out = partial + g_shared
+        else:
+            partial = g_dispatcher + g_shared
+            out = partial + g_router
         return out
 
 
@@ -326,6 +331,8 @@ class MoELayer(nn.Layer):
             "ringmoe",
         )
         self.moe_allgather_gate_overlap = config.moe_allgather_gate_overlap
+        if self.use_accuracy_compatible and not use_dsv4_accuracy_compatible():
+            self.moe_token_dispatcher_type = "alltoall"
         self.use_hybrid_ep_backend = False
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
@@ -984,6 +991,11 @@ class MoELayer(nn.Layer):
             # All-to-all may dispatch probabilities for expert-side scaling.
             # DeepEP retains them in its communication manager and applies
             # them exactly once during the aligned unpermute/combine path.
+            if per_token_scale is None and not use_dsv4_accuracy_compatible():
+                raise RuntimeError(
+                    "FLAGS_use_accuracy_compatible_kernel requires dispatched "
+                    "router probabilities from the token dispatcher."
+                )
             if per_token_scale is not None:
                 scale_chunks = paddle.split(
                     per_token_scale,
@@ -1839,7 +1851,9 @@ class MoELayer(nn.Layer):
                 residual = GatherOp.apply(residual)
 
         sequence_first_moe = (
-            self.use_accuracy_compatible and hidden_states.ndim == 3
+            use_dsv4_accuracy_compatible()
+            and self.use_accuracy_compatible
+            and hidden_states.ndim == 3
         )
         if sequence_first_moe:
             hidden_states = hidden_states.transpose([1, 0, 2]).contiguous()

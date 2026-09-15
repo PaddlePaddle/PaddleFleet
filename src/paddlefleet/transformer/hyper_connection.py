@@ -391,9 +391,7 @@ class HyperConnectionModule(nn.Layer):
         # matmul and mixed FP32/BF16 operands are invalid when autocast is off.
         self._cast_to_low_precision = False
         param_dtype = (
-            config.params_dtype
-            if _use_accuracy_compatible_kernel()
-            else "float32"
+            config.params_dtype if use_dsv4_accuracy_compatible() else "float32"
         )
         default_dtype = paddle.get_default_dtype()
         try:

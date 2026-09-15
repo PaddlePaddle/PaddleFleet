@@ -462,10 +462,10 @@ class LanguageLoss(FleetLayer):
                     (1 - is_invalid_line_float).sum() + 1e-6
                 )
             else:
-                if (
-                    self.use_accuracy_compatible
+                if self.use_accuracy_compatible and not (
+                    use_dsv4_accuracy_compatible()
                     and self.config.experimental_attention_variant
-                    != "dsv4_hybrid"
+                    == "dsv4_hybrid"
                 ):
                     _flat = loss.cast(paddle.float32).reshape([-1]) * lossmask
                     loss_sum = (
@@ -955,7 +955,9 @@ class LanguageLoss(FleetLayer):
                     # This matches Megatron's behavior where MTP contributes to training
                     # gradients without affecting the reported loss value.
                     if self.config.add_mtp_loss:
-                        return loss - loss.detach() + main_loss
+                        if use_dsv4_accuracy_compatible():
+                            return loss - loss.detach() + main_loss
+                        return main_loss + loss - loss.detach()
                     else:
                         return main_loss
                 else:

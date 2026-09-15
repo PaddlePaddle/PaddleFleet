@@ -1994,6 +1994,15 @@ class TopKRouter(StandardMoERouter):
                     # experts actually multiply by.
                     top_gate = top_gate / top_gate.sum(axis=-1, keepdim=True)
                     top_gate = top_gate.cast(input.dtype)
+                elif (
+                    self.use_accuracy_compatible
+                    and not use_dsv4_accuracy_compatible()
+                ):
+                    _sum_f64 = top_gate.cast(paddle.float64).sum(
+                        axis=-1, keepdim=True
+                    )
+                    denominator = _sum_f64.cast(paddle.float32) + 1e-20
+                    top_gate = top_gate / denominator
                 else:
                     top_gate = _normalize_topk_gate(top_gate)
             # When moe_topk_fusion=True and not QB, top_gate is already normalized by MoETopkFusion

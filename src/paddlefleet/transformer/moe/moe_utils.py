@@ -38,7 +38,7 @@ from paddlefleet.tensor_parallel.random import (
     get_expert_parallel_rng_tracker_name,
 )
 from paddlefleet.training.global_vars import get_global_training_logs
-from paddlefleet.utils import get_pg_size
+from paddlefleet.utils import get_pg_size, use_dsv4_accuracy_compatible
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -460,13 +460,31 @@ def permute(
 
     if use_accuracy_compatible:
         sorted_indices.stop_gradient = True
-        # The aligned gather table assumes a fixed top-k. DSv4 replay includes
-        # padding/variable routing rows, so retain the proven FP32 gather path.
-        permuted_input = (
-            tokens.cast("float32")
-            .index_select(axis=0, index=sorted_indices)
-            .cast(tokens.dtype)
-        )
+        if use_dsv4_accuracy_compatible():
+            # The aligned gather table assumes a fixed top-k. DSv4 replay
+            # includes padding/variable routing rows, so retain the proven
+            # FP32 gather path.
+            permuted_input = (
+                tokens.cast("float32")
+                .index_select(axis=0, index=sorted_indices)
+                .cast(tokens.dtype)
+            )
+        else:
+            gather_index_flat, valid_rows, topk_val, has_padding = (
+                _build_aligned_gather_index(routing_map)
+            )
+
+            permuted_input = _PermuteAlignedPyLayer.apply(
+                tokens,
+                sorted_indices,
+                gather_index_flat,
+                valid_rows,
+                num_tokens,
+                topk_val,
+                hidden,
+                has_padding,
+                use_accuracy_compatible,
+            )
     else:
         # use the mapping to permute the tokens
         permuted_input = tokens.index_select(axis=0, index=sorted_indices)
@@ -515,6 +533,19 @@ def unpermute(
             )
         else:
             permuted_tokens = permuted_tokens * permuted_probs.unsqueeze(-1)
+
+    if (
+        use_accuracy_compatible
+        and routing_map is not None
+        and not use_dsv4_accuracy_compatible()
+    ):
+        return _unpermute_gather_sum_aligned(
+            permuted_tokens,
+            sorted_indices,
+            restore_shape,
+            routing_map,
+            use_accuracy_compatible,
+        )
 
     if use_accuracy_compatible_kernel():
         output_tokens = _unpermute_fp32_accum(
