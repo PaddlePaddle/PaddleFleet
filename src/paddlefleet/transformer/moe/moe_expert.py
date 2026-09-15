@@ -1027,3 +1027,53 @@ class StandardMLPExpert(MLP):
                 intermediate_size=moe_intermediate_size,
                 # tp_group=pg_collection.expt_tp,
             )
+
+    def _gen_up_gate_fusion_aoa_statements(
+        self, gate_checkpoint_name, up_checkpoint_name, fused_model_name
+    ):
+        """Routed experts are expert-parallel, so gate/up fuse via a plain
+        ``axis=1`` concat rather than the TP-interleaving ``fused_ffn`` macro
+        used by dense and shared MLPs."""
+        return [
+            f"{gate_checkpoint_name}^T, {up_checkpoint_name}^T "
+            f"-> {fused_model_name}, axis=1"
+        ]
+
+    def _gen_inv_up_gate_fusion_aoa_statements(
+        self,
+        fused_model_name,
+        gate_model_name,
+        up_model_name,
+        gate_checkpoint_name,
+        up_checkpoint_name,
+    ):
+        """Routed experts are expert-parallel, so the fused weight splits via a
+        plain ``axis=1`` concat instead of the TP-interleaving ``fused_ffn``
+        macro. Same split-then-transpose structure as the dense/shared default:
+        split onto model-side gate/up half names, then transpose each to its
+        checkpoint name."""
+        return [
+            f"{fused_model_name} -> {gate_model_name}, {up_model_name}, axis=1",
+            f"{gate_model_name}^T -> {gate_checkpoint_name}",
+            f"{up_model_name}^T -> {up_checkpoint_name}",
+        ]
+
+    def _gen_up_gate_bias_fusion_aoa_statements(
+        self, gate_checkpoint_name, up_checkpoint_name, fused_model_name
+    ):
+        """Same expert-parallel reason as the weight: a plain concat on the
+        bias axis instead of the TP-interleaving ``fused_ffn`` macro."""
+        return [
+            f"{gate_checkpoint_name}, {up_checkpoint_name} "
+            f"-> {fused_model_name}, axis=0"
+        ]
+
+    def _gen_inv_up_gate_bias_fusion_aoa_statements(
+        self, fused_model_name, gate_checkpoint_name, up_checkpoint_name
+    ):
+        """Expert-parallel inverse of the fused bias: a plain split on the bias
+        axis, straight onto the checkpoint names (no transpose)."""
+        return [
+            f"{fused_model_name} -> "
+            f"{gate_checkpoint_name}, {up_checkpoint_name}, axis=0"
+        ]
