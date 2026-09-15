@@ -827,11 +827,20 @@ class GPTEmbedding(FleetLayer):
             rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(
                 rope_base, self.config, packed_seq_params
             )
+            # packed_decoder_rope gate (HyperBody packed decoder): feed the
+            # per-segment reset position_ids into RoPE even in training so the
+            # decoder RoPE restarts at 0 for each packed document. Default off
+            # => every other model keeps the original training behavior
+            # (position_ids=None, monotonic 0..S).
+            if getattr(self.config, "packed_decoder_rope", False):
+                rope_position_ids = mtp_position_ids
+            else:
+                rope_position_ids = None if self.training else mtp_position_ids
             rotary_pos_emb = self.rotary_pos_emb(
                 rotary_seq_len,
                 packed_seq=packed_seq_params is not None
                 and packed_seq_params.qkv_format == "thd",
-                position_ids=None if self.training else mtp_position_ids,
+                position_ids=rope_position_ids,
             )
         elif (
             self.position_embedding_type == "mrope"
