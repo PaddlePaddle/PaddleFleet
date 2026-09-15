@@ -85,6 +85,7 @@ from paddlefleet.transformer.csa_attention import (
     CSADocMaskMetadata,
     _apply_rope,
     _build_compressed_causal_mask,
+    _compute_attn_target_on_selected_set,
     get_compress_topk_idxs,
     get_mqa_causal_topk_idxs,
     get_valid_range,
@@ -1677,6 +1678,150 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
             )
 
         self.assertTrue(output.isfinite().all().item())
+
+    def test_cudnn_replay_uses_native_topk_for_indexer_target(self):
+        """Replay attention columns must not be paired with native LSE."""
+        import paddlefleet_ops.cudnn.deepseek_sparse_attention as DSA
+
+        import paddlefleet.cudnn_ops.attn.csa_sparse_attn_fwd_cudnn as SA
+        import paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn as IND
+        import paddlefleet.tilelang_ops
+
+        paddle.seed(_SEED)
+        ratio = 4
+        config = _make_config(
+            csa_compress_ratios=[ratio],
+            num_layers=1,
+            csa_indexer_backend="cudnn",
+            csa_sparse_attn_backend="cudnn",
+        )
+        model_parallel_cuda_manual_seed(_SEED)
+        attn = _build_attention(config, layer_number=0)
+        attn.train()
+
+        seq_len = 128
+        seq_len_comp = seq_len // ratio
+        hidden_states = paddle.randn(
+            [1, seq_len, config.hidden_size], dtype="bfloat16"
+        )
+        startend_row_indices = paddle.full(
+            [1, 1, seq_len, 1], seq_len, dtype="int32"
+        )
+
+        valid_mask = paddle.arange(1, seq_len + 1).unsqueeze(
+            1
+        ) >= paddle.arange(ratio, seq_len + ratio, ratio)
+        native_compressed = paddle.arange(
+            seq_len_comp, dtype="int32"
+        ).broadcast_to([1, seq_len, seq_len_comp])
+        native_compressed = paddle.where(
+            valid_mask,
+            native_compressed,
+            paddle.to_tensor(-1, dtype="int32"),
+        )
+        topk_scores = paddle.randn(
+            [1, seq_len, seq_len_comp], dtype="float32"
+        )
+        topk_scores = paddle.where(
+            valid_mask,
+            topk_scores,
+            paddle.to_tensor(float("-inf"), dtype="float32"),
+        )
+        seen = {}
+
+        def _mock_indexer_topk(index_q, index_k_comp, weights, **kwargs):
+            del index_q, index_k_comp, weights
+            self.assertEqual(kwargs.get("topk_effective"), seq_len_comp)
+            self.assertTrue(kwargs.get("return_topk_scores"))
+            return native_compressed, None, topk_scores
+
+        def _mock_flash_mla(q, kv, attn_sink, topk_idxs, **kwargs):
+            del attn_sink
+            self.assertEqual(kwargs.get("indexer_topk"), seq_len_comp)
+            seen["attention_topk"] = topk_idxs[..., :seq_len_comp]
+            output = paddle.randn(
+                [*q.shape[:3], kv.shape[-1]], dtype="bfloat16"
+            )
+            lse = paddle.randn(q.shape[:3], dtype="float32")
+            return output, lse, lse
+
+        def _mock_score_recompute(*_args, **_kwargs):
+            raise AssertionError(
+                "Replay LSE must not be passed to the native target columns"
+            )
+
+        native_target = paddlefleet.tilelang_ops.csa_attn_target_reducesum
+
+        def _record_native_target(query, key, topk_indices, softmax_scale):
+            seen["target_query"] = query
+            seen["target_key"] = key
+            seen["target_topk"] = topk_indices
+            seen["target_scale"] = softmax_scale
+            target = native_target(
+                query, key, topk_indices, softmax_scale
+            )
+            seen["target"] = target
+            return target
+
+        def _replay(native_indices, _n_compressed, offset, **_kwargs):
+            seen["native_topk"] = native_indices
+            return paddle.where(
+                native_indices >= 0,
+                paddle.full_like(native_indices, offset),
+                native_indices,
+            )
+
+        with (
+            patch.object(IND, "cudnn_indexer_topk_fwd", _mock_indexer_topk),
+            patch.object(SA, "flash_mla_sparse_attn", _mock_flash_mla),
+            patch.object(
+                DSA,
+                "sparse_attn_score_recompute_wrapper",
+                _mock_score_recompute,
+            ),
+            patch.object(
+                CompressedSparseAttention,
+                "_postprocess_indexer_replay",
+                side_effect=_replay,
+            ),
+            patch.object(
+                paddlefleet.tilelang_ops,
+                "csa_attn_target_reducesum",
+                side_effect=_record_native_target,
+            ) as fallback,
+        ):
+            output, _ = attn(
+                hidden_states,
+                attention_mask=None,
+                attn_mask_startend_row_indices=startend_row_indices,
+            )
+
+        self.assertTrue(output.isfinite().all().item())
+        self.assertEqual(fallback.call_count, 1)
+        self.assertTrue(
+            paddle.equal_all(
+                seen["target_topk"], seen["native_topk"]
+            ).item()
+        )
+        target_reference = _compute_attn_target_on_selected_set(
+            seen["target_query"],
+            seen["target_key"],
+            seen["target_topk"],
+            seen["target_scale"],
+        )
+        self.assertTrue(
+            paddle.allclose(
+                seen["target"].cast("float32"),
+                target_reference.cast("float32"),
+                rtol=6e-2,
+                atol=2e-2,
+            ).item()
+        )
+        self.assertFalse(
+            paddle.equal_all(
+                seen["attention_topk"], seen["native_topk"]
+            ).item()
+        )
 
 
 class TestDSv4HybridAttentionConstructor(unittest.TestCase):

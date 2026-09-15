@@ -987,6 +987,8 @@ class DSv4HybridAttention(Attention):
         past_key_values = kwargs.get("past_key_values", None)
         layer_idx = kwargs.get("layer_idx", None)
         use_cache = kwargs.get("use_cache", False)
+        indexcache_state = kwargs.get("indexcache_state", None)
+        core_attn_returns_indexcache_state = False
 
         # Get Q, K, V tensors
         # In CP mode, pass position_offset so RoPE uses correct global positions.
@@ -1108,7 +1110,13 @@ class DSv4HybridAttention(Attention):
                 past_key_values=past_key_values,
                 layer_idx=layer_idx,
                 use_cache=use_cache,
+                indexcache_state=indexcache_state,
             )
+            core_attn_returns_indexcache_state = isinstance(
+                core_attn_out, tuple
+            )
+            if core_attn_returns_indexcache_state:
+                core_attn_out, indexcache_state = core_attn_out
 
             # Output projection
             output, bias = deferrable_linear(
@@ -1151,6 +1159,8 @@ class DSv4HybridAttention(Attention):
         if original_b > 1:
             output = _unpack_dsv4_logical_batch(output, original_b, original_sq)
 
+        if indexcache_state is not None or core_attn_returns_indexcache_state:
+            return output, bias, indexcache_state
         return output, bias
 
     def _full_attn_forward(
@@ -1165,6 +1175,7 @@ class DSv4HybridAttention(Attention):
         past_key_values=None,
         layer_idx=None,
         use_cache=False,
+        indexcache_state=None,
     ) -> Tensor:
         """Full attention forward: qkv_proj + core_attn + inv_rope + o_group_proj + gated_attn.
 
@@ -1204,7 +1215,7 @@ class DSv4HybridAttention(Attention):
             value = key
 
         # Core attention (CompressedSparseAttention)
-        core_attn_out = self.core_attention(
+        core_attn_result = self.core_attention(
             query,
             key,
             value,
@@ -1216,7 +1227,13 @@ class DSv4HybridAttention(Attention):
             past_key_values=past_key_values,
             layer_idx=layer_idx,
             use_cache=use_cache,
+            indexcache_state=indexcache_state,
         )
+        core_attn_returns_indexcache_state = isinstance(core_attn_result, tuple)
+        if isinstance(core_attn_result, tuple):
+            core_attn_out, indexcache_state = core_attn_result
+        else:
+            core_attn_out = core_attn_result
         # core_attn_out: [b, sq, np * v_head_dim]
 
         if (
@@ -1269,9 +1286,12 @@ class DSv4HybridAttention(Attention):
         # on, the raw grouped-projection output otherwise. Probed here (once,
         # at the producer) instead of at the two self.o_proj(core_attn_out)
         # call sites in forward().
-        return inspect_tensor(
+        core_attn_out = inspect_tensor(
             "attn_o_proj_input", self.layer_number, core_attn_out
         )
+        if indexcache_state is not None or core_attn_returns_indexcache_state:
+            return core_attn_out, indexcache_state
+        return core_attn_out
 
     def _post_core_forward(
         self,
