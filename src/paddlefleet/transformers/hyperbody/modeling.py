@@ -286,16 +286,47 @@ class HyperBodyEncoderFrontEnd(FleetLayer):
             return freqs[:, : seg_lens[0]]
         return paddle.concat([freqs[:, :L] for L in seg_lens], axis=1)
 
+    def _infer_use_long_query(self, input_ids, cu_seqlens):
+        short_q, long_q = self.config.hyperencoder_query_lengths
+        bounds = [int(x) for x in cu_seqlens.reshape([-1]).tolist()]
+        tokens = input_ids.reshape([-1])
+        flags = []
+        for start, end in zip(bounds[:-1], bounds[1:]):
+            query_count = int(
+                (tokens[start:end] == CONTEXT_TOKEN).astype("int32").sum()
+            )
+            if query_count == long_q:
+                flags.append(True)
+            elif query_count == short_q:
+                flags.append(False)
+            else:
+                raise ValueError(
+                    f"HyperBody segment has {query_count} context tokens; "
+                    f"expected short={short_q} or long={long_q}"
+                )
+        return flags
+
     def forward(self, dict_args):
         from paddlefleet.transformer.prefix_lm_mask import (
             build_dense_mask,
             prefix_lm_pad_len,
         )
+        from .mm_pack import unpack_hyperbody_mm
+
+        # fleet pipeline micro-batch loader 只传 Tensor；image/audio 以 ragged Tensor
+        # 打包传入，这里原地还原成 list。
+        unpack_hyperbody_mm(dict_args)
 
         context_ids = dict_args["context_ids"]
         image = dict_args.get("image", None)
         audio = dict_args.get("audio", None)
-        use_long_query = dict_args.get("use_long_query", False)
+        cu_seqlens = dict_args.get("cu_seqlens", None)
+        if cu_seqlens is not None:
+            use_long_query = self._infer_use_long_query(
+                dict_args["input_ids"], cu_seqlens
+            )
+        else:
+            use_long_query = dict_args.get("use_long_query", False)
         cu_seqlens_context = dict_args.get("cu_seqlens_context", None)
 
         context_embeds = self._build_context_embeds(
@@ -1281,6 +1312,7 @@ class HyperBodyForConditionalGeneration(HyperBodyPretrainedModel):
             "labels": labels,
             "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
             "position_ids": position_ids,
+            "cu_seqlens": cu_seqlens,
             "cu_seqlens_context": cu_seqlens_context,
         }
         out = self.pipe(input_dict)

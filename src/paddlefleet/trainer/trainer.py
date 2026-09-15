@@ -392,6 +392,7 @@ class Trainer:
                 isinstance(model, LoRAModel)
                 and isinstance(model.model, FleetGPTModel)
             )
+            or getattr(model, "is_fleet", False)
         ):
             self.using_fleet_model = True
         else:
