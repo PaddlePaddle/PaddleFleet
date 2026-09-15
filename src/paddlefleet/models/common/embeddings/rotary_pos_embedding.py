@@ -35,7 +35,34 @@ __all__ = [
     "RotaryEmbedding",
     "MultimodalRotaryEmbedding",
     "Rope2DPosEmbRepeated",
+    "clear_shared_rotary_embed_cache",
 ]
+
+
+# Angle tables shared by every ``RotaryEmbedding`` with the same configuration
+# signature (see ``RotaryEmbedding._emb_cache_sig``). Read and written whenever
+# ``rotary_embed_cache`` is set.
+#
+# The table is a pure function of ``(signature, max_seq_len, offset)``, so two
+# instances with equal signatures compute bit-identical tables and one entry can
+# serve both. That is the whole point: a 44-layer model holds ~50 rotary
+# instances but only a handful of distinct signatures, so a per-instance memo
+# would retain ~50 copies of a table that has only a handful of distinct values.
+#
+# One slot per signature, not a dict of keys: the training path keeps one key for
+# the whole run so the slot is a permanent hit, while a caller that varies the
+# key (incremental decode) just replaces it. Retention is therefore bounded by
+# the number of distinct signatures, with no eviction policy.
+_SHARED_EMB_CACHE: dict[tuple, tuple[tuple[int, int], Tensor]] = {}
+
+
+def clear_shared_rotary_embed_cache() -> None:
+    """Drop every shared rotary angle table.
+
+    Only needed by tests that assert on cache state; the entries are pure
+    functions of their key, so dropping them can never change a result.
+    """
+    _SHARED_EMB_CACHE.clear()
 
 
 class RotaryEmbedding(nn.Layer):
@@ -56,6 +83,10 @@ class RotaryEmbedding(nn.Layer):
         rope_scaling_factor (float, optional): rope scaling factor in llama 3.x. Defaults to 8.
         cp_group (paddle.distributed.communication.group.Group, optional): Process group for context parallel.
             Defaults to None.
+        rotary_embed_cache (bool, optional): If True, memoise the angle table in a
+            process-wide store keyed by this instance's configuration signature, so
+            identically configured layers hold one table instead of one each.
+            Defaults to False.
     """
 
     def __init__(
@@ -129,16 +160,43 @@ class RotaryEmbedding(nn.Layer):
         # the GPU finishes in ~1-2 us. Enabling the cache turns the whole chain
         # into a dict lookup; a hit is bit-identical to recomputing.
         #
-        # Per-instance, because the table also depends on ``inv_freq``. A single
-        # slot rather than a dict: the training path keeps one key for the whole run,
-        # so the slot is a permanent hit there. A caller that varies the key --
-        # incremental decode, whose ``sq + position_offset`` grows with the KV cache
-        # -- just replaces the slot and keeps missing, so what is retained is bounded
-        # by construction and no eviction policy is needed. Stays None when the cache
-        # is off, and ``forward`` then runs unchanged.
+        # Shared across instances, because the table also depends on ``inv_freq``
+        # and identically configured layers build the identical table. A single
+        # slot per configuration signature (see ``_SHARED_EMB_CACHE``): the
+        # training path keeps one key for the whole run, so the slot is a
+        # permanent hit there. A caller that varies the key -- incremental
+        # decode, whose ``sq + position_offset`` grows with the KV cache -- just
+        # replaces the slot and keeps missing, so what is retained is bounded by
+        # construction and no eviction policy is needed. When the cache is off,
+        # ``forward`` runs unchanged.
         self.rotary_embed_cache = rotary_embed_cache
-        self._emb_cache_key: tuple[int, int] | None = None
-        self._emb_cache_value: Tensor | None = None
+
+        # Configuration signature: everything the angle table depends on besides
+        # ``(max_seq_len, offset)``. ``inv_freq`` is itself a pure function of
+        # ``dim``, ``rotary_base``, the rope-scaling settings and
+        # ``use_accuracy_compatible`` (which changes where the exponent is
+        # evaluated and therefore its last bits), so listing those is equivalent
+        # to hashing ``inv_freq`` without touching the device. ``type(self)``
+        # keeps a subclass that overrides the ``inv_freq`` math -- e.g.
+        # ``YarnRotaryEmbedding`` -- from ever matching a base-class instance.
+        # The place string keeps a CPU-built table from being served to a GPU
+        # caller.
+        #
+        # Used as the key of ``_SHARED_EMB_CACHE``. Keep it in sync with
+        # anything new that feeds ``get_freqs_non_repeated``.
+        self._emb_cache_sig: tuple = (
+            type(self),
+            int(dim),
+            float(rotary_base),
+            bool(rotary_interleaved),
+            None
+            if seq_len_interpolation_factor is None
+            else float(seq_len_interpolation_factor),
+            bool(rope_scaling),
+            float(rope_scaling_factor),
+            bool(use_accuracy_compatible),
+            str(self.inv_freq.place),
+        )
 
     def _apply_scaling(
         self,
@@ -244,15 +302,18 @@ class RotaryEmbedding(nn.Layer):
         Returns:
             Tensor: Embeddings after applying RoPE.
         """
-        # Cache lookup (config: ``rotary_embed_cache``). Skipped when
-        # ``position_ids`` is given: the result then depends on a runtime tensor
-        # and is not a constant of (max_seq_len, offset). A hit is bit-identical
-        # to recomputing.
+        # Cache lookup (config: ``rotary_embed_cache``), in the process-wide
+        # store keyed by ``_emb_cache_sig`` so identically configured layers
+        # share one table. Skipped when ``position_ids`` is given: the result
+        # then depends on a runtime tensor and is not a constant of
+        # (max_seq_len, offset). A hit is bit-identical to recomputing: the
+        # signature pins every input to the table.
         cache_key = None
         if self.rotary_embed_cache and position_ids is None:
             cache_key = (int(max_seq_len), int(offset))
-            if cache_key == self._emb_cache_key:
-                return self._emb_cache_value
+            shared = _SHARED_EMB_CACHE.get(self._emb_cache_sig)
+            if shared is not None and shared[0] == cache_key:
+                return shared[1]
 
         freqs = self.get_freqs_non_repeated(
             max_seq_len, offset, position_ids=position_ids
@@ -269,12 +330,12 @@ class RotaryEmbedding(nn.Layer):
         emb = emb[None, :, None, :]
 
         if cache_key is not None:
-            # Sharing one object across calls is safe because no caller mutates
-            # the table in place (verified: no `+=`/`copy_`/`fill_`/`scale_` on
-            # the returned tensor anywhere in paddlefleet), and the recompute
-            # path in transformer_layer.py already clones its inputs.
-            self._emb_cache_key = cache_key
-            self._emb_cache_value = emb
+            # Sharing one object across calls and instances is safe because no
+            # caller mutates the table in place (verified: no `+=`/`copy_`/
+            # `fill_`/`scale_` on the returned tensor anywhere in paddlefleet),
+            # and the recompute path in transformer_layer.py already clones its
+            # inputs.
+            _SHARED_EMB_CACHE[self._emb_cache_sig] = (cache_key, emb)
         return emb
 
     def get_rotary_seq_len(
