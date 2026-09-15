@@ -68,7 +68,7 @@ jobs:
           wget -q -O bos_new.tar.gz https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar xf bos_new.tar.gz -C bos
-          bash -x test/formers/integration_test/update_precision.sh
+          bash -x tests/formers/integration_test/update_precision.sh
 
   # update-precision-formers:
   #   name: Update precision formers
