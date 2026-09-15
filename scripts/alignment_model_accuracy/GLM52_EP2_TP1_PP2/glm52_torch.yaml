@@ -36,7 +36,6 @@ weight_decay: 0.0
 clip_grad: 0.0
 calculate_per_token_loss: true
 optimizer: adam
-native_unfused_adamw: true
 adam_beta1: 0.9
 adam_beta2: 0.95
 adam_eps: 0.00000001
@@ -69,10 +68,7 @@ recompute_granularity: none
 
 megatron_extra_kwargs:
   moe_router_bias_update_rate: 0.0
-  norm_accuracy_compatible: true
-  dsa_accuracy_compatible: true
   dsa_kernel_backend: none
-  router_accuracy_compatible: true
   persist_layer_norm: false
   transformer_impl: local
 

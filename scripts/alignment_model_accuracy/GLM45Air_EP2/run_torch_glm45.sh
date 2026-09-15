@@ -41,12 +41,6 @@ export NCCL_NVLS_ENABLE=0
 export TORCHDYNAMO_DISABLE=1
 export PYTORCH_ALLOC_CONF='expandable_segments:True'
 
-# ---- 精度对齐 Flag ----
-export FLAGS_use_accuracy_compatible_kernel=1
-export USE_ACCURACY_COMPATIBLE=1
-export GLM_ALIGN_BIT_EXACT=1
-export GLM_ALIGN_LOG=0
-
 # ---- 精度对齐：逐层输出 md5（默认关闭）----
 export ENABLE_SAVE_HOOK="${ENABLE_SAVE_HOOK:-0}"
 export ENABLE_BACKWARD_HOOK="${ENABLE_BACKWARD_HOOK:-0}"
@@ -130,7 +124,6 @@ ARGS=(
     --adam_beta2 0.95
     --weight_decay 0.1
     --clip_grad 1.0
-    --reproducible_grad_norm True
     --use_distributed_optimizer False
     --accumulate_allreduce_grads_in_fp32 True
 
