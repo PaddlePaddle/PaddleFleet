@@ -25,6 +25,7 @@ jobs:
       group: APPROVAL
     outputs:
       packages_changed: ${{ steps.check.outputs.packages_changed }}
+      ops_source_changed: ${{ steps.check.outputs.ops_source_changed }}
     steps:
       - name: Cleanup
         run: |
@@ -36,25 +37,42 @@ jobs:
       - name: Check if packages directory changed
         id: check
         run: |
+          # Two different questions:
+          #   ops_source_changed -- packages/ itself moved, so the PR CI rebuilt the
+          #     ops wheel and upload-pr-ops has a fresh artifact to republish.
+          #   packages_changed -- the published wheel needs refreshing at all, which
+          #     also covers version.txt: build_backend.py derives the ops wheel
+          #     version from it, so a bump must republish ops even though no source
+          #     moved. Test-release.yml gates only on packages/, so on a version-only
+          #     commit its tarball carries the *downloaded* nightly wheel, already
+          #     named paddlefleet_ops-0.0.0+<branch>-...; handing that to
+          #     upload-pr-ops made its mv fail with "are the same file".
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             echo "packages_changed=true" >> $GITHUB_OUTPUT
+            echo "ops_source_changed=true" >> $GITHUB_OUTPUT
           elif [[ "${{ github.event.created }}" == "true" ]]; then
             # Newly created branch (e.g. release/**): force build ops
             echo "packages_changed=true" >> $GITHUB_OUTPUT
+            echo "ops_source_changed=true" >> $GITHUB_OUTPUT
+          elif git diff --name-only HEAD~1 HEAD -- packages/ | grep -q .; then
+            echo "packages_changed=true" >> $GITHUB_OUTPUT
+            echo "ops_source_changed=true" >> $GITHUB_OUTPUT
+          elif git diff --name-only HEAD~1 HEAD -- version.txt | grep -q .; then
+            echo "packages_changed=true" >> $GITHUB_OUTPUT
+            echo "ops_source_changed=false" >> $GITHUB_OUTPUT
           else
-            # version.txt counts as an ops change: build_backend.py derives the
-            # ops wheel version from it, so a bump there must republish ops.
-            if git diff --name-only HEAD~1 HEAD -- packages/ version.txt | grep -q .; then
-              echo "packages_changed=true" >> $GITHUB_OUTPUT
-            else
-              echo "packages_changed=false" >> $GITHUB_OUTPUT
-            fi
+            echo "packages_changed=false" >> $GITHUB_OUTPUT
+            echo "ops_source_changed=false" >> $GITHUB_OUTPUT
           fi
 
   upload-pr-ops:
     name: Upload PR ops whl
     needs: check-packages-changes
-    if: needs.check-packages-changes.outputs.packages_changed == 'true'
+    # Republishes the wheel out of the PR's own artifact, so it is only meaningful
+    # when the PR actually rebuilt ops. On a version-only commit that artifact is
+    # just the nightly wheel Test-release.yml downloaded, and publish-ops-wheel
+    # uploads the same 0.0.0+<branch> name from a real rebuild anyway.
+    if: needs.check-packages-changes.outputs.ops_source_changed == 'true'
     runs-on:
       group: APPROVAL
     env:
