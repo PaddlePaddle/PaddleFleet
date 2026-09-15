@@ -1010,7 +1010,8 @@ class MoELayer(nn.Layer):
             expert = self.experts[current_expert_idx]
             if (
                 getattr(self, "use_accuracy_compatible", False)
-                and self.moe_token_dispatcher_type == "alltoall"
+                and getattr(self, "moe_token_dispatcher_type", "alltoall")
+                == "alltoall"
                 and 0 < int(chunk.shape[0]) < 17
             ):
                 num_rows = int(chunk.shape[0])
