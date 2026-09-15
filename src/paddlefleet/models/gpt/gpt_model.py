@@ -819,11 +819,25 @@ class GPTModel(PipelineLayer):
                     "multimodal one."
                 )
 
+        # Keys with no mapping entry are dropped. This is expected and not an
+        # error on its own: when a single card checkpoint is loaded, every
+        # other pipeline stage's keys arrive here too. What *is* an error is a
+        # parameter of this stage receiving no value, which is reported from
+        # ``missing_keys`` below.
+        unmapped_keys = []
         for k in list(state_dict.keys()):
             v = state_dict.pop(k)
             if k not in self._pipeline_name_mapping:
+                unmapped_keys.append(k)
                 continue
             state_dict[self._pipeline_name_mapping[k]] = v
+        if unmapped_keys:
+            logger.warning(
+                f"[pp-name-mapping] {len(unmapped_keys)} keys have no entry "
+                f"in _pipeline_name_mapping and were dropped. Keys owned by "
+                f"other pipeline stages land here too. First 20: "
+                f"{unmapped_keys[:20]}"
+            )
 
         # Load vision model state into vision_merge.vision_model
         if (
@@ -835,8 +849,43 @@ class GPTModel(PipelineLayer):
             if hasattr(vision_model, "set_state_dict"):
                 vision_model.set_state_dict(vision_state)
 
-        ret = super().set_state_dict(state_dict, *args, **kwargs)
-        return ret
+        missing_keys, unexpected_keys = super().set_state_dict(
+            state_dict, *args, **kwargs
+        )
+
+        # Two physical keys can resolve to the same single card name and alias
+        # one Parameter, so only the winner of that collision is fed above and
+        # the loser shows up in ``missing_keys`` although its Parameter did get
+        # a value. Two known sources:
+        #   * `shared_layers.{name}.rest` vs `{chunk_start}.{name}.rest`
+        #     (`pp_layers.py:1167-1171`, a legitimate VPP alias pair);
+        #   * `{global_idx}.rest` from the duplicate *top level* registration of
+        #     a second same-named SharedLayerDesc (`pp_layers.py:1132` adds it
+        #     to the PipelineLayer instead of the chunk). That one is a Paddle
+        #     bug; Paddle PR 79678 guards it, but it is not in the runtime yet.
+        # Drop such aliases before reporting, or `mtp_shared_last_layer=True`
+        # under VPP reports every MTP parameter as missing on every load.
+        missing_shared_keys = self._check_shared_model_state()
+        filtered_missing_keys = []
+        for key in missing_keys:
+            if (
+                key in missing_shared_keys
+                and missing_shared_keys[key] not in missing_keys
+            ):
+                continue
+            filtered_missing_keys.append(key)
+        missing_keys = filtered_missing_keys
+
+        if missing_keys:
+            # The precise signal that a name mapping is broken: a parameter
+            # this stage owns received no value and keeps its initial one.
+            # Shared layer aliases are filtered out above.
+            logger.warning(
+                f"[pp-name-mapping] {len(missing_keys)} parameters of this "
+                f"pipeline stage got no value from the checkpoint and keep "
+                f"their initial values. First 20: {missing_keys[:20]}"
+            )
+        return missing_keys, unexpected_keys
 
     def _check_shared_model_state(self):
         if self._pipeline_name_mapping is None:
