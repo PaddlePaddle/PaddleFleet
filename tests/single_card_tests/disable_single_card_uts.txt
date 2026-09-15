@@ -8,3 +8,8 @@ test_layers.py
 test_sigmoid_gate_fusion_triton.py
 test_coverage_sigmoid_gate_fusion.py
 test_coverage_moe_layer_5.py
+# internal_medicine: megatron/torch backend tests. The single-card CI image has
+# no torch, so these run in the megatron env only (INTERNAL_MEDICINE_TEST_BACKEND).
+test_megatron_monitors.py
+test_mhc_monitor.py
+test_triton_qk_kernel.py
