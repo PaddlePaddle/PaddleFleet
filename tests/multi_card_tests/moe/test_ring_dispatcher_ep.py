@@ -13,8 +13,8 @@
 # limitations under the License.
 """Multi-card (EP>1) tests for RingMoETokenDispatcher.
 
-Covers both ring topologies on two cards: G=2/N=1 (intra only) and G=1/N=2
-(inter only), selected by patching ``_RING_GPUS_PER_NODE``.
+Covers both ring topologies on two cards: intra-only and inter-only, selected
+by patching ``_RING_GPUS_PER_NODE``.
 
 Run with:
   python -m paddle.distributed.launch --gpus=0,1 \
@@ -93,10 +93,11 @@ def _ensure_fleet():
 def _make_dispatcher(gpus_per_node, ep_group, num_experts=4):
     """Build a dispatcher with the ring topology forced to a known G.
 
-    Production always splits on ``_RING_GPUS_PER_NODE`` (8); patching it is how a
-    two-card job gets to exercise both G=2/N=1 and G=1/N=2. Sub-group creation is
-    collective and cached per (ep_ranks, G), so every rank must call this in the
-    same order -- which unittest guarantees within a single test.
+    Production always splits on ``_RING_GPUS_PER_NODE``; patching it is how a
+    two-card job gets to exercise both the intra-only and inter-only topology.
+    Sub-group creation is collective and cached per (ep_ranks, G), so every rank
+    must call this in the same order -- which unittest guarantees within a
+    single test.
     """
     from paddlefleet.transformer.moe import token_dispatcher as td
 
@@ -225,8 +226,8 @@ class TestRingTopology(_RingTestBase):
     def test_fp8_dispatch_is_accepted(self):
         """fp8 dispatch is supported now (was NotImplementedError before).
 
-        The blocker was never the ring: MoELayer already validates
-        ``mid/EP % 128`` generically across the intermediate-sharded
+        The blocker was never the ring: MoELayer already validates the fp8
+        shard alignment generically across the intermediate-sharded
         dispatchers, and the ring quantizes per round via _RingFP8AllGather.
         """
         from paddlefleet.transformer.moe.token_dispatcher import (
@@ -818,8 +819,9 @@ class TestMoELayerRingBranches(unittest.TestCase):
             self._validate(moe_intermediate_size=255)
 
     def test_validation_fp8_requires_128_aligned_shard(self):
-        # fp8 block-scale tiles are 128 wide, so mid/EP must be a multiple of
-        # 128 -- 256/2 = 128 passes, 192/2 = 96 does not.
+        # fp8 block-scale tiles have a fixed width, so mid/EP must be a multiple
+        # of it -- the larger intermediate size divides cleanly, the smaller one
+        # does not.
         self._validate(fp8=True, moe_intermediate_size=256)
         with self.assertRaises(ValueError) as ctx:
             self._validate(fp8=True, moe_intermediate_size=192)

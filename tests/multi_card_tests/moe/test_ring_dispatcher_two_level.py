@@ -13,23 +13,23 @@
 # limitations under the License.
 """Two-level (G>1 AND N>1) coverage for RingMoETokenDispatcher.
 
-``test_ring_dispatcher_ep.py`` runs on two cards, so it can only reach G=2/N=1
-(intra only) or G=1/N=2 (inter only) -- never both levels at once. That leaves
+``test_ring_dispatcher_ep.py`` runs on two cards, so it can only reach the
+intra-only or the inter-only topology -- never both levels at once. That leaves
 the interesting interactions uncovered: the per-round intra AllGather/
 ReduceScatter running *inside* an inter-node rotation, and the deferred wait on
 the in-flight output reduce (``_RingReduceScatterAsync``), which degenerates to
 a no-op whenever ``intra_group`` is None.
 
-With ``_RING_GPUS_PER_NODE`` patched to 2, any even world size of at least four
-exercises both levels. For four cards this gives G=2, N=2:
-  intra groups [0,1] [2,3]   inter groups [0,2] [1,3]
+Patching ``_RING_GPUS_PER_NODE`` below the world size forces the EP group to
+split into both an intra and an inter level, so a large enough even world size
+exercises both at once.
 
 With an expert fn that is linear in the tokens, the ring's output is analytic:
 every rank's own rows come back scaled by EP, because the intra ReduceScatter
-sums G identical partials and the inter ReduceScatter sums N of those.
+sums the intra partials and the inter ReduceScatter sums the inter ones.
 
 Run with:
-  python -m paddle.distributed.launch --gpus=0,1,2,3 \
+  python -m paddle.distributed.launch \
       tests/multi_card_tests/moe/test_ring_dispatcher_two_level.py
 """
 
