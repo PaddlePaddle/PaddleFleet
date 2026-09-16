@@ -20,6 +20,13 @@ Torch venv to 5.12.1 for GLM-5.2's `glm_moe_dsa` support. Running the shared sui
 again restores 4.57.1 during its initial setup. The default CI venv is disposable;
 use `GLM52_VENV_ROOT` for a preconfigured environment that must not be modified.
 
+The default CI case builds Torch DeepEP at
+`17cfb817bccec3a9c247013360cc550c2bac441e`. Its Torch cu130 environment needs
+CUDA 13.0 even when the shared image has a 12.9 compiler. The case downloads
+checksum-pinned NVIDIA CUDA 13.0.2 compiler components into its run directory
+and uses the CUDA library headers shipped with Torch. This compiler environment
+applies only to the DeepEP build subprocess.
+
 The default model cache is
 `/home/.cache/PaddleFormers/GLM-5.2-BF16-minimal`.
 Use the uploaded [PaddleFormers/GLM-5.2-BF16-minimal model](https://git.aistudio.baidu.com/PaddleFormers/GLM-5.2-BF16-minimal.git),
