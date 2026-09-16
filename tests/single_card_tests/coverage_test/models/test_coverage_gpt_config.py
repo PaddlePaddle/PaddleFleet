@@ -55,11 +55,11 @@ class TestGPTConfigDefaults(unittest.TestCase):
         config = GPTConfig()
         self.assertEqual(config.rotary_percent, 1.0)
 
-    def test_default_rotary_base(self):
+    def test_default_rope_theta(self):
         from paddlefleet.models.gpt.gpt_config import GPTConfig
 
         config = GPTConfig()
-        self.assertEqual(config.rotary_base, 10000)
+        self.assertEqual(config.rope_theta, 10000)
 
     def test_default_rope_scaling(self):
         from paddlefleet.models.gpt.gpt_config import GPTConfig
@@ -176,7 +176,7 @@ class TestGPTConfigInheritance(unittest.TestCase):
             "vocab_size",
             "position_embedding_type",
             "rotary_percent",
-            "rotary_base",
+            "rope_theta",
             "rope_scaling",
             "max_sequence_length",
             "tie_word_embeddings",
@@ -209,11 +209,11 @@ class TestGPTConfigEdgeCases(unittest.TestCase):
         config = GPTConfig(rotary_percent=-0.5)
         self.assertEqual(config.rotary_percent, -0.5)
 
-    def test_zero_rotary_base(self):
+    def test_zero_rope_theta(self):
         from paddlefleet.models.gpt.gpt_config import GPTConfig
 
-        config = GPTConfig(rotary_base=0)
-        self.assertEqual(config.rotary_base, 0)
+        config = GPTConfig(rope_theta=0)
+        self.assertEqual(config.rope_theta, 0)
 
     def test_empty_layer_types(self):
         from paddlefleet.models.gpt.gpt_config import GPTConfig
@@ -228,7 +228,7 @@ class TestGPTConfigEdgeCases(unittest.TestCase):
             vocab_size=50000,
             position_embedding_type="none",
             rotary_percent=0.5,
-            rotary_base=500000,
+            rope_theta=500000,
             rope_scaling=4.0,
             max_sequence_length=4096,
             tie_word_embeddings=True,
@@ -238,7 +238,7 @@ class TestGPTConfigEdgeCases(unittest.TestCase):
         self.assertEqual(config.vocab_size, 50000)
         self.assertEqual(config.position_embedding_type, "none")
         self.assertEqual(config.rotary_percent, 0.5)
-        self.assertEqual(config.rotary_base, 500000)
+        self.assertEqual(config.rope_theta, 500000)
         self.assertEqual(config.rope_scaling, 4.0)
         self.assertEqual(config.max_sequence_length, 4096)
         self.assertTrue(config.tie_word_embeddings)
