@@ -23,7 +23,7 @@ Tests are designed from the production source, exercising real entry points:
   inherited parent fields survive and the new field is appended.
 * ``Qwen3VLVisionModel.get_layer_desc_list`` -- the real desc-list assembly is
   run (embedding first, encoder body in the middle, ``merger`` last) and the
-  emitted ``name_prefix`` chain plus per-slot ``layer_func`` identity are pinned.
+  emitted ``name_prefix`` chain plus per-slot ``layer_spec`` identity are pinned.
 * ``Qwen3VLVisionTransformerLayer.forward`` -- the dict-assembly logic (key pop,
   context branch, deepstack list construction) is driven with a distinguishable
   ``_forward_impl`` stub so the packed output is observed by identity, not by
@@ -223,9 +223,9 @@ class TestQwen3VLVisionModelGetLayerDescList(unittest.TestCase):
         )
         self.assertEqual([type(e["layer"]) for e in layers], [LayerDesc] * 3)
         # First slot wraps embedding, last wraps merger (not swapped).
-        self.assertIs(layers[0]["layer"].layer_func, emb)
-        self.assertIs(layers[1]["layer"].layer_func, body[0])
-        self.assertIs(layers[-1]["layer"].layer_func, merger)
+        self.assertIs(layers[0]["layer"].layer_spec, emb)
+        self.assertIs(layers[1]["layer"].layer_spec, body[0])
+        self.assertIs(layers[-1]["layer"].layer_spec, merger)
 
     def test_shared_index_counter_across_sections(self):
         """head/transformer/tail share one 0-based ``.layers.{i}`` counter.
@@ -250,7 +250,7 @@ class TestQwen3VLVisionModelGetLayerDescList(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            [entry["layer"].layer_func for entry in layers],
+            [entry["layer"].layer_spec for entry in layers],
             [emb, head[0], body[0], body[1], tail[0], merger],
         )
 

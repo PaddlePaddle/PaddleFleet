@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU-only behavior tests for the p2p metadata serialization codec.
+"""Single-card behavior tests for the p2p metadata serialization codec.
 
 Exercises the CPU-executable pure logic of the production module
 ``paddlefleet.pipeline_parallel.pp_utils.p2p_communication``:
@@ -48,7 +48,14 @@ try:
     import numpy as np
     import paddle
 
-    paddle.set_device("cpu")
+    # Importing paddlefleet pulls in paddlefleet_ops, which queries the CUDA
+    # device capability at import time; that requires a CUDA place to be
+    # selected first. The CI runner provides a real GPU, so select it here and
+    # only fall back to CPU when CUDA is unavailable.
+    if paddle.is_compiled_with_cuda():
+        paddle.set_device("gpu")
+    else:
+        paddle.set_device("cpu")
 
     from paddlefleet.pipeline_parallel.pp_utils import (
         p2p_communication as p2p_mod,
@@ -63,7 +70,15 @@ try:
     )
 
     _IMPORT_ERROR = None
-except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover
+# RuntimeError/ValueError capture the import-time device-capability probe on a
+# host without a usable CUDA device, so the suite skips instead of erroring at
+# collection.
+except (
+    ImportError,
+    ModuleNotFoundError,
+    RuntimeError,
+    ValueError,
+) as exc:  # pragma: no cover
     np = None
     paddle = None
     p2p_mod = None

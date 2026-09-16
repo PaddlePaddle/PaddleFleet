@@ -45,17 +45,24 @@ from unittest import mock
 
 _IMPORT_ERROR = None
 try:
+    from paddle import nn
     from paddle.distributed.fleet.meta_parallel import LayerDesc
 
     from paddlefleet.transformer import transformer_encoder
     from paddlefleet.transformer.transformer_encoder import TransformerEncoder
     from paddlefleet.transformer.transformer_layer import TransformerLayerNode
+
+    # LayerDesc validates ``issubclass(layer_func, nn.Layer)``, so the marker
+    # classes below must derive from nn.Layer. They are only stored/wrapped
+    # (never instantiated), so an empty subclass is sufficient.
+    _LayerBase = nn.Layer
 except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover
     _IMPORT_ERROR = exc
     LayerDesc = None
     transformer_encoder = None
     TransformerEncoder = None
     TransformerLayerNode = None
+    _LayerBase = object
 
 _SKIP_REASON = (
     "requires an importable paddle + paddlefleet.transformer stack "
@@ -68,27 +75,27 @@ _SKIP_REASON = (
 # The descriptor helpers only *store* / *wrap* these classes; they are never
 # instantiated, so plain (non-paddle) classes are sufficient and keep each slot
 # individually identifiable to catch swaps between emb / head / tf / tail.
-class _Emb:
+class _Emb(_LayerBase):
     pass
 
 
-class _Head:
+class _Head(_LayerBase):
     pass
 
 
-class _T0:
+class _T0(_LayerBase):
     pass
 
 
-class _T1:
+class _T1(_LayerBase):
     pass
 
 
-class _Tail:
+class _Tail(_LayerBase):
     pass
 
 
-class _Norm:
+class _Norm(_LayerBase):
     pass
 
 

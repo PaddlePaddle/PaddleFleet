@@ -111,10 +111,13 @@ class TestWeightQuantCacheShortCircuit(unittest.TestCase):
 
     def test_partial_cache_attrs_is_a_miss(self):
         """fp8_weight_fwd set but scales missing -> fall through to the kernel."""
-        _, weight_func = get_quant_func("blockwise")
         partial_input = types.SimpleNamespace(fp8_weight_fwd=object())
         marker = ("BWD", "SB", "FWD", "SF")
+        # ``get_quant_func`` binds ``_quant`` to
+        # ``paddle.incubate.nn.functional.fp8_quant_blockwise`` at call time,
+        # so the patch must be active *before* the factory runs.
         with mock.patch(_QUANT_TARGET, return_value=marker) as fake_quant:
+            _, weight_func = get_quant_func("blockwise")
             result = weight_func(partial_input)
         fake_quant.assert_called_once()
         # out_scale_trans defaults to False -> tuple passed through unchanged.
@@ -126,15 +129,16 @@ class TestWeightQuantKernelOrchestration(unittest.TestCase):
     """On a cache miss weight_quant_func drives the kernel with 128x128 blocks."""
 
     def test_weight_uses_128x128_and_forwards_flags(self):
-        _, weight_func = get_quant_func(
-            "blockwise",
-            input_trans=True,
-            out_scale_trans=False,
-            pow2_scale=True,
-        )
         fresh_input = object()  # no cache attributes -> cache miss
         marker = ("FP8_BWD", "SCALE_BWD", "FP8_FWD", "SCALE_FWD")
+        # Patch before the factory captures ``_quant`` (bound at call time).
         with mock.patch(_QUANT_TARGET, return_value=marker) as fake_quant:
+            _, weight_func = get_quant_func(
+                "blockwise",
+                input_trans=True,
+                out_scale_trans=False,
+                pow2_scale=True,
+            )
             result = weight_func(fresh_input)
 
         fake_quant.assert_called_once()
@@ -148,16 +152,17 @@ class TestWeightQuantKernelOrchestration(unittest.TestCase):
         self.assertEqual(result, marker)
 
     def test_out_scale_trans_transposes_scales_but_not_fp8(self):
-        _, weight_func = get_quant_func(
-            "blockwise",
-            input_trans=True,
-            out_scale_trans=True,
-            pow2_scale=True,
-        )
         scale_bwd = mock.MagicMock(name="scale_bwd")
         scale_fwd = mock.MagicMock(name="scale_fwd")
         marker = ("FP8_BWD", scale_bwd, "FP8_FWD", scale_fwd)
+        # Patch before the factory captures ``_quant`` (bound at call time).
         with mock.patch(_QUANT_TARGET, return_value=marker):
+            _, weight_func = get_quant_func(
+                "blockwise",
+                input_trans=True,
+                out_scale_trans=True,
+                pow2_scale=True,
+            )
             fp8_bwd, out_sb, fp8_fwd, out_sf = weight_func(object())
 
         # fp8 payloads untouched; only the scales get the stride-only .T view.
@@ -172,13 +177,14 @@ class TestInpQuantKernelOrchestration(unittest.TestCase):
     """inp_quant_func drives the kernel with 1x128 blocks and forwards flags."""
 
     def test_non_ue8m0_inp_uses_1x128_and_returns_kernel_result(self):
-        inp_func, _ = get_quant_func(
-            "blockwise",
-            input_trans=True,
-            out_scale_trans=True,
-            pow2_scale=False,
-        )
+        # Patch before the factory captures ``_quant`` (bound at call time).
         with mock.patch(_QUANT_TARGET, return_value="INP_RESULT") as fake_quant:
+            inp_func, _ = get_quant_func(
+                "blockwise",
+                input_trans=True,
+                out_scale_trans=True,
+                pow2_scale=False,
+            )
             result = inp_func("XT")
 
         fake_quant.assert_called_once()
@@ -194,16 +200,17 @@ class TestInpQuantKernelOrchestration(unittest.TestCase):
         self.assertNotIn("using_ue8m0_scale", kwargs)
 
     def test_ue8m0_inp_forces_transpose_flags_and_mn_major(self):
-        inp_func, _ = get_quant_func(
-            "blockwise",
-            input_trans=True,
-            pow2_scale=True,
-            use_ue8m0=True,
-        )
         scale = mock.MagicMock(name="scale")
         scale_t = mock.MagicMock(name="scale_t")
         marker = ("FP8", scale, "FP8_T", scale_t)
+        # Patch before the factory captures ``_quant`` (bound at call time).
         with mock.patch(_QUANT_TARGET, return_value=marker) as fake_quant:
+            inp_func, _ = get_quant_func(
+                "blockwise",
+                input_trans=True,
+                pow2_scale=True,
+                use_ue8m0=True,
+            )
             fp8, out_scale, fp8_t, out_scale_t = inp_func("X")
 
         args, kwargs = fake_quant.call_args

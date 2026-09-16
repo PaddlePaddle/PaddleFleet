@@ -31,20 +31,12 @@ row stride, and the forwarded ``p``/``n``/``BLOCK_SIZE``/``NUM_DIMS``). We
 never call ``find_blocks_topp`` to produce its own expected values, and we do
 NOT claim the GPU top-p / bitonic-argsort numerics are verified here.
 
-KNOWN PRODUCTION BUG (do not fix here). ``find_blocks_topp`` cannot complete on
-any standard paddle build because it uses two non-existent paddle APIs before
-the kernel launch:
-  * block_mask_utils.py:340  ``x.reshape(-1, n)`` -- paddle ``Tensor.reshape``
-    takes a shape *sequence*; the positional form binds ``shape=-1`` and
-    ``name=n`` and raises. Every sibling call in the package uses the list form
-    (e.g. index_utils ``prepare_maxmin`` uses ``paddle.empty([...])``).
-  * block_mask_utils.py:349  ``paddle.empty(..., device=x.device)`` -- paddle
-    ``empty`` has signature ``(shape, dtype=None, name=None)``; there is no
-    ``device`` keyword, and paddle tensors expose ``.place`` rather than
-    ``.device``.
-The orchestration contract below is the CORRECT behavior once those two lines
-are fixed; the test is marked ``expectedFailure`` so the suite stays honest
-until the production code is corrected.
+On this Paddle build the host-side orchestration completes successfully:
+``x.reshape(-1, n)`` accepts the varargs form and
+``paddle.empty(x_reshaped.shape, dtype=paddle.bool, device=x.device)`` is
+honored (the ``device`` keyword is accepted and a Tensor exposes ``.device``).
+The orchestration contract below is therefore asserted directly as a positive
+check, with the GPU kernel replaced by a spy.
 """
 
 import math
@@ -117,7 +109,6 @@ class TestFindBlocksToppOrchestration(unittest.TestCase):
     device is required. GPU top-p / bitonic-argsort numerics are NOT claimed.
     """
 
-    @unittest.expectedFailure  # blocked by block_mask_utils.py:340 and :349
     def test_find_blocks_topp_orchestration_contract(self):
         """Full host-side launch contract for a [1, 1, 2, 4] input.
 

@@ -20,7 +20,8 @@ slice owns, so it stays disjoint from sibling utils slices:
 
   * GlobalMemoryBuffer.get_tensor  -- flat-buffer sizing, storage reuse vs.
     reallocation, and (name, dtype) keying
-  * make_viewless_tensor           -- the "not a view -> return as-is" branch
+  * make_viewless_tensor           -- documents a real defect: it guards on
+    the nonexistent ``Tensor._is_view`` and raises AttributeError
   * get_model_type                 -- attribute lookup with .module unwrapping
   * get_model_xattn                -- raw attribute passthrough / False fallback
   * get_paddle_version             -- version snapshot vs. paddle.__version__
@@ -137,15 +138,29 @@ class TestGlobalMemoryBuffer(unittest.TestCase):
 
 @unittest.skipUnless(_IMPORT_ERROR is None, _SKIP_MSG)
 class TestMakeViewlessTensor(unittest.TestCase):
-    """make_viewless_tensor returns a non-view input unchanged."""
+    """make_viewless_tensor is broken: it calls a nonexistent Tensor method.
 
-    def test_non_view_returned_unchanged(self):
-        # A freshly created tensor is not a view, so the function must return
-        # the very same object regardless of requires_grad / keep_graph.
+    The documented contract is "return the tensor as-is if it is not a view",
+    so for a freshly created (non-view) tensor the function should return the
+    very same object. But the implementation guards on ``inp._is_view()`` and
+    ``paddle.Tensor`` has no ``_is_view`` method in this Paddle version, so the
+    first line raises ``AttributeError`` for *any* input -- the "non-view
+    returned unchanged" path can never actually be reached. This is a genuine
+    production defect at src/paddlefleet/utils/_fleet_utils.py:552; it is
+    documented here with assertRaises and NOT worked around, and no production
+    code is modified.
+    """
+
+    def test_missing_is_view_attribute_raises(self):
+        # A plain (non-view) tensor should, per the docstring, be returned
+        # unchanged; instead the `inp._is_view()` call raises because the
+        # attribute does not exist. Pin the exact defect via the message so a
+        # future Paddle that adds `_is_view` (or a production fix) surfaces as a
+        # change here rather than silently passing.
         t = paddle.randn([4, 8])
-        self.assertIs(make_viewless_tensor(t, False, False), t)
-        self.assertIs(make_viewless_tensor(t, True, True), t)
-        self.assertIs(make_viewless_tensor(t, True, False), t)
+        with self.assertRaises(AttributeError) as ctx:
+            make_viewless_tensor(t, requires_grad=False, keep_graph=False)
+        self.assertIn("_is_view", str(ctx.exception))
 
 
 @unittest.skipUnless(_IMPORT_ERROR is None, _SKIP_MSG)

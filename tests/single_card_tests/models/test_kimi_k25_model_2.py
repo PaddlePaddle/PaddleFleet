@@ -160,8 +160,8 @@ class TestKimiK25VisionModelGetLayerDescList(unittest.TestCase):
         for entry, (name, wrapped) in zip(layers, expected):
             self.assertEqual(entry["name_prefix"], name)
             self.assertIsInstance(entry["layer"], LayerDesc)
-            # LayerDesc(spec.<field>) stores that LayerSpec as its layer_func.
-            self.assertIs(entry["layer"].layer_func, wrapped)
+            # LayerDesc(spec.<field>) stores that LayerSpec as its layer_spec.
+            self.assertIs(entry["layer"].layer_spec, wrapped)
 
     def test_name_prefix_without_modal(self):
         """modal falsy -> bare 'model' prefix; index starts at 0 for encoder."""
@@ -191,7 +191,7 @@ class TestKimiK25VisionModelGetLayerDescList(unittest.TestCase):
         for entry, (name, wrapped) in zip(layers, expected):
             self.assertEqual(entry["name_prefix"], name)
             self.assertIsInstance(entry["layer"], LayerDesc)
-            self.assertIs(entry["layer"].layer_func, wrapped)
+            self.assertIs(entry["layer"].layer_spec, wrapped)
 
 
 @unittest.skipUnless(_AVAILABLE, _SKIP_REASON)

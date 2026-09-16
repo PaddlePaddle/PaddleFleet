@@ -50,6 +50,7 @@ try:
     from paddle.nn import functional as F
 
     from paddlefleet.transformer.block_attn_res import (
+        HAVE_FUSED_ATTNRES,
         BlockAttnRes,
         BlockAttnResSublayersSpec,
         _block_attn_res_rmsnorm,
@@ -181,10 +182,11 @@ class TestConstruction(unittest.TestCase):
         )
         self.assertIsInstance(block.norm, RMSNorm)
         self.assertTrue(block._use_pylayer)
-        # RMSNorm makes the instance fused-eligible, but with paddlefleet_ops
-        # absent HAVE_FUSED_ATTNRES is False, so _use_fused must remain False
-        # (falls back to the PyLayer path).
-        self.assertFalse(block._use_fused)
+        # RMSNorm makes the instance fused-eligible (attn_res_fusion default on,
+        # deterministic_mode off), so _use_fused tracks HAVE_FUSED_ATTNRES
+        # exactly: True when the paddlefleet_ops fused kernel is built (real
+        # GPU runner), False when it is absent and the PyLayer path is used.
+        self.assertEqual(block._use_fused, HAVE_FUSED_ATTNRES)
 
 
 @unittest.skipUnless(HAS_DEPS, _SKIP_REASON)

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU-only behavior tests for the pure logic in paddlefleet's own
+"""Device-agnostic behavior tests for the pure logic in paddlefleet's own
 pipeline_parallel p2p_communication module.
 
 Scope note (why these particular targets):
@@ -36,7 +36,15 @@ import unittest
 try:
     import paddle
 
-    paddle.set_device("cpu")
+    # Importing paddlefleet initializes paddlefleet_ops, which calls
+    # paddle.cuda.get_device_capability() on the current device. A CPU place
+    # makes that raise ValueError and abort collection, so select the GPU
+    # before the import on a CUDA-capable host. The logic exercised below is
+    # pure and communication-free, hence device-agnostic once imported.
+    if paddle.is_compiled_with_cuda():
+        paddle.set_device("gpu")
+    else:
+        paddle.set_device("cpu")
 
     from paddlefleet.pipeline_parallel.pp_utils import (
         p2p_communication as p2p,

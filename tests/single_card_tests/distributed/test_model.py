@@ -24,19 +24,24 @@ legitimately single-process ``world_size == 1`` local path.
 
 What is verified (real behavior, no stand-ins for the code under test):
 
-* On a single rank, wrapping a plain (non-``PipelineLayer``) ``paddle.nn.Layer``
-  is accepted and the wrapper preserves the model's forward numerics. The
-  expected output is derived by hand with NumPy from fixed weights / bias /
-  inputs (``y = x @ W + b``), so it is independent of the Paddle implementation:
-  a wrapper that dropped the bias, transposed the weight, or reused the wrong
-  sublayer would be rejected rather than passing on shape alone.
-* The wrapped object still exposes the original parameter *values*, not merely
-  parameters of the right shape.
+* The fixed Linear fixture computes ``y = x @ W + b``. The expected output is
+  derived by hand with NumPy from fixed weights / bias / inputs, independent of
+  the Paddle implementation, so a fixture that dropped the bias or transposed
+  the weight would be rejected rather than passing on shape alone.
+* ``fleet.distributed_model`` does NOT accept an arbitrary ``paddle.nn.Layer``
+  even on a single rank: in this Paddle version it routes unconditionally
+  through ``NoPipelineParallel.__init__`` (pipeline_parallel.py:435), whose very
+  first line is ``assert isinstance(layers, PipelineLayer)``. A plain
+  ``nn.Linear`` is therefore rejected with ``AssertionError``. This is genuine
+  upstream Paddle behavior (not a PaddleFleet defect and not a test artifact);
+  it is pinned here with ``assertRaises`` and no production code is modified. An
+  earlier version of this test assumed the wrapper accepted plain layers and
+  preserved their forward numerics -- that premise is false on the real API, so
+  the wrapping is now asserted to raise instead.
 
-Scope. This exercises only the local ``world_size == 1`` path. Pipeline-parallel
-wrapping (the branch the original coverage test forced by mocking
-``PipelineLayer.__instancecheck__`` and a fake ``world_size``) is genuinely
-multi-card behavior and is out of scope for a single-process test; it must be
+Scope. This exercises only the local ``world_size == 1`` path. Genuine
+pipeline-parallel wrapping (constructing a real ``PipelineLayer`` across ranks)
+is multi-card behavior and is out of scope for a single-process test; it must be
 proven with a real multi-rank process group, not simulated here.
 
 Because ``paddle`` is imported at module load, the whole suite is skipped with an
@@ -94,7 +99,7 @@ _INPUT = [
     f"paddle unavailable: {_IMPORT_ERROR}",
 )
 class TestDistributedModelSingleProcess(unittest.TestCase):
-    """``distributed_model`` on ``world_size == 1`` preserves the model."""
+    """``distributed_model`` on ``world_size == 1``: fixture + wrap contract."""
 
     def _build_fixed_linear(self):
         """Return a Linear whose weight/bias are set to the fixed fixture."""
@@ -117,53 +122,40 @@ class TestDistributedModelSingleProcess(unittest.TestCase):
         except Exception as exc:  # environment setup only, not code under test
             self.skipTest(f"single-process Fleet unavailable here: {exc!r}")
 
-    def test_forward_is_preserved_by_wrapping(self):
-        """Wrapped forward equals the hand-derived ``x @ W + b``."""
+    def test_fixture_forward_matches_reference(self):
+        """The Linear fixture computes exactly ``x @ W + b`` (no wrapper).
+
+        This pins the fixture's real numerics against an independent NumPy
+        reference before any wrapping is attempted, so the wrap contract below
+        is tested against a known-good model.
+        """
         expected = np.array(_INPUT, dtype=np.float32) @ np.array(
             _WEIGHT, dtype=np.float32
         ) + np.array(_BIAS, dtype=np.float32)
 
         model = self._build_fixed_linear()
         x = paddle.to_tensor(_INPUT, dtype="float32")
-
-        # Sanity-check the fixture against the independent reference before
-        # touching the wrapper, so a mismatch below is attributable to it.
         np.testing.assert_allclose(
             model(x).numpy(), expected, rtol=1e-5, atol=1e-6
         )
 
-        self._init_single_process_fleet()
-        wrapped = fleet.distributed_model(model)
+    def test_distributed_model_requires_pipeline_layer(self):
+        """Wrapping a plain Linear raises: upstream requires a PipelineLayer.
 
-        # A non-PipelineLayer is accepted on a single rank, and the wrapper's
-        # forward must reproduce the same numerics as the hand-derived output.
-        out = wrapped(x)
-        np.testing.assert_allclose(out.numpy(), expected, rtol=1e-5, atol=1e-6)
-
-    def test_wrapped_parameters_keep_their_values(self):
-        """The wrapper exposes the original weight/bias values, not just shapes."""
+        ``fleet.distributed_model`` routes unconditionally through
+        ``NoPipelineParallel.__init__``, whose first statement is
+        ``assert isinstance(layers, PipelineLayer)``
+        (paddle .../meta_parallel/pipeline_parallel.py:435). A plain
+        ``nn.Linear`` is not a ``PipelineLayer``, so the assert fires. This
+        documents genuine upstream Paddle behavior; no production code is
+        modified. If a future Paddle relaxes this (accepting arbitrary layers on
+        a single rank) the AssertionError will stop being raised and this test
+        will fail, flagging the contract change for review.
+        """
         model = self._build_fixed_linear()
-
         self._init_single_process_fleet()
-        wrapped = fleet.distributed_model(model)
-
-        params = {p.name: p for p in wrapped.parameters()}
-        # Recover weight/bias by their known shapes and compare content against
-        # the fixture; a wrapper that re-initialized or transposed them fails.
-        weight = next(p for p in params.values() if list(p.shape) == [3, 2])
-        bias = next(p for p in params.values() if list(p.shape) == [2])
-        np.testing.assert_allclose(
-            weight.numpy(),
-            np.array(_WEIGHT, dtype=np.float32),
-            rtol=1e-6,
-            atol=1e-6,
-        )
-        np.testing.assert_allclose(
-            bias.numpy(),
-            np.array(_BIAS, dtype=np.float32),
-            rtol=1e-6,
-            atol=1e-6,
-        )
+        with self.assertRaises(AssertionError):
+            fleet.distributed_model(model)
 
 
 if __name__ == "__main__":

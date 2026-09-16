@@ -36,7 +36,10 @@ from dataclasses import fields
 
 try:
     import paddle
-    from paddle.distributed.fleet.meta_parallel import ScheduleChunk
+    from paddle.distributed.fleet.meta_parallel import (
+        ScheduleChunk,
+        ScheduleNode,
+    )
 
     from paddlefleet.models.gpt.gpt_model import (
         GPTModel,
@@ -149,12 +152,14 @@ class TestBuildOverlappedNodes(unittest.TestCase):
     """
 
     def _run(self):
-        # Distinguishable non-layer sentinels (plain objects are not
-        # TransformerLayerNode instances, so they are classified as pre/post).
-        self.f_pre = object()
-        self.f_post = object()
-        self.b_x0 = object()
-        self.b_x1 = object()
+        # Distinguishable non-layer nodes. They must be real ScheduleNode
+        # instances (ScheduleChunk validates that every element is a
+        # ScheduleNode/ScheduleChunk), but they are NOT TransformerLayerNode
+        # instances, so build_overlapped_nodes classifies them as pre/post.
+        self.f_pre = ScheduleNode(lambda inputs: inputs, name="f_pre")
+        self.f_post = ScheduleNode(lambda inputs: inputs, name="f_post")
+        self.b_x0 = ScheduleNode(lambda inputs: inputs, name="b_x0")
+        self.b_x1 = ScheduleNode(lambda inputs: inputs, name="b_x1")
         # Layer nodes carry unique config markers so overlap.config is checkable.
         self.tf0 = _make_layer_node("cfg_f0")
         self.tf1 = _make_layer_node("cfg_f1")

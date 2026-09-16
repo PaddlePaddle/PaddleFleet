@@ -176,20 +176,32 @@ class TestRMSNormFusionBranches(unittest.TestCase):
         self._run_leaf_case(x_np, w_np, upstream, make_x=lambda b: b)
 
     def test_forward_backward_strided_rows(self):
-        """Non-contiguous rows via a transposed leaf exercise the
-        stride_x_row = x.stride()[ndim-2] read path (headline strided-input
-        feature). base is [n2, n1] contiguous; x = base.T is [n1, n2]."""
+        """Non-trivial row stride via a last-dim slice exercises the
+        ``stride_x_row = x.stride()[ndim-2]`` read path (headline strided-input
+        feature) while keeping the normalized last dim unit-stride -- the
+        split/slice layout this kernel actually supports (a single row-stride
+        parameter plus contiguous columns). ``base`` is [n1, N] contiguous and
+        ``x = base[:, :n2]`` has row stride N (!= n2) but stride-1 columns.
+
+        A transpose would instead make the *normalized* dim non-contiguous,
+        which this kernel does not support (it reads columns as
+        ``X_ptr + row*stride_x_row + cols`` with an implicit unit column
+        stride), so a slice is the correct way to drive the strided branch.
+        """
         rng = np.random.RandomState(1)
-        n1, n2 = 5, 16
-        base_np = rng.randn(n2, n1).astype("float32")  # leaf layout
+        n1, n2, extra = 5, 16, 7
+        total_cols = n2 + extra  # N > n2 so the row stride differs from n2
+        base_np = rng.randn(n1, total_cols).astype("float32")  # leaf layout
         w_np = (rng.randn(n2) * 0.3 + 1.0).astype("float32")
         upstream = rng.randn(n1, n2).astype("float32")
 
         def make_x(base):
-            return paddle.transpose(base, [1, 0])
+            # Slice the last dim: row stride == total_cols != n2, columns
+            # remain contiguous (unit stride) as the kernel requires.
+            return base[:, :n2]
 
-        # Reference must see the transposed values, so feed base_np and let
-        # make_x transpose it inside _run_leaf_case's reference branch too.
+        # Reference must see the same sliced values, so feed base_np and let
+        # make_x slice it inside _run_leaf_case's reference branch too.
         self._run_leaf_case(base_np, w_np, upstream, make_x=make_x)
 
     def test_forward_backward_multi_program_reduce(self):

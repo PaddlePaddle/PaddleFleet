@@ -157,8 +157,14 @@ class TestRefinedRcomputeFlashAttnForwardDispatch(unittest.TestCase):
         self.assertEqual(len(self.first_calls), 1)
         self.assertEqual(len(self.second_calls), 0)
 
-        # forward() returns the first pass result unchanged (same object).
-        self.assertIs(out, self._first_marker)
+        # forward() unpacks the pass's ``(attn_output, attn_weights)`` return
+        # and re-packs it, so it returns a *new* 2-tuple whose elements are the
+        # exact objects the first pass produced. Assert element-wise identity
+        # (the whole-tuple identity would be a different object).
+        self.assertIsInstance(out, tuple)
+        self.assertEqual(len(out), 2)
+        self.assertIs(out[0], self._first_marker[0])
+        self.assertIs(out[1], self._first_marker[1])
 
         # Tensors relayed by identity; scalar options relayed by value.
         call = self.first_calls[0]
@@ -184,7 +190,11 @@ class TestRefinedRcomputeFlashAttnForwardDispatch(unittest.TestCase):
 
         self.assertEqual(len(self.first_calls), 1)
         self.assertEqual(len(self.second_calls), 0)
-        self.assertIs(out, self._first_marker)
+        # forward() re-packs (attn_output, attn_weights); assert element-wise.
+        self.assertIsInstance(out, tuple)
+        self.assertEqual(len(out), 2)
+        self.assertIs(out[0], self._first_marker[0])
+        self.assertIs(out[1], self._first_marker[1])
         self.assertIs(self.first_calls[0]["q"], self.q)
         self.assertEqual(self.first_calls[0]["causal"], True)
 
@@ -204,7 +214,11 @@ class TestRefinedRcomputeFlashAttnForwardDispatch(unittest.TestCase):
 
         self.assertEqual(len(self.second_calls), 1)
         self.assertEqual(len(self.first_calls), 0)
-        self.assertIs(out, self._second_marker)
+        # forward() re-packs (attn_output, attn_weights); assert element-wise.
+        self.assertIsInstance(out, tuple)
+        self.assertEqual(len(out), 2)
+        self.assertIs(out[0], self._second_marker[0])
+        self.assertIs(out[1], self._second_marker[1])
 
         call = self.second_calls[0]
         self.assertIs(call["q"], self.q)

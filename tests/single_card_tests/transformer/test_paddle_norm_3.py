@@ -21,10 +21,12 @@ each normalization formula, never from the fused paddle ops under test:
   LayerNorm : (x - mean) / sqrt(var + eps) * weight + bias   (population var)
   L2Norm    : x / sqrt(mean(x^2, -1) + eps)                   (weightless)
 
-These are CPU-only tests. paddle/paddlefleet may be absent in the collecting
-environment, so the heavy imports are guarded and every test class is skipped
-with an honest reason when they cannot be imported. No import failure is ever
-swallowed into a fake pass.
+These are GPU tests: the fused ``rms_norm`` kernel is registered for the GPU
+backend only, so every norm forward here must run on a real CUDA device. When
+paddle/paddlefleet cannot be imported the heavy imports are guarded and every
+test class is skipped with an honest reason; when no CUDA GPU is available the
+device-dependent classes skip in setUp. No import failure is ever swallowed
+into a fake pass.
 """
 
 import unittest
@@ -114,9 +116,18 @@ def _make_config(**overrides):
 
 
 @unittest.skipUnless(_IMPORT_ERROR is None, _SKIP_REASON)
-class _CpuNormTestBase(unittest.TestCase):
+class _GpuNormTestBase(unittest.TestCase):
     def setUp(self):
-        paddle.set_device("cpu")
+        # rms_norm has a GPU-only CUDA kernel, so these norm tests must run on
+        # a real GPU. Skip honestly when CUDA is unavailable; otherwise select
+        # the GPU device and restore the previous device in tearDown.
+        self._orig_device = paddle.device.get_device()
+        if not paddle.is_compiled_with_cuda():
+            self.skipTest("rms_norm requires a CUDA GPU; none available")
+        paddle.set_device("gpu")
+
+    def tearDown(self):
+        paddle.set_device(self._orig_device)
 
     def _set_weight(self, layer, values):
         layer.weight.set_value(
@@ -129,7 +140,7 @@ class _CpuNormTestBase(unittest.TestCase):
         )
 
 
-class TestRMSNormNumeric(_CpuNormTestBase):
+class TestRMSNormNumeric(_GpuNormTestBase):
     def test_forward_matches_independent_reference_with_weight(self):
         norm = RMSNorm(_make_config(), normalized_shape=4, norm_eps=RMS_EPS)
         self._set_weight(norm, W_NP)  # non-trivial weight must be applied
@@ -174,7 +185,7 @@ class TestRMSNormNumeric(_CpuNormTestBase):
         self.assertGreater(np.abs(w_ref.grad.numpy()).max(), 1e-3)
 
 
-class TestLayerNormNumeric(_CpuNormTestBase):
+class TestLayerNormNumeric(_GpuNormTestBase):
     def test_forward_matches_independent_reference_with_weight_and_bias(self):
         norm = LayerNorm(_make_config(), normalized_shape=4, norm_eps=RMS_EPS)
         self._set_weight(norm, W_NP)  # non-trivial affine must be applied
@@ -184,7 +195,7 @@ class TestLayerNormNumeric(_CpuNormTestBase):
         np.testing.assert_allclose(out.numpy(), expected, rtol=1e-5, atol=1e-6)
 
 
-class TestL2NormNumeric(_CpuNormTestBase):
+class TestL2NormNumeric(_GpuNormTestBase):
     def test_forward_matches_independent_reference(self):
         norm = L2Norm(hidden_size=4)  # default eps == 1e-6
         out = norm(paddle.to_tensor(X_NP))
@@ -211,7 +222,7 @@ class TestL2NormNumeric(_CpuNormTestBase):
         self.assertFalse(np.allclose(out.numpy(), wrong, rtol=1e-3, atol=1e-6))
 
 
-class TestWrappedPaddleNormSelection(_CpuNormTestBase):
+class TestWrappedPaddleNormSelection(_GpuNormTestBase):
     def test_selects_rmsnorm_and_normalizes(self):
         norm = WrappedPaddleNorm(config=_make_config(), hidden_size=4)
         self.assertIsInstance(norm, RMSNorm)
@@ -274,7 +285,7 @@ class TestWrappedPaddleNormSelection(_CpuNormTestBase):
         marker.assert_not_called()
 
 
-class TestWrappedPaddleNormPipe(_CpuNormTestBase):
+class TestWrappedPaddleNormPipe(_GpuNormTestBase):
     def test_no_mtp_normalizes_and_preserves_other_keys(self):
         pipe = WrappedPaddleNormPipe(config=_make_config(), hidden_size=4)
         self._set_weight(pipe.norm, W_NP)
@@ -332,7 +343,7 @@ class TestWrappedPaddleNormPipe(_CpuNormTestBase):
         self.assertFalse(np.allclose(out.numpy()[2:3], XM_NP[2:3]))
 
 
-class TestGetNormExtraArgs(_CpuNormTestBase):
+class TestGetNormExtraArgs(_GpuNormTestBase):
     def test_wrapped_paddle_norm_via_layerspec_uses_hidden_size_eps(self):
         config = _make_config()
         args = get_norm_extra_args(

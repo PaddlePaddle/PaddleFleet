@@ -137,14 +137,17 @@ class TestRMSNorm(unittest.TestCase):
         )
 
     def test_custom_eps_is_consumed(self):
-        # A large eps materially changes the denominator; assert the exact
-        # value tracks the requested eps rather than the config default.
+        # A larger eps materially changes the denominator; assert the exact
+        # value tracks the requested eps rather than the config default. The
+        # fused rms_norm CUDA op only accepts eps <= 1e-3, so we combine an
+        # in-range large eps with a small-magnitude input so the eps term
+        # dominates and the difference stays clearly observable.
         config = _make_config(hidden_size=8, rms_norm_eps=1e-5)
-        big_eps = 0.5
+        big_eps = 5e-4
         norm = RMSNorm(config=config, norm_eps=big_eps)
         self.assertEqual(norm.variance_epsilon, big_eps)
         rng = np.random.default_rng(1)
-        x_np = rng.standard_normal((2, 8)).astype(np.float32)
+        x_np = (rng.standard_normal((2, 8)).astype(np.float32)) * 0.03
 
         out = norm(paddle.to_tensor(x_np)).numpy()
         expected = _rms_norm_ref(x_np, np.ones(8), big_eps)
@@ -152,6 +155,11 @@ class TestRMSNorm(unittest.TestCase):
         # The default-eps reference must NOT match, proving eps is consumed.
         wrong = _rms_norm_ref(x_np, np.ones(8), 1e-5)
         self.assertGreater(np.abs(out - wrong).max(), 1e-3)
+
+        # eps is forwarded to the fused op, which enforces eps <= 1e-3; an
+        # out-of-range eps must raise rather than be silently ignored.
+        with self.assertRaises(ValueError):
+            RMSNorm(config=config, norm_eps=0.5)(paddle.to_tensor(x_np))
 
     def test_custom_normalized_shape_normalizes_over_last_dim(self):
         config = _make_config(hidden_size=8)

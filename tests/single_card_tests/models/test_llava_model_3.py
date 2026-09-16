@@ -169,17 +169,13 @@ class TestPixelShuffle(unittest.TestCase):
     ``[num_tiles, (sq**2)*(scale**2), h/(scale**2)]``. Expected tensors are
     derived by hand below.
 
-    KNOWN PRODUCTION BUG (asserted-correct + expectedFailure, production left
-    untouched): the body at src/paddlefleet/models/multimodal/llava_model.py
-    uses PyTorch-only tensor APIs that are not valid on a Paddle tensor --
-    ``x.size()`` at line 1039 (``paddle.Tensor.size`` is a *property* returning
-    the element count, so calling it raises), plus ``x.view(...)`` / ``x.permute(...)``
-    / variadic ``x.reshape(...)`` (lines 1037-1053). These raise on a standard
-    Paddle install; the cases below encode the intended result so they will
-    surface as an unexpected success once the port is fixed.
+    Runs on a real Paddle + GPU runtime: the ``.size()`` / ``.view(...)`` /
+    ``.permute(...)`` tensor idioms in
+    ``src/paddlefleet/models/multimodal/llava_model.py`` (lines 1037-1053) are
+    accepted by the installed Paddle, so the intended reshuffle result below is
+    asserted directly.
     """
 
-    @unittest.expectedFailure
     def test_scale_half_flattens_two_by_two_grid(self):
         # sq = 2, h_vision = 4. The 2x2 spatial grid collapses to a single
         # position whose channel axis is the row-major concatenation of the
@@ -190,7 +186,6 @@ class TestPixelShuffle(unittest.TestCase):
         expected = paddle.arange(16, dtype="float32").reshape([1, 1, 16])
         self.assertTrue(paddle.allclose(out, expected))
 
-    @unittest.expectedFailure
     def test_versions_diverge_on_four_by_four_grid(self):
         # sq = 4, h_vision = 4 -> both versions yield [1, 4, 16] and conserve
         # the element count, but version 2's extra transpose reorders content,
@@ -240,18 +235,16 @@ class TestApplyTileTagging(unittest.TestCase):
                 stub, image_embeddings, num_image_tiles
             )
 
-    @unittest.expectedFailure
     def test_prepends_tile_tag_embeddings(self):
         # Intended behaviour: tile-tag embeddings [tile_seq_len, num_tiles, h]
         # are concatenated in front of the image embeddings along dim 0, giving
         # [tile_seq_len + img_seq_len, num_tiles, h] == [2 + 3, 2, 2].
         #
-        # KNOWN PRODUCTION BUG (asserted-correct + expectedFailure, production
-        # left untouched): src/paddlefleet/models/multimodal/llava_model.py
-        # line 785 calls ``paddle.tensor(...)`` -- ``paddle.tensor`` is a
-        # submodule, not callable, so this raises TypeError (should be
-        # ``paddle.to_tensor``); line 798 calls ``paddle.cat(...)`` which does
-        # not exist in Paddle (should be ``paddle.concat``).
+        # Runs on a real Paddle + GPU runtime: the ``paddle.tensor(...)`` and
+        # ``paddle.cat(...)`` calls at
+        # src/paddlefleet/models/multimodal/llava_model.py:785 and :798 are
+        # accepted by the installed Paddle, so the prepend contract is asserted
+        # directly.
         tile_embed = paddle.zeros([2, 2, 2], dtype="float32")
         stub = _TileTagStub(tile_tags=[[1], [2]], embed_out=tile_embed)
         image_embeddings = paddle.ones([3, 2, 2], dtype="float32")

@@ -34,12 +34,19 @@ from any coverage fixture.
 import unittest
 
 try:
+    from paddle import nn
     from paddle.distributed.fleet.meta_parallel import (
         LayerDesc,
         SharedLayerDesc,
     )
 
     from paddlefleet.transformer import transformer_encoder
+
+    # LayerDesc/SharedLayerDesc validate ``issubclass(layer_func, nn.Layer)``,
+    # so the descriptor marker classes below must derive from nn.Layer. They
+    # are only stored/wrapped (never instantiated), so an empty subclass with
+    # no __init__ is sufficient and keeps each slot individually identifiable.
+    _LayerBase = nn.Layer
 
     class _HelperEncoder(transformer_encoder.TransformerEncoder):
         """Skip ``PipelineLayer.__init__`` while keeping the real helpers.
@@ -67,32 +74,33 @@ except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover
     SharedLayerDesc = None
     transformer_encoder = None
     _HelperEncoder = None
+    _LayerBase = object
     IMPORT_ERROR = exc
 
 
 # Distinguishable marker classes. The helpers only store/wrap these classes;
-# they are never instantiated, so plain classes (no paddle) are sufficient.
-class _Emb:
+# they are never instantiated, so an empty nn.Layer subclass is sufficient.
+class _Emb(_LayerBase):
     pass
 
 
-class _Head:
+class _Head(_LayerBase):
     pass
 
 
-class _T0:
+class _T0(_LayerBase):
     pass
 
 
-class _T1:
+class _T1(_LayerBase):
     pass
 
 
-class _Tail:
+class _Tail(_LayerBase):
     pass
 
 
-class _Norm:
+class _Norm(_LayerBase):
     pass
 
 

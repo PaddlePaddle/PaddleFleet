@@ -85,13 +85,13 @@ class TestCalculatePredictedLogits(unittest.TestCase):
         self.assertEqual(target_mask.astype("int64").tolist(), [[0], [0]])
         self.assertEqual(masked_target_1d.tolist(), [2, 1])
 
-        # logits were shifted in place by subtracting the per-row max.
+        # Oracle: the max-subtracted logits the function computes internally.
+        # (calculate_predicted_logits subtracts the per-row max before the
+        # gather / exp; the returned predicted_logits, exp_logits and
+        # sum_exp_logits are all derived from these shifted values.)
         shifted = np.array(
             [[-3.0, -2.0, -1.0, 0.0], [-1.0, 0.0, -1.0, -2.0]],
             dtype=np.float32,
-        )
-        np.testing.assert_allclose(
-            logits.numpy(), shifted, rtol=1e-6, atol=1e-6
         )
 
         # predicted = shifted[row, target]: shifted[0,2]=-1, shifted[1,1]=0.

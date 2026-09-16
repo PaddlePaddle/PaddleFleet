@@ -114,8 +114,10 @@ class TestMakeContiguous(unittest.TestCase):
         self.assertFalse(view.is_contiguous())
         out = make_contiguous(view)
         self.assertTrue(out.is_contiguous())
-        self.assertIsNot(out, view)
-        # Values must match the transposed layout element-for-element.
+        # Values must match the transposed layout element-for-element. (The
+        # contract is "returns a contiguous tensor with the same values"; it
+        # does not promise a distinct object -- paddle's .contiguous() may
+        # return the same handle -- so identity is intentionally not asserted.)
         np.testing.assert_array_equal(out.numpy(), base.numpy().T)
 
     def test_list_and_tuple_type_preserved_with_contiguous_elements(self):

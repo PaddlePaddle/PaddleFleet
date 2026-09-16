@@ -248,8 +248,12 @@ class TestScheduleNodeForward(unittest.TestCase):
         self.assertIsNot(node.inputs, x)
         self.assertFalse(node.inputs.stop_gradient)
         np.testing.assert_array_equal(node.inputs.numpy(), x.numpy())
-        # self.outputs is a fresh (fake-cloned) buffer of matching shape.
-        self.assertEqual(node.outputs.shape, [2, 3])
+        # labels is None here, so production takes the clear_dataptr=True
+        # branch: self.outputs is a distinct FakeClone buffer whose data
+        # pointer has been released, which collapses its shape to [].
+        self.assertIsInstance(node.outputs, paddle.Tensor)
+        self.assertIsNot(node.outputs, out)
+        self.assertEqual(list(node.outputs.shape), [])
 
     def test_scale_loss_factor_divides_output(self):
         x = paddle.to_tensor([[2.0, 4.0], [6.0, 8.0]], dtype="float32")
@@ -320,7 +324,12 @@ class TestScheduleNodeBackward(unittest.TestCase):
             [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype="float32"
         )
         x.stop_gradient = False
-        node = ScheduleNode(fwd_func=lambda inputs, **kw: inputs.sum())
+        # A scalar-loss node must carry labels so production keeps the loss
+        # tensor alive (``clear_dataptr = labels is None``); otherwise the
+        # output data pointer is released before backward and the gradient
+        # would be zeroed. The label value is unused by this reducer.
+        node = ScheduleNode(fwd_func=lambda inputs, lbl, **kw: inputs.sum())
+        node.labels = paddle.zeros([2, 3], dtype="float32")
         node.forward(x)
         grads = node.backward()
         self.assertIsInstance(grads, tuple)
@@ -369,7 +378,10 @@ class TestScheduleChunk(unittest.TestCase):
         )
         x.stop_gradient = False
         node_a = ScheduleNode(fwd_func=lambda inputs, **kw: inputs * 2)
-        node_b = ScheduleNode(fwd_func=lambda inputs, **kw: inputs.sum())
+        # node_b is the scalar-loss tail; it must carry labels so its loss
+        # output is retained (``clear_dataptr = labels is None``) for backward.
+        node_b = ScheduleNode(fwd_func=lambda inputs, lbl, **kw: inputs.sum())
+        node_b.labels = paddle.zeros([2, 3], dtype="float32")
         chunk = ScheduleChunk([node_a, node_b])
         chunk.forward(x)
         grads = chunk.backward(output_grad=None)

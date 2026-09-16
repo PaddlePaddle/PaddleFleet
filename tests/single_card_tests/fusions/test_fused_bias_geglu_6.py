@@ -270,26 +270,29 @@ class TestWeightedBiasQuickGegluImpl(_CPUFixture):
         with self.assertRaises(AssertionError):
             weighted_bias_quick_geglu_impl(x, None, w)
 
-    @unittest.expectedFailure
-    def test_offset_tensor_construction_is_broken(self):
-        """Real production defect (production intentionally left unmodified).
+    def test_offset_tensor_construction_builds_and_matches_reference(self):
+        """A valid no-bias 2D call returns the weighted quick-GEGLU value.
 
         ``weighted_bias_quick_geglu_impl`` builds the linear offset with
-        ``paddle.tensor(linear_offset, dtype=..., device=input.device)``.
-        ``paddle.tensor`` is a submodule, not a tensor factory (the correct call
-        is ``paddle.to_tensor``); additionally paddle tensors expose ``.place``
-        rather than ``.device`` and ``to_tensor`` takes ``place=`` not
-        ``device=``. A well-formed 2-D call therefore raises before reaching the
-        PyLayer, so this test is expected to fail until the line is corrected.
+        ``paddle.tensor(linear_offset, dtype=..., device=input.device)``. Under
+        the paddlefleet_ops torch-compat layer active in this runtime,
+        ``paddle.tensor`` is a callable factory that accepts the ``device=``
+        keyword, so the offset tensor is constructed and (with ``bias=None``)
+        the impl routes to the weighted quick-GEGLU path and returns the
+        per-token-weighted value. Checked against an INDEPENDENT NumPy
+        reference at the default ``linear_offset=0.0``.
         """
-        x = paddle.to_tensor(
-            np.array(
-                [[1.0, -1.0, 2.0, 3.0], [0.5, -0.5, 1.5, -1.5]],
-                dtype="float32",
-            )
+        x_np = np.array(
+            [[1.0, -1.0, 2.0, 3.0], [0.5, -0.5, 1.5, -1.5]],
+            dtype="float32",
         )
-        w = paddle.to_tensor(np.array([[2.0], [3.0]], dtype="float32"))
-        weighted_bias_quick_geglu_impl(x, None, w)
+        w_np = np.array([[2.0], [3.0]], dtype="float32")
+        out = weighted_bias_quick_geglu_impl(
+            paddle.to_tensor(x_np), None, paddle.to_tensor(w_np)
+        ).numpy()
+        expected = _quick_geglu_ref(x_np, 0.0) * w_np
+        self.assertEqual(list(out.shape), [2, 2])
+        np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-6)
 
 
 if __name__ == "__main__":

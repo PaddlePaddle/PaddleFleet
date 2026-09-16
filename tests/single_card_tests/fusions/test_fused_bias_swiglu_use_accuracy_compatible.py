@@ -298,6 +298,11 @@ class TestBiasSwiGLUBackwardDispatch(_CPUFixture):
         x = paddle.to_tensor(_X_ROWS, dtype="float32")
         x.stop_gradient = False
         bias = paddle.to_tensor(_BIAS_ROW, dtype="float32")
+        # ``bias`` is a trainable parameter in real use; it must require grad so
+        # the PyLayer backward (which returns a grad for BOTH forward inputs)
+        # is allowed to hand back a non-None bias gradient. Leaving it as a
+        # stop-gradient leaf makes paddle reject the returned bias grad.
+        bias.stop_gradient = False
         g_up = paddle.to_tensor(_GUP_ROWS, dtype="float32")
         with (
             self._spy("bias_swiglu_back") as fused,
@@ -324,6 +329,11 @@ class TestBiasSwiGLUBackwardDispatch(_CPUFixture):
         x = paddle.to_tensor(_X_ROWS, dtype="float32")
         x.stop_gradient = False
         bias = paddle.to_tensor(_BIAS_ROW, dtype="float32")
+        # ``bias`` is a trainable parameter in real use; it must require grad so
+        # the PyLayer backward (which returns a grad for BOTH forward inputs)
+        # is allowed to hand back a non-None bias gradient. Leaving it as a
+        # stop-gradient leaf makes paddle reject the returned bias grad.
+        bias.stop_gradient = False
         g_up = paddle.to_tensor(_GUP_ROWS, dtype="float32")
         with (
             self._spy("bias_swiglu_back") as fused,

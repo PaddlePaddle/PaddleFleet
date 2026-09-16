@@ -140,7 +140,11 @@ class TestRMSNormForward(unittest.TestCase):
         )
 
     def test_high_precision_float32_applies_weight_and_matches_reference(self):
-        eps = 0.5
+        # The weighted RMSNorm.forward path dispatches to the rms_norm CUDA
+        # kernel (LayerNorm op), whose epsilon must satisfy 0 <= eps <= 1e-3;
+        # a larger value is rejected at InferMeta. Use the max legal eps so the
+        # additive term is still non-trivial relative to the unit-scale input.
+        eps = 1e-3
         rng = np.random.RandomState(1)
         x_np = rng.standard_normal([2, 4, self.HIDDEN]).astype(np.float32)
         # Distinguishable per-channel weight (not the all-ones default) so a
@@ -160,8 +164,9 @@ class TestRMSNormForward(unittest.TestCase):
 
     def test_low_precision_float32_matches_same_reference(self):
         # else branch (high_precision_norm=False) with matching dtypes: same
-        # weighted RMS math, same independent reference.
-        eps = 0.5
+        # weighted RMS math, same independent reference. eps stays within the
+        # rms_norm kernel's legal [0, 1e-3] epsilon range.
+        eps = 1e-3
         rng = np.random.RandomState(2)
         x_np = rng.standard_normal([2, 4, self.HIDDEN]).astype(np.float32)
         w_np = (rng.standard_normal([self.HIDDEN]) * 0.5 + 1.0).astype(

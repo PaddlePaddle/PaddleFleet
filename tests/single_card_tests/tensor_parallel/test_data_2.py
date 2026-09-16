@@ -72,15 +72,10 @@ class TestBuildKeySizeNumelDictionaries(unittest.TestCase):
         # Real cross-rank broadcast is NOT exercised here.
         return None
 
-    # NOTE: this asserts the CORRECT reconstruction, but the production function
-    # calls ``paddle.tensor(sizes, dtype=paddle.int32)`` at the "move to GPU"
-    # step. ``paddle.tensor`` is a *module*, not a callable, so the real code
-    # raises ``TypeError: 'module' object is not callable`` before it ever
-    # returns -- the intended API is ``paddle.to_tensor``. We assert the correct
-    # behavior and mark the test expectedFailure so that (a) production is not
-    # edited, and (b) if the bug is fixed this test flips to "unexpected success"
-    # and flags that the marker should be removed.
-    @unittest.expectedFailure
+    # This asserts the CORRECT reconstruction: rank 0 packs the per-key shapes
+    # into the flat size buffer, the mocked no-op broadcast leaves them intact
+    # for the single process, and the unpack loop recovers exact sizes / numels
+    # / running total from distinguishable shapes.
     def test_multi_key_distinguishable_shapes(self):
         tp_group = SimpleNamespace(rank=0, ranks=[0])
         # Distinguishable shapes: a stride/offset error or key swap changes the
@@ -109,7 +104,6 @@ class TestBuildKeySizeNumelDictionaries(unittest.TestCase):
         self.assertEqual(int(key_numel["y"]), 120)
         self.assertEqual(int(total_numel), 126)
 
-    @unittest.expectedFailure
     def test_key_order_independent_of_alpha_order(self):
         # Sizes must follow the requested key order, not dict/alphabetical order.
         # "b" (2-D) precedes "a" (3-D): a swap would exchange the sizes.

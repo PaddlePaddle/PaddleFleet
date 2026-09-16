@@ -189,6 +189,11 @@ class TestMoELayerAuxLossCompute(unittest.TestCase):
 
     def test_z_loss_added_on_own_branch(self):
         hidden = paddle.arange(12, dtype="float32").reshape([6, 2])
+        # hidden_states flow through AddAuxiliaryLoss, whose backward returns a
+        # gradient at position 0; the PyLayer contract requires that forward
+        # input to be grad-requiring (as it always is in training), otherwise
+        # the framework rejects the non-None grad. Mark it accordingly.
+        hidden.stop_gradient = False
         residuals = paddle.zeros([2, 3, 2], dtype="float32")
         z_loss = paddle.to_tensor([3.0], dtype="float32")
         z_loss.stop_gradient = False

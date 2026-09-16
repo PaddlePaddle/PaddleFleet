@@ -51,9 +51,17 @@ import numpy as np
 try:
     import paddle
 
+    # Import at module load, BEFORE any ``setUp`` pins the device to CPU. On a
+    # CUDA-compiled build the first ``paddlefleet`` import pulls in
+    # ``paddlefleet_ops``, whose package init calls ``get_device_capability()``
+    # against the current device -- which must be a GPU. The process default
+    # device is the GPU there, so importing first keeps that query valid.
+    from paddlefleet.fusions.fused_softmax import SoftmaxOne
+
     _PADDLE_IMPORT_ERROR = None
 except ImportError as exc:  # honest: paddle genuinely absent, not swallowed
     paddle = None
+    SoftmaxOne = None
     _PADDLE_IMPORT_ERROR = exc
 
 
@@ -97,10 +105,6 @@ class TestSoftmaxOne(unittest.TestCase):
         self._orig_device = paddle.get_device()
         self.addCleanup(paddle.set_device, self._orig_device)
         paddle.set_device("cpu")
-
-        # Import here (not at module top) so a genuinely missing paddlefleet
-        # surfaces as a real error rather than being masked as "no paddle".
-        from paddlefleet.fusions.fused_softmax import SoftmaxOne
 
         self.SoftmaxOne = SoftmaxOne
 

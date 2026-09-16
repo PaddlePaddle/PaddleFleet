@@ -292,6 +292,9 @@ class TestVHATransforms(unittest.TestCase):
         batch, seq, groups, q_head_dim, head_dim, nkv = 2, 3, 2, 4, 5, 3
         num_heads = nkv * groups
         obj = SelfAttentionVHA.__new__(SelfAttentionVHA)
+        # Initialize the paddle.nn.Layer base so tensor attributes register as
+        # buffers; only the heavy Attention.__init__ config wiring is bypassed.
+        paddle.nn.Layer.__init__(obj)
         obj.num_attention_heads = num_heads
         obj.head_dim = head_dim
 
@@ -323,6 +326,9 @@ class TestVHATransforms(unittest.TestCase):
     def test_postmix_applies_identity_plus_lowrank(self):
         batch, seq, nh, d, rank = 2, 2, 4, 3, 2
         obj = SelfAttentionVHA.__new__(SelfAttentionVHA)
+        # Initialize the paddle.nn.Layer base so tensor attributes register as
+        # buffers; only the heavy Attention.__init__ config wiring is bypassed.
+        paddle.nn.Layer.__init__(obj)
         obj.num_attention_heads = nh
         obj.v_head_dim = d
 
@@ -357,6 +363,9 @@ class TestVHATransforms(unittest.TestCase):
         # V = 0 => M = I => output equals input exactly, independent of U.
         batch, seq, nh, d, rank = 1, 2, 4, 3, 2
         obj = SelfAttentionVHA.__new__(SelfAttentionVHA)
+        # Initialize the paddle.nn.Layer base so tensor attributes register as
+        # buffers; only the heavy Attention.__init__ config wiring is bypassed.
+        paddle.nn.Layer.__init__(obj)
         obj.num_attention_heads = nh
         obj.v_head_dim = d
         u_np = np.linspace(-1.0, 1.0, nh * rank, dtype=np.float32).reshape(

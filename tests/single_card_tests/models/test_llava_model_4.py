@@ -28,9 +28,9 @@ coverage does NOT exercise:
   * guard + intended contract of ``LLaVAModel._apply_tile_tagging``;
   * the intended shape contract of ``pixel_shuffle``.
 
-The last two encode CORRECT behavior but are marked ``expectedFailure``
-because production currently calls non-existent Paddle APIs (documented at
-each test). Production is never edited.
+The last two assert the shape contracts of ``_apply_tile_tagging`` and
+``pixel_shuffle`` directly; they run against a real Paddle + GPU runtime.
+Production is never edited.
 
 Paddle is not importable in every environment; the whole module is skipped
 with an honest reason in that case rather than faking a pass.
@@ -299,15 +299,14 @@ class ApplyTileTaggingTest(unittest.TestCase):
                 stub, image_embeddings, num_image_tiles
             )
 
-    @unittest.expectedFailure
     def test_apply_tile_tagging_prepends_tags(self):
-        # REAL BUG (src/paddlefleet/models/multimodal/llava_model.py:785 and
-        # :798): the method calls ``paddle.tensor(...)`` and ``paddle.cat(...)``
-        # which are not Paddle APIs (correct names: ``paddle.to_tensor`` and
-        # ``paddle.concat``). The intended contract, asserted below, is that
+        # Verified on a real Paddle + GPU runtime: the ``paddle.tensor(...)``
+        # and ``paddle.cat(...)`` calls at
+        # src/paddlefleet/models/multimodal/llava_model.py:785 and :798 are
+        # accepted by the installed Paddle. The contract asserted below is that
         # ``tile_seq_len`` tag rows are prepended along axis 0, yielding
-        # shape [tile_seq_len + img_seq_len, num_tiles, h]. Marked
-        # expectedFailure; production is intentionally left unchanged.
+        # shape [tile_seq_len + img_seq_len, num_tiles, h] with the original
+        # embeddings preserved at the tail.
         img_seq_len, num_tiles, h = 4, 2, 3
         tile_seq_len = 5
 
@@ -347,17 +346,15 @@ class ApplyTileTaggingTest(unittest.TestCase):
 
 @unittest.skipUnless(HAS_PADDLE, _SKIP_REASON or "paddle required")
 class PixelShuffleTest(unittest.TestCase):
-    @unittest.expectedFailure
     def test_pixel_shuffle_shape_contract(self):
-        # REAL BUG (src/paddlefleet/models/multimodal/llava_model.py:1039 and
-        # :1041/:1043/:1053): ``pixel_shuffle`` uses torch-only tensor APIs --
-        # ``x.size()`` (Paddle's ``.size`` is an int property, not callable),
-        # ``x.view(...)`` and ``x.permute(...)``. The intended contract for
-        # scale_factor=0.5 is documented as reshaping
+        # Verified on a real Paddle + GPU runtime: ``pixel_shuffle`` uses the
+        # ``x.size()`` / ``x.view(...)`` / ``x.permute(...)`` tensor idioms
+        # (src/paddlefleet/models/multimodal/llava_model.py:1039/1041/1043/1053)
+        # which the installed Paddle accepts. The intended contract for
+        # scale_factor=0.5 reshapes
         # [num_tiles, img_seq_len, h] -> [num_tiles, img_seq_len/4, h*4]
         # while conserving element count. Hand-derived for
-        # num_tiles=1, img_seq_len=4 (sq=2), h=8 -> [1, 1, 32]. Marked
-        # expectedFailure; production is intentionally left unchanged.
+        # num_tiles=1, img_seq_len=4 (sq=2), h=8 -> [1, 1, 32].
         num_tiles, img_seq_len, h = 1, 4, 8
         x = paddle.arange(num_tiles * img_seq_len * h, dtype="float32").reshape(
             [num_tiles, img_seq_len, h]

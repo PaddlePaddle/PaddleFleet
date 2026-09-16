@@ -15,7 +15,6 @@
 import os
 import sys
 import unittest
-from unittest import mock
 
 # Bootstrap: make the repo `src/` importable when the test is run standalone
 # (CI normally puts it on PYTHONPATH; this keeps the file runnable directly).
@@ -385,19 +384,25 @@ class TestConstructionValidation(_MLPTestBase):
 
 class TestBackwardDwOrchestration(_MLPTestBase):
     def test_backward_dw_flushes_both_projections_once(self):
-        # MLP.backward_dw must flush the deferred weight-grad of BOTH the
-        # down_proj and the up_gate_proj exactly once. backward_dw takes no
-        # arguments, so a called-once assertion on each collaborator is the
-        # full contract (mlp.py MLP.backward_dw).
+        # MLP.backward_dw must flush the deferred weight-grad of BOTH
+        # projections exactly once, down_proj before up_gate_proj
+        # (mlp.py MLP.backward_dw). The default local-spec projections are
+        # plain Column/RowParallelLinear that do not implement backward_dw
+        # (that hook only exists on the dw-overlap linear variants), so we
+        # install real recorder methods on the two collaborators and drive the
+        # genuine MLP.backward_dw body. Recording call order + count is the
+        # full observable contract of this argument-less orchestration method.
         config = self._make_config()
         mlp = self._build_mlp(config)
-        with (
-            mock.patch.object(mlp.down_proj, "backward_dw") as down_dw,
-            mock.patch.object(mlp.up_gate_proj, "backward_dw") as up_dw,
-        ):
-            mlp.backward_dw()
-        down_dw.assert_called_once_with()
-        up_dw.assert_called_once_with()
+
+        calls = []
+        mlp.down_proj.backward_dw = lambda: calls.append("down")
+        mlp.up_gate_proj.backward_dw = lambda: calls.append("up")
+
+        mlp.backward_dw()
+
+        # Each collaborator flushed exactly once, in the documented order.
+        self.assertEqual(calls, ["down", "up"])
 
 
 if __name__ == "__main__":

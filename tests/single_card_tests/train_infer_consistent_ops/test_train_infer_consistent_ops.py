@@ -234,8 +234,9 @@ class TestStats(unittest.TestCase):
         self.assertAlmostEqual(abssum, exp_abssum, places=6)
         self.assertAlmostEqual(absmax, exp_absmax, places=6)
         self.assertEqual(md5, exp_md5)
-        # 6.5 = 3.0 + 1.5 + 2.0 + 0.5, max 3.0 -- pinned by hand too.
-        self.assertAlmostEqual(abssum, 6.5, places=6)
+        # 7.0 = |−3.0| + |1.5| + |2.0| + |−0.5| = 3.0 + 1.5 + 2.0 + 0.5,
+        # max 3.0 -- pinned by hand too.
+        self.assertAlmostEqual(abssum, 7.0, places=6)
         self.assertAlmostEqual(absmax, 3.0, places=6)
 
     def test_negative_zero_collapses_in_md5(self):

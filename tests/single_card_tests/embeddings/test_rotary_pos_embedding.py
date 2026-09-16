@@ -74,30 +74,43 @@ def _ref_freqs(positions, inv_freq):
 
 @unittest.skipUnless(PADDLE_AVAILABLE, SKIP_REASON)
 class TestInvFreq(unittest.TestCase):
+    # ``inv_freq`` is built in float32 (see rotary_pos_embedding.py: the
+    # exponent is cast to ``paddle.float32`` before ``rotary_base ** ...``), so
+    # comparisons use a float32-appropriate relative tolerance. The previous
+    # rtol=1e-12 / atol=1e-9,1e-12 were tighter than float32 can represent
+    # (~1e-7 relative) and rejected mathematically-correct values on last-bit
+    # rounding; rtol=1e-6 still rejects any real formula/base/exponent error.
     def test_full_rotary_inv_freq_is_powers_of_ten(self):
         emb = RotaryEmbedding(head_dim=8, rotary_percent=1.0)
         actual = emb.inv_freq.numpy().astype(np.float64)
         self.assertEqual(actual.shape, (4,))
         np.testing.assert_allclose(
-            actual, np.array(INV_FREQ_HD8), rtol=0, atol=1e-9
+            actual, np.array(INV_FREQ_HD8), rtol=1e-6, atol=1e-8
         )
 
     def test_custom_rotary_base_changes_decay(self):
-        # base=100=10**2 -> inv_freq[i] = 100 ** (-(2*i)/8) = 10 ** (-(i)/2)
+        # base=100 -> inv_freq[i] = 100 ** (-(2*i)/8) for i in {0,1,2,3}
+        #           = [1, 100**-0.25, 100**-0.5, 100**-0.75]
         emb = RotaryEmbedding(head_dim=8, rotary_percent=1.0, rotary_base=100)
         expected = [100.0 ** (-(2 * i) / 8) for i in range(4)]
         np.testing.assert_allclose(
-            emb.inv_freq.numpy().astype(np.float64), expected, rtol=1e-12
+            emb.inv_freq.numpy().astype(np.float64),
+            expected,
+            rtol=1e-6,
+            atol=1e-8,
         )
 
     def test_partial_rotary_shrinks_dimension(self):
         # rotary_percent=0.5 -> dim = int(8 * 0.5) = 4, indices arange(0,4,2)=[0,2]
-        # inv_freq = 10000 ** (-(2*i)/4) = [1.0, 10000**-1 = 1e-4]
+        # inv_freq[i] = 10000 ** (-idx/dim) for idx in {0, 2}, dim=4
+        #             = [10000**0, 10000**(-2/4)] = [1.0, 10000**-0.5 = 1e-2]
+        # (the prior oracle wrote 1e-4, mis-simplifying -2/4 as -1 instead of
+        # -0.5; the production value 0.01 is the correct RoPE partial-rotary.)
         emb = RotaryEmbedding(head_dim=8, rotary_percent=0.5)
         actual = emb.inv_freq.numpy().astype(np.float64)
         self.assertEqual(actual.shape, (2,))
         np.testing.assert_allclose(
-            actual, np.array([1.0, 1e-4]), rtol=0, atol=1e-12
+            actual, np.array([1.0, 1e-2]), rtol=1e-6, atol=1e-8
         )
 
 
