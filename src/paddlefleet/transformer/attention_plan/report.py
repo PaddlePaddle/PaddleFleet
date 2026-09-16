@@ -58,7 +58,11 @@ def format_plan_lines(bundle: AttentionPlanBundle) -> list[str]:
         for note in p.notes:
             lines.append(f"[ATTN-PLAN]          note: {note}")
     for f in bundle.findings:
-        sev = "W" if bundle.log_only else f.severity
+        # The severity prefix always reflects the rule's real severity (E for
+        # error, W for warning) so they are distinguishable in the log;
+        # log_only only suppresses the raise, the header keeps the
+        # [warn-only] marker to say errors were not raised.
+        sev = f.severity[0].upper()
         lines.append(f"[ATTN-PLAN] {sev}  {f.rule_id}: {f.message}")
         lines.append(f"[ATTN-PLAN]        fix: {f.remediation}")
     return lines

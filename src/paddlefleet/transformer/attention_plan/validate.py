@@ -42,8 +42,9 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class Finding:
-    """A single validation result. Under warn-only (log_only) mode every
-    severity is downgraded to warning."""
+    """A single validation result. Under warn-only (log_only) mode findings
+    are printed with their real severity prefix (E/W) but error findings
+    are not raised; only the report header gains the [warn-only] marker."""
 
     rule_id: str  # e.g. "V-VAR-01"
     severity: Literal["error", "warning"]

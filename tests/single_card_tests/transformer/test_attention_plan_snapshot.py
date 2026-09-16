@@ -863,11 +863,14 @@ class TestPlanPrinting(unittest.TestCase):
         self.assertIn("6 layers resolved", header)
         self.assertIn("variant=dsv4_hybrid", header)
         self.assertIn("[warn-only]", header)
-        # 表头 + 每层一行 + note 行 + W 行（V-VAR-01/V-ROPE-01 各两行）
+        # 表头 + 每层一行 + note 行 + finding 行（V-VAR-01/V-ROPE-01 各两行）。
+        # 前缀按 rule 真实 severity 打印（E/W），log_only 只是不 raise。
         layer_rows = [l for l in lines if "  dsv4  " in l or "  mla  " in l]
         self.assertEqual(len(layer_rows), 6)
-        warn_lines = [l for l in lines if " W  V-" in l]
-        self.assertEqual(len(warn_lines), len(bundle.findings))
+        prefix_lines = [l for l in lines if " E  V-" in l or " W  V-" in l]
+        self.assertEqual(len(prefix_lines), len(bundle.findings))
+        for line, finding in zip(prefix_lines, bundle.findings):
+            self.assertIn(f" {finding.severity[0].upper()}  ", line)
         # RoPE 完整展示：position 列含 base/dim/layout/seg/interleave
         win_row = layer_rows[1]
         self.assertIn("layout=DSV4_CSA_EAGER", win_row)
