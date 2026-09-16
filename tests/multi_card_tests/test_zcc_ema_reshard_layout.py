@@ -22,12 +22,19 @@ touching any of those, so the gate reported "same strategy" and the ZCC
 subprocess read shards laid out for the previous owner map. FC-format EMA is
 therefore now always routed through ``Trainer._load_ema_with_reshard``.
 
-Two things are pinned: resharding lands the right values whether or not the
-layout moved, and a real ZCC worker consumes the resulting shared memory after
-its first UPDATE. A rank-rotated ownership map stands in for the flag -- same
-global tensors, same degrees, different ``global_offset``, which is what the
-change looks like to ``dist.load_state_dict`` -- so the test also runs on paddle
-wheels that predate the flag.
+Three things are pinned:
+  * resharding lands the right values whether or not the layout moved;
+  * a real ZCC worker consumes the resulting shared memory after its first
+    UPDATE, without hanging;
+  * ``Trainer._load_flex_checkpoint`` actually routes an FC-format EMA resume
+    through the reshard (the call site this PR changed, trainer.py:1677-1684) --
+    the other two exercise ``_load_ema_with_reshard`` directly and so never
+    reach that call site.
+
+A rank-rotated ownership map stands in for the flag -- same global tensors, same
+degrees, different ``global_offset``, which is what the change looks like to
+``dist.load_state_dict`` -- so the test also runs on paddle wheels that predate
+the flag.
 
 Run with:
   python -m paddle.distributed.launch --gpus 0,1,2,3 \
@@ -41,6 +48,7 @@ import sys
 import time
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(
     0,
@@ -52,6 +60,7 @@ sys.path.insert(
 import numpy as np
 import paddle
 import paddle.distributed as dist
+from paddle.distributed import fleet
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import ShardedWeight
 
 from paddlefleet.trainer.trainer import Trainer
@@ -60,6 +69,12 @@ from paddlefleet.trainer.utils.zero_cost_checkpoint import (
     ZCCWorkerStatus,
     ZeroCostCheckpointWorkerFcBased,
     worker_loop,
+)
+from paddlefleet.utils.env import (
+    EMA_STATE_DIC,
+    MASTER_WEIGHT_DIC,
+    MODEL_STATE_DIC,
+    OPTIMIZER_STATE_DIC,
 )
 
 ROWS_PER_RANK = 4
@@ -122,21 +137,24 @@ def _sharded_weight(key, layout, dtype="float32", fill_reference=False):
 class _Stub:
     """Stands in for both the model and the optimizer.
 
-    ``_load_ema_with_reshard`` is called unbound on a stub so the production
-    implementation runs as-is, without a TrainingArguments/dataloader/ZCC stack.
+    Holds a factory so every ``sharded_state_dict`` call returns fresh tensors:
+    ``_load_flex_checkpoint`` asks more than once (load target, then again inside
+    the reshard), and shared tensors would let one load's writes leak into
+    another's target. The unbound production methods run as-is on this stub, so
+    no TrainingArguments/dataloader/ZCC stack is needed.
     """
 
-    def __init__(self, state_dict):
-        self._state_dict = state_dict
+    def __init__(self, factory):
+        self._factory = factory
 
     def sharded_state_dict(self, *_):
-        return self._state_dict
+        return self._factory()
 
 
 def _stub_trainer():
     return SimpleNamespace(
         model=_Stub(
-            {
+            lambda: {
                 MODEL_KEY: _sharded_weight(MODEL_KEY, "identity"),
                 MODEL_BF16_KEY: _sharded_weight(
                     MODEL_BF16_KEY, "identity", dtype="bfloat16"
@@ -144,7 +162,7 @@ def _stub_trainer():
             }
         ),
         optimizer=_Stub(
-            {
+            lambda: {
                 MASTER_KEY: _sharded_weight(MASTER_KEY, "identity"),
                 OPT_MOMENT_KEY: _sharded_weight(OPT_MOMENT_KEY, "identity"),
             }
@@ -172,10 +190,127 @@ def _ipc(tensor):
     return tensor.value().get_tensor()._share_cuda()
 
 
+def _save_dir(root, sub, state_dict):
+    directory = os.path.join(root, sub)
+    os.makedirs(directory, exist_ok=True)
+    dist.save_state_dict(state_dict, directory)
+
+
+def _build_flex_checkpoint(root):
+    """Write the four flex-checkpoint subdirs a resume reads (identity layout).
+
+    optimizer_state is only scanned for its ``.metadata`` (opt load is skipped
+    via ignore_load_lr_and_optim); model_state, master_weight and ema_state are
+    really loaded and must match their load targets key-for-key -- including the
+    bf16 decoy in the model state.
+    """
+    _save_dir(
+        root,
+        MODEL_STATE_DIC,
+        {
+            MODEL_KEY: _sharded_weight(
+                MODEL_KEY, "identity", fill_reference=True
+            ),
+            MODEL_BF16_KEY: _sharded_weight(
+                MODEL_BF16_KEY,
+                "identity",
+                dtype="bfloat16",
+                fill_reference=True,
+            ),
+        },
+    )
+    _save_dir(
+        root,
+        OPTIMIZER_STATE_DIC,
+        {
+            OPT_MOMENT_KEY: _sharded_weight(
+                OPT_MOMENT_KEY, "identity", fill_reference=True
+            )
+        },
+    )
+    _save_dir(
+        root,
+        MASTER_WEIGHT_DIC,
+        {
+            MASTER_KEY: _sharded_weight(
+                MASTER_KEY, "identity", fill_reference=True
+            )
+        },
+    )
+    _save_dir(
+        root,
+        EMA_STATE_DIC,
+        {
+            MASTER_KEY: _sharded_weight(
+                MASTER_KEY, "identity", fill_reference=True
+            ),
+            MODEL_KEY: _sharded_weight(
+                MODEL_KEY, "identity", fill_reference=True
+            ),
+        },
+    )
+
+
+def _flex_harness():
+    """A stub carrying the real ``_load_flex_checkpoint`` and its args knobs.
+
+    The args take the shortest successful path to the reshard block: no HF load,
+    no EMA-sourced model, optimizer/scheduler load skipped, bf16 off (so the bf16
+    branch short-circuits before touching ``_inner_opt``), ZCC on with an EMA
+    coefficient. ``init_optimizer`` is patched out by the caller.
+    """
+    harness = SimpleNamespace(
+        model=_Stub(
+            lambda: {
+                MODEL_KEY: _sharded_weight(MODEL_KEY, "identity"),
+                MODEL_BF16_KEY: _sharded_weight(
+                    MODEL_BF16_KEY, "identity", dtype="bfloat16"
+                ),
+            }
+        ),
+        optimizer=_Stub(
+            lambda: {
+                MASTER_KEY: _sharded_weight(MASTER_KEY, "identity"),
+                OPT_MOMENT_KEY: _sharded_weight(OPT_MOMENT_KEY, "identity"),
+            }
+        ),
+        args=SimpleNamespace(
+            flex_ckpt_comm_method="broadcast",
+            load_from_hf=False,
+            sharded_model_from_ema=False,
+            ignore_load_lr_and_optim=True,
+            bf16=False,
+            tensorwise_offload_optimizer=False,
+            enable_zero_cost_checkpoint=True,
+            zcc_save_ema_coef=0.99,
+            aoa_config=None,
+            load_via_cpu=False,
+        ),
+    )
+    harness._load_flex_checkpoint = Trainer._load_flex_checkpoint.__get__(
+        harness
+    )
+    harness._is_fc_format_ema = Trainer._is_fc_format_ema.__get__(harness)
+    harness._load_ema_with_reshard = Trainer._load_ema_with_reshard.__get__(
+        harness
+    )
+    return harness
+
+
 class TestZCCEMAReshardLayout(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        dist.init_parallel_env()
+        # fleet.init (not just init_parallel_env) so _load_flex_checkpoint can
+        # fetch a hybrid communicate group; sharding-only keeps global tensors
+        # split one-block-per-rank, matching the hand-built shards.
+        strategy = fleet.DistributedStrategy()
+        strategy.hybrid_configs = {
+            "dp_degree": 1,
+            "mp_degree": 1,
+            "pp_degree": 1,
+            "sharding_degree": dist.get_world_size(),
+        }
+        fleet.init(is_collective=True, strategy=strategy)
         cls.rank = dist.get_rank()
         assert dist.get_world_size() > 1, "needs more than one rank"
         master = os.environ.get("PADDLE_MASTER", "local").replace(":", "_")
@@ -349,6 +484,36 @@ class TestZCCEMAReshardLayout(unittest.TestCase):
             if process.is_alive():
                 process.terminate()
                 process.join(30)
+        dist.barrier()
+
+    def test_resume_routes_fc_ema_through_reshard(self):
+        """Drive the real _load_flex_checkpoint: FC-format EMA resume must reshard.
+
+        This is the call site the PR changed (trainer.py:1677-1684). On the
+        parent commit a same-degree resume took the file-read path and left
+        ``_ema_reshard_result`` None; the fix reshards unconditionally.
+        """
+        ckpt = os.path.join(self.tmp_root, "resume")
+        if self.rank == 0:
+            shutil.rmtree(ckpt, ignore_errors=True)
+        dist.barrier()
+        _build_flex_checkpoint(ckpt)
+        dist.barrier()
+
+        harness = _flex_harness()
+        # init_optimizer would need a real sharding optimizer to build
+        # accumulators; the reshard block under test does not depend on it.
+        with patch("paddlefleet.trainer.trainer.init_optimizer"):
+            harness._load_flex_checkpoint(ckpt)
+
+        self.assertIsNotNone(
+            harness._ema_reshard_result,
+            "FC-format EMA resume did not go through _load_ema_with_reshard",
+        )
+        self.assertEqual(
+            sorted(harness._ema_reshard_result.keys()),
+            sorted([MASTER_KEY, MODEL_KEY]),
+        )
         dist.barrier()
 
     @classmethod
