@@ -9,8 +9,16 @@ subset: 3 dense layers, 1 MoE layer, 1 MTP layer and 16 experts.
 Use the consolidated GLM-5.2 implementation from PaddleFleet #1961,
 PFCCLab/Megatron-LM #4 and PFCCLab/ms-swift #3. Before these changes reach the
 standard wheels, prepare matching environments explicitly and set
-`GLM52_VENV_ROOT` to their parent directory (`paddle/` and `torch/`). This case
-does not change the shared dependency installer or other models' environments.
+`GLM52_VENV_ROOT` to their parent directory (`paddle/` and `torch/`), with
+Transformers 5.12.1 installed on the Torch side. Explicitly supplied environments
+are used without installing dependencies.
+
+The shared installer retains Transformers 4.57.1 for the existing MiniMax and
+GLM4.5 cases. MiniMax's checkpoint export uses model code incompatible with
+Transformers 5.12.1. After those cases finish, this final case upgrades the default
+Torch venv to 5.12.1 for GLM-5.2's `glm_moe_dsa` support. Running the shared suite
+again restores 4.57.1 during its initial setup. The default CI venv is disposable;
+use `GLM52_VENV_ROOT` for a preconfigured environment that must not be modified.
 
 The default model cache is
 `/home/.cache/PaddleFormers/GLM-5.2-BF16-minimal`.
