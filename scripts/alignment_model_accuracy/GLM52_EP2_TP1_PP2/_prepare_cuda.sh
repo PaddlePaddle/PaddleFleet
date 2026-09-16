@@ -9,7 +9,7 @@ mkdir -p "${GLM52_CUDA_ROOT}"
 # https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.0.2.json
 while read -r component version checksum; do
     archive="${GLM52_CUDA_ROOT}/${component}.tar.xz"
-    curl --fail --location --retry 3 \
+    curl --fail --location --retry 3 --retry-all-errors \
         "https://developer.download.nvidia.com/compute/cuda/redist/${component}/linux-x86_64/${component}-linux-x86_64-${version}-archive.tar.xz" \
         --output "${archive}"
     printf '%s  %s\n' "${checksum}" "${archive}" | sha256sum --check -

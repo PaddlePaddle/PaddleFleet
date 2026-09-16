@@ -8,6 +8,13 @@ RUN_DIR="${SCRIPT_DIR}/results/${ALIGNMENT_RUN_TAG}"
 # GLM-5.2 needs glm_moe_dsa support; upgrade only when entering this final case.
 # Explicitly supplied environments are provisioned by the caller.
 if [[ -z "${GLM52_VENV_ROOT:-}" ]]; then
+    # The shared latest wheels can omit GLM52 interfaces. Use existing,
+    # checksum-pinned reference builds only after the legacy cases finish.
+    # Their publisher adds the source SHA to filenames, not package metadata.
+    UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install \
+        --python "${SCRIPT_DIR}/../venv/torch/bin/python" \
+        --no-deps --require-hashes --reinstall \
+        -r "${SCRIPT_DIR}/reference_wheels.txt"
     uv pip install --python "${SCRIPT_DIR}/../venv/torch/bin/python" \
         "transformers==5.12.1"
     # The GLM52 flex dispatcher requires Torch DeepEP on the H20 CI runner.

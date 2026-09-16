@@ -6,12 +6,15 @@ subset: 3 dense layers, 1 MoE layer, 1 MTP layer and 16 experts.
 
 ## Prerequisites
 
-Use the consolidated GLM-5.2 implementation from PaddleFleet #1961,
-PFCCLab/Megatron-LM #4 and PFCCLab/ms-swift #3. Before these changes reach the
-standard wheels, prepare matching environments explicitly and set
-`GLM52_VENV_ROOT` to their parent directory (`paddle/` and `torch/`), with
-Transformers 5.12.1 installed on the Torch side. Explicitly supplied environments
-are used without installing dependencies.
+Use the consolidated GLM-5.2 implementation from PaddleFleet #1961.
+After the legacy cases finish, this case installs the existing Megatron
+`40456374` and Swift `baa4ba73` reference builds listed with SHA256 hashes in
+`reference_wheels.txt`. Shared latest wheels may omit their GLM52 interfaces.
+This does not edit either companion repository or publish shared packages.
+For a preconfigured environment, set `GLM52_VENV_ROOT` to its parent directory
+(`paddle/` and `torch/`), with these reference implementations, Transformers
+5.12.1 and Torch DeepEP installed. Explicit environments are used without
+installing dependencies.
 
 The shared installer retains Transformers 4.57.1 for the existing MiniMax and
 GLM4.5 cases. MiniMax's checkpoint export uses model code incompatible with
