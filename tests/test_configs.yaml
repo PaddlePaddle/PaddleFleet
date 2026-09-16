@@ -100,21 +100,21 @@ tests:
   - test_case: [tests/multi_card_tests/transformer/test_transformer_layer.py]
     products:
       - num_gpus: 8
-  - test_case: [tests/multi_card_tests/coverage_test/models/test_coverage_gpt_builders_2.py]
+  - test_case: [tests/multi_card_tests/models/test_gpt_builders_2.py]
     products:
       - num_gpus: 4
   # coverage_test: moe (Pattern D, TP=4)
-  - test_case: [tests/multi_card_tests/coverage_test/moe/test_coverage_gpt_layer_specs.py]
+  - test_case: [tests/multi_card_tests/moe/test_gpt_layer_specs.py]
     products:
       - num_gpus: 4
-  - test_case: [tests/multi_card_tests/coverage_test/moe/test_coverage_moe_utils.py]
+  - test_case: [tests/multi_card_tests/moe/test_moe_utils.py]
     products:
       - num_gpus: 8
   # coverage_test: models (Pattern C, PP=4)
-  - test_case: [tests/multi_card_tests/coverage_test/models/test_coverage_gpt_model.py]
+  - test_case: [tests/multi_card_tests/models/test_gpt_model.py]
     products:
       - num_gpus: 4
-  - test_case: [tests/multi_card_tests/coverage_test/models/test_coverage_gpt_builders.py]
+  - test_case: [tests/multi_card_tests/models/test_gpt_builders.py]
     products:
       - num_gpus: 4
   # coverage_test: pipeline_parallel advanced (Pattern B, PP=2)
@@ -156,18 +156,18 @@ tests:
   - test_case: [tests/multi_card_tests/transformer/test_transformer_encoder.py]
     products:
       - num_gpus: 2
-  - test_case: [tests/multi_card_tests/coverage_test/moe/test_coverage_gpt_layer_specs_2.py]
+  - test_case: [tests/multi_card_tests/moe/test_gpt_layer_specs_2.py]
     products:
       - num_gpus: 4
   # coverage_test: moe advanced (Pattern D, EP/TP=4)
-  - test_case: [tests/multi_card_tests/coverage_test/moe/test_coverage_token_dispatcher.py]
+  - test_case: [tests/multi_card_tests/moe/test_token_dispatcher.py]
     products:
       - num_gpus: 4
-  - test_case: [tests/multi_card_tests/coverage_test/moe/test_coverage_moe_router.py]
+  - test_case: [tests/multi_card_tests/moe/test_moe_router.py]
     products:
       - num_gpus: 4
   # coverage_test: models advanced (Pattern B, PP=2)
-  - test_case: [tests/multi_card_tests/coverage_test/models/test_coverage_language_loss.py]
+  - test_case: [tests/multi_card_tests/models/test_language_loss.py]
     products:
       - num_gpus: 2
   # transformer: DSA sequence_parallel (TP=2)
