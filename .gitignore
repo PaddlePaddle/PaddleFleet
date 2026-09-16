@@ -19,7 +19,8 @@ ducc_storage/
 paddlefleet-*.whl
 test_log
 .ninja_log
-.claude
+/.claude/*
+!/.claude/skills/
 .DS_Store
 
 # Ignore files generated from `uv sync` for custom ops
