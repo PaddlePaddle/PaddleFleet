@@ -13,8 +13,8 @@ After the legacy cases finish, this case installs the existing Megatron
 This does not edit either companion repository or publish shared packages.
 For a preconfigured environment, set `GLM52_VENV_ROOT` to its parent directory
 (`paddle/` and `torch/`), with these reference implementations, Transformers
-5.12.1 and Torch DeepEP installed. Explicit environments are used without
-installing dependencies.
+5.12.1, Torch DeepEP and fast-hadamard-transform installed. Explicit environments
+are used without installing dependencies.
 
 The shared installer retains Transformers 4.57.1 for the existing MiniMax and
 GLM4.5 cases. MiniMax's checkpoint export uses model code incompatible with
@@ -24,11 +24,14 @@ again restores 4.57.1 during its initial setup. The default CI venv is disposabl
 use `GLM52_VENV_ROOT` for a preconfigured environment that must not be modified.
 
 The default CI case builds Torch DeepEP at
-`17cfb817bccec3a9c247013360cc550c2bac441e`. Its Torch cu130 environment needs
+`17cfb817bccec3a9c247013360cc550c2bac441e` and fast-hadamard-transform at
+`f134af63deb2df17e1171a9ec1ea4a7d8604d5ca` for DSA indexer rotation.
+Hadamard kernels are built from source against the installed Torch rather than
+using the package's guessed prebuilt wheel. The Torch cu130 environment needs
 CUDA 13.0 even when the shared image has a 12.9 compiler. The case downloads
 checksum-pinned NVIDIA CUDA 13.0.2 compiler components into its run directory
 and uses the CUDA library headers shipped with Torch. This compiler environment
-applies only to the DeepEP build subprocess.
+applies only to the extension build subprocess.
 
 The default model cache is
 `/home/.cache/PaddleFormers/GLM-5.2-BF16-minimal`.

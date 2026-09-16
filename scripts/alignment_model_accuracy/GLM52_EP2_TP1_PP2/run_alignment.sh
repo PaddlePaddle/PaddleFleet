@@ -17,7 +17,7 @@ if [[ -z "${GLM52_VENV_ROOT:-}" ]]; then
         -r "${SCRIPT_DIR}/reference_wheels.txt"
     uv pip install --python "${SCRIPT_DIR}/../venv/torch/bin/python" \
         "transformers==5.12.1"
-    # The GLM52 flex dispatcher requires Torch DeepEP on the H20 CI runner.
+    # The flex dispatcher and DSA indexer need Torch DeepEP and Hadamard kernels.
     # Build against this environment's Torch; the Paddle extension cannot serve it.
     (
         # The shared image has CUDA 12.9; Torch's cu130 extension needs 13.0.
@@ -26,11 +26,13 @@ if [[ -z "${GLM52_VENV_ROOT:-}" ]]; then
         torch_cuda_headers=("${SCRIPT_DIR}/../venv/torch/lib/"python*/site-packages/nvidia/cu13/include)
         test "${#torch_cuda_headers[@]}" -eq 1
         test -f "${torch_cuda_headers[0]}/cusparse.h"
-        TORCH_CUDA_ARCH_LIST=9.0 MAX_JOBS="${MAX_JOBS:-2}" \
+        FAST_HADAMARD_TRANSFORM_FORCE_BUILD=TRUE \
+            TORCH_CUDA_ARCH_LIST=9.0 MAX_JOBS="${MAX_JOBS:-2}" \
             CPATH="${CUDA_HOME}/include/cccl:${torch_cuda_headers[0]}${CPATH:+:${CPATH}}" \
             uv pip install --python "${SCRIPT_DIR}/../venv/torch/bin/python" \
             --no-build-isolation --no-deps \
-            "deep_ep @ git+https://github.com/deepseek-ai/DeepEP.git@17cfb817bccec3a9c247013360cc550c2bac441e"
+            "deep_ep @ git+https://github.com/deepseek-ai/DeepEP.git@17cfb817bccec3a9c247013360cc550c2bac441e" \
+            "fast_hadamard_transform @ git+https://github.com/Dao-AILab/fast-hadamard-transform.git@f134af63deb2df17e1171a9ec1ea4a7d8604d5ca"
     )
 fi
 bash "${SCRIPT_DIR}/run_paddle_glm52.sh"
