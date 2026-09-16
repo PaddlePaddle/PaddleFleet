@@ -25,6 +25,7 @@ sides of the flag.
 
 from __future__ import annotations
 
+import os
 import types
 import unittest
 from unittest.mock import patch
@@ -32,6 +33,9 @@ from unittest.mock import patch
 import numpy as np
 import paddle
 
+from paddlefleet import accuracy_compatible_patch
+from paddlefleet.accuracy_compatible_patch import FixedTrainingData
+from paddlefleet.datasets import collate
 from paddlefleet.fusions import fused_bias_swiglu
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.trainer import trainer_utils
@@ -405,6 +409,125 @@ class TestPackDsv4LogicalBatch(unittest.TestCase):
                 cp_size=1,
                 dense_mode=False,
             )
+
+
+def _fixed_data_collate_args():
+    """Minimal args that drive ``collate_fn`` down the fixed-token branches."""
+    training_args = types.SimpleNamespace(
+        num_nextn_predict_layers=0,
+        context_parallel_size=1,
+        tensor_model_parallel_size=1,
+        sequence_parallel=False,
+        fp8=False,
+        max_seq_len=4,
+    )
+    model_args = types.SimpleNamespace(
+        mtp_attention_flexible=False,
+        use_attn_mask_startend_row_indices=True,
+        use_global_causal_attn=False,
+    )
+    tokenizer = types.SimpleNamespace(pad_token_id=0)
+    return training_args, model_args, tokenizer
+
+
+class TestCollateFixedDataGating(unittest.TestCase):
+    """``LOAD_FIXED_DATA_PATH`` only reaches the DSV4 replay loader when the flag is on.
+
+    ``collate_fn`` has two fixed-token sources: the DSV4 ``load_fixed_training_data``
+    replay and the historical ``np.load`` of ``tokens_*.npy`` / ``labels_*.npy``.
+    ``FLAGS_use_dsv4_accuracy`` picks between them, so with the flag off the replay
+    loader must never run and the historical ``.npy`` path must produce the batch.
+    """
+
+    def _run_with_fixed_path(self, enabled, fixed_data):
+        training_args, model_args, tokenizer = _fixed_data_collate_args()
+        with (
+            _dsv4_flag(collate, enabled),
+            patch.dict(os.environ, {"LOAD_FIXED_DATA_PATH": "/tmp/fixed"}),
+            patch.object(
+                accuracy_compatible_patch,
+                "load_fixed_training_data",
+                return_value=fixed_data,
+            ) as load_fixed,
+            patch.object(
+                collate.np, "load", return_value=np.array([20, 21, 22, 23])
+            ) as np_load,
+        ):
+            result = collate.collate_fn(
+                batch=[None],
+                tokenizer=tokenizer,
+                training_args=training_args,
+                model_args=model_args,
+                max_seq_len=0,
+                padding_free=False,
+            )
+        return result, load_fixed, np_load
+
+    def test_flag_on_loads_via_the_dsv4_replay_loader(self):
+        fixed_data = FixedTrainingData(
+            input_ids=[10, 11, 12, 13],
+            labels=[10, 11, 12, 13],
+            position_ids=[0, 1, 2, 3],
+            max_seq_len=4,
+        )
+
+        result, load_fixed, np_load = self._run_with_fixed_path(
+            True, fixed_data
+        )
+
+        load_fixed.assert_called_once()
+        np_load.assert_not_called()
+        np.testing.assert_array_equal(result["input_ids"][0], [10, 11, 12, 13])
+
+    def test_flag_off_falls_back_to_the_historical_npy_load(self):
+        # The replay loader would happily return data, but the flag being off
+        # must keep it from ever running.
+        fixed_data = FixedTrainingData(
+            input_ids=[10, 11, 12, 13],
+            labels=[10, 11, 12, 13],
+            position_ids=[0, 1, 2, 3],
+            max_seq_len=4,
+        )
+
+        result, load_fixed, np_load = self._run_with_fixed_path(
+            False, fixed_data
+        )
+
+        load_fixed.assert_not_called()
+        self.assertEqual(np_load.call_count, 2)  # tokens_*.npy + labels_*.npy
+        np.testing.assert_array_equal(result["input_ids"][0], [20, 21, 22, 23])
+
+    def test_flag_on_without_the_path_never_calls_the_loader(self):
+        # The replay call site is ``fixed_tokens_path and use_dsv4_...``; the
+        # flag alone must not fire it when the env var is absent.
+        training_args, model_args, tokenizer = _fixed_data_collate_args()
+        sequence = types.SimpleNamespace(
+            token_ids=[1, 2, 3],
+            labels=[1, 2, 3],
+            position_ids=[0, 1, 2],
+        )
+
+        with (
+            _dsv4_flag(collate, True),
+            patch.dict(os.environ),
+            patch.object(
+                accuracy_compatible_patch, "load_fixed_training_data"
+            ) as load_fixed,
+            patch.object(collate.np, "load") as np_load,
+        ):
+            os.environ.pop("LOAD_FIXED_DATA_PATH", None)
+            result = collate.collate_fn(
+                batch=[[sequence]],
+                tokenizer=tokenizer,
+                training_args=training_args,
+                model_args=model_args,
+                max_seq_len=0,
+                padding_free=False,
+            )
+
+        load_fixed.assert_not_called()
+        np_load.assert_not_called()
+        np.testing.assert_array_equal(result["input_ids"][0], [1, 2, 3])
 
 
 if __name__ == "__main__":
