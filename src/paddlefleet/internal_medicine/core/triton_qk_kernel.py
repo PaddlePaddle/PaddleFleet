@@ -17,10 +17,13 @@
 Computes per-head: max logit, mean logit, entropy, sink weight
 using online softmax (O(S) memory, no S×S materialization).
 
-Supports asymmetric Q/K sequence lengths for Context-Parallel (CP) monitoring:
-each CP rank keeps its local Q shard (``seq_len_q = S/CP``) but sees the
-full-sequence K (``seq_len_k = S``) after an all_gather. Passing
+Supports asymmetric Q/K sequence lengths for contiguous Context-Parallel
+monitoring: each rank keeps its local Q shard (``seq_len_q = S/CP``) but sees
+the full-sequence K (``seq_len_k = S``) after an all_gather. Passing
 ``q_row_offset = cp_rank * seq_len_q`` restores correct causal masking.
+Dual-chunk CP cannot use a single offset because each rank holds two
+non-contiguous intervals; the paddlefleet monitor reconstructs both Q and K
+to global order first and then calls this kernel at offset 0.
 
 Three families of kernels live here:
 

@@ -160,11 +160,10 @@ def _compute_qk_stats_triton(
     head internally so we never materialize a repeat_interleave of k.
     ``row_stride`` subsamples query rows (see kernel docstring).
 
-    Under Context-Parallel (CP > 1), Q may stay local (``S_q = S/CP``) while
-    K has been all_gather'd to full seq (``S_k = S``). ``q_row_offset`` is the
-    starting global row index of the local Q shard, used only by the kernel's
-    causal masking so that local row m compares against key col ``m + offset``
-    rather than the ambiguous local ``m``.
+    Under contiguous Context-Parallel, Q stays local (``S_q = S/CP``) while K
+    has been all_gather'd to full seq (``S_k = S``). ``q_row_offset`` is the
+    starting global row index of that local Q shard. Dual-chunk CP reconstructs
+    both Q and K first, so the kernel sees ``S_q = S_k = S`` and offset 0.
     """
     _ensure_triton_driver()
     from ...core.triton_qk_kernel import qk_stats_partial_kernel
@@ -276,9 +275,9 @@ def compute_qk_stats_paddle(
         q: [B, S_q, H, D] — PaddleFleet core_attention input format
         k: [B, S_k, H_kv, D] — KV heads (may be fewer than query heads for GQA)
         row_stride: subsample every ``row_stride``-th query row (1 == exact)
-        q_row_offset: global row-index start for this Q shard. Zero unless the
-            caller is running with Context-Parallel and Q is kept local. Used
-            only by the kernel's causal-mask logic.
+        q_row_offset: global row-index start for this Q shard. Used by
+            contiguous CP, where Q stays local and K has been gathered.
+            Dual-chunk CP reconstructs both Q and K first, so the offset is 0.
         attn_sink: per-head sink logit ``[H]`` (float32), folded into the softmax
             as an extra key-less column. Pass the layer's
             ``core_attention.softmax_offset`` whenever it exists — without it the
@@ -651,9 +650,9 @@ class PaddleQKStatsMonitor(PaddleProbe):
                 config, "cp_balance_mode", "dualchunk_allgather"
             )
             logger.warning(
-                "[PaddleQKMonitor] CP=%d detected with mode=%s. Reconstructing "
-                "full-sequence Q/K with the matching gather so causal, entropy "
-                "and sink stats use global token order.",
+                "[PaddleQKMonitor] CP=%d detected with mode=%s. Contiguous CP "
+                "keeps local Q and gathers K; dual-chunk reconstructs both Q "
+                "and K to global token order before QK stats.",
                 self.cp_size,
                 self.cp_balance_mode,
             )
@@ -923,6 +922,9 @@ class PaddleQKStatsMonitor(PaddleProbe):
                 attention_layers.append((item.idx, attn, item))
         return attention_layers
 
+    def _uses_contiguous_cp(self) -> bool:
+        return self.cp_balance_mode.startswith("contiguous")
+
     def _cp_gather_seq(self, tensor: paddle.Tensor) -> paddle.Tensor | None:
         """Restore ``tensor`` to global sequence order across the CP group.
 
@@ -942,7 +944,7 @@ class PaddleQKStatsMonitor(PaddleProbe):
 
             gather = (
                 all_gather_contiguous
-                if self.cp_balance_mode.startswith("contiguous")
+                if self._uses_contiguous_cp()
                 else all_gather_balance
             )
             return gather(tensor, group=self.cp_group, axis=1)
@@ -996,16 +998,25 @@ class PaddleQKStatsMonitor(PaddleProbe):
                                 vector_norm.max(),
                                 attn_type=attn_type,
                             )
-                    if self.cp_size > 1:
-                        # Restore both Q and K to global token order. Dual-chunk
-                        # shards are two non-contiguous intervals, so a single
-                        # q_row_offset cannot describe them; gathering Q as well
-                        # lets the kernel run with offset 0 on the full sequence.
-                        query = self._cp_gather_seq(query.detach())
-                        key = self._cp_gather_seq(key.detach())
-                        if query is None or key is None:
-                            return
                     q_row_offset = 0
+                    if self.cp_size > 1:
+                        key = self._cp_gather_seq(key.detach())
+                        if key is None:
+                            return
+                        if self._uses_contiguous_cp():
+                            # Local Q is one contiguous interval, so K-only
+                            # gather plus q_row_offset is enough. Avoid gathering
+                            # Q: that would make every rank recompute full-seq
+                            # QK on the forward hook.
+                            query = query.detach()
+                            q_row_offset = self.cp_rank * query.shape[1]
+                        else:
+                            # Dual-chunk Q is two non-contiguous intervals, so
+                            # a single offset cannot describe it. Reconstruct
+                            # both Q and K to global order and run at offset 0.
+                            query = self._cp_gather_seq(query.detach())
+                            if query is None:
+                                return
 
                     # query: [B, S_q, H, D]; seq_len is a static shape int (no D2H sync).
                     seq_len = query.shape[1]
@@ -1042,6 +1053,19 @@ class PaddleQKStatsMonitor(PaddleProbe):
                         else sink_logit.detach().astype("float32"),
                         softmax_scale=getattr(layer, "softmax_scale", None),
                     )
+                    if (
+                        self.cp_size > 1
+                        and self.cp_group is not None
+                        and self._uses_contiguous_cp()
+                    ):
+                        import paddle.distributed as dist
+
+                        for key_name in ("entropy_per_head", "sink_per_head"):
+                            t = stats[key_name].astype("float32")
+                            dist.all_reduce(
+                                t, op=dist.ReduceOp.SUM, group=self.cp_group
+                            )
+                            stats[key_name] = t / float(self.cp_size)
 
                 self._record_common_stats(layer_idx, attn_type, stats)
                 # A frozen offset ("off-by-one") has no learned magnitude to

@@ -2241,73 +2241,113 @@ class PaddleQKKernelComputeTest(unittest.TestCase):
         ):
             self.assertTrue(paddle.allclose(a[key], b[key], atol=1e-5).item())
 
-    def test_q_row_offset_matches_full_pass_when_reassembled(self):
-        """CP-Option-A equivalence: computing stats on Q_local + K_full with
-        the correct q_row_offset, then reassembling per-head means across the
-        simulated CP shards, must reproduce the full-pass stats.
+    def test_contiguous_cp_k_gather_plus_offset_matches_full_pass(self):
+        """Contiguous CP keeps local Q and gathers K.
 
-        This is the single-GPU numerical proof that the Triton kernel's
-        ``q_row_offset`` parameter + K-only gather correctly recovers the
-        distributed-Q semantics. Actual multi-rank behaviour is validated
-        end-to-end via a training run.
+        Rank r holds Q[r*chunk:(r+1)*chunk] and the full K. The kernel's
+        ``q_row_offset`` plus a later per-head mean across ranks must match
+        the CP=1 full-sequence reference.
         """
-        # MHA to keep the head math trivial and avoid GQA-alignment concerns
-        # in the reassembly.
         q, k = self._gqa_inputs(B=1, S=128, Hq=8, Hkv=8, D=32, seed=3)
-        # Full pass — reference.
         full = self.qk.compute_qk_stats_paddle(q, k, causal=True, row_stride=1)
-
-        # Simulate CP=2: split Q along seq into two halves, keep K full.
-        S = q.shape[1]
-        assert S % 2 == 0, "test requires even S"
-        half = S // 2
-        q_a = q[:, :half, :, :]
-        q_b = q[:, half:, :, :]
-
-        sub_a = self.qk.compute_qk_stats_paddle(
-            q_a, k, causal=True, row_stride=1, q_row_offset=0
-        )
-        sub_b = self.qk.compute_qk_stats_paddle(
-            q_b, k, causal=True, row_stride=1, q_row_offset=half
-        )
-
-        # Per-head means: average the two halves (rows split evenly).
+        cp_size = 2
+        chunk = q.shape[1] // cp_size
+        shards = []
+        for rank in range(cp_size):
+            q_local = q[:, rank * chunk : (rank + 1) * chunk, :, :]
+            shards.append(
+                self.qk.compute_qk_stats_paddle(
+                    q_local,
+                    k,
+                    causal=True,
+                    row_stride=1,
+                    q_row_offset=rank * chunk,
+                )
+            )
         for key in ("entropy_per_head", "sink_per_head", "mean_per_head"):
-            reassembled = (sub_a[key] + sub_b[key]) / 2.0
+            reassembled = sum(shard[key] for shard in shards) / float(cp_size)
             self.assertTrue(
                 paddle.allclose(
                     full[key], reassembled, atol=1e-4, rtol=1e-4
                 ).item(),
-                f"{key} mismatch after CP-halves reassembly",
+                f"{key} mismatch after contiguous CP reassembly",
             )
-        # Per-head max: take elementwise max across halves.
-        reassembled_max_ph = paddle.maximum(
-            sub_a["max_per_head"], sub_b["max_per_head"]
-        )
+        reassembled_max = shards[0]["max_per_head"]
+        for shard in shards[1:]:
+            reassembled_max = paddle.maximum(reassembled_max, shard["max_per_head"])
         self.assertTrue(
             paddle.allclose(
-                full["max_per_head"], reassembled_max_ph, atol=1e-4, rtol=1e-4
-            ).item(),
-            "max_per_head mismatch after CP-halves reassembly",
-        )
-
-        # Global scalars: max via max across halves; mean/entropy/sink via
-        # mean across halves (row counts are equal).
-        self.assertTrue(
-            paddle.allclose(
-                full["max_global"],
-                paddle.maximum(sub_a["max_global"], sub_b["max_global"]),
-                atol=1e-4,
-                rtol=1e-4,
+                full["max_per_head"], reassembled_max, atol=1e-4, rtol=1e-4
             ).item()
         )
-        for key in ("mean_global", "entropy_global", "sink_global"):
-            reassembled_scalar = (sub_a[key] + sub_b[key]) / 2.0
+
+    def test_dualchunk_cp_balance_reorder_matches_full_pass(self):
+        """Dual-chunk CP must invert scatter_balance before QK stats.
+
+        Each rank holds a front chunk plus a rear chunk. Concatenating those
+        shards in rank order is the wrong layout; reassembling with the
+        inverse of ``scatter_balance`` restores global token order and must
+        match the CP=1 reference.
+        """
+        q, k = self._gqa_inputs(B=1, S=128, Hq=8, Hkv=8, D=32, seed=5)
+        full = self.qk.compute_qk_stats_paddle(q, k, causal=True, row_stride=1)
+        cp_size = 2
+        interval = q.shape[1] // (cp_size * 2)
+        seq_len = q.shape[1]
+
+        def scatter_balance_local(tensor, rank):
+            front = tensor[:, interval * rank : interval * (rank + 1), :, :]
+            rear = tensor[
+                :,
+                seq_len - interval * (rank + 1) : seq_len - interval * rank,
+                :,
+                :,
+            ]
+            return paddle.concat([front, rear], axis=1)
+
+        def gather_balance_local(shards):
+            restored = []
+            for rank in range(cp_size):
+                restored.append(shards[rank][:, :interval, :, :])
+            for rank in reversed(range(cp_size)):
+                restored.append(shards[rank][:, interval:, :, :])
+            return paddle.concat(restored, axis=1)
+
+        q_shards = [scatter_balance_local(q, rank) for rank in range(cp_size)]
+        k_shards = [scatter_balance_local(k, rank) for rank in range(cp_size)]
+        q_wrong = paddle.concat(q_shards, axis=1)
+        k_wrong = paddle.concat(k_shards, axis=1)
+        wrong = self.qk.compute_qk_stats_paddle(
+            q_wrong, k_wrong, causal=True, row_stride=1
+        )
+        restored = self.qk.compute_qk_stats_paddle(
+            gather_balance_local(q_shards),
+            gather_balance_local(k_shards),
+            causal=True,
+            row_stride=1,
+        )
+        for key in (
+            "entropy_global",
+            "sink_global",
+            "mean_global",
+            "max_global",
+        ):
             self.assertTrue(
                 paddle.allclose(
-                    full[key], reassembled_scalar, atol=1e-4, rtol=1e-4
+                    full[key], restored[key], atol=1e-4, rtol=1e-4
                 ).item(),
-                f"{key} mismatch after CP-halves reassembly",
+                f"{key} mismatch after dual-chunk reorder",
+            )
+        # Entropy and max depend on which tokens sit in the causal window, so
+        # the unreordered dual-chunk layout must not reproduce the reference.
+        # sink/mean can stay near zero for N(0,1) inputs and are not used as
+        # the negative control.
+        for key in ("entropy_global", "max_global"):
+            self.assertFalse(
+                paddle.allclose(
+                    full[key], wrong[key], atol=1e-3, rtol=1e-3
+                ).item(),
+                f"{key} unexpectedly matched the unreordered dual-chunk layout",
             )
 
     def test_q_row_offset_zero_matches_no_offset(self):
