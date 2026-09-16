@@ -241,6 +241,11 @@ tests:
   - test_case: [tests/multi_card_tests/test_gpt_mtp_megatron_cp.py]
     products:
       - num_gpus: 2
+  # ZCC EMA resume when only the 2D shard layout moved: needs a fixed world so
+  # the rotated ownership map is a real permutation (sharding-only, 4 ranks).
+  - test_case: [tests/multi_card_tests/test_zcc_ema_reshard_layout.py]
+    products:
+      - num_gpus: 4
   # default fallback for remaining multi_card_tests
   - test_case: [tests/multi_card_tests/pipeline_parallel/*.py]
     products:
