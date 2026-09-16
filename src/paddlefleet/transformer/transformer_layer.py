@@ -40,15 +40,21 @@ from paddlefleet.recompute_utils import (
     has_recovered,
     install_recompute_p2p_overlap,
     keep_indexer_grad_path,
+    mhc_recompute_block_plan,
     module_needs_recompute,
     need_full_recompute,
 )
-from paddlefleet.tensor_parallel import RecomputeWithoutOutput
+from paddlefleet.tensor_parallel import (
+    RecomputeWithoutOutput,
+    finalize_mhc_recompute_block,
+    get_mhc_recompute_manager,
+)
 from paddlefleet.train_infer_consistent_ops.inspect_util import (
     inspect_tensor,
     inspect_tensor_set_current_layer,
 )
 from paddlefleet.transformer.dsv4_hybrid_attention import DSv4HybridAttention
+from paddlefleet.transformer.hyper_connection import MhcAggregateRecompute
 from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.kimi_delta_attention import KimiDeltaAttention
 from paddlefleet.transformer.mlp import MLP
@@ -1690,6 +1696,110 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             )
         )
 
+        # Block mode shares one manager across layers and subsumes half-layer
+        # mode; an explicit block list can leave this layer out entirely.
+        block_configured = (
+            config.recompute_granularity == "selective"
+            and module_needs_recompute(
+                "mhc_block",
+                self.layer_number,
+                config,
+                is_mtp_layer=self.is_mtp_layer,
+            )
+        )
+        self._mhc_block_id, self._mhc_is_block_end = (
+            mhc_recompute_block_plan(
+                self.layer_number, config, is_mtp_layer=self.is_mtp_layer
+            )
+            if block_configured
+            else (None, False)
+        )
+        self.recompute_mhc_block = self._mhc_block_id is not None
+
+        # Block mode releases real layernorm outputs; IdentityOp has no output
+        # allocation to release.
+        self.mhc_checkpoint_input_layernorm = not isinstance(
+            self.input_layernorm, IdentityOp
+        )
+        self.mhc_checkpoint_post_attention_layernorm = not isinstance(
+            self.post_attention_layernorm, IdentityOp
+        )
+
+    def _mhc_block_manager(self, half_layer):
+        """Return this layer's mHC block manager, or ``None`` when inactive.
+
+        ``half_layer`` is 0 for attention and 1 for MLP. Together with the layer
+        number it provides the strictly increasing position used to discard stale
+        managers from unfinished forwards.
+        """
+        if not (
+            self.recompute_mhc_block
+            and self.training
+            and paddle.is_grad_enabled()
+        ):
+            return None
+        return get_mhc_recompute_manager(
+            self._mhc_block_id, (self.layer_number, half_layer)
+        )
+
+    def _mhc_layernorm(
+        self,
+        norm,
+        aggregated,
+        manager,
+        checkpoint_norm,
+        plain_recompute,
+    ):
+        """Apply layernorm, optionally registering its output with the block.
+
+        Block recompute takes precedence over plain recompute because it releases
+        the norm output itself. Registration order also ensures the aggregate
+        replays first, since the norm consumes its output.
+        """
+        if manager is not None and checkpoint_norm:
+            norm_recompute = RecomputeWithoutOutput()
+            # No randomness in a norm, so no RNG snapshot is needed.
+            output = norm_recompute.recompute(
+                norm,
+                aggregated,
+                preserve_rng_state=False,
+                share_grad_holder=True,
+            )
+            manager.add(norm_recompute, f"L{self.layer_number} layernorm")
+            return output
+        if plain_recompute:
+            return recompute(norm, aggregated)
+        return norm(aggregated)
+
+    def _mhc_head(self, hyper_connection, hidden_states, manager, recompute_on):
+        """Run the mHC head, optionally under recompute.
+
+        Returns ``(aggregated, h_res, h_post, agg_recompute)``. A mapping cache
+        reuses ``compute_mappings`` during replay; ``MhcAggregateRecompute`` keeps
+        ``h_res``/``h_post`` resident.
+        """
+        if not recompute_on:
+            return (*hyper_connection(hidden_states), None)
+
+        cache = {} if hyper_connection.supports_mappings_cache else None
+
+        def head(inner_hidden_states):
+            return hyper_connection(inner_hidden_states, mappings_cache=cache)
+
+        agg_recompute = MhcAggregateRecompute()
+        aggregated, h_res, h_post = agg_recompute.recompute(
+            hyper_connection if cache is None else head,
+            hidden_states,
+            preserve_rng_state=False,
+            share_grad_holder=True,
+        )
+        if manager is not None:
+            # Registered before the layernorm and BDA, i.e. in the order the
+            # manager replays.
+            manager.add(agg_recompute, f"L{self.layer_number} aggregate")
+            return aggregated, h_res, h_post, None
+        return aggregated, h_res, h_post, agg_recompute
+
     def _fused_h_res_h_post_bda(
         self,
         hyper_connection,
@@ -1698,39 +1808,28 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         h_post,
         layer_output_with_bias,
         enable_recompute,
+        manager=None,
     ):
-        """Run fused_h_res_h_post_bda, optionally in a RecomputeWithoutOutput span.
+        """Run fused BDA, optionally under recompute.
 
-        On the fp32 fast path the span keeps the up-casts that
-        ``FusedHPostBDA.save_for_backward`` would otherwise pin -- the [..., n, C]
-        residual and the [..., C] layer output, i.e. two more activation-sized
-        buffers per half-layer -- out of the live set. On the sequential path
-        (active dropout) it hides that path's dropout mask instead, which is a
-        byte per element of the [..., n*C] output. Either way the span body runs
-        under ``no_grad``, where an inner PyLayer's ``save_for_backward`` retains
-        nothing, and backward re-runs the kernel from the low-precision inputs.
-
-        ``hyper_connection.bda_span_pays_off`` vetoes the configurations where
-        neither applies; ``enable_recompute`` is the caller's own switch on top
-        of that.
-
-        Returns ``(output, span)``. ``output`` is the [..., n*C] result; when
-        ``span`` is not None the caller MUST hand it to
-        ``_cast_and_discard_fused_bda`` -- see there for why the discard is not
-        optional.
+        Without a manager, the recompute excludes the cast and is returned for the
+        caller to close. With a manager, it swallows the cast too and registers
+        itself with the block, so there is nothing to return. Block mode skips
+        ``bda_span_pays_off`` because it releases the n-stream residual itself.
         """
+        ori_dtype = original_residual.dtype
         bda_kwargs = {
             "dropout_prob": self.hidden_dropout_prob,
             "training": self.training,
             "fused": self.config.bias_dropout_fusion,
         }
         x, bias = layer_output_with_bias
-        # Only wrap when the call actually retains something the span can hide;
+        # Only wrap when the call actually retains something hideable;
         # ``bda_span_pays_off`` owns that predicate because it depends on which
         # path ``fused_h_res_h_post_bda`` takes. ``bias`` is part of that: it is
         # half of the ``fuse_cast`` condition, and with the up-casts fused into
-        # the kernel the span has nothing left to hide.
-        if not hyper_connection.bda_span_pays_off(
+        # the kernel there is nothing left to hide.
+        if manager is None and not hyper_connection.bda_span_pays_off(
             self.hidden_dropout_prob, self.training, bias
         ):
             enable_recompute = False
@@ -1742,30 +1841,25 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 layer_output_with_bias=layer_output_with_bias,
                 **bda_kwargs,
             )
-            return output, None
+            return output.to(ori_dtype), None
 
         def _fused(h_res, original_residual, h_post, x, bias):
-            return hyper_connection.fused_h_res_h_post_bda(
+            output = hyper_connection.fused_h_res_h_post_bda(
                 h_res=h_res,
                 original_residual=original_residual,
                 h_post=h_post,
                 layer_output_with_bias=(x, bias),
                 **bda_kwargs,
             )
+            # Only in block mode; the half-layer scope cannot include the cast.
+            return output.to(ori_dtype) if manager is not None else output
 
-        span = RecomputeWithoutOutput()
-        output = span.recompute(
+        bda_recompute = RecomputeWithoutOutput()
+        output = bda_recompute.recompute(
             _fused,
-            # h_res/h_post are outputs of the mHC-aggregate span, which clears
-            # them with Tensor._clear_data(). detach() shares the holder, so the
-            # alias that save_for_backward keeps would be emptied too and the
-            # replay would read a dangling tensor. They are [..., n, n] and
-            # [..., n], i.e. smaller than the residual by a factor of C, so clone
-            # instead of depending on the hook registration order of the two
-            # spans.
-            h_res.clone(),
+            h_res,
             original_residual,
-            h_post.clone(),
+            h_post,
             x,
             bias,
             # No dropout on the fast path, so the replay is deterministic
@@ -1773,36 +1867,29 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             preserve_rng_state=self.hidden_dropout_prob > 0.0 and self.training,
             share_grad_holder=True,
         )
-        return output, span
+        if manager is not None:
+            manager.add(bda_recompute, f"L{self.layer_number} bda")
+            return output, None
+        return output, bda_recompute
 
     @staticmethod
-    def _cast_and_discard_fused_bda(output, ori_dtype, span):
-        """Cast the BDA result back to ``ori_dtype`` and close ``span``.
+    def _cast_and_discard_fused_bda(output, ori_dtype, bda_recompute):
+        """Cast the BDA result and close a half-layer recompute.
 
-        The fp32 [..., n*C] BDA result is dead the moment it is cast: cast
-        backward only needs the grad, not the input data. But the span pins it
-        through ``self.outputs``, so without the discard the span would trade the
-        two ``save_for_backward`` up-casts for a retained fp32 output and give
-        most of the saving back. The discard is also what registers
-        ``_recompute``, and ``_recompute`` is the only place that sets
-        ``ctx.inputs``/``ctx.outputs`` for
-        ``RecomputeWithoutOutputFunction.backward`` -- so it is mandatory, not an
-        optimization. The hook goes on the cast result because that is the first
-        tensor whose grad is produced after the fp32 data is dead; the cast
-        result itself must stay live for the whole half-layer, so the span cannot
-        be extended to swallow the cast.
+        The cast result carries the replay hook while the owned fp32 output is
+        discarded. Block mode already includes the cast and passes ``None``.
         """
+        if bda_recompute is None:
+            return output
         casted = output.to(ori_dtype)
-        if span is None:
-            return casted
         if casted is output:
             # Tensor.to() is an identity when the dtype already matches, so the
-            # span output and the tensor the rest of the layer holds would be the
-            # same object and the discard would clear live data. Reachable when
-            # the residual is already fp32 (fp32 training); give the caller its
-            # own copy so the span still owns something discardable.
+            # recompute output and the tensor the rest of the layer holds would
+            # be the same object and the discard would clear live data. Reachable
+            # when the residual is already fp32 (fp32 training); give the caller
+            # its own copy so there is still something discardable.
             casted = output.clone()
-        span.discard_output_and_register_recompute(casted)
+        bda_recompute.discard_output_and_register_recompute(casted)
         return casted
 
     def _docmask_meta_kwargs(self):
@@ -1876,29 +1963,38 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         original_residual = hidden_states
         ori_dtype = hidden_states.dtype
 
+        # Shared with block neighbours when mhc_block is on; None selects the
+        # half-layer-scoped behaviour.
+        mhc_manager = self._mhc_block_manager(half_layer=0)
+        mhc_recompute_on = mhc_manager is not None or (
+            self.recompute_mhc_forward and self.training
+        )
+
         # mHC: aggregate n-stream → 1-stream
-        if self.recompute_mhc_forward and self.training:
-            self._attn_mhc_recompute = RecomputeWithoutOutput()
-            aggregated, h_res, h_post = self._attn_mhc_recompute.recompute(
-                self.self_attention_hyper_connection,
-                hidden_states,
-                preserve_rng_state=False,
-                share_grad_holder=True,
-            )
-        else:
-            aggregated, h_res, h_post = self.self_attention_hyper_connection(
-                hidden_states
-            )
+        (
+            aggregated,
+            h_res,
+            h_post,
+            self._attn_mhc_recompute,
+        ) = self._mhc_head(
+            self.self_attention_hyper_connection,
+            hidden_states,
+            mhc_manager,
+            mhc_recompute_on,
+        )
         aggregated = aggregated.to(ori_dtype)
 
         h_post = inspect_tensor("mhc_attn_post", self.layer_number, h_post)
         h_res = inspect_tensor("mhc_attn_comb", self.layer_number, h_res)
 
         # LayerNorm on aggregated single stream
-        if self.recompute_input_layernorm:
-            input_layernorm_output = recompute(self.input_layernorm, aggregated)
-        else:
-            input_layernorm_output = self.input_layernorm(aggregated)
+        input_layernorm_output = self._mhc_layernorm(
+            self.input_layernorm,
+            aggregated,
+            mhc_manager,
+            self.mhc_checkpoint_input_layernorm,
+            self.recompute_input_layernorm,
+        )
 
         # Observation only: "Attn_input" below owns this tensor's injection.
         inspect_tensor(
@@ -1990,22 +2086,24 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             attention_output_with_bias,
             index=0,
         )
-        hidden_states, fused_span = self._fused_h_res_h_post_bda(
+        hidden_states, bda_recompute = self._fused_h_res_h_post_bda(
             self.self_attention_hyper_connection,
             h_res,
             original_residual,
             h_post,
             attention_output_with_bias,
-            self.recompute_mhc_forward and self.training,
+            mhc_recompute_on,
+            manager=mhc_manager,
         )
-        # Discard mhc.forward outputs (aggregated, h_res, h_post) after fused_bda consumed them
-        if self.recompute_mhc_forward and self.training:
+        # Discard mhc.forward outputs after fused_bda consumed them. In block
+        # mode the manager does this at the block end instead.
+        if self._attn_mhc_recompute is not None:
             self._attn_mhc_recompute.discard_output_and_register_recompute(
                 hidden_states
             )
             self._attn_mhc_recompute = None
         hidden_states = self._cast_and_discard_fused_bda(
-            hidden_states, ori_dtype, fused_span
+            hidden_states, ori_dtype, bda_recompute
         )
         hidden_states = inspect_tensor(
             "mhc_attn_residual_output", self.layer_number, hidden_states
@@ -2050,31 +2148,36 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         original_residual = hidden_states
         ori_dtype = hidden_states.dtype
 
+        mhc_manager = self._mhc_block_manager(half_layer=1)
+        mhc_recompute_on = mhc_manager is not None or (
+            self.recompute_mhc_forward and self.training
+        )
+
         # mHC: aggregate n-stream → 1-stream
-        if self.recompute_mhc_forward and self.training:
-            self._mlp_mhc_recompute = RecomputeWithoutOutput()
-            aggregated, h_res, h_post = self._mlp_mhc_recompute.recompute(
-                self.mlp_hyper_connection,
-                hidden_states,
-                preserve_rng_state=False,
-                share_grad_holder=True,
-            )
-        else:
-            aggregated, h_res, h_post = self.mlp_hyper_connection(hidden_states)
+        (
+            aggregated,
+            h_res,
+            h_post,
+            self._mlp_mhc_recompute,
+        ) = self._mhc_head(
+            self.mlp_hyper_connection,
+            hidden_states,
+            mhc_manager,
+            mhc_recompute_on,
+        )
         aggregated = aggregated.to(ori_dtype)
 
         h_post = inspect_tensor("mhc_mlp_post", self.layer_number, h_post)
         h_res = inspect_tensor("mhc_mlp_comb", self.layer_number, h_res)
 
         # LayerNorm on aggregated single stream
-        if self.recompute_post_attention_layernorm:
-            post_attention_layernorm_output = recompute(
-                self.post_attention_layernorm, aggregated
-            )
-        else:
-            post_attention_layernorm_output = self.post_attention_layernorm(
-                aggregated
-            )
+        post_attention_layernorm_output = self._mhc_layernorm(
+            self.post_attention_layernorm,
+            aggregated,
+            mhc_manager,
+            self.mhc_checkpoint_post_attention_layernorm,
+            self.recompute_post_attention_layernorm,
+        )
 
         # Observation only: "moe_or_dense_input" below owns the injection.
         inspect_tensor(
@@ -2137,22 +2240,27 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             mlp_output_with_bias,
             index=0,
         )
-        hidden_states, fused_span = self._fused_h_res_h_post_bda(
+        # The block's final BDA output is the boundary tensor, so it stays live
+        # and is not recomputed; its own hook would fire before the manager's.
+        is_block_boundary = mhc_manager is not None and self._mhc_is_block_end
+        hidden_states, bda_recompute = self._fused_h_res_h_post_bda(
             self.mlp_hyper_connection,
             h_res,
             original_residual,
             h_post,
             mlp_output_with_bias,
-            self.recompute_mhc_forward and self.training,
+            mhc_recompute_on and not is_block_boundary,
+            manager=None if is_block_boundary else mhc_manager,
         )
-        # Discard mhc.forward outputs (aggregated, h_res, h_post) after fused_bda consumed them
-        if self.recompute_mhc_forward and self.training:
+        # Discard mhc.forward outputs after fused_bda consumed them. In block
+        # mode the manager does this at the block end instead.
+        if self._mlp_mhc_recompute is not None:
             self._mlp_mhc_recompute.discard_output_and_register_recompute(
                 hidden_states
             )
             self._mlp_mhc_recompute = None
         hidden_states = self._cast_and_discard_fused_bda(
-            hidden_states, ori_dtype, fused_span
+            hidden_states, ori_dtype, bda_recompute
         )
         hidden_states = inspect_tensor(
             "mhc_mlp_residual_output", self.layer_number, hidden_states
@@ -2160,6 +2268,10 @@ class HyperConnectionTransformerLayer(TransformerLayer):
 
         if is_first_fwd:
             hidden_states.stop_gradient = False
+
+        # Finalize after setting stop_gradient so the boundary hook is valid.
+        if is_block_boundary:
+            finalize_mhc_recompute_block(self._mhc_block_id, hidden_states)
 
         return hidden_states
 
