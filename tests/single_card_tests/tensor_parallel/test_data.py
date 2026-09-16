@@ -122,17 +122,11 @@ class TestBuildKeySizeNumelDictionaries(unittest.TestCase):
     hand-derived from the two input shapes.
     """
 
-    @unittest.expectedFailure
     def test_rank0_packs_and_unpacks_shapes(self):
-        # KNOWN PRODUCTION BUG (do not edit production code): this path cannot
-        # run as written. On rank 0 the packer calls ``data[key].size()``, but
-        # in Paddle ``Tensor.size`` is an int property (element count), not a
-        # callable returning the shape -- calling it raises TypeError; the
-        # correct expression is ``data[key].shape``. Independently, line
-        # ``paddle.tensor(sizes, dtype=paddle.int32)`` calls the ``paddle.tensor``
-        # sub-package (not callable); it should be ``paddle.to_tensor``. This
-        # test asserts the CORRECT hand-derived result and is marked
-        # expectedFailure until the bug is fixed.
+        # Rank-0 packs each tensor's shape into the flat size buffer, the
+        # (mocked no-op) broadcast leaves it intact for the single process, and
+        # the unpack loop reconstructs per-key shape / element-count / running
+        # total. Expected values are hand-derived from the two input shapes.
         group = _FakeTPGroup(rank=0, ranks=[0, 1])
         data = {
             "a": paddle.zeros([2, 3], dtype=paddle.float32),  # numel 6

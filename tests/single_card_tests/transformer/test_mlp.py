@@ -269,7 +269,12 @@ class TestGatedMLPForwardReference(unittest.TestCase):
 
     def test_activation_clamp_value_is_consumed(self):
         paddle.seed(13)
-        clamp = 0.25
+        # The gate/linear pre-activations here are small (weights use
+        # init std 0.02 over hidden_size=8, so |z| ~ 0.05), so the clamp
+        # threshold must sit inside that range to actually bite. 0.01 is well
+        # below the activation spread, guaranteeing both the min-clamp on the
+        # gate and the [-v, v] clip on the linear term change the output.
+        clamp = 0.01
         mlp = _mlp_from_config(self._config(offset=0.0, clamp=clamp))
         x = paddle.randn([3, 2, 8], dtype="float32")
 
@@ -281,7 +286,7 @@ class TestGatedMLPForwardReference(unittest.TestCase):
         np.testing.assert_allclose(
             out.numpy(), ref_clamped, rtol=1e-4, atol=1e-5
         )
-        # The clamp actually bites on this fixture (values exceed 0.25).
+        # The clamp actually bites on this fixture (values exceed 0.01).
         self.assertFalse(
             np.allclose(ref_clamped, ref_unclamped, rtol=1e-4, atol=1e-5)
         )

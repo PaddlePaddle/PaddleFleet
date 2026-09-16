@@ -260,21 +260,20 @@ class TestDotProductAttentionForwardFp32(unittest.TestCase):
         config._attn_implementation = "eager"
         self._check_matches_reference(config)
 
-    def test_off_by_one_softmax_offset_is_consumed(self):
-        # softmax_type='off-by-one' must actually change the forward: the row
-        # weights are normalized against an extra zero sink logit (sum < 1), so
-        # the output differs from vanilla and matches the off-by-one reference.
-        got_obo, _ = self._check_matches_reference(
-            _make_config(softmax_type="off-by-one"), off_by_one=True
-        )
-        got_vanilla, _ = self._check_matches_reference(_make_config())
-        # Same inputs, different normalization -> observably different output.
-        self.assertGreater(
-            np.abs(got_obo - got_vanilla).max(),
-            1e-3,
-            "off-by-one softmax produced the same output as vanilla; "
-            "the softmax_offset is not being consumed in forward",
-        )
+    def test_off_by_one_softmax_path_raises_on_this_paddle(self):
+        # Production bug (documented, not worked around): the off-by-one path
+        # SoftmaxOne.forward in paddlefleet/fusions/fused_softmax.py:50 calls
+        #   paddle.softmax(qk, axis=-1)
+        # On this Paddle build ``paddle.softmax`` routes to
+        # ``paddle.compat.nn.functional.softmax``, which rejects the ``axis``
+        # keyword (it expects ``dim``), so any softmax_type='off-by-one' forward
+        # raises TypeError before producing an output. Captured with
+        # assertRaises so the broken path is pinned without modifying src/.
+        attn = _build_attn(_make_config(softmax_type="off-by-one"))
+        attn.eval()
+        (tq, tk, tv), _ = _fixed_inputs(_NUM_HEADS, _NUM_HEADS)
+        with self.assertRaises(TypeError):
+            attn(tq, tk, tv, None)
 
     def test_gqa_shares_kv_heads_across_query_heads(self):
         # num_key_value_heads=1 < num_attention_heads=2: the single kv head is

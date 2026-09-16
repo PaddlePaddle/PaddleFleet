@@ -12,10 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU-only behavior tests for paddlefleet pipeline_parallel p2p_communication.
+"""Device-agnostic behavior tests for paddlefleet pipeline_parallel
+p2p_communication.
 
-These tests exercise the CPU-executable pure logic of the production module
-``paddlefleet.pipeline_parallel.pp_utils.p2p_communication``:
+These tests exercise the pure, communication-free logic of the production
+module ``paddlefleet.pipeline_parallel.pp_utils.p2p_communication``. Importing
+paddlefleet initializes paddlefleet_ops, which queries the CUDA device
+capability, so on a GPU host the device is selected as ``gpu`` before import
+(see below); the logic under test is independent of the device it runs on:
 
 * ``_is_valid_send_recv_partial`` divisibility / enable-flag gating
 * ``SendRecvMeta._obtain_send_message`` shape/dtype-number/key extraction and
@@ -38,7 +42,15 @@ from unittest import mock
 try:
     import paddle
 
-    paddle.set_device("cpu")
+    # Importing paddlefleet drags in paddlefleet_ops, whose module init calls
+    # paddle.cuda.get_device_capability() against the *current* device. On a CPU
+    # place that raises ValueError and aborts collection, so on a CUDA-capable
+    # host we must select the GPU before the import. The tests below are pure,
+    # communication-free logic and are device-agnostic once imported.
+    if paddle.is_compiled_with_cuda():
+        paddle.set_device("gpu")
+    else:
+        paddle.set_device("cpu")
 
     from paddlefleet.pipeline_parallel.pp_utils import (
         p2p_communication as p2p_mod,

@@ -281,12 +281,19 @@ class TestScheduleNodeForwardCPU(unittest.TestCase):
     def test_retained_outputs_preserve_shape(self):
         x = paddle.to_tensor([[1.0, 2.0], [3.0, 4.0]])
         x.stop_gradient = False
-        node = ScheduleNode(lambda t: t * 3.0)
+        labels = paddle.zeros([2, 2], dtype="float32")
+        # With labels set the output is a retained loss tensor, so production
+        # takes the clear_dataptr=False branch (``clear_dataptr = labels is
+        # None``). self.outputs is then a shape-preserving FakeClone
+        # (empty_like) whose content is uninitialised and is not compared. On
+        # the default (no-labels) path the output dataptr is released and the
+        # shape would instead collapse to [].
+        node = ScheduleNode(lambda t, lbl: t * 3.0)
+        node.labels = labels
 
         node.forward(x)
 
-        # self.outputs is a FakeClone (empty_like) with the dataptr cleared, so
-        # only its shape is a defined contract; its content is not compared.
+        self.assertIsInstance(node.outputs, paddle.Tensor)
         self.assertEqual(list(node.outputs.shape), [2, 2])
 
 

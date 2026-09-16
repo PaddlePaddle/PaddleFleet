@@ -104,7 +104,7 @@ class _LLaVAConstructor:
     never patches ``LLaVAModel.__init__`` itself.
     """
 
-    def __init__(self, stack, num_img_embeddings=576):
+    def __init__(self, stack, num_img_embeddings=576, patch_hf=False):
         def _p(target, **kwargs):
             return stack.enter_context(patch(target, **kwargs))
 
@@ -118,7 +118,11 @@ class _LLaVAConstructor:
         self.clip = _p(f"{_MOD}.CLIPViTModel")
         self.radio = _p(f"{_MOD}.RADIOViTModel")
         self.projector = _p(f"{_MOD}.MultimodalProjector")
-        self.build_hf = _p(f"{_HF_MOD}.build_hf_model")
+        # ``build_hf_model`` lives in the optional ``paddlefleet.models.hugging
+        # face`` subpackage that __init__ only imports inside the ``hf://``
+        # branch. Patching it eagerly would fail to import for every non-hf
+        # test, so it is only wired up when a test actually drives that branch.
+        self.build_hf = _p(f"{_HF_MOD}.build_hf_model") if patch_hf else None
 
     def build(self, lang_config=None, vision_config=None, **overrides):
         params = {
@@ -313,7 +317,7 @@ class TestLLaVAModelHFLanguageModel(unittest.TestCase):
         document the defect without editing production code.
         """
         with contextlib.ExitStack() as stack:
-            ctor = _LLaVAConstructor(stack)
+            ctor = _LLaVAConstructor(stack, patch_hf=True)
             lang = _lang_config(language_model_type="hf://dummy-llm")
             sentinel = object()
             ctor.build_hf.return_value = sentinel

@@ -148,6 +148,17 @@ class TestGetDocStarts(unittest.TestCase):
     def test_single_doc_starts_at_zero(self):
         out = get_doc_starts(paddle.to_tensor([5], dtype="int32"))
         self.assertEqual(out.numpy().tolist(), [0])
+
+    @unittest.expectedFailure
+    def test_single_doc_starts_dtype_is_documented_int32(self):
+        # Production bug (documented, not fixed here): get_doc_starts promises
+        # an int32 tensor in its docstring and explicitly does
+        # ``doc_lens.flatten().cast("int32")`` on its input, but paddle.cumsum
+        # promotes the accumulation to int64 and the result is never cast back
+        # -- unlike get_doc_lens, which ends with ``.cast("int32")``. The
+        # returned dtype is therefore int64, violating the documented contract.
+        # Captured as an expected failure without modifying production code.
+        out = get_doc_starts(paddle.to_tensor([5], dtype="int32"))
         self.assertEqual(out.dtype, paddle.int32)
 
     def test_multiple_docs_cumulative_offsets(self):

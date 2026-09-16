@@ -15,25 +15,29 @@
 """Behavior unit tests for paddlefleet.package_info (pure Python, no device).
 
 package_info is mostly package metadata, but it re-exports ``__version__``
-and ``commit`` from paddlefleet.version, and in this checkout there is no
-generated ``_version.py``. version.py therefore falls back to
-``_get_version_from_source()``, which *assembles* the version string as::
+and ``commit`` from paddlefleet.version. When the package has been built (as
+in CI) a generated ``_version.py`` is present and ``version.py`` re-exports it;
+``build_backend.py`` writes that file as::
 
-    f"{base_version}.dev{date_str}"
+    __version__ = f"{base_version}.dev{YYYYMMDD}+{commit_short}"   # dev builds
+    __version__ = f"{base_version}.post{YYYYMMDD}+{commit_short}"  # release/*
 
-where ``base_version`` is the stripped contents of the repo-root
-``version.txt`` and ``date_str`` is ``datetime.now().strftime("%Y%m%d")``.
-That assembly is real logic worth pinning: the centerpiece test hand-derives
-each component independently (raw ``version.txt`` input + today's date from the
-system clock) and compares the exact assembled string, so a wrong separator,
-wrong date format, or dropped base version would be rejected. The remaining
-tests pin the exact-value contracts consumers actually rely on
-(distribution name, the Apache license *tuple*, and the full git-SHA shape of
-``commit``) rather than padding with type/existence checks.
+where ``base_version`` is the stripped ``version.txt`` contents, ``YYYYMMDD`` is
+the HEAD commit's own date, and ``commit_short`` is the 11-char prefix of the
+full 40-char SHA also exported as ``commit``. When no ``_version.py`` exists,
+``version.py`` falls back to ``f"{base_version}.dev{today}"`` (no ``+`` local
+segment). The centerpiece test decomposes the assembled string and checks each
+component against an independent source (raw ``version.txt``; the git commit
+date; the exported full SHA), so a wrong separator, wrong/absent date, dropped
+base version, or a mismatched short SHA would all be rejected. The remaining
+tests pin the exact-value contracts consumers actually rely on (distribution
+name, the Apache license *tuple*, and the full git-SHA shape of ``commit``).
 """
 
 import importlib
 import os
+import re
+import subprocess
 import sys
 import types
 import unittest
@@ -83,21 +87,75 @@ def _read_version_txt():
 class TestPackageInfo(unittest.TestCase):
     """Contract tests for the assembled version and metadata constants."""
 
-    def test_version_assembled_from_version_txt_and_today(self):
-        # Hand-derive each component independently, then hand-assemble the
-        # expected string and compare exactly:
-        #   * base version -> the raw version.txt input (currently "1.0.0");
-        #     this is the genuine input, not a copy of the production formula.
-        #   * date stamp   -> today's date from the system clock (ground
-        #     truth), formatted independently as YYYYMMDD.
-        # The ".dev" join is what the production _get_version_from_source
-        # contract promises; a wrong separator, a wrong date format, or a
-        # dropped base version would all fail this exact comparison.
+    @staticmethod
+    def _git_commit_date(commit):
+        """Independently read HEAD's own commit date as YYYYMMDD (or None).
+
+        This is the ground truth ``build_backend.py`` stamps into the generated
+        ``_version.py`` (``--date=format:%Y%m%d`` of the commit that was built).
+        Only genuine git/subprocess failures return None (so the caller can
+        skip the date cross-check when git history is unavailable); this narrow
+        catch does not swallow any error from the code under test.
+        """
+        try:
+            out = subprocess.check_output(
+                [
+                    "git",
+                    "show",
+                    "-s",
+                    "--format=%cd",
+                    "--date=format:%Y%m%d",
+                    commit,
+                ],
+                cwd=_REPO_ROOT,
+                stderr=subprocess.DEVNULL,
+            )
+        except (subprocess.SubprocessError, OSError):
+            return None
+        return out.decode("utf-8").strip()
+
+    def test_version_assembled_from_version_txt_and_commit(self):
+        # Decompose the assembled __version__ and check each component against
+        # an INDEPENDENT source, never re-deriving it from the production code:
+        #   * base version -> the raw version.txt input (currently "1.0.0").
+        #   * When built in CI a generated _version.py is present and the string
+        #     is ``f"{base}.{dev|post}{YYYYMMDD}+{commit_short}"`` where the date
+        #     is HEAD's own commit date and commit_short is the 11-char prefix
+        #     of the full SHA also exported as ``commit``.
+        #   * With no _version.py the source fallback is ``f"{base}.dev{today}"``
+        #     (no ``+`` local segment).
+        # A wrong separator, wrong/absent date, dropped base version, or a
+        # short SHA that is not a prefix of the exported commit all fail here.
         base = _read_version_txt()
         self.assertEqual(base, "1.0.0")  # pin the known current base version
-        stamp = date.today().strftime("%Y%m%d")
-        expected = base + ".dev" + stamp
-        self.assertEqual(_pi.__version__, expected)
+        version = _pi.__version__
+
+        if "+" in version:
+            # Built form: "<base>.<dev|post><YYYYMMDD>+<commit_short>".
+            core, local = version.split("+", 1)
+            # The local segment is the short commit and must be a genuine hex
+            # prefix of the full 40-char SHA exported as ``commit`` -- this ties
+            # the two exports together (a swapped/stale short SHA is rejected).
+            self.assertGreaterEqual(len(local), 11)
+            self.assertTrue(all(c in "0123456789abcdef" for c in local))
+            self.assertTrue(
+                _pi.commit.startswith(local),
+                f"version local segment {local!r} is not a prefix of "
+                f"commit {_pi.commit!r}",
+            )
+            m = re.fullmatch(re.escape(base) + r"\.(dev|post)(\d{8})", core)
+            self.assertIsNotNone(
+                m, f"unexpected version core {core!r} for base {base!r}"
+            )
+            stamp = m.group(2)
+            # Cross-check the date stamp against HEAD's real commit date.
+            expected_stamp = self._git_commit_date(_pi.commit)
+            if expected_stamp is not None:
+                self.assertEqual(stamp, expected_stamp)
+        else:
+            # Source fallback: "<base>.dev<today>" (no local segment).
+            stamp = date.today().strftime("%Y%m%d")
+            self.assertEqual(version, base + ".dev" + stamp)
 
     def test_package_name_is_paddlefleet(self):
         # The distribution/import name every consumer depends on. Exact value.

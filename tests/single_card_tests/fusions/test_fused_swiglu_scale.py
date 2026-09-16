@@ -55,9 +55,25 @@ import numpy as np
 try:
     import paddle
 
+    # Import at module load, BEFORE any ``setUp`` pins the device to CPU. On a
+    # CUDA-compiled build the first ``paddlefleet`` import pulls in
+    # ``paddlefleet_ops``, whose package init calls ``get_device_capability()``
+    # against the current device -- which must be a GPU. The process default
+    # device is the GPU there, so importing first keeps that query valid; a
+    # deferred import in ``setUp`` (after ``set_device("cpu")``) would probe a
+    # CPU place and raise ``ValueError``.
+    from paddlefleet.fusions.fused_swiglu_scale import (
+        _broadcast_scale,
+        fused_swiglu_scale_backward,
+        fused_swiglu_scale_forward,
+    )
+
     _PADDLE_IMPORT_ERROR = None
 except ImportError as exc:  # honest: paddle genuinely absent, not swallowed
     paddle = None
+    _broadcast_scale = None
+    fused_swiglu_scale_forward = None
+    fused_swiglu_scale_backward = None
     _PADDLE_IMPORT_ERROR = exc
 
 _SKIP_REASON = (
@@ -110,8 +126,6 @@ class TestBroadcastScale(unittest.TestCase):
         self._orig_device = paddle.get_device()
         self.addCleanup(paddle.set_device, self._orig_device)
         paddle.set_device("cpu")
-        from paddlefleet.fusions.fused_swiglu_scale import _broadcast_scale
-
         self._broadcast_scale = _broadcast_scale
 
     def test_1d_scale_unsqueezed_once_values_preserved(self):
@@ -169,10 +183,6 @@ class TestForwardCpuFallback(unittest.TestCase):
         p = patch("paddle.is_compiled_with_cuda", return_value=False)
         p.start()
         self.addCleanup(p.stop)
-        from paddlefleet.fusions.fused_swiglu_scale import (
-            fused_swiglu_scale_forward,
-        )
-
         self._forward = fused_swiglu_scale_forward
 
     def test_forward_applies_broadcast_scale(self):
@@ -238,10 +248,6 @@ class TestBackwardCpuFallback(unittest.TestCase):
         p = patch("paddle.is_compiled_with_cuda", return_value=False)
         p.start()
         self.addCleanup(p.stop)
-        from paddlefleet.fusions.fused_swiglu_scale import (
-            fused_swiglu_scale_backward,
-        )
-
         self._backward = fused_swiglu_scale_backward
 
     def _autograd_reference(self):
@@ -314,10 +320,6 @@ class TestForwardCudaDispatch(unittest.TestCase):
         self._orig_device = paddle.get_device()
         self.addCleanup(paddle.set_device, self._orig_device)
         paddle.set_device("cpu")
-        from paddlefleet.fusions.fused_swiglu_scale import (
-            fused_swiglu_scale_forward,
-        )
-
         self._forward = fused_swiglu_scale_forward
         self.calls = {}
 
@@ -379,10 +381,6 @@ class TestBackwardCudaDispatch(unittest.TestCase):
         self._orig_device = paddle.get_device()
         self.addCleanup(paddle.set_device, self._orig_device)
         paddle.set_device("cpu")
-        from paddlefleet.fusions.fused_swiglu_scale import (
-            fused_swiglu_scale_backward,
-        )
-
         self._backward = fused_swiglu_scale_backward
         self.calls = {}
         self._plain_ret = (paddle.to_tensor([[1.0]]), paddle.to_tensor([2.0]))

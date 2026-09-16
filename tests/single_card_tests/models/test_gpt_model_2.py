@@ -168,8 +168,10 @@ class TestBuildOverlappedNodes(unittest.TestCase):
         self.assertEqual(len(overlap.nodes), 0)
         self.assertEqual(forward_pre.nodes, [fpre])
         self.assertEqual(forward_post.nodes, [f_t1, f_t2, fpost])
-        # No decoder layers on the backward side -> both plain nodes are pre.
-        self.assertEqual(backward_pre.nodes, [bpost, bpre])
+        # No decoder layers on the backward side -> both plain nodes stay in
+        # pre. The backward chunk is walked in reverse then re-reversed, so the
+        # original order [bpre, bpost] is preserved.
+        self.assertEqual(backward_pre.nodes, [bpre, bpost])
         self.assertEqual(backward_post.nodes, [])
 
 

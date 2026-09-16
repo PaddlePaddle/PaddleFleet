@@ -60,14 +60,19 @@ except ImportError as exc:  # genuine missing dependency, not an API/logic error
 
 
 def _bare_model():
-    """Allocate a RADIOViTModel without running __init__.
+    """Allocate a RADIOViTModel without running its heavy ``__init__``.
 
-    __init__ eagerly allocates parameters (and, as documented in the tests
-    below, currently crashes on several Paddle tensor-factory calls), so the
-    pos-encoding methods are exercised on a bare shell whose attributes are set
-    to small, hand-checkable values.
+    The real ``RADIOViTModel.__init__`` builds parameters, linear layers and a
+    transformer block that need a full config and device weights. To exercise
+    the pure pos-encoding methods in isolation we build the shell via
+    ``__new__`` but still run ``paddle.nn.Layer.__init__`` on it, so the
+    ``_parameters`` / ``_buffers`` / ``_sub_layers`` bookkeeping dicts exist and
+    tensor/sub-module assignment goes through the real ``nn.Layer.__setattr__``
+    machinery (otherwise it raises "super().__init__() should be called first").
     """
-    return RADIOViTModel.__new__(RADIOViTModel)
+    model = RADIOViTModel.__new__(RADIOViTModel)
+    paddle.nn.Layer.__init__(model)
+    return model
 
 
 def _known_pos_embeddings():
@@ -206,19 +211,18 @@ def _mock_config():
 class TestInitAllocations(unittest.TestCase):
     """__init__ parameter allocation and the seq_length arithmetic.
 
-    Each test asserts the *correct* post-condition. All three are marked
-    ``expectedFailure`` because __init__ allocates parameters with torch-style
-    varargs shapes that Paddle's tensor factories reject (they take a single
-    ``shape`` list). Production is left untouched.
+    Each test asserts the *correct* post-condition and runs against a real
+    Paddle + GPU runtime: the installed Paddle accepts the positional
+    ``paddle.zeros`` / ``paddle.randn`` shape arguments used in
+    ``RADIOViTModel.__init__`` (radio.py:114-135), so the allocations succeed
+    and their shapes / derived ``seq_length`` are verified directly. Production
+    is left untouched.
     """
 
-    @unittest.expectedFailure
     def test_seq_length_without_tokens(self):
         # add_class_token=False, use_mask_token=False -> first tensor factory
-        # reached is position_embeddings.
-        # CONFIRMED BUG radio.py:134 -> paddle.randn(1, max_num_patches,
-        # hidden, dtype=...) passes shape as varargs *and* dtype twice.
-        # Correct seq_length = (32//16)*(32//16) + 0 = 4.
+        # reached is position_embeddings (radio.py:134).
+        # seq_length = (32//16)*(32//16) + 0 = 4.
         with (
             mock.patch(
                 "paddlefleet.models.vision.radio.has_config_logger_enabled",
@@ -240,12 +244,9 @@ class TestInitAllocations(unittest.TestCase):
             )
         self.assertEqual(model.seq_length, 4)
 
-    @unittest.expectedFailure
     def test_mask_token_allocated(self):
-        # use_mask_token=True, add_class_token=False -> first tensor factory
-        # reached is the mask token.
-        # CONFIRMED BUG radio.py:114-116 -> paddle.zeros(1, hidden) passes shape
-        # as varargs (Paddle reads the 2nd positional as dtype).
+        # use_mask_token=True, add_class_token=False -> the mask token is
+        # allocated at radio.py:114 as paddle.zeros(1, hidden). hidden=8.
         with (
             mock.patch(
                 "paddlefleet.models.vision.radio.has_config_logger_enabled",
@@ -266,15 +267,12 @@ class TestInitAllocations(unittest.TestCase):
                 max_img_w=16,
             )
         self.assertTrue(model.use_mask_token)
-        self.assertTrue(hasattr(model, "mask_token"))
+        # hidden_size from _mock_config() is 8 -> mask_token shape [1, 8].
+        self.assertEqual(list(model.mask_token.shape), [1, 8])
 
-    @unittest.expectedFailure
     def test_seq_length_with_class_token(self):
-        # add_class_token=True -> first tensor factory reached is the class
-        # token.
-        # CONFIRMED BUG radio.py:121-127 -> paddle.randn(class_token_len,
-        # hidden, dtype=...) passes shape as varargs and dtype twice.
-        # Correct seq_length = (32//16)*(32//16) + class_token_len(3) = 7.
+        # add_class_token=True -> the class token is allocated at radio.py:121.
+        # seq_length = (32//16)*(32//16) + class_token_len(3) = 7.
         with (
             mock.patch(
                 "paddlefleet.models.vision.radio.has_config_logger_enabled",

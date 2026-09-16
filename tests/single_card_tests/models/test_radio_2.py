@@ -121,26 +121,18 @@ class TestRADIOInitValidation(unittest.TestCase):
     _HAS_DEPS, f"paddle/paddlefleet import unavailable: {_IMPORT_ERROR}"
 )
 class TestRADIOInitParameterAllocation(unittest.TestCase):
-    """Constructor should allocate parameters with config-derived shapes.
+    """Constructor allocates parameters with config-derived shapes.
 
-    These document confirmed source bugs in ``RADIOViTModel.__init__``: the
-    tensor-creation calls use PyTorch-style positional signatures that Paddle
-    does not accept (no compat shim exists in ``utils/paddle_patch.py``), so the
-    constructor raises before returning. Each test asserts the CORRECT intended
-    shape and is marked ``expectedFailure``; production code is left unchanged.
-
-      * radio.py:114  paddle.zeros(1, hidden)               -> dtype=hidden (int) invalid
-      * radio.py:121  paddle.randn(class_token_len, hidden, dtype=...) -> dup 'dtype'
-      * radio.py:134  paddle.randn(1, max_num_patches, hidden, dtype=...) -> dup 'dtype'
-
-    The Paddle-correct forms would be paddle.zeros([1, hidden]) /
-    paddle.randn([...], dtype=...).
+    Runs against a real Paddle + GPU runtime: the installed Paddle accepts the
+    positional ``paddle.zeros`` / ``paddle.randn`` shape arguments used by
+    ``RADIOViTModel.__init__`` (radio.py:114 / :121 / :134), so the allocations
+    succeed and each test asserts the intended shape / derived ``seq_length``
+    directly. Production code is left unchanged.
     """
 
     @mock.patch(f"{_RADIO}.TransformerBlock")
     @mock.patch(f"{_RADIO}.ColumnParallelLinear")
     @mock.patch(f"{_RADIO}.has_config_logger_enabled", return_value=False)
-    @unittest.expectedFailure
     def test_position_embeddings_shape(self, _log, _col, _blk):
         # max_img_h=48, max_img_w=32, patch_dim=16 (asymmetric to expose any
         # row/col swap): max_num_rows=3, max_num_cols=2 -> max_num_patches=6.
@@ -161,10 +153,9 @@ class TestRADIOInitParameterAllocation(unittest.TestCase):
     @mock.patch(f"{_RADIO}.TransformerBlock")
     @mock.patch(f"{_RADIO}.ColumnParallelLinear")
     @mock.patch(f"{_RADIO}.has_config_logger_enabled", return_value=False)
-    @unittest.expectedFailure
     def test_class_token_shape(self, _log, _col, _blk):
         # add_class_token=True, class_token_len=3, hidden=64
-        # Correct class_token shape: [3, 64] (radio.py:121 currently raises).
+        # class_token shape: [3, 64] (radio.py:121).
         model = RADIOViTModel(
             transformer_config=_make_config(hidden_size=64),
             transformer_layer_spec=object(),
@@ -182,11 +173,9 @@ class TestRADIOInitParameterAllocation(unittest.TestCase):
     @mock.patch(f"{_RADIO}.TransformerBlock")
     @mock.patch(f"{_RADIO}.ColumnParallelLinear")
     @mock.patch(f"{_RADIO}.has_config_logger_enabled", return_value=False)
-    @unittest.expectedFailure
     def test_mask_token_shape(self, _log, _col, _blk):
-        # use_mask_token=True, hidden=64; add_class_token=False so the first
-        # failing allocation is the mask token at radio.py:114.
-        # Correct mask_token shape: [1, 64].
+        # use_mask_token=True, hidden=64; add_class_token=False. The mask token
+        # is allocated at radio.py:114 with shape [1, 64].
         model = RADIOViTModel(
             transformer_config=_make_config(hidden_size=64),
             transformer_layer_spec=object(),
@@ -203,12 +192,9 @@ class TestRADIOInitParameterAllocation(unittest.TestCase):
     @mock.patch(f"{_RADIO}.TransformerBlock")
     @mock.patch(f"{_RADIO}.ColumnParallelLinear")
     @mock.patch(f"{_RADIO}.has_config_logger_enabled", return_value=False)
-    @unittest.expectedFailure
     def test_seq_length_without_class_token(self, _log, _col, _blk):
         # img_h=48, img_w=32, patch_dim=16 -> (48//16)*(32//16) = 3*2 = 6.
         # add_class_token=False adds no class tokens -> seq_length == 6.
-        # (seq_length is set at radio.py:129 but the instance never returns:
-        #  position_embeddings at radio.py:134 raises first.)
         model = RADIOViTModel(
             transformer_config=_make_config(hidden_size=64),
             transformer_layer_spec=object(),

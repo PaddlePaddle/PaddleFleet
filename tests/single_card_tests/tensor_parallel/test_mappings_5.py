@@ -102,15 +102,19 @@ class TestAllGatherFromTensorParallelRegion(unittest.TestCase):
         # is the identity and the leaf grad must equal the (non-uniform)
         # upstream coefficient exactly. A wrong backward (e.g. an accidental
         # reduce/scale) would change these values.
-        x = paddle.arange(8, dtype="float32").reshape([2, 4])
-        x.stop_gradient = False
+        leaf = paddle.arange(8, dtype="float32").reshape([2, 4])
+        leaf.stop_gradient = False
+        # The None-group forward returns its input unchanged; feed a non-leaf
+        # (clone) because Paddle forbids an identity autograd Function on a
+        # grad-requiring leaf. clone's identity backward preserves the grad.
+        x = leaf.clone()
         coef = paddle.to_tensor(
             [[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]], dtype="float32"
         )
         out = _AllGatherFromTensorParallelRegion.apply(x, None)
         (out * coef).sum().backward()
-        self.assertIsNotNone(x.grad)
-        self.assertEqual(x.grad.tolist(), coef.tolist())
+        self.assertIsNotNone(leaf.grad)
+        self.assertEqual(leaf.grad.tolist(), coef.tolist())
 
 
 @unittest.skipUnless(HAS_PADDLE, _SKIP_REASON)
@@ -132,15 +136,19 @@ class TestReduceScatterToTensorParallelRegion(unittest.TestCase):
 
     def test_none_group_backward_passes_gradient_through_unchanged(self):
         # backward: ``if ctx.group is None: return grad_output`` -- identity.
-        x = paddle.arange(6, dtype="float32").reshape([2, 3])
-        x.stop_gradient = False
+        leaf = paddle.arange(6, dtype="float32").reshape([2, 3])
+        leaf.stop_gradient = False
+        # Non-leaf (clone) input: the None-group forward is an identity
+        # pass-through, which Paddle rejects on a grad-requiring leaf. clone's
+        # identity backward preserves the grad.
+        x = leaf.clone()
         coef = paddle.to_tensor(
             [[2.0, 4.0, 6.0], [8.0, 10.0, 12.0]], dtype="float32"
         )
         out = _ReduceScatterToTensorParallelRegion.apply(x, None)
         (out * coef).sum().backward()
-        self.assertIsNotNone(x.grad)
-        self.assertEqual(x.grad.tolist(), coef.tolist())
+        self.assertIsNotNone(leaf.grad)
+        self.assertEqual(leaf.grad.tolist(), coef.tolist())
 
 
 @unittest.skipUnless(HAS_PADDLE, _SKIP_REASON)
@@ -161,15 +169,19 @@ class TestAllToAllSingleRank(unittest.TestCase):
         # output_split_sizes)`` (split sizes transposed). With world_size == 1
         # every branch is the identity fast path, so the leaf grad must equal
         # the non-uniform upstream coefficient exactly.
-        x = paddle.arange(8, dtype="float32").reshape([2, 4])
-        x.stop_gradient = False
+        leaf = paddle.arange(8, dtype="float32").reshape([2, 4])
+        leaf.stop_gradient = False
+        # Non-leaf (clone) input: the world_size==1 forward returns its input
+        # unchanged, which Paddle rejects as an identity Function on a
+        # grad-requiring leaf. clone's identity backward preserves the grad.
+        x = leaf.clone()
         coef = paddle.to_tensor(
             [[1.0, 3.0, 5.0, 7.0], [9.0, 11.0, 13.0, 15.0]], dtype="float32"
         )
         out = _AllToAll.apply(_Group(1), x, None, None)
         (out * coef).sum().backward()
-        self.assertIsNotNone(x.grad)
-        self.assertEqual(x.grad.tolist(), coef.tolist())
+        self.assertIsNotNone(leaf.grad)
+        self.assertEqual(leaf.grad.tolist(), coef.tolist())
 
 
 @unittest.skipUnless(HAS_PADDLE, _SKIP_REASON)

@@ -15,7 +15,10 @@
 import unittest
 
 try:
-    from paddle.distributed.fleet.meta_parallel import ScheduleChunk
+    from paddle.distributed.fleet.meta_parallel import (
+        ScheduleChunk,
+        ScheduleNode,
+    )
 
     from paddlefleet.transformer.transformer_encoder import (
         TransformerEncoder,
@@ -43,11 +46,16 @@ try:
             self.tag = tag
             self.config = config
 
-    class _NonLayerNode:
-        """Marker that is NOT a TransformerLayerNode.
+    class _NonLayerNode(ScheduleNode):
+        """A genuine ScheduleNode that is NOT a TransformerLayerNode.
 
-        ``build_overlapped_nodes`` must route these to the pre/post chunks and
-        never into the overlap chunk.
+        ``ScheduleChunk.__init__`` now validates that every member is a
+        ``ScheduleNode``/``ScheduleChunk`` instance, so a plain object is
+        rejected. Subclassing ``ScheduleNode`` (while skipping the heavy base
+        ``__init__``, mirroring ``_FakeTransformerLayerNode``) keeps the object
+        a valid chunk member with a distinguishable identity, yet not a
+        ``TransformerLayerNode`` -- so ``build_overlapped_nodes`` must route it
+        to the pre/post chunks and never into the overlap chunk.
         """
 
         def __init__(self, tag):
@@ -68,6 +76,7 @@ try:
     _IMPORT_ERROR = None
 except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover
     ScheduleChunk = None
+    ScheduleNode = None
     TransformerEncoder = None
     build_overlapped_nodes = None
     TransformerLayerNode = None

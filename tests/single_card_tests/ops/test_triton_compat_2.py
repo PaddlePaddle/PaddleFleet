@@ -47,13 +47,24 @@ swap and kernel dispatch are validated with CPU-side recording doubles, and
 no real device numerics are claimed.
 """
 
+import importlib
+import sys
 import unittest
 from unittest import mock
 
 try:
     import paddle
     import triton  # noqa: F401
-    import triton.runtime.driver as triton_driver_mod
+
+    # ``triton.runtime`` re-exports a ``driver`` DriverConfig *instance* that
+    # shadows the ``driver`` submodule attribute on the ``triton.runtime``
+    # package, so ``import triton.runtime.driver as m`` binds ``m`` to that
+    # instance rather than to the module. Production looks the driver up via
+    # ``from triton.runtime.driver import driver`` (i.e. the real submodule in
+    # sys.modules), so fetch that same module object here; patching its
+    # ``driver`` attribute is then visible to the production import.
+    importlib.import_module("triton.runtime.driver")
+    triton_driver_mod = sys.modules["triton.runtime.driver"]
 
     from paddlefleet.triton_ops import triton_compat as tc
 

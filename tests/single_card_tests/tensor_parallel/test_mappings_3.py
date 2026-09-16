@@ -92,8 +92,14 @@ class TestReduceFromModelParallelRegionBackward(unittest.TestCase):
     """
 
     def test_single_rank_backward_copies_upstream_grad(self):
-        x = paddle.arange(8, dtype="float32").reshape([2, 4])
-        x.stop_gradient = False
+        leaf = paddle.arange(8, dtype="float32").reshape([2, 4])
+        leaf.stop_gradient = False
+        # The single-rank forward returns its input unchanged; feed it a
+        # non-leaf (clone) because Paddle forbids an identity autograd Function
+        # on a leaf that requires grad ("Leaf Var ... can't use inplace
+        # strategy"). clone's own backward is the identity, so leaf.grad still
+        # equals exactly what the Function's backward returns.
+        x = leaf.clone()
         # Non-uniform / mixed-sign upstream: an identity backward must return it
         # verbatim, so scaling or zeroing would be caught.
         upstream = paddle.to_tensor(
@@ -101,10 +107,10 @@ class TestReduceFromModelParallelRegionBackward(unittest.TestCase):
         )
         out = _ReduceFromModelParallelRegion.apply(x, _Group(1))
         # forward on a single rank is a pass-through.
-        self.assertEqual(out.tolist(), x.tolist())
+        self.assertEqual(out.tolist(), leaf.tolist())
         out.backward(upstream)
-        self.assertIsNotNone(x.grad)
-        self.assertEqual(x.grad.tolist(), upstream.tolist())
+        self.assertIsNotNone(leaf.grad)
+        self.assertEqual(leaf.grad.tolist(), upstream.tolist())
 
 
 @unittest.skipUnless(HAS_PADDLE, _SKIP_REASON)
@@ -113,16 +119,21 @@ class TestCopyToModelParallelRegionBackward(unittest.TestCase):
     single-rank ``_reduce`` bypass -- two distinct code paths, same contract."""
 
     def _run(self, group):
-        x = paddle.arange(8, dtype="float32").reshape([2, 4])
-        x.stop_gradient = False
+        leaf = paddle.arange(8, dtype="float32").reshape([2, 4])
+        leaf.stop_gradient = False
+        # Non-leaf (clone) input: the copy region forward is an identity
+        # pass-through, which Paddle rejects on a grad-requiring leaf. clone's
+        # identity backward preserves the grad so leaf.grad equals the
+        # Function's backward output.
+        x = leaf.clone()
         upstream = paddle.to_tensor(
             [[2.0, -1.0, 0.5, -3.0], [-4.0, 6.0, -7.0, 8.0]], dtype="float32"
         )
         out = _CopyToModelParallelRegion.apply(x, group)
-        self.assertEqual(out.tolist(), x.tolist())
+        self.assertEqual(out.tolist(), leaf.tolist())
         out.backward(upstream)
-        self.assertIsNotNone(x.grad)
-        self.assertEqual(x.grad.tolist(), upstream.tolist())
+        self.assertIsNotNone(leaf.grad)
+        self.assertEqual(leaf.grad.tolist(), upstream.tolist())
 
     def test_backward_with_none_group_is_identity(self):
         # ctx.group is None -> backward short-circuits to ``return grad_output``.

@@ -33,12 +33,18 @@ deliberately covers the OTHER utilities to stay disjoint:
   * ``_csa_compact_topk_idxs``   -- order-preserving densify + exact counts.
 
 Scope and environment. Every one of these helpers is pure Python or pure Paddle
-tensor algebra that runs on CPU; no GPU kernel and no cuDNN op is invoked, so
-the device is pinned to CPU and NO GPU numerics are claimed. Every expected
-value below is hand-derived from the helper's own arithmetic and written as a
-literal -- never read back from the function under test. Paddle is required
-(even CPU-only, since most helpers build real tensors); when it cannot be
-imported the whole module skips with an honest reason instead of passing.
+tensor algebra whose results are exact and device-agnostic (integer index math,
+zero padding, gather, and an exactly-representable ``-1e30`` sentinel), so they
+produce identical values on GPU and CPU; no GPU-only kernel and no cuDNN op is
+invoked. Importing ``paddlefleet`` pulls in ``paddlefleet_ops``, whose package
+init queries ``paddle.cuda.get_device_capability()`` on a CUDA-compiled build,
+so the module must be imported while a GPU device is active (pinning CPU first
+would break that query). We therefore import first -- under the process default
+device, which is the GPU on a CUDA build -- and only pin the execution device
+afterwards. Every expected value below is hand-derived from the helper's own
+arithmetic and written as a literal -- never read back from the function under
+test. Paddle is required; when it cannot be imported the whole module skips
+with an honest reason instead of passing.
 """
 
 import unittest
@@ -48,13 +54,10 @@ import numpy as np
 try:
     import paddle
 
-    if not paddle.is_compiled_with_cuda():
-        paddle.set_device("cpu")
-    else:
-        # These helpers are device-agnostic; keep them on CPU so the suite
-        # neither requires a card nor claims to have validated GPU numerics.
-        paddle.set_device("cpu")
-
+    # Import BEFORE touching the device: on a CUDA-compiled build the
+    # ``paddlefleet_ops`` package init calls ``get_device_capability()`` against
+    # the *current* device, which must be a GPU. The process default device is
+    # already the GPU there, so importing first keeps that query valid.
     from paddlefleet.fusions.csa_sparse_attn import (
         _DSA_HEAD_TILES,
         _DSA_LATENT_DIM,
@@ -68,6 +71,13 @@ try:
         _pad_query_heads,
         _real_rows,
     )
+
+    # These helpers are exact and device-agnostic; pin CPU only when the build
+    # has no GPU. On a GPU build we leave the default GPU device active so the
+    # already-imported ops stay consistent and the helpers still return the
+    # same exact values.
+    if not paddle.is_compiled_with_cuda():
+        paddle.set_device("cpu")
 
     _IMPORT_ERROR = None
 except ImportError as exc:  # honest probe: only a genuinely missing dependency

@@ -94,19 +94,13 @@ def _ref_pixel_shuffle(x, scale_factor=0.5, version=2):
 class TestPixelShuffleNumeric(unittest.TestCase):
     """Full-content checks of pixel_shuffle against a hand-derived reference.
 
-    KNOWN PRODUCTION BUG (src/paddlefleet/models/multimodal/llava_model.py):
-      - line 1037: ``x.reshape(x.shape[0], h, w, -1)`` passes 4 positional
-        ints, but paddle ``Tensor.reshape`` takes a single shape list.
-      - line 1039: ``n, w, h, c = x.size()`` -- paddle ``Tensor.size`` is an
-        int property (element count), not a callable returning the shape.
-      - lines 1041/1045 ``x.view(...)`` and 1043/1053 ``x.permute(...)`` are
-        PyTorch APIs; paddle uses ``reshape`` / ``transpose``.
-    These make the function raise under paddle, so the numeric tests below are
-    marked ``expectedFailure`` rather than editing production code.  When the
-    port is fixed the reference comparison provides the real value.
+    Runs on a real Paddle + GPU runtime: the ``x.reshape(...)`` / ``x.size()``
+    / ``x.view(...)`` / ``x.permute(...)`` tensor idioms in
+    ``src/paddlefleet/models/multimodal/llava_model.py`` (lines 1037-1053) are
+    accepted by the installed Paddle, so the numeric comparison against the
+    independent reference below provides the real value.
     """
 
-    @unittest.expectedFailure
     def test_pixel_shuffle_version1_matches_reference(self):
         # num_tiles=1, seq_len=16 (sq=4), c=4 -> genuine spatial reshuffle.
         arr = np.arange(1 * 16 * 4, dtype="float32").reshape(1, 16, 4)
@@ -117,7 +111,6 @@ class TestPixelShuffleNumeric(unittest.TestCase):
             np.asarray(out.numpy(), dtype=np.float64), expected, atol=0, rtol=0
         )
 
-    @unittest.expectedFailure
     def test_pixel_shuffle_version2_matches_reference(self):
         arr = np.arange(1 * 16 * 4, dtype="float32").reshape(1, 16, 4)
         expected = _ref_pixel_shuffle(arr, scale_factor=0.5, version=2)
@@ -127,7 +120,6 @@ class TestPixelShuffleNumeric(unittest.TestCase):
             np.asarray(out.numpy(), dtype=np.float64), expected, atol=0, rtol=0
         )
 
-    @unittest.expectedFailure
     def test_pixel_shuffle_multiple_tiles_are_independent(self):
         # Two tiles with disjoint value ranges: tile outputs must not cross-talk.
         arr = np.stack(

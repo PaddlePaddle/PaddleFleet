@@ -233,7 +233,14 @@ class TestFusedStackQuant(unittest.TestCase):
         self.assertIs(fwd_list[0], plain)
         self.assertTrue(fwd_transpose)
         self.assertTrue(fwd_ue8m0)
-        self.assertIs(out, marker)
+        # fused_stack_quant unpacks ``w, scale`` from the collaborator's return
+        # and re-returns them as a fresh ``(w, scale)`` tuple, so the wrapper
+        # object identity differs; assert the two forwarded values are returned
+        # verbatim (element identity) rather than tuple-object identity.
+        self.assertIsInstance(out, tuple)
+        self.assertEqual(len(out), 2)
+        self.assertIs(out[0], marker[0])
+        self.assertIs(out[1], marker[1])
 
 
 @unittest.skipUnless(_RUN, _SKIP_REASON)

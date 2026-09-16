@@ -236,12 +236,25 @@ class TestForwardCPUFallback(_CPUFixture):
         )
 
     def test_output_dtype_follows_input(self):
-        x = paddle.randn([2, 8], dtype="float32").astype("float16")
+        # The output must follow the *input* dtype, not the (float32) scale
+        # dtype: ``_broadcast_scale`` casts the scale to ``x.dtype`` before the
+        # elementwise multiply. paddle's ``swiglu`` op has no CPU float16
+        # kernel (CPU supports only float32/float64), so a float16 input cannot
+        # exercise the pure-paddle CPU fallback at all -- a genuine paddle op
+        # limitation, not a paddlefleet bug. We therefore probe the same
+        # dtype-following contract on CPU with a float64 input against a
+        # float32 scale: an output echoing the scale dtype would come back
+        # float32, so a float64 output proves the scale was cast down to
+        # x.dtype and the input dtype is preserved end to end.
+        x = paddle.randn([2, 8], dtype="float32").astype("float64")
         scale = paddle.to_tensor([2.0], dtype="float32")
         with mock.patch("paddle.is_compiled_with_cuda", return_value=False):
             out = fused_swiglu_scale_forward(x, scale)
-        # scale is cast to x.dtype inside _broadcast_scale, so out is float16.
-        self.assertEqual(out.dtype, paddle.float16)
+        self.assertEqual(out.dtype, paddle.float64)
+        # Values are still the scaled swiglu (the dtype cast is the only
+        # change), anchored against the independent NumPy reference.
+        expected = ref_forward(x.numpy(), scale.numpy())
+        np.testing.assert_allclose(out.numpy(), expected, rtol=1e-6, atol=1e-9)
 
 
 def _autograd_reference_backward(x_np, scale_np, out_grad_np, cv=None):

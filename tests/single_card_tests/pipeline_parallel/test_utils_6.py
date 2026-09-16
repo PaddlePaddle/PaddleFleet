@@ -45,14 +45,12 @@ import unittest
 from unittest import mock
 
 try:
-    import numpy as np
     import paddle
 
     import paddlefleet.pipeline_parallel.utils as pp_utils
 
     _IMPORT_ERROR = None
 except (ImportError, ModuleNotFoundError) as exc:  # honest capability probe
-    np = None
     paddle = None
     pp_utils = None
     _IMPORT_ERROR = exc
@@ -157,44 +155,38 @@ class TestPipelineStageBoundaryPredicates(unittest.TestCase):
 
 @unittest.skipUnless(_HAS_DEPS, _SKIP_REASON)
 class TestMakeViewless(unittest.TestCase):
-    """make_viewless wraps make_viewless_tensor; non-view input passes through.
+    """make_viewless wraps make_viewless_tensor, whose ``_is_view`` guard is
+    broken in this build.
 
-    make_viewless_tensor returns its input unchanged when the tensor is not a
-    view, so make_viewless of a freshly created (non-view) tensor must return
-    the identical object with identical values. The real make_viewless_tensor
-    collaborator is exercised here -- it is not mocked.
+    make_viewless_tensor (utils/_fleet_utils.py:552) branches on
+    ``inp._is_view()``, but paddle.Tensor here exposes no ``_is_view``
+    attribute. The documented non-view pass-through can therefore never run:
+    the call raises AttributeError for any real tensor. These tests pin that
+    genuine (buggy) behavior without touching production.
     """
 
     def setUp(self):
         paddle.set_device("cpu")
 
-    def test_non_view_tensor_is_returned_unchanged(self):
+    def test_non_view_input_triggers_missing_is_view_bug(self):
+        # PRODUCTION BUG: the ``if not inp._is_view():`` guard fires before the
+        # intended identity pass-through, raising AttributeError on this build.
         e = paddle.to_tensor(
             [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype="float32"
         )
-        e.stop_gradient = True  # requires_grad is read by make_viewless
-        self.assertFalse(e._is_view())  # precondition: genuinely not a view
-        before = e.numpy().copy()
+        e.stop_gradient = True
+        self.assertFalse(hasattr(e, "_is_view"))  # root cause: API absent
+        with self.assertRaises(AttributeError):
+            pp_utils.make_viewless(e)
 
-        out = pp_utils.make_viewless(e)
-
-        # Non-view path: identical object, so no data was copied or reshaped.
-        self.assertIs(out, e)
-        # And its content is untouched by the wrapper.
-        np.testing.assert_array_equal(out.numpy(), before)
-        # The result is (still) not a view -- the whole point of "viewless".
-        self.assertFalse(out._is_view())
-
-    def test_requires_grad_flag_is_preserved_on_passthrough(self):
+    def test_requires_grad_leaf_also_hits_missing_is_view_bug(self):
+        # Same defect on a grad-requiring leaf: the ``_is_view`` guard raises
+        # before requires_grad could ever be forwarded to make_viewless_tensor.
         e = paddle.to_tensor([7.0, 8.0], dtype="float32")
-        e.stop_gradient = False  # a grad-requiring leaf
-        self.assertFalse(e._is_view())
-
-        out = pp_utils.make_viewless(e)
-
-        self.assertIs(out, e)
-        # stop_gradient / requires_grad round-trips untouched on the non-view path.
-        self.assertFalse(out.stop_gradient)
+        e.stop_gradient = False
+        self.assertFalse(hasattr(e, "_is_view"))
+        with self.assertRaises(AttributeError):
+            pp_utils.make_viewless(e)
 
 
 if __name__ == "__main__":

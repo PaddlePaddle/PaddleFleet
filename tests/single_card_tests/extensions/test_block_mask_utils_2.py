@@ -31,6 +31,10 @@ is hand-derived; ``find_blocks_topp`` is never used to compute its own expected
 values. Nucleus-selection numeric correctness lives in the GPU kernel and is
 explicitly NOT claimed by these tests.
 
+On this Paddle build the host-side orchestration completes successfully (both
+``x.reshape(-1, n)`` and ``paddle.empty(..., device=x.device)`` are accepted),
+so the tests below are plain positive assertions of the launch contract.
+
 This facet (host launch-config derivation + output shape round-trip) is
 distinct from the geometric block-mask kernels (``_is_block_fully_masked`` /
 ``check_partially_masked_state`` ...) exercised by the sibling files.
@@ -97,20 +101,14 @@ class TestFindBlocksToppLaunchConfig(unittest.TestCase):
     Runs on CPU-only paddle: the GPU Triton kernel is replaced by a spy, so no
     CUDA device is required.
 
-    NOTE (real production bug, block_mask_utils.py:348-350): ``find_blocks_topp``
-    allocates its output with
-        ``paddle.empty(x_reshaped.shape, dtype=paddle.bool, device=x.device)``.
-    ``paddle.empty`` has signature ``paddle.empty(shape, dtype=None, name=None)``
-    and accepts no ``device`` keyword -- every other ``paddle.empty`` call in the
-    ops package (e.g. the sibling ``index_utils.py:66-67``) omits it. The call
-    therefore raises ``TypeError`` at line 348, *before* the (spied) kernel
-    launch is ever reached. The tests below assert the CORRECT orchestration
-    contract and are marked ``@unittest.expectedFailure`` per the "assert
-    correct behavior + xfail" rule for a confirmed production bug; production
-    code is NOT modified. Remove the decorators once line 348 drops ``device=``.
-    The ``find_blocks_topp(...)`` call is the first statement in each test, so
-    the expected failure is caused by the production bug rather than by any
-    later assertion.
+    On this Paddle build ``find_blocks_topp`` completes the host-side
+    orchestration successfully: ``x.reshape(-1, n)`` accepts the varargs form
+    and ``paddle.empty(x_reshaped.shape, dtype=paddle.bool, device=x.device)``
+    is honored (the ``device`` keyword is accepted and a Tensor exposes
+    ``.device``). The tests therefore assert the real orchestration contract
+    directly (positive assertions), with the GPU kernel replaced by a spy so
+    only the CPU-observable launch-config derivation and shape round-trip are
+    claimed.
     """
 
     def setUp(self):
@@ -120,7 +118,6 @@ class TestFindBlocksToppLaunchConfig(unittest.TestCase):
         # avoid all-zero degeneracy.
         paddle.set_device("cpu")
 
-    @unittest.expectedFailure
     def test_4d_input_launch_config_and_shape_roundtrip(self):
         """4D input [2, 3, 5, 8] -> flattened to 30 rows of width 8.
 
@@ -135,7 +132,7 @@ class TestFindBlocksToppLaunchConfig(unittest.TestCase):
 
         spy = _KernelLaunchSpy()
         with mock.patch.object(block_mask_utils, "top_p_kernel", spy):
-            out = find_blocks_topp(x, p=0.7)  # raises at empty() until fixed
+            out = find_blocks_topp(x, p=0.7)
 
         # --- output contract: same shape as input, boolean dtype ---
         self.assertEqual(out.shape, [b, h, m, n])
@@ -157,7 +154,6 @@ class TestFindBlocksToppLaunchConfig(unittest.TestCase):
         self.assertEqual(spy.kwargs["BLOCK_SIZE"], 8)
         self.assertEqual(spy.kwargs["NUM_DIMS"], 3)
 
-    @unittest.expectedFailure
     def test_2d_input_rounds_block_size_up_to_power_of_two(self):
         """2D input [4, 10] with a non power-of-two width.
 
@@ -172,7 +168,7 @@ class TestFindBlocksToppLaunchConfig(unittest.TestCase):
 
         spy = _KernelLaunchSpy()
         with mock.patch.object(block_mask_utils, "top_p_kernel", spy):
-            out = find_blocks_topp(x, p=0.5)  # raises at empty() until fixed
+            out = find_blocks_topp(x, p=0.5)
 
         self.assertEqual(out.shape, [rows, n])
         self.assertEqual(out.dtype, paddle.bool)

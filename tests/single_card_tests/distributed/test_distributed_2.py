@@ -119,8 +119,11 @@ class TestUseMpuProcessGroups(unittest.TestCase):
 
         ``get_data_parallel_group`` returns a different marker depending on
         ``with_context_parallel`` so that the dp / cp_dp split is observable.
-        Returns (markers, recorded_calls) where recorded_calls maps the getter
-        name to its captured kwargs.
+        It is invoked *twice* (once for ``dp`` with_context_parallel=False and
+        once for ``cp_dp`` with_context_parallel=True) and the order is not
+        fixed (``required_pgs`` derives from a set), so every invocation's
+        kwargs are appended to a list rather than overwriting a single slot.
+        Returns (markers, mocks, recorded_calls).
         """
         markers = {name: object() for name in _ALL_FIELDS}
         calls = {}
@@ -128,10 +131,12 @@ class TestUseMpuProcessGroups(unittest.TestCase):
         def _dp_side_effect(
             check_initialized=True, with_context_parallel=False
         ):
-            calls["get_data_parallel_group"] = {
-                "check_initialized": check_initialized,
-                "with_context_parallel": with_context_parallel,
-            }
+            calls.setdefault("get_data_parallel_group", []).append(
+                {
+                    "check_initialized": check_initialized,
+                    "with_context_parallel": with_context_parallel,
+                }
+            )
             return markers["cp_dp"] if with_context_parallel else markers["dp"]
 
         patchers = [
@@ -200,12 +205,20 @@ class TestUseMpuProcessGroups(unittest.TestCase):
 
         _kw = mocks["get_tensor_model_parallel_group"].call_args.kwargs
         self.assertEqual(_kw.get("check_initialized"), False)
-        # cp_dp path additionally requests the context-parallel data group.
-        self.assertEqual(
-            calls["get_data_parallel_group"]["check_initialized"], False
+        # get_data_parallel_group serves both dp (with_context_parallel=False)
+        # and cp_dp (with_context_parallel=True); both are requested and both
+        # must pass check_initialized=False. The call order is not fixed
+        # (required_pgs comes from a set), so assert the full set of recorded
+        # calls rather than the last one -- the previous version overwrote a
+        # single slot and passed or failed depending on iteration order.
+        dp_calls = calls["get_data_parallel_group"]
+        self.assertIn(
+            {"check_initialized": False, "with_context_parallel": False},
+            dp_calls,
         )
-        self.assertEqual(
-            calls["get_data_parallel_group"]["with_context_parallel"], True
+        self.assertIn(
+            {"check_initialized": False, "with_context_parallel": True},
+            dp_calls,
         )
 
     def test_subset_builds_only_requested_fields(self):

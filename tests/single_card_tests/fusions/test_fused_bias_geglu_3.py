@@ -447,18 +447,16 @@ class TestWeightedBiasQuickGeGLUImpl(_CpuBase):
                 paddle.to_tensor(_distinct([16])), None, w
             )
 
-    @unittest.expectedFailure
     def test_impl_valid_input_builds_offset_and_matches_reference(self):
-        """A valid 2D call SHOULD return the weighted-bias quick-GEGLU value.
+        """A valid 2D call returns the weighted-bias quick-GEGLU value.
 
-        It currently cannot: ``weighted_bias_quick_geglu_impl`` builds the
-        linear offset with ``paddle.tensor(linear_offset, dtype=..., device=
-        input.device)`` (fused_bias_geglu.py line 482). ``paddle.tensor`` is a
-        submodule, not a tensor constructor, and ``device=`` is not a valid
-        paddle keyword (paddle uses ``place=``). The call raises before any
-        activation is produced, so the valid path is dead. This is marked
-        ``expectedFailure`` to flag the production defect without editing it;
-        if it ever passes, the bug was fixed and this guard should be updated.
+        ``weighted_bias_quick_geglu_impl`` builds the linear offset with
+        ``paddle.tensor(linear_offset, dtype=..., device=input.device)``
+        (fused_bias_geglu.py line 482). Under the paddlefleet_ops torch-compat
+        layer active in this runtime, ``paddle.tensor`` is a callable factory
+        that accepts the ``device=`` keyword, so the offset tensor is built and
+        the impl produces the correct weighted-bias quick-GEGLU output. The
+        result is checked against an INDEPENDENT NumPy reference.
         """
         y_np = _distinct([4, 6])
         bias_np = _distinct([4, 6]) * 0.3
@@ -470,6 +468,7 @@ class TestWeightedBiasQuickGeGLUImpl(_CpuBase):
             linear_offset=0.5,
         ).numpy()
         expected = _np_quick_geglu(y_np + bias_np, 0.5) * w_np
+        self.assertEqual(list(out.shape), [4, 3])
         np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-6)
 
 

@@ -101,7 +101,7 @@ class ModelParallelCudaManualSeedTest(unittest.TestCase):
           data          = 100
           tensor-model  = 100 + 2718 + 3 = 2821
           expert        = 100 + 1024 + 100*2 + 1 = 1325
-        Swapping ep/etp would yield 1126, and a wrong offset would move 2821,
+        Swapping ep/etp would yield 1226, and a wrong offset would move 2821,
         so the exact pairs pin the arithmetic rather than mere presence.
         """
         events = []
@@ -143,7 +143,7 @@ class ModelParallelCudaManualSeedTest(unittest.TestCase):
         """ep_rank scales by 100 while etp_rank adds 1: swapping them differs.
 
         A second point with ep/etp exchanged (ep=1, etp=2) must yield a
-        different expert seed (100 + 1024 + 100 + 2 = 1126, not 1325), proving
+        different expert seed (100 + 1024 + 100 + 2 = 1226, not 1325), proving
         the 100*ep_rank + etp_rank weighting is really consumed.
         """
         events = []
@@ -165,7 +165,7 @@ class ModelParallelCudaManualSeedTest(unittest.TestCase):
         expert_events = [
             e for e in events if e[:2] == ("add", "expert-parallel-rng")
         ]
-        self.assertEqual(expert_events, [("add", "expert-parallel-rng", 1126)])
+        self.assertEqual(expert_events, [("add", "expert-parallel-rng", 1226)])
 
 
 @unittest.skipUnless(HAS_PADDLE, _SKIP_REASON)

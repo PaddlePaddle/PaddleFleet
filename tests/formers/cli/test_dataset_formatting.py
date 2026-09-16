@@ -33,7 +33,7 @@ package, which requires Paddle; when that dependency is absent the import raises
 
 import unittest
 
-from datasets import Dataset, Value
+from datasets import Dataset, Features, Value
 
 try:
     from paddlefleet.cli.train.sft.dataset_formatting import (
@@ -247,8 +247,20 @@ class TestGetFormattingFuncFromDataset(_FormattingTestBase):
 
     def test_messages_chatml_routes_through_messages_field(self):
         tok = RecordingTokenizer()
+        # Build the dataset with an explicit chatml schema so detection keys off
+        # the documented contract (features == FORMAT_MAPPING["chatml"]) rather
+        # than datasets' type inference, which renders a list-of-struct column as
+        # a Sequence feature that is *not* equal to the plain-list schema the
+        # production table compares against.
         ds = Dataset.from_dict(
-            {"messages": [[{"role": "user", "content": "seed"}]]}
+            {"messages": [[{"role": "user", "content": "seed"}]]},
+            features=Features(
+                {
+                    "messages": [
+                        {"content": Value("string"), "role": Value("string")}
+                    ]
+                }
+            ),
         )
         fn = get_formatting_func_from_dataset(ds, tok)
         self.assertIsNotNone(fn)
@@ -264,7 +276,14 @@ class TestGetFormattingFuncFromDataset(_FormattingTestBase):
     def test_conversations_chatml_routes_through_conversations_field(self):
         tok = RecordingTokenizer()
         ds = Dataset.from_dict(
-            {"conversations": [[{"role": "user", "content": "seed"}]]}
+            {"conversations": [[{"role": "user", "content": "seed"}]]},
+            features=Features(
+                {
+                    "conversations": [
+                        {"content": Value("string"), "role": Value("string")}
+                    ]
+                }
+            ),
         )
         fn = get_formatting_func_from_dataset(ds, tok)
         self.assertIsNotNone(fn)

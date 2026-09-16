@@ -40,6 +40,7 @@ try:
         LayerDesc,  # noqa: F401
         LayerSpec,
         ScheduleChunk,
+        ScheduleNode,
         SharedLayerDesc,
     )
 
@@ -49,6 +50,10 @@ try:
         GPTSublayersSpec,
         build_overlapped_nodes,
         is_vision_merge_key,
+    )
+    from paddlefleet.transformer.transformer_layer import (
+        TransformerLayerNode,
+        TransformerLayerOverlappedScheduleNode,
     )
 
     HAVE_PADDLE = True
@@ -159,25 +164,46 @@ class TestIsVisionMergeKey(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_PADDLE, _SKIP_REASON)
 class TestBuildOverlappedNodes(unittest.TestCase):
-    """build_overlapped_nodes: partition/pairing derived by hand."""
+    """build_overlapped_nodes: partition/pairing derived by hand.
+
+    Non-layer nodes are real ``ScheduleNode`` instances and layer nodes are
+    real ``TransformerLayerNode`` instances (built via ``__new__`` so the heavy
+    layer/config graph is skipped -- only ``.config`` is read downstream).
+    ``ScheduleChunk`` validates that every element is a ScheduleNode/
+    ScheduleChunk, so bare sentinels cannot be used; the real production classes
+    exercise the genuine isinstance-based partition logic.
+    """
+
+    def _plain(self, name):
+        # A ScheduleNode is not a TransformerLayerNode -> treated as pre/post.
+        return ScheduleNode(lambda inputs: inputs, name=name)
+
+    def _layer(self, marker):
+        # Real TransformerLayerNode (a ScheduleNode subclass) without the heavy
+        # __init__; only the .config attribute is consumed by the overlapped
+        # node constructor.
+        node = TransformerLayerNode.__new__(TransformerLayerNode)
+        node.config = marker
+        return node
 
     def test_no_overlap_partitions_pre_and_post(self):
         # overlap = min(fwd_transformer=1, bwd_transformer=0) = 0, so the single
         # forward transformer node and everything after it fall into post.
-        with mock.patch.object(gpt_model_mod, "TransformerLayerNode", _RecTL):
-            n0, t1, n2 = object(), _RecTL(), object()
-            m0, m1 = object(), object()
-            fwd = ScheduleChunk([n0, t1, n2])
-            bwd = ScheduleChunk([m0, m1])
-            (
-                fwd_pre,
-                bwd_pre,
-                overlap,
-                fwd_post,
-                bwd_post,
-            ) = build_overlapped_nodes(fwd, bwd)
+        n0, t1, n2 = self._plain("n0"), self._layer("cfg_t1"), self._plain("n2")
+        m0, m1 = self._plain("m0"), self._plain("m1")
+        fwd = ScheduleChunk([n0, t1, n2])
+        bwd = ScheduleChunk([m0, m1])
+        (
+            fwd_pre,
+            bwd_pre,
+            overlap,
+            fwd_post,
+            bwd_post,
+        ) = build_overlapped_nodes(fwd, bwd)
         self.assertEqual(fwd_pre.nodes, [n0])
         self.assertEqual(fwd_post.nodes, [t1, n2])
+        # backward has no layer node -> both plain nodes stay in pre, and the
+        # reverse/re-reverse walk preserves their original order.
         self.assertEqual(bwd_pre.nodes, [m0, m1])
         self.assertEqual(bwd_post.nodes, [])
         self.assertEqual(overlap.nodes, [])
@@ -185,36 +211,32 @@ class TestBuildOverlappedNodes(unittest.TestCase):
     def test_overlap_pairs_forward_with_reversed_backward(self):
         # fwd=[t0,t1,t2] bwd=[b0,b1]; overlap=min(3,2)=2. Forward keeps order,
         # backward is consumed in reverse -> pairs (t0,b1),(t1,b0); t2 -> post.
-        class _Pair:
-            def __init__(self, f, b):
-                self.f, self.b = f, b
-
-        with (
-            mock.patch.object(gpt_model_mod, "TransformerLayerNode", _RecTL),
-            mock.patch.object(
-                gpt_model_mod, "TransformerLayerOverlappedScheduleNode", _Pair
-            ),
-        ):
-            t0, t1, t2 = _RecTL(), _RecTL(), _RecTL()
-            b0, b1 = _RecTL(), _RecTL()
-            (
-                fwd_pre,
-                bwd_pre,
-                overlap,
-                fwd_post,
-                bwd_post,
-            ) = build_overlapped_nodes(
-                ScheduleChunk([t0, t1, t2]), ScheduleChunk([b0, b1])
-            )
+        t0, t1, t2 = (
+            self._layer("cfg_f0"),
+            self._layer("cfg_f1"),
+            self._layer("cfg_f2"),
+        )
+        b0, b1 = self._layer("cfg_b0"), self._layer("cfg_b1")
+        (
+            fwd_pre,
+            bwd_pre,
+            overlap,
+            fwd_post,
+            bwd_post,
+        ) = build_overlapped_nodes(
+            ScheduleChunk([t0, t1, t2]), ScheduleChunk([b0, b1])
+        )
         self.assertEqual(fwd_pre.nodes, [])
         self.assertEqual(fwd_post.nodes, [t2])
         self.assertEqual(bwd_pre.nodes, [])
         self.assertEqual(bwd_post.nodes, [])
         self.assertEqual(len(overlap.nodes), 2)
-        self.assertIs(overlap.nodes[0].f, t0)
-        self.assertIs(overlap.nodes[0].b, b1)
-        self.assertIs(overlap.nodes[1].f, t1)
-        self.assertIs(overlap.nodes[1].b, b0)
+        for pair in overlap.nodes:
+            self.assertIsInstance(pair, TransformerLayerOverlappedScheduleNode)
+        self.assertIs(overlap.nodes[0].forward_node, t0)
+        self.assertIs(overlap.nodes[0].backward_node, b1)
+        self.assertIs(overlap.nodes[1].forward_node, t1)
+        self.assertIs(overlap.nodes[1].backward_node, b0)
 
 
 @unittest.skipUnless(HAVE_PADDLE, _SKIP_REASON)

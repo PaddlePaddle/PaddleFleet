@@ -67,11 +67,15 @@ dequantization + ``paddle._C_ops.put_along_axis_grad``) require a GPU build and
 belong to the single-/multi-card MoE suites; no CPU stand-in is presented as
 their numeric proof.
 
-These tests run on CPU. Importing the production module pulls the
-``paddlefleet`` package (and its ``deepseek_v3_pretrain`` ``__init__`` ->
-``workflow``), which requires Paddle; when that dependency is absent the import
-raises ``ImportError`` and every test skips (recorded, not silently passed). No
-production code is modified or monkeypatched permanently by this file.
+These tests run on CPU, except the ``topk_to_permuted_indices`` cases (and the
+``PermuteNode`` forward/backward that build on it): that helper uses
+``paddle.tensor.search._restrict_nonzero``, whose kernel is GPU-only, so those
+specific cases require a real GPU and are skipped when CUDA is not compiled in.
+Importing the production module pulls the ``paddlefleet`` package (and its
+``deepseek_v3_pretrain`` ``__init__`` -> ``workflow``), which requires Paddle;
+when that dependency is absent the import raises ``ImportError`` and every test
+skips (recorded, not silently passed). No production code is modified or
+monkeypatched permanently by this file.
 """
 
 import types
@@ -121,6 +125,26 @@ class _MoeUtilsTestBase(unittest.TestCase):
                 f"failed (dependency unavailable): {_IMPORT_ERROR!r}"
             )
 
+    def _use_gpu_or_skip(self):
+        """Run the current test on GPU (skip when CUDA is not compiled in).
+
+        ``topk_to_permuted_indices`` builds its permutation via
+        ``paddle.tensor.search._restrict_nonzero``, whose kernel is registered
+        for the GPU backend only; on a CPU place it raises "kernel ... not
+        registered. Selected wrong Backend CPU". These specific cases therefore
+        require a real GPU. No production code is changed -- the op is
+        legitimately GPU-only, so the test states that requirement instead of
+        forcing an unsupported CPU run.
+        """
+        if not paddle.is_compiled_with_cuda():
+            self.skipTest(
+                "topk_to_permuted_indices uses the GPU-only kernel "
+                "_restrict_nonzero; this build has no CUDA support"
+            )
+        orig_device = paddle.get_device()
+        paddle.set_device("gpu")
+        self.addCleanup(paddle.set_device, orig_device)
+
 
 class TestTopkToPermutedIndices(_MoeUtilsTestBase):
     """Grouping a [num_tokens, topk] routing map by expert id."""
@@ -131,6 +155,7 @@ class TestTopkToPermutedIndices(_MoeUtilsTestBase):
         # Expert 0 sits at flat positions {0, 4}; expert 1 at {1, 2};
         # expert 2 at {3, 5, 6}; expert 3 at {7}. _restrict_nonzero yields
         # them in ascending order, concatenated expert-by-expert.
+        self._use_gpu_or_skip()
         dispatched = paddle.to_tensor(
             [[0, 1], [1, 2], [0, 2], [2, 3]], dtype="int64"
         )
@@ -146,6 +171,7 @@ class TestTopkToPermutedIndices(_MoeUtilsTestBase):
     def test_topk1_is_pure_regrouping_of_tokens(self):
         # With topk == 1 the flat position *is* the token id, so token and prob
         # indices coincide and the result is the tokens reordered by expert.
+        self._use_gpu_or_skip()
         dispatched = paddle.to_tensor([[2], [0], [1], [0]], dtype="int64")
         # Expert 0 at flat positions {1, 3}; expert 1 at {2}; expert 2 at {0}.
         num_tokens_per_expert = [2, 1, 1]
@@ -634,6 +660,7 @@ class TestPermuteNode(_MoeUtilsTestBase):
         self.assertIsNone(node.prob_permuted_indices)
 
     def test_forward_permutes_tokens_and_scale_and_records_shape(self):
+        self._use_gpu_or_skip()
         disp = _make_dispatcher([2, 2, 3, 1], router_topk=2)
         node = MOE.PermuteNode(disp)
         hidden = paddle.arange(8, dtype="float32").reshape([4, 2])
@@ -656,6 +683,7 @@ class TestPermuteNode(_MoeUtilsTestBase):
         )
 
     def test_backward_is_weighted_scatter_add_and_resets(self):
+        self._use_gpu_or_skip()
         disp = _make_dispatcher([2, 2, 3, 1], router_topk=2)
         node = MOE.PermuteNode(disp)
         hidden = paddle.arange(8, dtype="float32").reshape([4, 2])

@@ -35,20 +35,15 @@ its kernel) to compute its own expected values.
 
 Import guard: ``paddlefleet_ops`` imports ``paddle`` (and Triton) at import
 time and this host may lack them, so the whole suite skips honestly when the
-real production entry point cannot be imported.
+real production entry point cannot be imported. The ``top_p_kernel`` bitonic
+argsort runs only on a real GPU, so the suite also skips when paddle is not
+compiled with CUDA.
 
-Known production bug (asserted as *expected failure*, production left
-untouched): ``find_blocks_topp`` allocates its output with
-``paddle.empty(x_reshaped.shape, dtype=paddle.bool, device=x.device)``
-(``block_mask_utils.py:348-349``). Paddle Tensors have no ``.device``
-attribute (the canonical accessor is ``.place``) and ``paddle.empty`` accepts
-no ``device`` keyword, so this line raises before the kernel is ever launched
--- for *any* input on *any* device. Every other ``paddle.empty`` call in the
-package omits ``device=`` and uses ``.place`` elsewhere, confirming this is a
-stray PyTorch-ism. The tests therefore assert the *correct* nucleus behaviour
-and are marked ``@unittest.expectedFailure``; when the bug is fixed (and run on
-a GPU host) they should turn into unexpected successes, signalling that the
-decorators can be removed.
+On this Paddle build (real Hopper GPU) ``find_blocks_topp`` completes end to
+end: ``x.reshape(-1, n)`` accepts the varargs form and
+``paddle.empty(x_reshaped.shape, dtype=paddle.bool, device=x.device)`` is
+honored. The tests below therefore assert the *correct* nucleus behaviour as
+plain positive checks against hand-derived masks.
 """
 
 import unittest
@@ -83,12 +78,19 @@ class TestFindBlocksToppNucleusMask(unittest.TestCase):
     larger elements < row_sum * p, then scatter the kept flags back to the
     original column order.
 
-    All cases currently fail on the ``device=x.device`` allocation bug at
-    ``block_mask_utils.py:349`` before the kernel runs; hence
-    ``@unittest.expectedFailure``. The assertions describe the intended,
-    correct behaviour so they become real numeric checks once the bug is fixed
-    and the file is run on a GPU host.
+    The GPU Triton kernel (bitonic argsort + scatter) needs a real CUDA
+    device; the class is skipped honestly when paddle is not compiled with
+    CUDA. The assertions are real numeric checks of the intended, correct
+    behaviour.
     """
+
+    def setUp(self):
+        if not paddle.is_compiled_with_cuda():
+            self.skipTest(
+                "top_p_kernel is a GPU-only Triton kernel; requires a "
+                "CUDA-compiled paddle build with a real GPU"
+            )
+        paddle.set_device("gpu")
 
     def _mask_of(self, data, p):
         """Call the real production entry point and return a bool ndarray."""
@@ -97,7 +99,6 @@ class TestFindBlocksToppNucleusMask(unittest.TestCase):
         self.assertEqual(out.dtype, paddle.bool)
         return np.asarray(out.numpy(), dtype=bool)
 
-    @unittest.expectedFailure  # block_mask_utils.py:349 device=x.device
     def test_basic_descending_cut(self):
         # row [0.4,0.3,0.2,0.1], sum 1.0, cutoff 0.8.
         # exclusive-prefix on descending order: [0.0,0.4,0.7,0.9]; <0.8 keeps
@@ -105,7 +106,6 @@ class TestFindBlocksToppNucleusMask(unittest.TestCase):
         mask = self._mask_of([[0.4, 0.3, 0.2, 0.1]], 0.8)
         np.testing.assert_array_equal(mask, [[True, True, True, False]])
 
-    @unittest.expectedFailure  # block_mask_utils.py:349 device=x.device
     def test_unordered_row_sort_and_scatter(self):
         # row [0.1,0.4,0.2,0.3], sum 1.0, cutoff 0.7.
         # descending values 0.4(col1),0.3(col3),0.2(col2),0.1(col0);
@@ -115,7 +115,6 @@ class TestFindBlocksToppNucleusMask(unittest.TestCase):
         mask = self._mask_of([[0.1, 0.4, 0.2, 0.3]], 0.7)
         np.testing.assert_array_equal(mask, [[False, True, False, True]])
 
-    @unittest.expectedFailure  # block_mask_utils.py:349 device=x.device
     def test_cutoff_scales_with_unnormalised_row_sum(self):
         # row [4,3,2,1], sum 10.0, cutoff = 10*0.8 = 8.0.
         # exclusive-prefix [0,4,7,9]; <8 keeps first three -> [T,T,T,F].
@@ -125,19 +124,16 @@ class TestFindBlocksToppNucleusMask(unittest.TestCase):
         mask = self._mask_of([[4.0, 3.0, 2.0, 1.0]], 0.8)
         np.testing.assert_array_equal(mask, [[True, True, True, False]])
 
-    @unittest.expectedFailure  # block_mask_utils.py:349 device=x.device
     def test_zero_row_masks_everything(self):
         # row_sum == 0.0 hits the early-return branch: all-False output.
         mask = self._mask_of([[0.0, 0.0, 0.0, 0.0]], 0.5)
         np.testing.assert_array_equal(mask, [[False, False, False, False]])
 
-    @unittest.expectedFailure  # block_mask_utils.py:349 device=x.device
     def test_p_one_keeps_all(self):
         # cutoff = sum; every exclusive-prefix (max 0.9) < 1.0 -> all kept.
         mask = self._mask_of([[0.4, 0.3, 0.2, 0.1]], 1.0)
         np.testing.assert_array_equal(mask, [[True, True, True, True]])
 
-    @unittest.expectedFailure  # block_mask_utils.py:349 device=x.device
     def test_p_zero_keeps_nothing(self):
         # cutoff = 0; even the top element has exclusive-prefix 0, and 0 < 0
         # is False, so *nothing* is kept. This implementation offers no
@@ -145,7 +141,6 @@ class TestFindBlocksToppNucleusMask(unittest.TestCase):
         mask = self._mask_of([[0.4, 0.3, 0.2, 0.1]], 0.0)
         np.testing.assert_array_equal(mask, [[False, False, False, False]])
 
-    @unittest.expectedFailure  # block_mask_utils.py:349 device=x.device
     def test_non_power_of_two_width_padding(self):
         # n=3 -> BLOCK_SIZE padded to 4 with a -inf sort sentinel that must not
         # leak into the mask. row [0.5,0.3,0.2], sum 1.0, cutoff 0.7.
@@ -153,7 +148,6 @@ class TestFindBlocksToppNucleusMask(unittest.TestCase):
         mask = self._mask_of([[0.5, 0.3, 0.2]], 0.7)
         np.testing.assert_array_equal(mask, [[True, True, False]])
 
-    @unittest.expectedFailure  # block_mask_utils.py:349 device=x.device
     def test_multidim_rows_are_independent_and_shape_preserved(self):
         # Shape [1,2,1,4]: two independent rows share one p=0.7.
         #   row A [0.4,0.3,0.2,0.1]: exclusive [0,0.4,0.7,0.9] -> [T,T,F,F]

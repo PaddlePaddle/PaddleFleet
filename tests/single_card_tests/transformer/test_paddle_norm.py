@@ -109,24 +109,41 @@ class TestRMSNorm(unittest.TestCase):
         np.testing.assert_allclose(out.numpy(), ref, rtol=1e-4, atol=1e-5)
 
     def test_eps_is_consumed(self):
-        # Same input/weight, two very different eps must yield different output;
-        # each must match its own independent reference.
+        # Same input/weight, two different eps must yield different output;
+        # each must match its own independent reference. The fused rms_norm
+        # CUDA op only accepts eps in [0, 1e-3], so we use a small-magnitude
+        # input (making the eps term dominate the denominator) with an in-range
+        # large eps to keep the effect materially visible.
         config = _make_config()
-        x_np = _nonuniform([2, config.hidden_size])
+        x_np = _nonuniform([2, config.hidden_size]) * 0.03
         weight_np = np.ones([config.hidden_size], dtype=np.float64)
 
-        small = RMSNorm(config, norm_eps=1e-5)
-        big = RMSNorm(config, norm_eps=0.5)
+        small_eps, big_eps = 1e-5, 5e-4
+        small = RMSNorm(config, norm_eps=small_eps)
+        big = RMSNorm(config, norm_eps=big_eps)
         out_small = small(paddle.to_tensor(x_np, dtype="float32")).numpy()
         out_big = big(paddle.to_tensor(x_np, dtype="float32")).numpy()
 
         np.testing.assert_allclose(
-            out_small, _rmsnorm_ref(x_np, weight_np, 1e-5), rtol=1e-4, atol=1e-5
+            out_small,
+            _rmsnorm_ref(x_np, weight_np, small_eps),
+            rtol=1e-4,
+            atol=1e-5,
         )
         np.testing.assert_allclose(
-            out_big, _rmsnorm_ref(x_np, weight_np, 0.5), rtol=1e-4, atol=1e-5
+            out_big,
+            _rmsnorm_ref(x_np, weight_np, big_eps),
+            rtol=1e-4,
+            atol=1e-5,
         )
         self.assertGreater(np.abs(out_small - out_big).max(), 1e-2)
+
+        # eps is forwarded to the fused op (not silently dropped): the op
+        # enforces eps <= 1e-3, so an out-of-range eps must be rejected.
+        with self.assertRaises(ValueError):
+            RMSNorm(config, norm_eps=0.5)(
+                paddle.to_tensor(x_np, dtype="float32")
+            )
 
     def test_forward_backward_matches_independent_autograd(self):
         # Drive a real backward and compare dx, dw against an independent paddle

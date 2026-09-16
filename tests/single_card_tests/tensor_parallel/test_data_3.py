@@ -110,16 +110,10 @@ class TestCheckDataTypes(unittest.TestCase):
 class TestBuildKeySizeNumelDictionaries(unittest.TestCase):
     """Pack/unpack round trip of ``_build_key_size_numel_dictionaries``."""
 
-    @unittest.expectedFailure
     def test_round_trip_recovers_sizes_and_numels(self):
-        # PRODUCTION BUG (not editing production code):
-        # data.py line ~51 calls ``paddle.tensor(sizes, dtype=paddle.int32)``.
-        # ``paddle.tensor`` is a module, not a constructor -- the correct API
-        # is ``paddle.to_tensor``. Calling a module raises
-        # ``TypeError: 'module' object is not callable`` before any unpacking
-        # runs, so this function currently cannot execute at all. The asserts
-        # below encode the CORRECT expected behavior for when the bug is fixed;
-        # until then the test is an expected failure.
+        # Rank-0 packs the per-key shapes into the flat size buffer, the mocked
+        # no-op broadcast leaves them intact for the single process, and the
+        # unpack loop reconstructs exact per-key sizes / numels / running total.
         from unittest import mock
 
         group = _single_rank_group()

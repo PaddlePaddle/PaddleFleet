@@ -74,13 +74,19 @@ def _make_language_loss():
     """Build a ``LanguageLoss`` whose ``forward_impl`` runs the real CE path.
 
     ``__new__`` skips ``FleetLayer.__init__`` (which needs the distributed
-    runtime); only the plain scaffold attributes ``forward_impl`` reads are
-    populated, and ``loss_func`` is a *real* ``CrossEntropyLoss``. No test
-    asserts these scaffold values — they exist solely so the production
-    method executes; correctness is judged by comparing its numeric output
-    to an independent NumPy reference.
+    runtime), but the base ``paddle.nn.Layer`` bookkeeping dicts still must be
+    initialized so that assigning a sublayer (``loss_func``) is legal; only the
+    plain scaffold attributes ``forward_impl`` reads are populated, and
+    ``loss_func`` is a *real* ``CrossEntropyLoss``. No test asserts these
+    scaffold values — they exist solely so the production method executes;
+    correctness is judged by comparing its numeric output to an independent
+    NumPy reference.
     """
     layer = LanguageLoss.__new__(LanguageLoss)
+    # Set up the base Layer machinery (_parameters/_buffers/_sub_layers) so that
+    # assigning the CrossEntropyLoss sublayer below does not raise
+    # "super().__init__() should be called first".
+    paddle.nn.Layer.__init__(layer)
     layer.config = SimpleNamespace(
         gpt_model_use_experimental_version=False,
         sequence_parallel=False,

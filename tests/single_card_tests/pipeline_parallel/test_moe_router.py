@@ -28,8 +28,10 @@ Covered (all runnable on CPU, no collectives, no ``world_size`` faking):
     backward against an independent numpy Jacobian-vector reference.
   * ``FusedGateDetachMatmul`` - the (non-hf, non-accuracy) fused gate matmul
     forward ``x @ w.T`` AND backward (both ``x`` and ``w`` gradients).
-  * ``StandardMoERouter._probs_drop_policy`` - a genuine production defect is
-    documented via ``@unittest.expectedFailure`` (see that test).
+  * ``StandardMoERouter._probs_drop_policy`` - per-expert top-``capacity`` token
+    selection: for each expert only its highest-scoring tokens survive, and any
+    token that was not originally selected (score 0) is zeroed (checked against
+    an independent numpy reference).
 
 The pure math methods are invoked as real *unbound* methods with a minimal
 stand-in ``self`` that only carries the data attributes they read
@@ -360,22 +362,17 @@ class TestFusedGateDetachMatmul(unittest.TestCase):
 
 
 @unittest.skipUnless(_HAS_DEPS, _SKIP_REASON)
-class TestProbsDropPolicyKnownBug(unittest.TestCase):
-    """``_probs_drop_policy`` is currently broken and cannot run on any paddle
-    build: it calls ``paddle.topk(..., dim=0)`` (paddle uses ``axis``, not
-    ``dim``) and ``paddle.zeros(num_tokens, num_experts, dtype=paddle.bool)``
-    (paddle.zeros takes a single ``shape`` arg, so ``num_experts`` collides with
-    the keyword ``dtype``). Either raises ``TypeError`` before any masking runs.
-
-    This test asserts the *intended* per-expert top-``capacity`` behavior and is
-    marked ``expectedFailure`` so the defect is recorded without touching
-    production code. When the two API calls are fixed, remove the decorator.
+class TestProbsDropPolicy(unittest.TestCase):
+    """``_probs_drop_policy`` enforces per-expert capacity: for each expert
+    (column) it keeps only the ``capacity`` highest-scoring tokens (top-k over
+    the token axis) and then zeroes out any token that was not originally
+    selected (score 0). The intended per-expert top-``capacity`` behavior is
+    verified against an independent numpy reference.
     """
 
     def setUp(self):
         paddle.set_device("cpu")
 
-    @unittest.expectedFailure
     def test_keeps_top_capacity_tokens_per_expert(self):
         # Already-gated scores (zeros for non-selected). capacity=1 -> each
         # expert keeps only its single highest-scoring token.

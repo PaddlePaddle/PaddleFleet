@@ -834,8 +834,11 @@ class TestGatedDeltaNetPaddingMask(unittest.TestCase):
         )
 
     def test_startend_row_indices_derives_validity(self):
-        # indices come from [:, 0, :, 0]; valid iff index > position.
-        idx = paddle.to_tensor([2, 2, 4, 4], dtype="int32").reshape(
+        # indices come from [:, 0, :, 0]; valid iff index > position. A constant
+        # boundary of 2 makes positions 0,1 valid (2>0, 2>1) and positions 2,3
+        # padding (2>2, 2>3 both false) -> [1,1,0,0]. A partially-invalid mask
+        # is required so the all-valid ``None`` fast path is not taken.
+        idx = paddle.to_tensor([2, 2, 2, 2], dtype="int32").reshape(
             [1, 1, 4, 1]
         )
         out = self.gdn._build_padding_mask(None, idx, 1, 4)

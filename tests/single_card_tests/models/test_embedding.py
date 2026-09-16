@@ -252,8 +252,13 @@ class TestLearnable2DInterpPosEmbDivided(unittest.TestCase):
         # The two frames must differ by exactly the time-weight delta, proving
         # per-frame addition (not a duplicated single frame).
         frame0, frame1 = out[:n], out[n:]
+        # Each of the n spatial rows must shift by the same time-weight delta,
+        # so broadcast the [dim] delta across all n rows for an exact compare.
         np.testing.assert_allclose(
-            frame1 - frame0, tw[1, 0, :] - tw[0, 0, :], rtol=1e-4, atol=1e-4
+            frame1 - frame0,
+            np.broadcast_to(tw[1, 0, :] - tw[0, 0, :], (n, dim)),
+            rtol=1e-4,
+            atol=1e-4,
         )
 
     def test_forward_resize_branch_uses_requested_grid(self):

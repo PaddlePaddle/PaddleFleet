@@ -45,9 +45,19 @@ import unittest
 try:
     import paddle
 
+    # Import at module load, BEFORE any ``setUp`` pins the device to CPU. On a
+    # CUDA-compiled build the first ``paddlefleet`` import pulls in
+    # ``paddlefleet_ops``, whose package init calls ``get_device_capability()``
+    # against the current device -- which must be a GPU. The process default
+    # device is the GPU there, so importing first keeps that query valid.
+    from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
+    from paddlefleet.transformer.enums import AttnMaskType
+
     _PADDLE_IMPORT_ERROR = None
 except ImportError as exc:  # honest: paddle genuinely absent, not swallowed
     paddle = None
+    FusedScaleMaskSoftmax = None
+    AttnMaskType = None
     _PADDLE_IMPORT_ERROR = exc
 
 
@@ -65,16 +75,12 @@ class TestFusedScaleMaskSoftmaxInit(unittest.TestCase):
 
     def setUp(self):
         # __init__ creates no tensors, but pin CPU for honesty about the
-        # no-card scope and restore the prior device afterwards.
+        # no-card scope and restore the prior device afterwards. The
+        # paddlefleet import happens at module load (above), so pinning CPU
+        # here does not break the CUDA-build capability query.
         self._orig_device = paddle.get_device()
         self.addCleanup(paddle.set_device, self._orig_device)
         paddle.set_device("cpu")
-
-        # Import here (not at module top) so that a genuinely missing
-        # paddlefleet surfaces as a real error rather than being masked, and
-        # so the paddle-dependent module import only runs when not skipped.
-        from paddlefleet.fusions.fused_softmax import FusedScaleMaskSoftmax
-        from paddlefleet.transformer.enums import AttnMaskType
 
         self.FusedScaleMaskSoftmax = FusedScaleMaskSoftmax
         self.AttnMaskType = AttnMaskType

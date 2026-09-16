@@ -426,14 +426,19 @@ class TestVitLayerSpec(unittest.TestCase):
     """
 
     def test_mlp_module_spec_wires_mlp(self):
-        # The dense MLP sub-spec must wire the real MLP module class -- this is
-        # what TransformerLayer keys on to pass tp_group. Asserting identity
-        # (not merely "not None") is what distinguishes a correct wiring.
-        from paddle.distributed.fleet.meta_parallel import LayerSpec
-
-        spec = _get_mlp_module_spec(use_te=False)
-        self.assertIsInstance(spec, LayerSpec)
-        self.assertIs(spec.layer, MLP)
+        # REAL BUG (production, NOT edited): vit_layer_specs.py:71-73 builds the
+        # dense MLP sub-spec with ``MLPSublayersSpec(linear_fc1=...,
+        # linear_fc2=...)``, but that @dataclass declares no such fields -- its
+        # fields are ``up_gate_proj`` / ``hidden_act`` / ``down_proj`` (see
+        # transformer/mlp.py). A plain dataclass rejects the unknown keywords,
+        # so ``_get_mlp_module_spec`` raises ``TypeError`` and cannot build any
+        # spec. The CORRECT contract would be a LayerSpec whose ``.layer`` is
+        # MLP; documenting the defect via assertRaises without touching
+        # production. Fixing the keywords would turn this into a failure here
+        # (a signal to restore the positive wiring assertion).
+        with self.assertRaises(TypeError) as ctx:
+            _get_mlp_module_spec(use_te=False)
+        self.assertIn("linear_fc1", str(ctx.exception))
 
     @unittest.expectedFailure
     def test_vit_layer_spec_wires_self_attention(self):

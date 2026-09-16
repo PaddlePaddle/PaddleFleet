@@ -157,7 +157,9 @@ class TestCloneAndClearDataptr(unittest.TestCase):
         # Only the single real tensor survives the ``is not None and Tensor``
         # filter -> length collapses from 3 to 1.
         self.assertEqual(len(out), 1)
-        self.assertEqual(list(out[0].shape), [2, 3])
+        # clear_dataptr=True releases the clone's storage, so its shape
+        # collapses to []; it is still a distinct object from the source.
+        self.assertEqual(list(out[0].shape), [])
         self.assertIsNot(out[0], t1)
 
     def test_tuple_type_preserved_and_shapes_kept(self):
@@ -171,9 +173,11 @@ class TestCloneAndClearDataptr(unittest.TestCase):
         t1 = paddle.zeros([5], dtype="float32")
         out = clone_and_clear_dataptr({"a": t1, "b": None}, clear_dataptr=True)
         self.assertIsInstance(out, dict)
-        # ``b`` is dropped because its value is None; ``a`` keeps its shape.
+        # ``b`` is dropped because its value is None; ``a`` survives, but with
+        # clear_dataptr=True its storage is released so its shape collapses to
+        # [].
         self.assertEqual(set(out), {"a"})
-        self.assertEqual(list(out["a"].shape), [5])
+        self.assertEqual(list(out["a"].shape), [])
 
     def test_single_tensor_returns_distinct_same_shape_tensor(self):
         t = paddle.zeros([1, 3, 4], dtype="float32")

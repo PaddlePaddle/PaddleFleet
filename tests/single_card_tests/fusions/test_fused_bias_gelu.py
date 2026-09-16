@@ -35,6 +35,18 @@ import numpy as np
 try:
     import paddle
 
+    # Import at module load, BEFORE any ``setUp`` pins the device to CPU. On a
+    # CUDA-compiled build the ``paddlefleet_ops`` package init (pulled in by the
+    # first ``paddlefleet`` import) calls ``get_device_capability()`` against the
+    # current device, which must be a GPU; the process default device is the GPU
+    # there, so importing first keeps that query valid. The actual numerics still
+    # run on CPU in float64 because ``setUp`` pins CPU afterwards.
+    from paddlefleet.fusions.fused_bias_gelu import (
+        GeLUFunction,
+        bias_gelu,
+        bias_gelu_back,
+    )
+
     _PADDLE_IMPORT_ERROR = None
 except ImportError as exc:  # honest: paddle genuinely absent, not a swallow
     paddle = None
@@ -85,7 +97,6 @@ class TestFusedBiasGelu(unittest.TestCase):
         Uses a per-column-distinguishable bias broadcast over two rows so a
         dropped/ignored/mis-broadcast bias would change the result.
         """
-        from paddlefleet.fusions.fused_bias_gelu import bias_gelu
 
         bias_np = np.array([0.5, -1.0, 2.0], dtype=np.float64)
         y_np = np.array([[1.0, -2.0, 0.5], [-0.5, 3.0, -1.5]], dtype=np.float64)
@@ -108,7 +119,6 @@ class TestFusedBiasGelu(unittest.TestCase):
           GELU(1)  = 0.5*(1+tanh(0.8335620)) ~= 0.8411920
           GELU(-1) = -0.5*(1-tanh(0.8335620)) ~= -0.1588080
         """
-        from paddlefleet.fusions.fused_bias_gelu import bias_gelu
 
         bias = paddle.to_tensor([0.3, 0.4, -0.4], dtype="float64")
         y = paddle.to_tensor([-0.3, 0.6, -0.6], dtype="float64")  # x=[0,1,-1]
@@ -125,7 +135,6 @@ class TestFusedBiasGelu(unittest.TestCase):
         bias_gelu(bias, input)) with a broadcast bias and distinguishable
         inputs, compared to the independent reference.
         """
-        from paddlefleet.fusions.fused_bias_gelu import GeLUFunction
 
         inp_np = np.array(
             [[0.25, -0.75, 1.5], [2.0, -1.25, 0.1]], dtype=np.float64
@@ -149,7 +158,6 @@ class TestFusedBiasGelu(unittest.TestCase):
         diverge from autodiff of the independent forward. Matching shapes are
         used so the returned (tmp, tmp) map cleanly onto both inputs.
         """
-        from paddlefleet.fusions.fused_bias_gelu import GeLUFunction
 
         inp_np = np.array(
             [[0.25, -0.75, 1.5], [2.0, -1.25, 0.1]], dtype=np.float64
@@ -208,7 +216,6 @@ class TestFusedBiasGelu(unittest.TestCase):
         of the independent forward, with a non-uniform upstream g and
         distinguishable bias/y.
         """
-        from paddlefleet.fusions.fused_bias_gelu import bias_gelu_back
 
         g_np = np.array([[1.0, -2.0, 0.5], [0.3, -0.7, 1.25]], dtype=np.float64)
         bias_np = np.array(
