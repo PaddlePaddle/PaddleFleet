@@ -14,7 +14,8 @@
 
 # Fleet CI accuracy jobs use docker --network host. A hardcoded
 # MASTER_PORT (29500) can already be taken by another job on the
-# same runner (EADDRINUSE). Bind an ephemeral localhost port instead.
+# same runner (EADDRINUSE). Check all IPv4 addresses, like TCPStore;
+# a port free on localhost can still be occupied on another interface.
 _py="python3"
 if command -v python >/dev/null 2>&1; then
     _py="python"
@@ -23,7 +24,7 @@ MASTER_PORT="$("${_py}" - <<'PY'
 import socket
 
 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-    sock.bind(("127.0.0.1", 0))
+    sock.bind(("0.0.0.0", 0))
     print(sock.getsockname()[1])
 PY
 )"
