@@ -4809,6 +4809,10 @@ def save_full_param(
     # memory, so resident pinned memory is bounded by pinned_param_pool_capacity tensors
     # instead of a whole shard.
     pinned_param_pool_capacity = 4
+    # Tensors larger than this bypass the pinned pool and use a synchronous
+    # copy, so a single huge param (e.g. a fused MoE expert weight) never
+    # allocates an equally huge pinned buffer.
+    sync_copy_threshold_bytes = 1 << 30  # 1 GiB
     use_async = paddle.get_device().startswith("gpu")
     async_loader = create_async_load() if use_async else None
 
@@ -4875,7 +4879,7 @@ def save_full_param(
                 > max_shard_size_bytes
             ):
                 _save_current_shard()
-            if not use_async:
+            if not use_async or param_size_bytes > sync_copy_threshold_bytes:
                 current_shard_state_dict[param_key] = param.cpu()
             else:
                 # Async D2H into a private pinned buffer; keep at most
