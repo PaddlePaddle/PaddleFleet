@@ -11,6 +11,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Real multi-card behaviour tests for ``transformer.moe.moe_utils``.
+
+Topology (Pattern D, matching the module fixture the tests target): TP=4,
+sharding=2, EP=1 -> world_size 8. The tensor model-parallel group therefore
+has 4 ranks and drives the real group collectives (``all_gather_group`` /
+``reduce_scatter_group``, their PyLayer wrappers and ``_AllToAll``) with
+distinguishable per-rank content, so a wrong rank order, a dropped rank, a
+wrong reduce op or a reversed all-to-all direction changes the exact result.
+The local permute / unpermute maths and the aux-loss trick are checked
+numerically against independent hand derivations.
+
+Run with:
+  python -m paddle.distributed.launch --gpus=0,1,2,3,4,5,6,7 \\
+      tests/multi_card_tests/moe/test_moe_utils.py
+"""
 
 import numpy as np
 import paddle
@@ -111,10 +126,10 @@ def test_add_auxiliary_loss_injects_unit_gradient():
 
 
 def test_all_to_all_equal_split():
-    # Real all-to-all across the whole 8-rank group. Rank r sends its j-th row
-    # to rank j; after the exchange rank r's i-th row is the r-th row that rank
-    # i sent. With input row value (rank*10 + j), rank r's output row i is
-    # (i*10 + rank). A reversed direction or a wrong peer changes these values.
+    # Real all-to-all across the 4-rank tensor-parallel group. Rank r sends
+    # its j-th row to rank j; after the exchange rank r's i-th row is the r-th
+    # row that rank i sent. With input row value (rank*10 + j), rank r's output
+    # row i is (i*10 + rank). A reversed direction or wrong peer changes these.
     tp_group = get_tensor_model_parallel_group_if_none(tp_group=None)
     rank = tp_group.rank
     world_size = tp_group.world_size
@@ -262,7 +277,9 @@ def test_reduce_scatter_group_op_forward_backward():
 
 
 if __name__ == "__main__":
-    Utils.initialize_model_parallel(8, 1)
+    Utils.initialize_model_parallel(
+        tensor_parallel_size=4, sharding_parallel_size=2
+    )
     test_permute_groups_tokens_by_expert()
     test_unpermute_scatter_add_sums_expert_copies()
     test_permute_unpermute_roundtrip_top1()

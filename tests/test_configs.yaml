@@ -92,8 +92,12 @@ tests:
   - test_case: [tests/multi_card_tests/tensor_parallel/test_parallel_state.py]
     products:
       - num_gpus: 4
+  # VPPSimulator pure-python schedule math, launched as a PP=4 world.
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_vpp_simulator.py]
+    products:
+      - num_gpus: 4
   # coverage_test: pipeline_parallel (Pattern C, PP=4)
-  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_coverage_forward_backward_overlap_utils.py]
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_forward_backward_overlap_utils.py]
     products:
       - num_gpus: 4
   # coverage_test: transformer (Pattern D, TP=4 sharding=2 -> 8 GPUs)
@@ -118,28 +122,28 @@ tests:
     products:
       - num_gpus: 4
   # coverage_test: pipeline_parallel advanced (Pattern B, PP=2)
-  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_coverage_p2p_communication.py]
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_p2p_communication.py]
     products:
       - num_gpus: 2
-  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_coverage_p2p_communication_2.py]
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_p2p_communication_2.py]
     products:
       - num_gpus: 2
-  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_coverage_p2p_communication_3.py]
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_p2p_communication_3.py]
     products:
       - num_gpus: 2
-  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_coverage_forward_backward_overlap_utils_2.py]
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_forward_backward_overlap_utils_2.py]
     products:
       - num_gpus: 2
-  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_coverage_four_directions_p2p_communication.py]
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_four_directions_p2p_communication.py]
     products:
       - num_gpus: 2
-  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_coverage_four_directions_p2p_communication_2.py]
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_four_directions_p2p_communication_2.py]
     products:
       - num_gpus: 2
-  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_coverage_four_directions_p2p_communication_3.py]
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_four_directions_p2p_communication_3.py]
     products:
       - num_gpus: 4
-  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_coverage_four_directions_p2p_communication_4.py]
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_four_directions_p2p_communication_4.py]
     products:
       - num_gpus: 2
   # coverage_test: tensor_parallel advanced (Pattern A/B, TP=4)
@@ -150,9 +154,6 @@ tests:
     products:
       - num_gpus: 4
   # coverage_test: transformer advanced (Pattern B/D, PP=2-4)
-  - test_case: [tests/multi_card_tests/coverage_test/pipeline_parallel/test_coverage_vpp_simulator.py]
-    products:
-      - num_gpus: 4
   - test_case: [tests/multi_card_tests/transformer/test_transformer_encoder.py]
     products:
       - num_gpus: 2

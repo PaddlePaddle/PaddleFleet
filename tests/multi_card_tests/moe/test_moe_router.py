@@ -20,7 +20,10 @@ import paddle.distributed as dist
 
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
-from paddlefleet.transformer.moe.moe_router import TopKRouter
+from paddlefleet.transformer.moe.moe_router import (
+    TopKRouter,
+    gate_detach_matmul,
+)
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_tensor_model_parallel_group_if_none
 from tests.multi_card_tests.tensor_parallel.test_utilities import Utils
@@ -242,8 +245,72 @@ def test_router_gate_replicated_across_tp_ranks():
         )
 
 
+def test_nonfused_gate_matmul_missing_transpose_is_locked():
+    """Lock a real production bug in ``gate_detach_matmul``.
+
+    The router gate weight is stored as ``[num_experts, hidden]`` and the fused
+    entry (``FusedGateDetachMatmul.forward``) transposes it (``w = w.T``) before
+    ``F.linear`` so the logits are ``x @ weight.T`` (moe_router.py:225). The
+    non-fused branch instead calls ``F.linear(x, weight)`` with NO transpose
+    (moe_router.py:347), i.e. it computes ``x @ weight`` against a
+    ``[num_experts, hidden]`` matrix. For the real router layout the two
+    branches therefore disagree.
+
+    A square but asymmetric ``[num_experts, hidden]`` weight (num_experts ==
+    hidden) is used on purpose: a rectangular layout would make the buggy
+    non-fused branch raise on the shape mismatch and hide the value-level
+    defect. The expected results are derived independently in numpy (``x @ W.T``
+    for fused, ``x @ W`` for non-fused) and never from the function under test.
+    When the non-fused branch is fixed to also transpose, ``nonfused`` becomes
+    ``x @ W.T`` == ``fused`` and the last two assertions fail, surfacing the fix.
+    Runs on ``.cuda()`` under the launched MP=4 group (behaviour is per-rank
+    identical; no collective is needed to observe this local bug).
+    """
+    n = NUM_EXPERTS  # square so both branches execute (num_experts == hidden)
+    w_np = np.array(
+        [
+            [1.0, 2.0, 0.0, -1.0],
+            [0.0, 1.0, 3.0, 0.5],
+            [-2.0, 0.0, 1.0, 2.0],
+            [0.5, -1.0, 0.0, 1.0],
+        ],
+        dtype=np.float32,
+    )
+    assert w_np.shape == (n, n)
+    assert not np.allclose(w_np, w_np.T), "weight must be asymmetric"
+    x_np = np.array(
+        [[1.0, -2.0, 3.0, 0.5], [-1.0, 0.0, 2.0, 1.0]], dtype=np.float32
+    )
+
+    w = paddle.to_tensor(w_np, dtype="float32").cuda()
+    x = paddle.to_tensor(x_np, dtype="float32").cuda()
+    w.stop_gradient = True
+    x.stop_gradient = True
+
+    with paddle.no_grad():
+        fused = gate_detach_matmul(x, w, True)
+        nonfused = gate_detach_matmul(x, w, False)
+
+    # Fused path is the router's real path: logits == x @ weight.T.
+    np.testing.assert_allclose(
+        fused.numpy(), x_np @ w_np.T, rtol=1e-5, atol=1e-5
+    )
+    # Non-fused path currently omits the transpose: it computes x @ weight.
+    np.testing.assert_allclose(
+        nonfused.numpy(), x_np @ w_np, rtol=1e-5, atol=1e-5
+    )
+    # The bug: for a [num_experts, hidden] gate the two entries must agree but
+    # they do not, because the non-fused branch never applies ``.T``.
+    assert not np.allclose(fused.numpy(), nonfused.numpy()), (
+        "non-fused gate_detach_matmul unexpectedly matches the fused path; "
+        "the missing-transpose bug at moe_router.py:347 may have been fixed -- "
+        "update this lock to compare both branches against x @ weight.T"
+    )
+
+
 if __name__ == "__main__":
     Utils.initialize_model_parallel(4, 1)
     model_parallel_cuda_manual_seed(SEED)
     test_greedy_softmax_routing_matches_independent_reference()
     test_router_gate_replicated_across_tp_ranks()
+    test_nonfused_gate_matmul_missing_transpose_is_locked()

@@ -378,6 +378,67 @@ def test_AllToAll():
     assert paddle.equal_all(output_data, expected)
 
 
+def test_all_to_all_hp2sp():
+    tp_group = get_tensor_model_parallel_group_if_none(tp_group=None)
+    rank = tp_group.rank
+    world_size = tp_group.world_size
+
+    # Input holds [num_tokens, H/TP]; here 4 tokens x 2 local-hidden channels.
+    # Encode each element as rank*100 + row*10 + col so every rank, token and
+    # channel is distinguishable: a wrong all-to-all peer, a wrong split axis
+    # or a wrong concat order all change the exact reconstructed row.
+    input_data = paddle.to_tensor(
+        [[rank * 100 + row * 10 + col for col in range(2)] for row in range(4)],
+        dtype="float32",
+    ).cuda()
+
+    output_data = mappings.all_to_all_hp2sp(input_data)
+
+    # Independent hand derivation. hp2sp maps [T, H/TP] -> [T/TP, H]. With
+    # T=4, TP=4, H/TP=2 each rank ends up owning token `rank` with the full
+    # hidden regathered from every rank's local slice, giving one row [1, 8]:
+    # element (s, c) = source-rank s's local channel c for this token, i.e.
+    #   s*100 + rank*10 + c.
+    expected = paddle.to_tensor(
+        [
+            [
+                s * 100 + rank * 10 + c
+                for s in range(world_size)
+                for c in range(2)
+            ]
+        ],
+        dtype="float32",
+    ).cuda()
+    assert list(output_data.shape) == [1, world_size * 2]
+    assert paddle.equal_all(output_data, expected)
+
+
+def test_all_to_all_sp2hp_divisibility_guard_is_inverted():
+    tp_group = get_tensor_model_parallel_group_if_none(tp_group=None)
+    world_size = tp_group.world_size
+
+    # A valid sp2hp input has a hidden size divisible by TP. Production guards
+    # it with `assert input_.shape[-1] % world_size` (missing `== 0`): for the
+    # CORRECT divisible case `H % world_size == 0`, which is falsy and raises.
+    # Lock the real bug -- a valid divisible input must currently raise
+    # AssertionError. When the guard is fixed to `== 0` this stops raising and
+    # the test fails, surfacing the regression. Do not edit production here.
+    input_data = paddle.to_tensor(
+        [[float(c) for c in range(world_size)] for _ in range(2)],
+        dtype="float32",
+    ).cuda()
+
+    raised = False
+    try:
+        mappings.all_to_all_sp2hp(input_data)
+    except AssertionError:
+        raised = True
+    assert raised, (
+        "expected all_to_all_sp2hp to raise AssertionError on valid divisible "
+        "input due to the inverted divisibility guard (missing '== 0')"
+    )
+
+
 if __name__ == "__main__":
     Utils.initialize_model_parallel(4, 1)
     test_CopyToModelParallelRegion()
@@ -389,3 +450,5 @@ if __name__ == "__main__":
     test_AllGatherFromTensorParallelRegion()
     test_ReduceScatterToTensorParallelRegion()
     test_AllToAll()
+    test_all_to_all_hp2sp()
+    test_all_to_all_sp2hp_divisibility_guard_is_inverted()
