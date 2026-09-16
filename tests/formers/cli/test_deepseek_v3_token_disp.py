@@ -144,7 +144,37 @@ class _CpuPaddleBase(unittest.TestCase):
             self.paddle.set_device(self._orig_device)
 
 
-class TestTopkToPermutedIndices(_CpuPaddleBase):
+class _GpuRestrictNonzeroBase(unittest.TestCase):
+    """Force GPU for cases that go through ``topk_to_permuted_indices``.
+
+    That helper builds its permutation via
+    ``paddle.tensor.search._restrict_nonzero``, whose kernel is registered for
+    the GPU backend only; on a CPU place it raises "kernel ... not registered.
+    Selected wrong Backend CPU". Run on GPU (skip when CUDA is not compiled in)
+    so the real op executes. No production change -- the op is legitimately
+    GPU-only.
+    """
+
+    def setUp(self):
+        try:
+            import paddle
+        except ImportError as exc:  # pragma: no cover - guarded above too
+            self.skipTest(f"paddle unavailable: {exc}")
+        if not paddle.is_compiled_with_cuda():
+            self.skipTest(
+                "topk_to_permuted_indices uses the GPU-only kernel "
+                "_restrict_nonzero; this build has no CUDA support"
+            )
+        self.paddle = paddle
+        self._orig_device = paddle.get_device()
+        paddle.set_device("gpu")
+
+    def tearDown(self):
+        if getattr(self, "paddle", None) is not None:
+            self.paddle.set_device(self._orig_device)
+
+
+class TestTopkToPermutedIndices(_GpuRestrictNonzeroBase):
     """Oracle for topk_to_permuted_indices: group (token, slot) entries by the
     expert they were dispatched to, in expert order, preserving identity."""
 
