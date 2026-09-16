@@ -95,7 +95,7 @@ class TestRecipeValidation(unittest.TestCase):
     def test_validation_precedes_kernel_lookup(self):
         # side_effect fires only if the kernel attribute is *accessed and
         # called*; the ValueError path must return before touching it.
-        with _patch_kernel(side_effect=AssertionError("kernel touched")):
+        with _patch_kernel(side_effect=AssertionError("kernel touched")):  # noqa: SIM117
             with self.assertRaises(ValueError):
                 get_quant_func("not_blockwise")
 
@@ -299,7 +299,7 @@ class TestUE8M0Path(unittest.TestCase):
         scale = _FakeTensor("scale")
         # Kernel returns a 4-tuple; the no-transpose branch keeps [:2].
         extra = (_FakeTensor("fp8_t"), _FakeTensor("scale_t"))
-        with _patch_kernel(return_value=(fp8, scale) + extra) as k:
+        with _patch_kernel(return_value=(fp8, scale, *extra)) as k:
             inp_func, _ = get_quant_func(
                 "blockwise", input_trans=False, use_ue8m0=True
             )

@@ -196,11 +196,11 @@ class TestInplaceOffloadIfNeeded(unittest.TestCase):
         # warning is emitted here pins the guard.
         x = paddle.to_tensor([1.0, 2.0, 3.0], dtype="float32")
         before = x.numpy().copy()
-        with paddle.no_grad():
+        with paddle.no_grad():  # noqa: SIM117
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 inplace_offload_if_needed(x, threshold=1)
-        self.assertEqual([w for w in caught], [])
+        self.assertEqual(list(caught), [])
         np.testing.assert_array_equal(x.numpy(), before)
 
     def test_grad_and_over_threshold_enters_offload_branch(self):
@@ -210,7 +210,7 @@ class TestInplaceOffloadIfNeeded(unittest.TestCase):
         # bytes >= 1 by hand.
         x = paddle.to_tensor([1.0, 2.0, 3.0], dtype="float32")
         before = x.numpy().copy()
-        with paddle.set_grad_enabled(True):
+        with paddle.set_grad_enabled(True):  # noqa: SIM117
             with self.assertWarns(UserWarning):
                 inplace_offload_if_needed(x, threshold=1)
         np.testing.assert_array_equal(x.numpy(), before)
@@ -219,11 +219,11 @@ class TestInplaceOffloadIfNeeded(unittest.TestCase):
         # Same grad context but threshold above the byte size: 12 < 1<<40, so
         # memory_size >= threshold is False and no warning may be emitted.
         x = paddle.to_tensor([1.0, 2.0, 3.0], dtype="float32")
-        with paddle.set_grad_enabled(True):
+        with paddle.set_grad_enabled(True):  # noqa: SIM117
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
                 inplace_offload_if_needed(x, threshold=1 << 40)
-        self.assertEqual([w for w in caught], [])
+        self.assertEqual(list(caught), [])
 
 
 @unittest.skipUnless(_IMPORT_ERROR is None, _SKIP_REASON)

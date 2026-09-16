@@ -276,7 +276,7 @@ class ConvertToQloraStateDictImportGuardTest(unittest.TestCase):
         # Patch only the (external) qlora collaborator to its unavailable state
         # and assert the module raises the specific ImportError contract. The
         # tested logic -- the `is None` guard -- is preserved, not mocked.
-        with mock.patch(f"{_MODULE}.qlora_weight_quantize", None):
+        with mock.patch(f"{_MODULE}.qlora_weight_quantize", None):  # noqa: SIM117
             with self.assertRaises(ImportError):
                 convert_to_qlora_state_dict(
                     state_dict, "layer.0", cfg, "float16", "nf4"

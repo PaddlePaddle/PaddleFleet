@@ -70,7 +70,7 @@ _SKIP_REASON = (
     "sigmoid_gate_fusion requires importable paddle + triton + the "
     "paddlefleet.triton_ops.sigmoid_gate_fusion module; the input-validation "
     "guards are CPU-observable and need no GPU, but the module cannot be "
-    "imported here (import error: %s)" % (_IMPORT_ERR or "none",)
+    "imported here (import error: {})".format(_IMPORT_ERR or "none")
 )
 
 

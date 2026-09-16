@@ -185,14 +185,14 @@ class TestGetShardedFileName(_RequiresPaddle):
     """
 
     def _args(self, **kw):
-        base = dict(
-            world_size=8,
-            dataset_world_size=2,
-            sharding_parallel_size=1,
-            use_expert_parallel=False,
-            expert_model_parallel_size=1,
-            logical_process_index=0,
-        )
+        base = {
+            "world_size": 8,
+            "dataset_world_size": 2,
+            "sharding_parallel_size": 1,
+            "use_expert_parallel": False,
+            "expert_model_parallel_size": 1,
+            "logical_process_index": 0,
+        }
         base.update(kw)
         return SimpleNamespace(**base)
 

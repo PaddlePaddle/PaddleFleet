@@ -79,7 +79,7 @@ class TestProfilerOptions(unittest.TestCase):
         for token in ("true", "TRUE", "yes", "t", "1"):
             with self.subTest(token=token):
                 self.assertIs(
-                    ProfilerOptions("exit_on_finished=%s" % token)[
+                    ProfilerOptions(f"exit_on_finished={token}")[
                         "exit_on_finished"
                     ],
                     True,
@@ -87,7 +87,7 @@ class TestProfilerOptions(unittest.TestCase):
         for token in ("false", "no", "0", "2", "maybe"):
             with self.subTest(token=token):
                 self.assertIs(
-                    ProfilerOptions("exit_on_finished=%s" % token)[
+                    ProfilerOptions(f"exit_on_finished={token}")[
                         "exit_on_finished"
                     ],
                     False,

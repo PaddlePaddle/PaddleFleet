@@ -255,7 +255,7 @@ class TestFusedLayerNormDispatch(unittest.TestCase):
     def test_no_kernel_available_raises_value_error(self):
         # persist disabled (default) AND fused kernel absent -> ValueError with
         # the documented message, raised before any parameter is built.
-        with patch.object(mod, "HAVE_FUSED_LAYER_NORM", False):
+        with patch.object(mod, "HAVE_FUSED_LAYER_NORM", False):  # noqa: SIM117
             with self.assertRaises(ValueError) as ctx:
                 FusedLayerNorm(_make_config(64, persist=False), hidden_size=64)
         self.assertIn("Apex must be installed", str(ctx.exception))

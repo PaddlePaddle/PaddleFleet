@@ -177,7 +177,7 @@ class TestParseWeightQuantizeAlgo(unittest.TestCase):
 
 
 def _build_linear_model():
-    import paddle.nn as nn
+    from paddle import nn
 
     class _Model(nn.Layer):
         def __init__(self):
@@ -196,7 +196,7 @@ class TestReplaceWithQuantizationLinearCPU(unittest.TestCase):
     """
 
     def test_ignored_module_not_replaced(self):
-        import paddle.nn as nn
+        from paddle import nn
 
         qu = _load_utils()
         model = _build_linear_model()
@@ -209,7 +209,7 @@ class TestReplaceWithQuantizationLinearCPU(unittest.TestCase):
         self.assertIsInstance(model.linear, nn.Linear)
 
     def test_dict_no_match_not_replaced(self):
-        import paddle.nn as nn
+        from paddle import nn
 
         qu = _load_utils()
         model = _build_linear_model()

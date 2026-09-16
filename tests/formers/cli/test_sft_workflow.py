@@ -48,7 +48,7 @@ silently passed). No production code is modified by this file.
 import unittest
 
 try:
-    import paddle  # noqa: F401
+    import paddle
 
     from paddlefleet.cli.train.sft.workflow import (
         create_peft_model,
@@ -97,7 +97,7 @@ class _SkipIfNoPaddle(unittest.TestCase):
             self.skipTest(
                 "paddlefleet.cli.train.sft.workflow import failed "
                 "(Paddle unavailable in this environment): "
-                "{!r}".format(_IMPORT_ERROR)
+                f"{_IMPORT_ERROR!r}"
             )
 
 

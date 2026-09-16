@@ -51,7 +51,7 @@ import unittest
 
 try:
     import numpy as np
-    import paddle
+    import paddle  # noqa: F401
 
     from paddlefleet.models.common.embeddings.yarn_rotary_pos_embedding import (
         YarnRotaryEmbedding,

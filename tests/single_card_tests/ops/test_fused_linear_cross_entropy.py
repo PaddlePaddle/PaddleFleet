@@ -192,17 +192,17 @@ class TestPyLayerBackwardControlFlow(unittest.TestCase):
     """
 
     def _base_ctx(self, **overrides):
-        attrs = dict(
-            weight_requires_grad=False,
-            ec_align=False,
-            has_bias=False,
-            has_multimax=False,
-            weight_ref=None,
-            multimax_ranges_ref=None,
-            multimax_ts_ref=None,
-            multimax_ranges_requires_grad=False,
-            multimax_ts_requires_grad=False,
-        )
+        attrs = {
+            "weight_requires_grad": False,
+            "ec_align": False,
+            "has_bias": False,
+            "has_multimax": False,
+            "weight_ref": None,
+            "multimax_ranges_ref": None,
+            "multimax_ts_ref": None,
+            "multimax_ranges_requires_grad": False,
+            "multimax_ts_requires_grad": False,
+        }
         attrs.update(overrides)
         return _make_ctx(**attrs)
 

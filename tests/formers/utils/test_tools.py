@@ -31,8 +31,6 @@ import contextlib
 import unittest
 from unittest.mock import patch
 
-import numpy as np
-
 from paddlefleet.utils.tools import (
     PaddleDeviceWrapper,
     TimeCostAverage,
@@ -298,9 +296,8 @@ class TestDeviceGuard(unittest.TestCase):
             "paddlefleet.utils.tools.is_paddle_available", return_value=False
         ):
             guard = device_guard("cpu")
-            with self.assertRaises(ImportError):
-                with guard:
-                    pass
+            with self.assertRaises(ImportError), guard:
+                pass
 
 
 class TestPaddleDeviceWrapperGetNestedAttr(unittest.TestCase):

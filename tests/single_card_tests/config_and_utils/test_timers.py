@@ -139,7 +139,7 @@ class TimerStateMachineTest(unittest.TestCase):
     def test_stop_without_start_raises_with_name_in_message(self):
         clock = _FakeClock(100.0)
         timer = self._new_timer(clock, name="cold")
-        with patch.object(timers_mod.time, "time", clock):
+        with patch.object(timers_mod.time, "time", clock):  # noqa: SIM117
             with self.assertRaises(AssertionError) as ctx:
                 timer.stop()
         self.assertEqual(str(ctx.exception), "cold timer is not started.")

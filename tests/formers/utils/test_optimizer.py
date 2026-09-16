@@ -40,7 +40,7 @@ from unittest.mock import patch
 
 import numpy as np
 import paddle
-import paddle.nn as nn
+from paddle import nn
 
 from paddlefleet.utils.optimizer import AdamWCustom, AdamWMini
 

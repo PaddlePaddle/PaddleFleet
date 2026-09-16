@@ -274,7 +274,7 @@ class ProfileTest(unittest.TestCase):
 
     def test_no_timers_runs_body_without_timing(self):
         events = []
-        with unittest.mock.patch.object(comm_utils, "get_timers", lambda: None):
+        with unittest.mock.patch.object(comm_utils, "get_timers", lambda: None):  # noqa: SIM117
             with comm_utils.profile("op"):
                 events.append("body")
         self.assertEqual(events, ["body"])
@@ -296,11 +296,13 @@ class ProfileTest(unittest.TestCase):
             factory_calls.append((name, use_event))
             return timer
 
-        with unittest.mock.patch.object(
-            comm_utils, "get_timers", lambda: factory
+        with (
+            unittest.mock.patch.object(
+                comm_utils, "get_timers", lambda: factory
+            ),
+            comm_utils.profile("attn", use_event=False),
         ):
-            with comm_utils.profile("attn", use_event=False):
-                events.append("body")
+            events.append("body")
 
         # Factory queried once for start and once for stop, both with the name
         # and use_event that profile received.
@@ -322,11 +324,13 @@ class ProfileTest(unittest.TestCase):
             factory_calls.append((name, use_event))
             return _Timer()
 
-        with unittest.mock.patch.object(
-            comm_utils, "get_timers", lambda: factory
+        with (
+            unittest.mock.patch.object(
+                comm_utils, "get_timers", lambda: factory
+            ),
+            comm_utils.profile("layer"),
         ):
-            with comm_utils.profile("layer"):
-                pass
+            pass
 
         self.assertEqual(factory_calls, [("layer", True), ("layer", True)])
 

@@ -34,7 +34,6 @@ import unittest
 
 from paddlefleet.data.tokenizer import BaseTokenizer, get_idx_from_word
 
-
 # A small local vocab with deliberately distinguishable, non-contiguous ids so
 # that a constant / shifted / swapped mapping cannot pass silently. The unk id
 # (7) is distinct from every real-token id, so an unk fallback is observable.

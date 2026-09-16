@@ -51,7 +51,7 @@ try:
     import numpy as np
     import paddle
     from paddle import _C_ops
-    from paddle.distributed.fleet.meta_optimizers.dygraph_optimizer.hybrid_parallel_optimizer import (  # noqa: E501
+    from paddle.distributed.fleet.meta_optimizers.dygraph_optimizer.hybrid_parallel_optimizer import (
         HybridParallelOptimizer,
     )
     from paddle.optimizer import Optimizer

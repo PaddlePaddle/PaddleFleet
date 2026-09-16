@@ -70,7 +70,7 @@ except ImportError as exc:  # missing dependency -> honest skip, not swallowed
 _SKIP_REASON = (
     "triton_compat driver-swap tests require paddle + triton to be importable "
     "(the module runs import-time compat setup and the tests patch "
-    "triton.runtime.driver); import error: %s" % (_IMPORT_ERR or "none",)
+    "triton.runtime.driver); import error: {}".format(_IMPORT_ERR or "none")
 )
 
 

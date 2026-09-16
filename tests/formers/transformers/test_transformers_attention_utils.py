@@ -369,7 +369,7 @@ class TestMultiHeadAttention(unittest.TestCase):
             np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
         )
         value = paddle.to_tensor(
-            (np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4) + 100.0)
+            np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4) + 100.0
         )
         k, v = mha.compute_kv(key, value)
         # Reference: the real (independent) projection layers.
@@ -387,7 +387,7 @@ class TestMultiHeadAttention(unittest.TestCase):
             np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
         )
         value = paddle.to_tensor(
-            (np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4) + 100.0)
+            np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4) + 100.0
         )
         cache = mha.gen_cache(key, value, type=MultiHeadAttention.StaticCache)
         self.assertIsInstance(cache, MultiHeadAttention.StaticCache)
@@ -412,10 +412,10 @@ class TestMultiHeadAttention(unittest.TestCase):
             np.arange(1 * 3 * 4, dtype=np.float32).reshape(1, 3, 4)
         )
         key = paddle.to_tensor(
-            (np.arange(1 * 3 * 4, dtype=np.float32).reshape(1, 3, 4) + 1.0)
+            np.arange(1 * 3 * 4, dtype=np.float32).reshape(1, 3, 4) + 1.0
         )
         value = paddle.to_tensor(
-            (np.arange(1 * 3 * 4, dtype=np.float32).reshape(1, 3, 4) + 2.0)
+            np.arange(1 * 3 * 4, dtype=np.float32).reshape(1, 3, 4) + 2.0
         )
         qmask = paddle.ones([1, 1, 3, 1])
         kmask = paddle.ones([1, 1, 1, 3])

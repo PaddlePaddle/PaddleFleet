@@ -184,11 +184,13 @@ class TestQuantizationLoRALinearForward(unittest.TestCase):
             captured.update(kwargs)
             return paddle.to_tensor(marker_np)
 
-        with mock.patch(
-            f"{_MODULE}.quant_weight_linear", side_effect=fake_kernel
+        with (
+            mock.patch(
+                f"{_MODULE}.quant_weight_linear", side_effect=fake_kernel
+            ),
+            paddle.no_grad(),
         ):
-            with paddle.no_grad():
-                out = layer(x)
+            out = layer(x)
 
         # Independent reference: base output (marker) + scaled adapter delta.
         expected = marker_np + (x_np @ a_np @ b_np) * (8.0 / 4.0)
@@ -212,12 +214,14 @@ class TestQuantizationLoRALinearForward(unittest.TestCase):
         )
         marker_np = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], np.float32)
 
-        with mock.patch(
-            f"{_MODULE}.quant_weight_linear",
-            side_effect=lambda **kw: paddle.to_tensor(marker_np),
+        with (
+            mock.patch(
+                f"{_MODULE}.quant_weight_linear",
+                side_effect=lambda **kw: paddle.to_tensor(marker_np),
+            ),
+            paddle.no_grad(),
         ):
-            with paddle.no_grad():
-                out = layer(x)
+            out = layer(x)
         # With adapter disabled the non-zero A/B must not contribute.
         np.testing.assert_allclose(out.numpy(), marker_np, rtol=1e-6, atol=1e-6)
 
@@ -271,11 +275,13 @@ class TestFleetQuantizationLoRALinear(unittest.TestCase):
             captured.update(kwargs)
             return paddle.to_tensor(marker_np)
 
-        with mock.patch(
-            f"{_MODULE}.quant_weight_linear", side_effect=fake_kernel
+        with (
+            mock.patch(
+                f"{_MODULE}.quant_weight_linear", side_effect=fake_kernel
+            ),
+            paddle.no_grad(),
         ):
-            with paddle.no_grad():
-                output, out_bias = layer(paddle.to_tensor(x_np))
+            output, out_bias = layer(paddle.to_tensor(x_np))
 
         # Bias is returned to the caller and withheld from the base matmul.
         self.assertIs(out_bias, bias)
@@ -298,11 +304,13 @@ class TestFleetQuantizationLoRALinear(unittest.TestCase):
             captured.update(kwargs)
             return paddle.to_tensor(marker_np)
 
-        with mock.patch(
-            f"{_MODULE}.quant_weight_linear", side_effect=fake_kernel
+        with (
+            mock.patch(
+                f"{_MODULE}.quant_weight_linear", side_effect=fake_kernel
+            ),
+            paddle.no_grad(),
         ):
-            with paddle.no_grad():
-                output, out_bias = layer(x)
+            output, out_bias = layer(x)
 
         # No split: caller gets no separate bias, kernel keeps the bias.
         self.assertIsNone(out_bias)

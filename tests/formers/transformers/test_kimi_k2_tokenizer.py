@@ -73,8 +73,10 @@ class KimiK2TikTokenTokenizerTest(unittest.TestCase):
         cls.tmpdir = tempfile.mkdtemp()
         cls.vocab_file = os.path.join(cls.tmpdir, "tiktoken.model")
         with open(cls.vocab_file, "w") as f:
-            for token, rank in _BPE_RANKS.items():
-                f.write(f"{base64.b64encode(token).decode()} {rank}\n")
+            f.writelines(
+                f"{base64.b64encode(token).decode()} {rank}\n"
+                for token, rank in _BPE_RANKS.items()
+            )
 
     def _make_tokenizer(self, vocab_file=None):
         # Only bos/eos are given explicit content; unk/pad fall back to the

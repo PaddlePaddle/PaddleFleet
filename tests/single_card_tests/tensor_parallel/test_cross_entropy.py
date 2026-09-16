@@ -82,7 +82,7 @@ try:
     from paddlefleet.tensor_parallel import cross_entropy as ce_mod
     from paddlefleet.tensor_parallel.cross_entropy import (
         VocabParallelCrossEntropy,
-        _VocabParallelCrossEntropy,
+        _VocabParallelCrossEntropy,  # noqa: F401
         vocab_parallel_cross_entropy,
     )
 

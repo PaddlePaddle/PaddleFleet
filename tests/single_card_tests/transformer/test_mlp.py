@@ -145,8 +145,8 @@ class TestDenseMLPForwardReference(unittest.TestCase):
 
         w_up, b_up, w_down, b_down = _real_weights(mlp)
         xn = x.numpy().astype("float64")
-        interm = np.maximum(xn @ w_up + b_up, 0.0)
-        ref = interm @ w_down
+        intermediate = np.maximum(xn @ w_up + b_up, 0.0)
+        ref = intermediate @ w_down
 
         self.assertEqual(out.shape, [3, 2, 8])
         np.testing.assert_allclose(out.numpy(), ref, rtol=1e-4, atol=1e-5)
@@ -190,8 +190,8 @@ class TestDenseMLPPerTokenScale(unittest.TestCase):
         w_up, b_up, w_down, b_down = _real_weights(mlp)
         xn = x.numpy().astype("float64")
         scale_n = scale.numpy().astype("float64")
-        interm = np.maximum(xn @ w_up + b_up, 0.0) * scale_n[..., None]
-        ref = interm @ w_down + b_down[None, None, :] * scale_n[..., None]
+        intermediate = np.maximum(xn @ w_up + b_up, 0.0) * scale_n[..., None]
+        ref = intermediate @ w_down + b_down[None, None, :] * scale_n[..., None]
 
         np.testing.assert_allclose(out.numpy(), ref, rtol=1e-4, atol=1e-5)
         # bias was folded into the output, so nothing is returned on the side.

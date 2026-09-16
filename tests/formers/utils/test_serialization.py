@@ -25,6 +25,7 @@ from parameterized import parameterized
 
 from paddlefleet.utils import load_torch
 from paddlefleet.utils.serialization import (
+    _TYPES,
     SafeUnpickler,
     SerializationError,
     StorageType,
@@ -35,7 +36,6 @@ from paddlefleet.utils.serialization import (
     _rebuild_parameter_with_state,
     _rebuild_tensor_stage,
     _storage_type_to_dtype_to_map,
-    _TYPES,
     dumpy,
     read_prefix_key,
     seek_by_string,
@@ -295,7 +295,7 @@ class SerializationBehaviorTest(TestCase):
             path = os.path.join(tmp, "blob.bin")
             with open(path, "wb") as f:
                 f.write(b"xxxxxx")
-            with open(path, "rb") as fh:
+            with open(path, "rb") as fh:  # noqa: SIM117
                 with self.assertRaises(SerializationError):
                     seek_by_string(fh, "abc", 6)
 
@@ -367,7 +367,7 @@ class SerializationBehaviorTest(TestCase):
             path = os.path.join(tmp, "model.safetensors")
             with open(path, "wb") as f:
                 f.write(b"this is not a valid safetensors payload")
-            with self.assertRaises(Exception):
+            with self.assertRaises(Exception):  # noqa: B017
                 load_torch(path)
 
     def test_load_torch_unrecognized_suffix_returns_empty(self):

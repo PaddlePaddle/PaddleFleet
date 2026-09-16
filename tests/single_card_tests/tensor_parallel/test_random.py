@@ -83,7 +83,7 @@ class TestTrackerBookkeeping(unittest.TestCase):
 
     def test_fork_unknown_name_raises_before_touching_generator(self):
         tracker = CudaRNGStatesTracker()
-        with self.assertRaises(Exception) as ctx:
+        with self.assertRaises(Exception) as ctx:  # noqa: SIM117
             with tracker.fork("never-added"):
                 pass
         message = str(ctx.exception)

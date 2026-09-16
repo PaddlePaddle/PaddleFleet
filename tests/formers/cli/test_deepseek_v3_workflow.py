@@ -74,7 +74,7 @@ import unittest
 from unittest import mock
 
 try:
-    import paddlefleet.cli.train.deepseek_v3_pretrain.workflow as workflow
+    from paddlefleet.cli.train.deepseek_v3_pretrain import workflow
     from paddlefleet.cli.train.deepseek_v3_pretrain.workflow import (
         DataArguments,
         PreTrainingArguments,
@@ -97,7 +97,7 @@ class _WorkflowTestBase(unittest.TestCase):
         if _IMPORT_ERROR is not None:
             self.skipTest(
                 "paddlefleet import failed (dependency unavailable): "
-                "{!r}".format(_IMPORT_ERROR)
+                f"{_IMPORT_ERROR!r}"
             )
 
 

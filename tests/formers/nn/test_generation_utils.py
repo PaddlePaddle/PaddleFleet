@@ -33,11 +33,11 @@ import numpy as np
 import paddle
 
 from paddlefleet.generation.logits_process import (
+    ForcedBOSTokenLogitsProcessor,
+    ForcedEOSTokenLogitsProcessor,
     MinLengthLogitsProcessor,
     NoRepeatNGramLogitsProcessor,
     RepetitionPenaltyLogitsProcessor,
-    ForcedBOSTokenLogitsProcessor,
-    ForcedEOSTokenLogitsProcessor,
 )
 from paddlefleet.generation.utils import (
     BeamHypotheses,

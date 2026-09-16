@@ -67,8 +67,8 @@ import numpy as np
 
 try:
     import paddle
-    import paddle.nn as nn
     import paddle.nn.functional as F
+    from paddle import nn
 
     _PADDLE_IMPORT_ERROR = None
 except ImportError as exc:  # pragma: no cover - environment without paddle
@@ -168,15 +168,15 @@ class _MoeBlockBase(unittest.TestCase):
             self.skipTest(f"paddle unavailable: {_PADDLE_IMPORT_ERROR!r}")
         paddle.set_device("cpu")
         try:
-            from paddlefleet.nn.moe.moe_block import (
-                MoEStatics,
-                create_moe_block,
-            )
             from paddlefleet.nn.moe.moe_allgather_layer import (
                 MOEAllGatherLayerV2,
             )
             from paddlefleet.nn.moe.moe_alltoall_layer import (
                 MOEAlltoAllLayer,
+            )
+            from paddlefleet.nn.moe.moe_block import (
+                MoEStatics,
+                create_moe_block,
             )
         except ImportError as exc:
             # moe_block pulls in moe_allgather_layer, which imports several

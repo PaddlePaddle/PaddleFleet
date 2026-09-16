@@ -43,7 +43,7 @@ import unittest
 from unittest import mock
 
 try:
-    import paddle  # noqa: F401
+    import paddle
 
     from paddlefleet.cli.train.ernie_pretrain.models.moe.token_dispatcher import (
         fp8_utils,

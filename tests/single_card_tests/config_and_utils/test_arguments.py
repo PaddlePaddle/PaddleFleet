@@ -125,7 +125,7 @@ class TestParseArgs(unittest.TestCase):
     def test_strict_unknown_flag_raises_system_exit(self):
         # Source: ignore_unknown_args=False selects parser.parse_args(), which
         # errors on unrecognized arguments and calls sys.exit -> SystemExit.
-        with mock.patch.object(sys, "argv", ["prog", "--mystery", "zzz"]):
+        with mock.patch.object(sys, "argv", ["prog", "--mystery", "zzz"]):  # noqa: SIM117
             with self.assertRaises(SystemExit):
                 parse_args(ignore_unknown_args=False)
 

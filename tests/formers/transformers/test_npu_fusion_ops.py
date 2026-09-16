@@ -105,7 +105,7 @@ class TestNpuCombining(unittest.TestCase):
         paddle.set_device("cpu")
 
     def _call(self, x, cw, idx, hard_gate=False):
-        from paddlefleet.transformers.ernie4_5_moe_vl.model.fusion_ops.npu_fusion_ops import (  # noqa: E501
+        from paddlefleet.transformers.ernie4_5_moe_vl.model.fusion_ops.npu_fusion_ops import (
             npu_combining,
         )
 
@@ -191,7 +191,7 @@ class TestNpuCalAuxLossFunc(unittest.TestCase):
     NE = 4
 
     def _call(self, **kw):
-        from paddlefleet.transformers.ernie4_5_moe_vl.model.fusion_ops.npu_fusion_ops import (  # noqa: E501
+        from paddlefleet.transformers.ernie4_5_moe_vl.model.fusion_ops.npu_fusion_ops import (
             npu_cal_aux_loss_func,
         )
 

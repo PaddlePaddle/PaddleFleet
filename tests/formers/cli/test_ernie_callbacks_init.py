@@ -46,8 +46,8 @@ try:
     from paddlefleet.cli.train.ernie_pretrain.src.callbacks import (
         GCCallback,
         LoggingCallback,
+        gc_callback,
     )
-    from paddlefleet.cli.train.ernie_pretrain.src.callbacks import gc_callback
 
     _IMPORT_ERROR = None
 except ImportError as exc:  # paddle (or the package) unavailable in this env

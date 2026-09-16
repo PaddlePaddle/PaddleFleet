@@ -251,7 +251,7 @@ class RunExportTest(unittest.TestCase):
         p_read, p_get, p_dev = self._patch_arg_builders(
             model_args, finetuning_args
         )
-        with p_read, p_get, p_dev:
+        with p_read, p_get, p_dev:  # noqa: SIM117
             with self.assertRaises(FileNotFoundError) as ctx:
                 export_mod.run_export({"output_dir": missing})
 
@@ -272,7 +272,7 @@ class RunExportTest(unittest.TestCase):
             p_read, p_get, p_dev = self._patch_arg_builders(
                 model_args, finetuning_args
             )
-            with p_read, p_get, p_dev:
+            with p_read, p_get, p_dev:  # noqa: SIM117
                 with self.assertRaises(ValueError) as ctx:
                     export_mod.run_export({"output_dir": tmpdir})
 

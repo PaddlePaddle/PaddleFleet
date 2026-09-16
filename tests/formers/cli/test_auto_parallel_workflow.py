@@ -66,9 +66,7 @@ try:
 except ImportError as exc:  # pragma: no cover - environment dependent
     _IMPORT_ERROR = exc
 
-_SKIP_REASON = "paddlefleet workflow import failed (missing dependency): %r" % (
-    _IMPORT_ERROR,
-)
+_SKIP_REASON = f"paddlefleet workflow import failed (missing dependency): {_IMPORT_ERROR!r}"
 
 
 @unittest.skipIf(_IMPORT_ERROR is not None, _SKIP_REASON)

@@ -217,7 +217,7 @@ class TestRefinedRcomputeFlashAttnForwardDispatch(unittest.TestCase):
 
         self.assertTrue(self.rrfa._hold_tensors_queue.empty())
 
-        with paddle.enable_grad():
+        with paddle.enable_grad():  # noqa: SIM117
             with self.assertRaises(AssertionError) as ctx:
                 self.rrfa.forward(self.q, self.k, self.v)
 

@@ -93,29 +93,29 @@ def build_template(template_class=Template, **overrides):
     system/user/assistant assembly and chat separators individually observable
     in the emitted id stream.
     """
-    kwargs = dict(
-        format_user=StringFormatter(slots=["<usr>{{content}}</usr>"]),
-        format_assistant=StringFormatter(
+    kwargs = {
+        "format_user": StringFormatter(slots=["<usr>{{content}}</usr>"]),
+        "format_assistant": StringFormatter(
             slots=["<ast>{{content}}", {"eos_token"}]
         ),
-        format_system=StringFormatter(slots=["<sys>{{content}}</sys>"]),
-        format_function=FunctionFormatter(
+        "format_system": StringFormatter(slots=["<sys>{{content}}</sys>"]),
+        "format_function": FunctionFormatter(
             slots=["{{content}}"], tool_format="default"
         ),
-        format_observation=StringFormatter(slots=["<obs>{{content}}</obs>"]),
-        format_tools=ToolFormatter(tool_format="default"),
-        format_prefix=EmptyFormatter(slots=[{"bos_token"}]),
-        default_system="SYS",
-        chat_sep="<sep>",
-        suffix=[],
-        stop_words=[],
-        thought_words=(THINK_OPEN, THINK_CLOSE),
-        efficient_eos=True,
-        auto_add_bos=False,
-        enable_thinking=True,
-        mm_plugin=_BASE_PLUGIN,
-        grounding_plugin=_GROUNDING_PLUGIN,
-    )
+        "format_observation": StringFormatter(slots=["<obs>{{content}}</obs>"]),
+        "format_tools": ToolFormatter(tool_format="default"),
+        "format_prefix": EmptyFormatter(slots=[{"bos_token"}]),
+        "default_system": "SYS",
+        "chat_sep": "<sep>",
+        "suffix": [],
+        "stop_words": [],
+        "thought_words": (THINK_OPEN, THINK_CLOSE),
+        "efficient_eos": True,
+        "auto_add_bos": False,
+        "enable_thinking": True,
+        "mm_plugin": _BASE_PLUGIN,
+        "grounding_plugin": _GROUNDING_PLUGIN,
+    }
     kwargs.update(overrides)
     return template_class(**kwargs)
 
@@ -149,8 +149,8 @@ class TestTemplateEncoding(unittest.TestCase):
         ]
         prompt_ids, response_ids = template.encode_oneturn(tok, messages)
 
-        expected_prompt = [1] + char_ids("<sys>SYS</sys><usr>hi</usr>")
-        expected_response = char_ids("<ast>world") + [2]
+        expected_prompt = [1, *char_ids("<sys>SYS</sys><usr>hi</usr>")]
+        expected_response = [*char_ids("<ast>world"), 2]
         self.assertEqual(prompt_ids, expected_prompt)
         self.assertEqual(response_ids, expected_response)
         # Label-masking boundary: bos and system/user are prompt-only (masked);
@@ -169,7 +169,7 @@ class TestTemplateEncoding(unittest.TestCase):
         ]
         prompt_ids, _ = template.encode_oneturn(tok, messages, system="OVR")
         self.assertEqual(
-            prompt_ids, [1] + char_ids("<sys>OVR</sys><usr>hi</usr>")
+            prompt_ids, [1, *char_ids("<sys>OVR</sys><usr>hi</usr>")]
         )
         # The default system text must not leak in when overridden.
         self.assertEqual(
@@ -186,7 +186,7 @@ class TestTemplateEncoding(unittest.TestCase):
         ]
         prompt_ids, _ = template.encode_oneturn(tok, messages)
         # Empty system => no <sys> block, only prefix + user.
-        self.assertEqual(prompt_ids, [1] + char_ids("<usr>hi</usr>"))
+        self.assertEqual(prompt_ids, [1, *char_ids("<usr>hi</usr>")])
 
     def test_encode_multiturn_inserts_chat_sep_between_turns_only(self):
         tok = CharTokenizer(bos_token_id=1, eos_token_id=2)
@@ -201,13 +201,13 @@ class TestTemplateEncoding(unittest.TestCase):
         self.assertEqual(len(pairs), 2)
         # First assistant turn is followed by <sep>; the last one is not.
         self.assertEqual(
-            pairs[0][0], [1] + char_ids("<sys>SYS</sys><usr>a</usr>")
+            pairs[0][0], [1, *char_ids("<sys>SYS</sys><usr>a</usr>")]
         )
         self.assertEqual(
-            pairs[0][1], char_ids("<ast>b") + [2] + char_ids("<sep>")
+            pairs[0][1], [*char_ids("<ast>b"), 2, *char_ids("<sep>")]
         )
         self.assertEqual(pairs[1][0], char_ids("<usr>c</usr>"))
-        self.assertEqual(pairs[1][1], char_ids("<ast>d") + [2])
+        self.assertEqual(pairs[1][1], [*char_ids("<ast>d"), 2])
         self.assertNotIn("<sep>", "".join(chr(c) for c in pairs[1][1]))
 
     def test_default_registered_template_encodes_expected_ids(self):
@@ -222,9 +222,9 @@ class TestTemplateEncoding(unittest.TestCase):
         # default format_user = ["Human: {{content}}", {eos}, "\nAssistant:"]
         # default format_assistant = ["{{content}}", {eos}, "\n"]
         self.assertEqual(
-            prompt_ids, char_ids("Human: hi") + [2] + char_ids("\nAssistant:")
+            prompt_ids, [*char_ids("Human: hi"), 2, *char_ids("\nAssistant:")]
         )
-        self.assertEqual(response_ids, char_ids("ok") + [2] + char_ids("\n"))
+        self.assertEqual(response_ids, [*char_ids("ok"), 2, *char_ids("\n")])
 
 
 class TestThoughtWords(unittest.TestCase):
@@ -266,11 +266,11 @@ class TestReasoningTemplate(unittest.TestCase):
         )
 
         thought_ids = char_ids(THINK_OPEN + THINK_CLOSE)
-        base_response = char_ids("<ast>world") + [2]
+        base_response = [*char_ids("<ast>world"), 2]
         # Loss is computed on the CoT: it prefixes the response, not the prompt.
         self.assertEqual(response_ids, thought_ids + base_response)
         self.assertEqual(
-            prompt_ids, [1] + char_ids("<sys>SYS</sys><usr>hi</usr>")
+            prompt_ids, [1, *char_ids("<sys>SYS</sys><usr>hi</usr>")]
         )
 
     def test_empty_thought_goes_to_prompt_when_thinking_disabled(self):
@@ -281,8 +281,8 @@ class TestReasoningTemplate(unittest.TestCase):
         )
 
         thought_ids = char_ids(THINK_OPEN + THINK_CLOSE)
-        base_prompt = [1] + char_ids("<sys>SYS</sys><usr>hi</usr>")
-        base_response = char_ids("<ast>world") + [2]
+        base_prompt = [1, *char_ids("<sys>SYS</sys><usr>hi</usr>")]
+        base_response = [*char_ids("<ast>world"), 2]
         # No supervision on the CoT: it is appended to the (masked) prompt.
         self.assertEqual(prompt_ids, base_prompt + thought_ids)
         self.assertEqual(response_ids, base_response)
@@ -311,7 +311,7 @@ class TestReasoningTemplate(unittest.TestCase):
         ]
         _, response_ids = template.encode_oneturn(tok, messages)
         # Content already carries a thought block, so no empty CoT is prepended.
-        self.assertEqual(response_ids, char_ids("<ast>" + content) + [2])
+        self.assertEqual(response_ids, [*char_ids("<ast>" + content), 2])
 
 
 class TestGLM5ReasoningTemplate(unittest.TestCase):
@@ -331,7 +331,7 @@ class TestGLM5ReasoningTemplate(unittest.TestCase):
         ]
         _, response_ids = template.encode_oneturn(tok, messages)
         close_ids = char_ids(THINK_CLOSE)
-        base_response = char_ids("<ast>world") + [2]
+        base_response = [*char_ids("<ast>world"), 2]
         self.assertEqual(response_ids, close_ids + base_response)
         # Must NOT prepend the opening marker that the base template would use.
         self.assertNotEqual(

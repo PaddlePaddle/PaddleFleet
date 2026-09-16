@@ -29,7 +29,6 @@ from unittest import mock
 
 from requests import HTTPError
 
-from paddlefleet.transformers import aistudio_utils
 from paddlefleet.transformers.aistudio_utils import (
     EntryNotFoundError,
     UnauthorizedError,
@@ -214,11 +213,13 @@ class AistudioDownloadErrorMappingTest(unittest.TestCase):
     HTTPError, generic Exception)."""
 
     def test_value_error_maps_to_cached_files_message(self):
-        with mock.patch(
-            _DOWNLOAD_ATTR, new=_raising_download(ValueError("boom"))
+        with (
+            mock.patch(
+                _DOWNLOAD_ATTR, new=_raising_download(ValueError("boom"))
+            ),
+            self.assertRaises(EnvironmentError) as ctx,
         ):
-            with self.assertRaises(EnvironmentError) as ctx:
-                aistudio_download("my/repo", filename="model.safetensors")
+            aistudio_download("my/repo", filename="model.safetensors")
         msg = str(ctx.exception)
         self.assertIn("Cannot find model.safetensors", msg)
         self.assertIn("cached files", msg)
@@ -227,12 +228,14 @@ class AistudioDownloadErrorMappingTest(unittest.TestCase):
         self.assertNotIn("the requested file", msg)
 
     def test_entry_not_found_maps_to_requested_file_message(self):
-        with mock.patch(
-            _DOWNLOAD_ATTR,
-            new=_raising_download(EntryNotFoundError("nope")),
+        with (
+            mock.patch(
+                _DOWNLOAD_ATTR,
+                new=_raising_download(EntryNotFoundError("nope")),
+            ),
+            self.assertRaises(EnvironmentError) as ctx,
         ):
-            with self.assertRaises(EnvironmentError) as ctx:
-                aistudio_download("my/repo", filename="model.safetensors")
+            aistudio_download("my/repo", filename="model.safetensors")
         msg = str(ctx.exception)
         # Distinguishing phrase for this branch; catches removal of the
         # `except EntryNotFoundError` clause (which would fall through to the
@@ -242,12 +245,14 @@ class AistudioDownloadErrorMappingTest(unittest.TestCase):
         self.assertNotIn("Please make sure", msg)
 
     def test_http_error_embeds_original_error_and_repo(self):
-        with mock.patch(
-            _DOWNLOAD_ATTR,
-            new=_raising_download(HTTPError("503 service down")),
+        with (
+            mock.patch(
+                _DOWNLOAD_ATTR,
+                new=_raising_download(HTTPError("503 service down")),
+            ),
+            self.assertRaises(EnvironmentError) as ctx,
         ):
-            with self.assertRaises(EnvironmentError) as ctx:
-                aistudio_download("my/repo", filename="model.safetensors")
+            aistudio_download("my/repo", filename="model.safetensors")
         msg = str(ctx.exception)
         self.assertIn("specific connection error", msg)
         self.assertIn("my/repo", msg)
@@ -255,12 +260,14 @@ class AistudioDownloadErrorMappingTest(unittest.TestCase):
         self.assertIn("503 service down", msg)
 
     def test_generic_exception_maps_to_please_make_sure_message(self):
-        with mock.patch(
-            _DOWNLOAD_ATTR,
-            new=_raising_download(RuntimeError("weird")),
+        with (
+            mock.patch(
+                _DOWNLOAD_ATTR,
+                new=_raising_download(RuntimeError("weird")),
+            ),
+            self.assertRaises(EnvironmentError) as ctx,
         ):
-            with self.assertRaises(EnvironmentError) as ctx:
-                aistudio_download("my/repo", filename="model.safetensors")
+            aistudio_download("my/repo", filename="model.safetensors")
         msg = str(ctx.exception)
         self.assertIn("Please make sure the model.safetensors", msg)
         self.assertIn("my/repo", msg)
@@ -268,17 +275,21 @@ class AistudioDownloadErrorMappingTest(unittest.TestCase):
         self.assertNotIn("the requested file", msg)
 
     def test_entry_not_found_and_generic_produce_different_messages(self):
-        with mock.patch(
-            _DOWNLOAD_ATTR,
-            new=_raising_download(EntryNotFoundError("x")),
+        with (
+            mock.patch(
+                _DOWNLOAD_ATTR,
+                new=_raising_download(EntryNotFoundError("x")),
+            ),
+            self.assertRaises(EnvironmentError) as ctx_entry,
         ):
-            with self.assertRaises(EnvironmentError) as ctx_entry:
-                aistudio_download("my/repo", filename="model.bin")
-        with mock.patch(
-            _DOWNLOAD_ATTR, new=_raising_download(RuntimeError("x"))
+            aistudio_download("my/repo", filename="model.bin")
+        with (
+            mock.patch(
+                _DOWNLOAD_ATTR, new=_raising_download(RuntimeError("x"))
+            ),
+            self.assertRaises(EnvironmentError) as ctx_generic,
         ):
-            with self.assertRaises(EnvironmentError) as ctx_generic:
-                aistudio_download("my/repo", filename="model.bin")
+            aistudio_download("my/repo", filename="model.bin")
         self.assertNotEqual(
             str(ctx_entry.exception), str(ctx_generic.exception)
         )
@@ -286,13 +297,13 @@ class AistudioDownloadErrorMappingTest(unittest.TestCase):
     def test_error_message_uses_subfolder_prefixed_filename(self):
         # Proves _add_subfolder runs before the download call and its result
         # is used in the error text (not just the raw filename).
-        with mock.patch(
-            _DOWNLOAD_ATTR, new=_raising_download(ValueError("boom"))
+        with (
+            mock.patch(
+                _DOWNLOAD_ATTR, new=_raising_download(ValueError("boom"))
+            ),
+            self.assertRaises(EnvironmentError) as ctx,
         ):
-            with self.assertRaises(EnvironmentError) as ctx:
-                aistudio_download(
-                    "my/repo", filename="model.bin", subfolder="ckpt"
-                )
+            aistudio_download("my/repo", filename="model.bin", subfolder="ckpt")
         self.assertIn("ckpt/model.bin", str(ctx.exception))
 
 

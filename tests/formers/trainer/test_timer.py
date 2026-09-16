@@ -44,8 +44,8 @@ try:
 except ImportError as exc:  # pragma: no cover - environment dependent
     _IMPORT_ERROR = exc
 
-_SKIP_REASON = "requires paddle/paddlefleet.trainer.plugins.timer: {}".format(
-    _IMPORT_ERROR
+_SKIP_REASON = (
+    f"requires paddle/paddlefleet.trainer.plugins.timer: {_IMPORT_ERROR}"
 )
 
 

@@ -34,7 +34,7 @@ import unittest
 
 import numpy as np
 import paddle
-import paddle.nn as nn
+from paddle import nn
 
 from paddlefleet.nn.embedding import Embedding
 from paddlefleet.transformers.configuration_utils import PretrainedConfig

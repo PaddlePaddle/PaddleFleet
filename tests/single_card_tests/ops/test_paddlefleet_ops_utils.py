@@ -337,7 +337,7 @@ class TestGetCudaVersion(unittest.TestCase):
     """get_cuda_version: nvcc discovery + release-string parsing to (M, m)."""
 
     def test_raises_when_nvcc_absent(self):
-        with mock.patch.object(_utils.shutil, "which", return_value=None):
+        with mock.patch.object(_utils.shutil, "which", return_value=None):  # noqa: SIM117
             with self.assertRaises(FileNotFoundError):
                 _utils.get_cuda_version()
 

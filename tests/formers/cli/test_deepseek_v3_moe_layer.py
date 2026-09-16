@@ -304,7 +304,7 @@ class DeepseekV3DropTokenMoEBehaviorTest(unittest.TestCase):
                 _sorted_rows(expected[e]),
                 rtol=1e-6,
                 atol=1e-6,
-                err_msg="expert %d received wrong token identities" % e,
+                err_msg=f"expert {e} received wrong token identities",
             )
 
     def test_empty_expert_is_excluded_from_dispatch(self):

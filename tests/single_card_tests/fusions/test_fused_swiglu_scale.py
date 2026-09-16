@@ -330,7 +330,7 @@ class TestForwardCudaDispatch(unittest.TestCase):
             self.calls["clamp"] = (x, scale, clamp_value)
             return paddle.to_tensor([[99.0]])
 
-        return dict(fused_swiglu_scale=plain, fused_swiglu_scale_clamp=clamp)
+        return {"fused_swiglu_scale": plain, "fused_swiglu_scale_clamp": clamp}
 
     def test_no_clamp_dispatches_plain_kernel(self):
         """clamp_value None -> fused_swiglu_scale(x, scale); output verbatim."""
@@ -397,10 +397,10 @@ class TestBackwardCudaDispatch(unittest.TestCase):
             self.calls["clamp"] = (x, scale, out_grad, clamp_value)
             return self._clamp_ret
 
-        return dict(
-            fused_swiglu_scale_bwd=plain_bwd,
-            fused_swiglu_scale_clamp_bwd=clamp_bwd,
-        )
+        return {
+            "fused_swiglu_scale_bwd": plain_bwd,
+            "fused_swiglu_scale_clamp_bwd": clamp_bwd,
+        }
 
     def test_no_clamp_dispatches_plain_bwd_returns_tuple(self):
         """clamp None -> fused_swiglu_scale_bwd(x, scale, out_grad) verbatim."""

@@ -128,7 +128,7 @@ class TestClipGradAttributeDelegation(unittest.TestCase):
         clip = ClipGradByGlobalNorm(1.0)
         clip_grad = MoEHybridParallelClipGrad(clip, _FakeHCG())
         with self.assertRaises(AttributeError):
-            clip_grad.definitely_missing_attr_xyz
+            _ = clip_grad.definitely_missing_attr_xyz
 
 
 class TestHFvsPaddleFormulaSelection(unittest.TestCase):

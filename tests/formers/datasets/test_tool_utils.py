@@ -261,7 +261,7 @@ class TestLlama3ToolUtils(unittest.TestCase):
         result = Llama3ToolUtils.tool_formatter([BARE_ADD_TOOL])
         today = datetime.now().strftime("%d %b %Y")
         self.assertIn("Cutting Knowledge Date: December 2023\n", result)
-        self.assertIn("Today Date: {}\n".format(today), result)
+        self.assertIn(f"Today Date: {today}\n", result)
         # Llama3 pretty-prints the wrapped tool with indent=4.
         self.assertIn('"type": "function"', result)
         self.assertIn('{\n    "type": "function",', result)

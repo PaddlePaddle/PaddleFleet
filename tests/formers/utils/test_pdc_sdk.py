@@ -214,11 +214,13 @@ class ExecCmdTest(PDCToolsTestBase):
 
     def test_subprocess_error_is_reraised(self):
         tools = PDCTools()
-        with mock.patch(
-            f"{PDC_MOD}.subprocess.run", side_effect=OSError("nope")
+        with (
+            mock.patch(
+                f"{PDC_MOD}.subprocess.run", side_effect=OSError("nope")
+            ),
+            self.assertRaises(Exception) as ctx,
         ):
-            with self.assertRaises(Exception) as ctx:
-                tools._exec_cmd(["/bin/echo"])
+            tools._exec_cmd(["/bin/echo"])
         self.assertIn("nope", str(ctx.exception))
 
 

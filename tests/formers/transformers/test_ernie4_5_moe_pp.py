@@ -240,17 +240,15 @@ class TestGetPPVPSplitLayers(unittest.TestCase):
         self.assertEqual(got, set(range(5)))
 
     def test_pp_size_one_rejected(self):
-        with _hcg_with_pp(1):
-            with self.assertRaises(AssertionError):
-                get_pp_vp_split_layers(_pp_cfg(num_hidden=8, vp=2))
+        with _hcg_with_pp(1), self.assertRaises(AssertionError):
+            get_pp_vp_split_layers(_pp_cfg(num_hidden=8, vp=2))
 
     def test_non_divisible_layer_num_rejected(self):
         # layer_num=6 not divisible by pp(2)*vp(2)=4
-        with _hcg_with_pp(2):
-            with self.assertRaises(AssertionError):
-                get_pp_vp_split_layers(
-                    _pp_cfg(num_hidden=6, vp=2), skip_recompute_num=1
-                )
+        with _hcg_with_pp(2), self.assertRaises(AssertionError):
+            get_pp_vp_split_layers(
+                _pp_cfg(num_hidden=6, vp=2), skip_recompute_num=1
+            )
 
 
 class TestEmptyLayerPassthrough(unittest.TestCase):

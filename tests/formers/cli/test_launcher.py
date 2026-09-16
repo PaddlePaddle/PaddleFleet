@@ -125,22 +125,26 @@ class ReexecWithNumactlTest(_LauncherTestBase):
         with mock.patch.dict(
             os.environ, {"PADDLE_TRAINER_ID": "keep-me"}, clear=True
         ):
-            with mock.patch.object(
-                launcher_mod.shutil, "which", return_value="/opt/bin/numactl"
-            ) as which:
-                with mock.patch.object(
+            with (
+                mock.patch.object(
+                    launcher_mod.shutil,
+                    "which",
+                    return_value="/opt/bin/numactl",
+                ) as which,
+                mock.patch.object(
                     launcher_mod.os, "execvpe", side_effect=fake_execvpe
-                ) as execvpe:
-                    with mock.patch.object(
-                        launcher_mod.sys, "executable", "/venv/bin/python"
-                    ):
-                        with mock.patch.object(
-                            launcher_mod.sys,
-                            "argv",
-                            ["train.py", "train", "--config", "a.yaml"],
-                        ):
-                            with mock.patch.object(launcher_mod, "print"):
-                                launcher_mod._reexec_with_numactl(3, 1)
+                ) as execvpe,
+                mock.patch.object(
+                    launcher_mod.sys, "executable", "/venv/bin/python"
+                ),
+                mock.patch.object(
+                    launcher_mod.sys,
+                    "argv",
+                    ["train.py", "train", "--config", "a.yaml"],
+                ),
+                mock.patch.object(launcher_mod, "print"),
+            ):
+                launcher_mod._reexec_with_numactl(3, 1)
 
             # os.environ itself must not be polluted with the sentinel.
             self.assertNotIn(launcher_mod.BIND_TRAINER_NUMA_EXECED, os.environ)
@@ -172,14 +176,16 @@ class ReexecWithNumactlTest(_LauncherTestBase):
     def test_is_noop_once_already_execed(self):
         """With the sentinel present the process is already inside numactl, so
         neither the PATH probe nor a second exec must happen."""
-        with mock.patch.dict(
-            os.environ,
-            {launcher_mod.BIND_TRAINER_NUMA_EXECED: "1"},
-            clear=True,
+        with (
+            mock.patch.dict(  # noqa: SIM117
+                os.environ,
+                {launcher_mod.BIND_TRAINER_NUMA_EXECED: "1"},
+                clear=True,
+            ),
+            mock.patch.object(launcher_mod.shutil, "which") as which,
         ):
-            with mock.patch.object(launcher_mod.shutil, "which") as which:
-                with mock.patch.object(launcher_mod.os, "execvpe") as execvpe:
-                    result = launcher_mod._reexec_with_numactl(0, 0)
+            with mock.patch.object(launcher_mod.os, "execvpe") as execvpe:
+                result = launcher_mod._reexec_with_numactl(0, 0)
 
         self.assertIsNone(result)
         which.assert_not_called()
@@ -187,7 +193,7 @@ class ReexecWithNumactlTest(_LauncherTestBase):
 
     def test_raises_when_numactl_absent_from_path(self):
         """No numactl on PATH is a hard error, and no exec is attempted."""
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.dict(os.environ, {}, clear=True):  # noqa: SIM117
             with mock.patch.object(
                 launcher_mod.shutil, "which", return_value=None
             ):
@@ -206,7 +212,7 @@ class MaybeBindTrainerNumaTest(_LauncherTestBase):
         """Run the gate with a controlled env, capturing the (rank, node) that
         reaches _reexec_with_numactl. Returns None if reexec was not invoked."""
         seen = []
-        with mock.patch.dict(os.environ, env, clear=True):
+        with mock.patch.dict(os.environ, env, clear=True):  # noqa: SIM117
             with mock.patch.object(
                 launcher_mod,
                 "_reexec_with_numactl",
@@ -271,33 +277,33 @@ class MaybeBindTrainerNumaTest(_LauncherTestBase):
         self.assertEqual(got, (1, 0))
 
     def test_enabled_without_any_rank_source_raises(self):
-        with mock.patch.dict(
-            os.environ, {"BIND_TRAINER_NUMA": "1"}, clear=True
+        with (
+            mock.patch.dict(os.environ, {"BIND_TRAINER_NUMA": "1"}, clear=True),
+            mock.patch.object(launcher_mod, "_reexec_with_numactl") as reexec,
+            self.assertRaisesRegex(
+                RuntimeError, "PADDLE_LOCAL_RANK or FLAGS_selected_gpus"
+            ),
         ):
-            with mock.patch.object(
-                launcher_mod, "_reexec_with_numactl"
-            ) as reexec:
-                with self.assertRaisesRegex(
-                    RuntimeError, "PADDLE_LOCAL_RANK or FLAGS_selected_gpus"
-                ):
-                    launcher_mod._maybe_bind_trainer_numa()
+            launcher_mod._maybe_bind_trainer_numa()
         reexec.assert_not_called()
 
     def test_rank_outside_supported_range_raises(self):
         for bad in ("4", "5", "8"):
             with self.subTest(rank=bad):
-                with mock.patch.dict(
-                    os.environ,
-                    {"BIND_TRAINER_NUMA": "1", "PADDLE_LOCAL_RANK": bad},
-                    clear=True,
-                ):
-                    with mock.patch.object(
+                with (
+                    mock.patch.dict(
+                        os.environ,
+                        {"BIND_TRAINER_NUMA": "1", "PADDLE_LOCAL_RANK": bad},
+                        clear=True,
+                    ),
+                    mock.patch.object(
                         launcher_mod, "_reexec_with_numactl"
-                    ) as reexec:
-                        with self.assertRaisesRegex(
-                            RuntimeError, "only supports local rank 0-3"
-                        ):
-                            launcher_mod._maybe_bind_trainer_numa()
+                    ) as reexec,
+                    self.assertRaisesRegex(
+                        RuntimeError, "only supports local rank 0-3"
+                    ),
+                ):
+                    launcher_mod._maybe_bind_trainer_numa()
                 reexec.assert_not_called()
 
 
@@ -319,18 +325,18 @@ class LaunchDispatchTest(_LauncherTestBase):
         return calls
 
     def test_missing_command_raises(self):
-        with mock.patch.object(launcher_mod.sys, "argv", ["train.py"]):
+        with mock.patch.object(launcher_mod.sys, "argv", ["train.py"]):  # noqa: SIM117
             with self.assertRaisesRegex(ValueError, "larger than 1"):
                 launcher_mod.launch()
 
     def test_unknown_command_raises_with_name(self):
-        with mock.patch.object(
-            launcher_mod.sys, "argv", ["train.py", "frobnicate"]
+        with (
+            mock.patch.object(
+                launcher_mod.sys, "argv", ["train.py", "frobnicate"]
+            ),
+            self.assertRaisesRegex(ValueError, "Unknown command : frobnicate"),
         ):
-            with self.assertRaisesRegex(
-                ValueError, "Unknown command : frobnicate"
-            ):
-                launcher_mod.launch()
+            launcher_mod.launch()
 
     def test_export_routes_to_run_export(self):
         calls = self._inject_entrypoint(
@@ -350,21 +356,21 @@ class LaunchDispatchTest(_LauncherTestBase):
             "paddlefleet.cli.train.tuner", "run_tuner"
         )
         seen = []
-        with mock.patch.dict(
-            os.environ,
-            {"BIND_TRAINER_NUMA": "1", "PADDLE_LOCAL_RANK": "2"},
-            clear=True,
-        ):
-            with mock.patch.object(
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"BIND_TRAINER_NUMA": "1", "PADDLE_LOCAL_RANK": "2"},
+                clear=True,
+            ),
+            mock.patch.object(
                 launcher_mod,
                 "_reexec_with_numactl",
                 side_effect=lambda r, n: seen.append((r, n)),
-            ):
-                with mock.patch.object(launcher_mod, "print"):
-                    with mock.patch.object(
-                        launcher_mod.sys, "argv", ["train.py", "train"]
-                    ):
-                        launcher_mod.launch()
+            ),
+            mock.patch.object(launcher_mod, "print"),
+            mock.patch.object(launcher_mod.sys, "argv", ["train.py", "train"]),
+        ):
+            launcher_mod.launch()
 
         self.assertEqual(seen, [(2, 1)])
         self.assertEqual(calls, ["run_tuner"])
@@ -375,7 +381,7 @@ class LaunchDispatchTest(_LauncherTestBase):
         calls = self._inject_entrypoint(
             "paddlefleet.cli.train.tuner", "run_tuner"
         )
-        with mock.patch.dict(os.environ, {}, clear=True):
+        with mock.patch.dict(os.environ, {}, clear=True):  # noqa: SIM117
             with mock.patch.object(
                 launcher_mod, "_reexec_with_numactl"
             ) as reexec:

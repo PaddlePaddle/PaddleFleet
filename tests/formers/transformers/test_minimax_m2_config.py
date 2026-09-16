@@ -254,14 +254,14 @@ class TestMiniMaxM2ConfigConsumption(unittest.TestCase):
     """
 
     def _config(self, **overrides):
-        base = dict(
-            hidden_size=128,
-            num_attention_heads=8,
-            num_key_value_heads=4,
-            head_dim=16,
-            num_hidden_layers=4,
-            num_empty_layers_add_in_head=0,
-        )
+        base = {
+            "hidden_size": 128,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 4,
+            "head_dim": 16,
+            "num_hidden_layers": 4,
+            "num_empty_layers_add_in_head": 0,
+        }
         base.update(overrides)
         return MiniMaxM2Config(**base)
 

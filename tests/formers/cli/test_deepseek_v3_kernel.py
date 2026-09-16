@@ -74,9 +74,7 @@ _KERNEL_AVAILABLE = dsv3_kernel is not None
 _IMPORT_SKIP_REASON = (
     ""
     if _KERNEL_AVAILABLE
-    else "kernel import failed (dependency unavailable): {!r}".format(
-        _IMPORT_ERROR
-    )
+    else f"kernel import failed (dependency unavailable): {_IMPORT_ERROR!r}"
 )
 
 
@@ -98,12 +96,12 @@ def _detect_gpu_fp8():
         dev = triton.runtime.driver.active.get_current_device()
         cc = triton.runtime.driver.active.get_device_properties(dev)["cc"]
     except (ImportError, ModuleNotFoundError) as exc:
-        return False, "Triton unavailable: {!r}".format(exc)
+        return False, f"Triton unavailable: {exc!r}"
     except (RuntimeError, AttributeError, KeyError) as exc:
-        return False, "Triton GPU driver unavailable: {!r}".format(exc)
+        return False, f"Triton GPU driver unavailable: {exc!r}"
     # fp8e4nv (paddle.float8_e4m3fn) requires Ada/Hopper (sm89+).
     if cc < 89:
-        return False, "fp8e4nv needs sm89+, got sm{}".format(cc)
+        return False, f"fp8e4nv needs sm89+, got sm{cc}"
     return True, ""
 
 

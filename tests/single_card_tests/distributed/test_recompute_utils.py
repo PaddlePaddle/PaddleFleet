@@ -72,18 +72,18 @@ def make_config(**overrides):
     override just the fields relevant to the behavior they pin down. This is a
     collaborator stub, not the unit under test.
     """
-    defaults = dict(
-        num_hidden_layers=8,
-        num_empty_layers_add_in_head=0,
-        num_empty_layers_add_in_tail=0,
-        pipeline_model_parallel_size=1,
-        virtual_pipeline_model_parallel_size=None,
-        recompute_granularity="full",
-        recompute_method="uniform",
-        recompute_num_layers=1,
-        recompute_modules=None,
-        num_nextn_predict_layers=0,
-    )
+    defaults = {
+        "num_hidden_layers": 8,
+        "num_empty_layers_add_in_head": 0,
+        "num_empty_layers_add_in_tail": 0,
+        "pipeline_model_parallel_size": 1,
+        "virtual_pipeline_model_parallel_size": None,
+        "recompute_granularity": "full",
+        "recompute_method": "uniform",
+        "recompute_num_layers": 1,
+        "recompute_modules": None,
+        "num_nextn_predict_layers": 0,
+    }
     defaults.update(overrides)
     return types.SimpleNamespace(**defaults)
 

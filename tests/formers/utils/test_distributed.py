@@ -274,7 +274,7 @@ class TestDistributedGatherMapping(unittest.TestCase):
 
         self.assertIsInstance(tuple_out, tuple)
         self.assertEqual(len(tuple_out), 2)
-        self.assertEqual([x for x in tuple_out], [None, None])
+        self.assertEqual(list(tuple_out), [None, None])
 
         self.assertIsInstance(dict_out, dict)
         self.assertEqual(set(dict_out.keys()), {"a", "b"})

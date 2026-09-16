@@ -55,7 +55,7 @@ class TestGetBoolEnv(unittest.TestCase):
     def test_true_tokens_are_truthy(self):
         # Hand-derived: these lowercase to "true"/"1", the only truthy tokens.
         for value in ("true", "True", "TRUE", "tRuE", "1"):
-            with self.subTest(value=value):
+            with self.subTest(value=value):  # noqa: SIM117
                 with patch.dict(os.environ, {BOOL_KEY: value}):
                     # default is deliberately "false" so a True result can only
                     # come from consuming the env value, not the default.
@@ -79,14 +79,14 @@ class TestGetBoolEnv(unittest.TestCase):
             "megatron",  # string-truthiness pitfall: non-empty but not a flag
             "hf",
         ):
-            with self.subTest(value=value):
+            with self.subTest(value=value):  # noqa: SIM117
                 with patch.dict(os.environ, {BOOL_KEY: value}):
                     self.assertIs(_get_bool_env(BOOL_KEY, "true"), False)
 
     def test_no_whitespace_stripping(self):
         # Contract does membership on the raw lowercased value, no strip().
         for value in (" true", "true ", " 1", "1 "):
-            with self.subTest(value=value):
+            with self.subTest(value=value):  # noqa: SIM117
                 with patch.dict(os.environ, {BOOL_KEY: value}):
                     self.assertIs(_get_bool_env(BOOL_KEY, "false"), False)
 
@@ -113,14 +113,14 @@ class TestGetUserHome(unittest.TestCase):
     def test_reads_home_env(self):
         # On POSIX, expanduser("~") resolves via $HOME; the helper must reflect
         # whatever HOME points at. os.path.expanduser is stdlib (independent).
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp:  # noqa: SIM117
             with patch.dict(os.environ, {"HOME": tmp}):
                 self.assertEqual(_get_user_home(), tmp)
 
 
 class TestGetPfHome(unittest.TestCase):
     def test_returns_existing_dir_from_env(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp:  # noqa: SIM117
             with patch.dict(os.environ, {"PF_HOME": tmp}):
                 self.assertEqual(_get_pf_home(), tmp)
 
@@ -135,14 +135,14 @@ class TestGetPfHome(unittest.TestCase):
             self.assertFalse(os.path.exists(missing))
 
     def test_raises_when_pf_home_is_file(self):
-        with tempfile.NamedTemporaryFile() as f:
+        with tempfile.NamedTemporaryFile() as f:  # noqa: SIM117
             with patch.dict(os.environ, {"PF_HOME": f.name}):
                 with self.assertRaises(RuntimeError):
                     _get_pf_home()
 
     def test_default_when_unset(self):
         # Independent expected: os.path.join(HOME, ".paddlefleet").
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp:  # noqa: SIM117
             with patch.dict(os.environ, {"HOME": tmp}):
                 os.environ.pop("PF_HOME", None)
                 expected = os.path.join(tmp, ".paddlefleet")
@@ -200,7 +200,7 @@ class TestCheckpointRegex(unittest.TestCase):
     def test_regex_is_built_from_prefix_constant(self):
         # The compiled pattern must derive from PREFIX_CHECKPOINT_DIR, so a
         # freshly built name using that constant should match and capture.
-        name = "{}-77".format(PREFIX_CHECKPOINT_DIR)
+        name = f"{PREFIX_CHECKPOINT_DIR}-77"
         m = _re_checkpoint.match(name)
         self.assertIsNotNone(m)
         self.assertEqual(m.group(1), "77")

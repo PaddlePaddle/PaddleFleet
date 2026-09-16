@@ -71,7 +71,7 @@ class _WorkflowTestBase(unittest.TestCase):
         if _IMPORT_ERROR is not None:
             self.skipTest(
                 "paddlefleet import failed (dependency unavailable): "
-                "{!r}".format(_IMPORT_ERROR)
+                f"{_IMPORT_ERROR!r}"
             )
 
 

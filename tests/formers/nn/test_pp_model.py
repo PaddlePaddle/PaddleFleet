@@ -550,7 +550,7 @@ class TestMakeDecoderLayerPipe(unittest.TestCase):
         self.assertIsInstance(tpe, tuple)
         self.assertEqual(len(tpe), 2)
         # each half sliced to seq on the -2 axis
-        self.assertEqual(list(tpe[0].shape), [2, 6, 3][:1] + [seq, 3])
+        self.assertEqual(list(tpe[0].shape), [*[2, 6, 3][:1], seq, 3])
         np.testing.assert_array_equal(tpe[0].numpy(), pe.numpy()[0, :, :seq, :])
         np.testing.assert_array_equal(tpe[1].numpy(), pe.numpy()[1, :, :seq, :])
         # output tuple carries mask, pos and pe forward

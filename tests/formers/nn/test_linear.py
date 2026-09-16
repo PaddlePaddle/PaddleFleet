@@ -29,7 +29,7 @@ import unittest
 
 import numpy as np
 import paddle
-import paddle.nn as nn
+from paddle import nn
 
 from paddlefleet.nn.linear import Linear
 from paddlefleet.transformers import LlamaConfig

@@ -56,7 +56,7 @@ import tempfile
 import unittest
 
 try:
-    import paddle  # noqa: F401  # heavy dep pulled in by paddlefleet/__init__
+    import paddle  # heavy dep pulled in by paddlefleet/__init__
 
     from paddlefleet.cli.train.ernie_pretrain.src.utils import (
         logging as ernie_logging,

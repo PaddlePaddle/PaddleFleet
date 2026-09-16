@@ -78,7 +78,7 @@ class _ConfigTestBase(unittest.TestCase):
         if _IMPORT_ERROR is not None:
             self.skipTest(
                 "paddlefleet import failed (dependency unavailable): "
-                "{!r}".format(_IMPORT_ERROR)
+                f"{_IMPORT_ERROR!r}"
             )
 
 
@@ -267,9 +267,7 @@ class TestSerializationRoundTrip(_ConfigTestBase):
             self.assertEqual(
                 getattr(rebuilt, field_name),
                 getattr(original, field_name),
-                "field {!r} was lost across to_dict/from_dict".format(
-                    field_name
-                ),
+                f"field {field_name!r} was lost across to_dict/from_dict",
             )
         # Booleans must round-trip as booleans, not stringified truthy values.
         self.assertIs(rebuilt.norm_topk_prob, True)

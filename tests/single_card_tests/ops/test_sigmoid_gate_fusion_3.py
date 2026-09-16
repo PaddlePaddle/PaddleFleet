@@ -84,13 +84,13 @@ def _gpu_ready():
 _IMPORT_SKIP = (
     "sigmoid_gate_fusion requires paddle (module imports paddle at top "
     "level); input validation runs on CPU but paddle must be installed "
-    "(import error: %s)" % (_IMPORT_ERR or "none",)
+    "(import error: {})".format(_IMPORT_ERR or "none")
 )
 
 _GPU_SKIP = (
     "fused sigmoid-gate kernels require paddle + triton and a CUDA GPU with "
     "an active Triton runtime; there is no CPU implementation to validate "
-    "(import error: %s)" % (_IMPORT_ERR or "none",)
+    "(import error: {})".format(_IMPORT_ERR or "none")
 )
 
 

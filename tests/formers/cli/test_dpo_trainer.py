@@ -39,7 +39,7 @@ import unittest
 from collections import OrderedDict
 
 try:
-    import paddle  # noqa: F401
+    import paddle
 
     from paddlefleet.cli.train.dpo.dpo_trainer import (
         DPO_INFO_KEYS,
@@ -334,7 +334,7 @@ class TestDisableDropoutInModel(unittest.TestCase):
             inner,
         )
         disable_dropout_in_model(model)
-        nested_dropout = list(inner.children())[0]
+        nested_dropout = next(iter(inner.children()))
         self.assertEqual(nested_dropout.p, 0)
 
 

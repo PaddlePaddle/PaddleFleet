@@ -76,7 +76,7 @@ class _ConfigTestBase(unittest.TestCase):
         if _IMPORT_ERROR is not None:
             self.skipTest(
                 "paddlefleet ernie configuration import failed "
-                "(Paddle dependency unavailable): {!r}".format(_IMPORT_ERROR)
+                f"(Paddle dependency unavailable): {_IMPORT_ERROR!r}"
             )
 
 

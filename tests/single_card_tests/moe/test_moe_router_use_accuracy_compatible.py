@@ -63,7 +63,9 @@ try:
     import numpy as np
     import paddle
 
-    from paddlefleet.transformer.moe import moe_router as _moe_router
+    from paddlefleet.transformer.moe import (
+        moe_router as _moe_router,  # noqa: F401
+    )
     from paddlefleet.transformer.moe.moe_router import StandardMoERouter
 
     _IMPORT_ERROR = None

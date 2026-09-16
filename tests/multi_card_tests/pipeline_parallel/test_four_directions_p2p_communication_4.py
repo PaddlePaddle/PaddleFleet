@@ -13,11 +13,12 @@
 # limitations under the License.
 
 import os
-import unittest
 
-# Exercise the synchronous-send ordering branch of ``_p2p_helper``
-# (recv_prev -> send_next -> recv_next -> send_prev). This flag is read at
-# import time by the production module, so it must be set before the import.
+# ``PADDLE_P2P_SYNC_SEND`` is read once, at import time, by the production
+# module (``_sync_send`` module global). Setting it here -- before that import
+# -- is load-bearing: it selects the synchronous-send ordering branch of
+# ``_p2p_helper`` (recv_prev -> send_next -> recv_next -> send_prev), which is
+# exactly the code path these tests exercise on a real 2-stage pipeline.
 os.environ["PADDLE_P2P_SYNC_SEND"] = "1"
 
 import paddle
@@ -61,20 +62,23 @@ def _init_pp():
     initialize_fleet(strategy)
 
 
-def setUpModule():
+def _setup():
     _init_pp()
     hcg = fleet.get_hybrid_communicate_group()
-    initialize_p2p_groups(hcg, enable_partial_send_recv=True)
+    initialize_p2p_groups(
+        hcg, enable_partial_send_recv=True, enable_timer=False
+    )
+    return hcg
 
 
 def _linear_payload(base, shape):
-    """Build a fully deterministic, position-distinguishable GPU tensor.
+    """Deterministic, sender-tagged GPU tensor.
 
-    Element at flat index ``k`` equals ``base + k``. ``base`` tags the logical
-    sender so that a wrong peer, a reversed direction or a swapped recv slot
-    yields values that differ from the hand-written expectation below. The
-    expected tensors in each test are written independently as the same known
-    constants; they are never produced by ``_p2p_helper``.
+    Element at flat index ``k`` equals ``base + k``. ``base`` identifies the
+    logical sender and direction so that a reversed direction, a wrong peer or
+    a swapped recv slot produces values that differ from the hand-written
+    expectations below. Expected tensors are written independently as explicit
+    literals and are never produced by ``_p2p_helper``.
     """
     numel = 1
     for dim in shape:
@@ -103,241 +107,268 @@ def _tuple_meta():
     return meta
 
 
-class TestSyncSendFourDirectionsP2P(unittest.TestCase):
-    """Real 2-GPU (PP=2) point-to-point transfers through ``_p2p_helper`` in
-    ``PADDLE_P2P_SYNC_SEND`` mode. Every payload is rank/position
-    distinguishable and each receiving rank checks the exact transmitted
-    values against a hand-written constant, so a reversed direction, a wrong
-    peer or a swapped recv slot is rejected -- not merely ``assertIsNotNone``.
+def _assert_tensor_equal(actual, expected):
+    assert actual is not None, "receiver returned None instead of a tensor"
+    assert list(actual.shape) == list(expected.shape), (
+        f"shape mismatch: {actual.shape} != {expected.shape}"
+    )
+    assert actual.dtype == expected.dtype, (
+        f"dtype mismatch: {actual.dtype} != {expected.dtype}"
+    )
+    assert bool(paddle.equal_all(actual, expected)), (
+        f"received {actual.numpy().tolist()} != "
+        f"expected {expected.numpy().tolist()}"
+    )
+
+
+def test_sync_send_forward_single_content():
+    """Forward direction, single tensor, sync-send mode.
+
+    Stage 0 sends one tensor to the next stage; stage 1 recv_prev must hold the
+    exact transmitted bytes. The sending rank must not receive anything.
     """
+    pp_rank = fleet.get_hybrid_communicate_group().get_stage_id()
+    meta = _single_meta()
 
-    def _assert_equal(self, actual, expected):
-        self.assertIsNotNone(actual)
-        self.assertEqual(list(actual.shape), list(expected.shape))
-        self.assertEqual(actual.dtype, expected.dtype)
-        self.assertTrue(
-            bool(paddle.equal_all(actual, expected)),
-            f"received {actual.numpy().tolist()} != "
-            f"expected {expected.numpy().tolist()}",
+    if pp_rank == 0:
+        payload = _linear_payload(1000, [2, 4])
+        recv_prev, recv_next = _p2p_helper(
+            tensor_send_next=payload,
+            tensor_send_prev=None,
+            recv_prev=False,
+            recv_next=False,
+            sync_recv=True,
+            send_recv_meta=meta,
         )
+        assert recv_prev is None
+        assert recv_next is None
+    else:
+        recv_prev, recv_next = _p2p_helper(
+            tensor_send_next=None,
+            tensor_send_prev=None,
+            recv_prev=True,
+            recv_next=False,
+            sync_recv=True,
+            send_recv_meta=meta,
+        )
+        expected = paddle.to_tensor(
+            [
+                [1000.0, 1001.0, 1002.0, 1003.0],
+                [1004.0, 1005.0, 1006.0, 1007.0],
+            ],
+            dtype="float32",
+        ).cuda()
+        _assert_tensor_equal(recv_prev, expected)
+        assert recv_next is None
 
-    def test_forward_single_tensor_content(self):
-        """Stage 0 sends to next; stage 1 recv_prev must hold the exact bytes."""
-        pp_rank = fleet.get_hybrid_communicate_group().get_stage_id()
-        meta = _single_meta()
+    dist.barrier()
 
-        if pp_rank == 0:
-            payload = _linear_payload(1000, [2, 4])
-            recv_prev, recv_next = _p2p_helper(
-                tensor_send_next=payload,
-                tensor_send_prev=None,
-                recv_prev=False,
-                recv_next=False,
-                sync_recv=True,
-                send_recv_meta=meta,
-            )
-            self.assertIsNone(recv_prev)
-            self.assertIsNone(recv_next)
-        else:
-            recv_prev, recv_next = _p2p_helper(
-                tensor_send_next=None,
-                tensor_send_prev=None,
-                recv_prev=True,
-                recv_next=False,
-                sync_recv=True,
-                send_recv_meta=meta,
-            )
-            expected = paddle.to_tensor(
-                [
-                    [1000.0, 1001.0, 1002.0, 1003.0],
-                    [1004.0, 1005.0, 1006.0, 1007.0],
-                ],
-                dtype="float32",
-            ).cuda()
-            self._assert_equal(recv_prev, expected)
-            self.assertIsNone(recv_next)
 
-        dist.barrier()
+def test_sync_send_backward_single_content():
+    """Backward direction, single tensor, sync-send mode.
 
-    def test_backward_single_tensor_content(self):
-        """Stage 1 sends to prev; stage 0 recv_next must hold the exact bytes."""
-        pp_rank = fleet.get_hybrid_communicate_group().get_stage_id()
-        meta = _single_meta()
+    Stage 1 sends one tensor to the prev stage; stage 0 recv_next must hold the
+    exact transmitted bytes. A distinct tag base from the forward test catches
+    a swapped forward/backward direction or a wrong recv slot.
+    """
+    pp_rank = fleet.get_hybrid_communicate_group().get_stage_id()
+    meta = _single_meta()
 
-        if pp_rank == 1:
-            payload = _linear_payload(2000, [2, 4])
-            recv_prev, recv_next = _p2p_helper(
-                tensor_send_next=None,
-                tensor_send_prev=payload,
-                recv_prev=False,
-                recv_next=False,
-                sync_recv=True,
-                send_recv_meta=meta,
-            )
-            self.assertIsNone(recv_prev)
-            self.assertIsNone(recv_next)
-        else:
-            recv_prev, recv_next = _p2p_helper(
-                tensor_send_next=None,
-                tensor_send_prev=None,
-                recv_prev=False,
-                recv_next=True,
-                sync_recv=True,
-                send_recv_meta=meta,
-            )
-            expected = paddle.to_tensor(
-                [
-                    [2000.0, 2001.0, 2002.0, 2003.0],
-                    [2004.0, 2005.0, 2006.0, 2007.0],
-                ],
-                dtype="float32",
-            ).cuda()
-            self._assert_equal(recv_next, expected)
-            self.assertIsNone(recv_prev)
+    if pp_rank == 1:
+        payload = _linear_payload(2000, [2, 4])
+        recv_prev, recv_next = _p2p_helper(
+            tensor_send_next=None,
+            tensor_send_prev=payload,
+            recv_prev=False,
+            recv_next=False,
+            sync_recv=True,
+            send_recv_meta=meta,
+        )
+        assert recv_prev is None
+        assert recv_next is None
+    else:
+        recv_prev, recv_next = _p2p_helper(
+            tensor_send_next=None,
+            tensor_send_prev=None,
+            recv_prev=False,
+            recv_next=True,
+            sync_recv=True,
+            send_recv_meta=meta,
+        )
+        expected = paddle.to_tensor(
+            [
+                [2000.0, 2001.0, 2002.0, 2003.0],
+                [2004.0, 2005.0, 2006.0, 2007.0],
+            ],
+            dtype="float32",
+        ).cuda()
+        _assert_tensor_equal(recv_next, expected)
+        assert recv_prev is None
 
-        dist.barrier()
+    dist.barrier()
 
-    def test_forward_tuple_content(self):
-        """Stage 0 sends a 2-tuple next; stage 1 recv_prev preserves order
-        and per-tensor content, not just tuple-ness."""
-        pp_rank = fleet.get_hybrid_communicate_group().get_stage_id()
-        meta = _tuple_meta()
 
-        if pp_rank == 0:
-            t1 = _linear_payload(3000, [2, 4])
-            t2 = _linear_payload(4000, [3, 5])
-            recv_prev, recv_next = _p2p_helper(
-                tensor_send_next=(t1, t2),
-                tensor_send_prev=None,
-                recv_prev=False,
-                recv_next=False,
-                sync_recv=True,
-                send_recv_meta=meta,
-            )
-            self.assertIsNone(recv_prev)
-            self.assertIsNone(recv_next)
-        else:
-            recv_prev, recv_next = _p2p_helper(
-                tensor_send_next=None,
-                tensor_send_prev=None,
-                recv_prev=True,
-                recv_next=False,
-                sync_recv=True,
-                send_recv_meta=meta,
-            )
-            self.assertIsInstance(recv_prev, tuple)
-            self.assertEqual(len(recv_prev), 2)
-            expected_1 = paddle.to_tensor(
-                [
-                    [3000.0, 3001.0, 3002.0, 3003.0],
-                    [3004.0, 3005.0, 3006.0, 3007.0],
-                ],
-                dtype="float32",
-            ).cuda()
-            expected_2 = paddle.to_tensor(
-                [
-                    [4000.0, 4001.0, 4002.0, 4003.0, 4004.0],
-                    [4005.0, 4006.0, 4007.0, 4008.0, 4009.0],
-                    [4010.0, 4011.0, 4012.0, 4013.0, 4014.0],
-                ],
-                dtype="float32",
-            ).cuda()
-            self._assert_equal(recv_prev[0], expected_1)
-            self._assert_equal(recv_prev[1], expected_2)
-            self.assertIsNone(recv_next)
+def test_sync_send_forward_tuple_content():
+    """Forward direction, 2-tuple, sync-send mode.
 
-        dist.barrier()
+    Stage 0 sends a two-tensor tuple to the next stage; stage 1 recv_prev must
+    preserve tuple order and each tensor's exact content, not merely tuple-ness.
+    The two tensors use different shapes and tag bases so a swapped order or a
+    dropped element is caught.
+    """
+    pp_rank = fleet.get_hybrid_communicate_group().get_stage_id()
+    meta = _tuple_meta()
 
-    def test_backward_tuple_content(self):
-        """Stage 1 sends a 2-tuple prev; stage 0 recv_next preserves order
-        and per-tensor content."""
-        pp_rank = fleet.get_hybrid_communicate_group().get_stage_id()
-        meta = _tuple_meta()
+    if pp_rank == 0:
+        t1 = _linear_payload(3000, [2, 4])
+        t2 = _linear_payload(4000, [3, 5])
+        recv_prev, recv_next = _p2p_helper(
+            tensor_send_next=(t1, t2),
+            tensor_send_prev=None,
+            recv_prev=False,
+            recv_next=False,
+            sync_recv=True,
+            send_recv_meta=meta,
+        )
+        assert recv_prev is None
+        assert recv_next is None
+    else:
+        recv_prev, recv_next = _p2p_helper(
+            tensor_send_next=None,
+            tensor_send_prev=None,
+            recv_prev=True,
+            recv_next=False,
+            sync_recv=True,
+            send_recv_meta=meta,
+        )
+        assert isinstance(recv_prev, tuple)
+        assert len(recv_prev) == 2
+        expected_1 = paddle.to_tensor(
+            [
+                [3000.0, 3001.0, 3002.0, 3003.0],
+                [3004.0, 3005.0, 3006.0, 3007.0],
+            ],
+            dtype="float32",
+        ).cuda()
+        expected_2 = paddle.to_tensor(
+            [
+                [4000.0, 4001.0, 4002.0, 4003.0, 4004.0],
+                [4005.0, 4006.0, 4007.0, 4008.0, 4009.0],
+                [4010.0, 4011.0, 4012.0, 4013.0, 4014.0],
+            ],
+            dtype="float32",
+        ).cuda()
+        _assert_tensor_equal(recv_prev[0], expected_1)
+        _assert_tensor_equal(recv_prev[1], expected_2)
+        assert recv_next is None
 
-        if pp_rank == 1:
-            t1 = _linear_payload(5000, [2, 4])
-            t2 = _linear_payload(6000, [3, 5])
-            recv_prev, recv_next = _p2p_helper(
-                tensor_send_next=None,
-                tensor_send_prev=(t1, t2),
-                recv_prev=False,
-                recv_next=False,
-                sync_recv=True,
-                send_recv_meta=meta,
-            )
-            self.assertIsNone(recv_prev)
-            self.assertIsNone(recv_next)
-        else:
-            recv_prev, recv_next = _p2p_helper(
-                tensor_send_next=None,
-                tensor_send_prev=None,
-                recv_prev=False,
-                recv_next=True,
-                sync_recv=True,
-                send_recv_meta=meta,
-            )
-            self.assertIsInstance(recv_next, tuple)
-            self.assertEqual(len(recv_next), 2)
-            expected_1 = paddle.to_tensor(
-                [
-                    [5000.0, 5001.0, 5002.0, 5003.0],
-                    [5004.0, 5005.0, 5006.0, 5007.0],
-                ],
-                dtype="float32",
-            ).cuda()
-            expected_2 = paddle.to_tensor(
-                [
-                    [6000.0, 6001.0, 6002.0, 6003.0, 6004.0],
-                    [6005.0, 6006.0, 6007.0, 6008.0, 6009.0],
-                    [6010.0, 6011.0, 6012.0, 6013.0, 6014.0],
-                ],
-                dtype="float32",
-            ).cuda()
-            self._assert_equal(recv_next[0], expected_1)
-            self._assert_equal(recv_next[1], expected_2)
-            self.assertIsNone(recv_prev)
+    dist.barrier()
 
-        dist.barrier()
 
-    def test_forward_single_tensor_non_blocking_content(self):
-        """sync_recv=False queues irecv tasks and waits them before returning;
-        the completed buffer on stage 1 must still equal the sent bytes."""
-        pp_rank = fleet.get_hybrid_communicate_group().get_stage_id()
-        meta = _single_meta()
+def test_sync_send_backward_tuple_content():
+    """Backward direction, 2-tuple, sync-send mode.
 
-        if pp_rank == 0:
-            payload = _linear_payload(7000, [2, 4])
-            recv_prev, recv_next = _p2p_helper(
-                tensor_send_next=payload,
-                tensor_send_prev=None,
-                recv_prev=False,
-                recv_next=False,
-                sync_recv=False,
-                send_recv_meta=meta,
-            )
-            self.assertIsNone(recv_prev)
-            self.assertIsNone(recv_next)
-        else:
-            recv_prev, recv_next = _p2p_helper(
-                tensor_send_next=None,
-                tensor_send_prev=None,
-                recv_prev=True,
-                recv_next=False,
-                sync_recv=False,
-                send_recv_meta=meta,
-            )
-            expected = paddle.to_tensor(
-                [
-                    [7000.0, 7001.0, 7002.0, 7003.0],
-                    [7004.0, 7005.0, 7006.0, 7007.0],
-                ],
-                dtype="float32",
-            ).cuda()
-            self._assert_equal(recv_prev, expected)
-            self.assertIsNone(recv_next)
+    Stage 1 sends a two-tensor tuple to the prev stage; stage 0 recv_next must
+    preserve tuple order and each tensor's exact content. Distinct tag bases
+    from the forward-tuple test guard against a reversed direction.
+    """
+    pp_rank = fleet.get_hybrid_communicate_group().get_stage_id()
+    meta = _tuple_meta()
 
-        dist.barrier()
+    if pp_rank == 1:
+        t1 = _linear_payload(5000, [2, 4])
+        t2 = _linear_payload(6000, [3, 5])
+        recv_prev, recv_next = _p2p_helper(
+            tensor_send_next=None,
+            tensor_send_prev=(t1, t2),
+            recv_prev=False,
+            recv_next=False,
+            sync_recv=True,
+            send_recv_meta=meta,
+        )
+        assert recv_prev is None
+        assert recv_next is None
+    else:
+        recv_prev, recv_next = _p2p_helper(
+            tensor_send_next=None,
+            tensor_send_prev=None,
+            recv_prev=False,
+            recv_next=True,
+            sync_recv=True,
+            send_recv_meta=meta,
+        )
+        assert isinstance(recv_next, tuple)
+        assert len(recv_next) == 2
+        expected_1 = paddle.to_tensor(
+            [
+                [5000.0, 5001.0, 5002.0, 5003.0],
+                [5004.0, 5005.0, 5006.0, 5007.0],
+            ],
+            dtype="float32",
+        ).cuda()
+        expected_2 = paddle.to_tensor(
+            [
+                [6000.0, 6001.0, 6002.0, 6003.0, 6004.0],
+                [6005.0, 6006.0, 6007.0, 6008.0, 6009.0],
+                [6010.0, 6011.0, 6012.0, 6013.0, 6014.0],
+            ],
+            dtype="float32",
+        ).cuda()
+        _assert_tensor_equal(recv_next[0], expected_1)
+        _assert_tensor_equal(recv_next[1], expected_2)
+        assert recv_prev is None
+
+    dist.barrier()
+
+
+def test_sync_send_forward_single_non_blocking_content():
+    """Forward direction, single tensor, sync-send mode with ``sync_recv=False``.
+
+    The non-blocking path queues an irecv task and waits it inside
+    ``_p2p_helper`` before returning; the completed buffer on stage 1 must still
+    equal the exact sent bytes.
+    """
+    pp_rank = fleet.get_hybrid_communicate_group().get_stage_id()
+    meta = _single_meta()
+
+    if pp_rank == 0:
+        payload = _linear_payload(7000, [2, 4])
+        recv_prev, recv_next = _p2p_helper(
+            tensor_send_next=payload,
+            tensor_send_prev=None,
+            recv_prev=False,
+            recv_next=False,
+            sync_recv=False,
+            send_recv_meta=meta,
+        )
+        assert recv_prev is None
+        assert recv_next is None
+    else:
+        recv_prev, recv_next = _p2p_helper(
+            tensor_send_next=None,
+            tensor_send_prev=None,
+            recv_prev=True,
+            recv_next=False,
+            sync_recv=False,
+            send_recv_meta=meta,
+        )
+        expected = paddle.to_tensor(
+            [
+                [7000.0, 7001.0, 7002.0, 7003.0],
+                [7004.0, 7005.0, 7006.0, 7007.0],
+            ],
+            dtype="float32",
+        ).cuda()
+        _assert_tensor_equal(recv_prev, expected)
+        assert recv_next is None
+
+    dist.barrier()
 
 
 if __name__ == "__main__":
-    unittest.main()
+    _setup()
+    test_sync_send_forward_single_content()
+    test_sync_send_backward_single_content()
+    test_sync_send_forward_tuple_content()
+    test_sync_send_backward_tuple_content()
+    test_sync_send_forward_single_non_blocking_content()

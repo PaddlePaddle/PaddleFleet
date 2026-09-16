@@ -36,16 +36,15 @@ Not covered here (documented, not silently skipped):
 
 import unittest
 
-import paddle
 from paddle import nn
 
+from paddlefleet.nn.moe_deepep.modular_moe_layer import ModularMoELayer
 from paddlefleet.nn.moe_deepep.moe_communication import (
     AllToAllMoECommunication,
     DeepEPMoECommunication,
 )
 from paddlefleet.nn.moe_deepep.moe_factory import QuickAccessMoEFactory
 from paddlefleet.nn.moe_deepep.moe_gate import StandardMoEGate
-from paddlefleet.nn.moe_deepep.modular_moe_layer import ModularMoELayer
 from paddlefleet.transformers.configuration_utils import PretrainedConfig
 
 
@@ -69,13 +68,13 @@ def _make_config(**overrides):
     """Build a real PretrainedConfig with the minimum fields the factory reads as
     plain attributes (hidden_size, moe_intermediate_size, model_type). Extra MoE keys
     are passed through and become attributes."""
-    base = dict(
-        hidden_size=64,
-        moe_intermediate_size=32,
-        model_type="qwen2_moe",
-        num_experts=4,
-        num_experts_per_tok=2,
-    )
+    base = {
+        "hidden_size": 64,
+        "moe_intermediate_size": 32,
+        "model_type": "qwen2_moe",
+        "num_experts": 4,
+        "num_experts_per_tok": 2,
+    }
     base.update(overrides)
     return PretrainedConfig(**base)
 

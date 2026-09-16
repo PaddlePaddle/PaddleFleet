@@ -122,9 +122,7 @@ class _Base(unittest.TestCase):
     def setUp(self):
         if _CONV is None:
             self.skipTest(
-                "converter import failed (dependency unavailable): {!r}".format(
-                    _LOAD_ERROR
-                )
+                f"converter import failed (dependency unavailable): {_LOAD_ERROR!r}"
             )
 
 

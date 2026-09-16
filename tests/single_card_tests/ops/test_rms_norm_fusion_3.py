@@ -134,7 +134,7 @@ class TestRMSNormFusionBranches(unittest.TestCase):
         norm = np.linalg.norm(ref)
         self.assertGreater(norm, 0.0, ctx + ": degenerate zero reference")
         rel = np.linalg.norm(actual - ref) / norm
-        self.assertLess(rel, 5e-3, ctx + " relative-L2=%r" % rel)
+        self.assertLess(rel, 5e-3, ctx + f" relative-L2={rel!r}")
 
     def _run_leaf_case(self, x_np, w_np, upstream_np, make_x):
         """Drive the fused op with a leaf produced by ``make_x`` (allows a

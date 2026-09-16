@@ -119,7 +119,7 @@ class TestPrepareMaxminInputRankContract(unittest.TestCase):
         """
         spy = _KernelSpy()
         x = paddle.zeros([4, 8], dtype=paddle.int32)  # rank 2
-        with mock.patch.object(_iu, "scan_maxmin_chunked", spy):
+        with mock.patch.object(_iu, "scan_maxmin_chunked", spy):  # noqa: SIM117
             with self.assertRaises(ValueError):
                 _iu.prepare_maxmin(x, chunk_size=4)
         self.assertEqual(spy.call_count, 0)
@@ -132,7 +132,7 @@ class TestPrepareMaxminInputRankContract(unittest.TestCase):
         """
         spy = _KernelSpy()
         x = paddle.zeros([2, 3, 4, 5], dtype=paddle.int32)  # rank 4
-        with mock.patch.object(_iu, "scan_maxmin_chunked", spy):
+        with mock.patch.object(_iu, "scan_maxmin_chunked", spy):  # noqa: SIM117
             with self.assertRaises(ValueError):
                 _iu.prepare_maxmin(x, chunk_size=4)
         self.assertEqual(spy.call_count, 0)

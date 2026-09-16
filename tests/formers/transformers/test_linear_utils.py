@@ -49,7 +49,7 @@ from paddle.distributed.fleet.utils import sequence_parallel_utils
 
 import paddlefleet.transformers.linear_utils as lu
 import paddlefleet.transformers.mc2_parallel_linear as mc2
-import paddlefleet.utils.tools as tools
+from paddlefleet.utils import tools
 
 
 class TestDefaultBindings(unittest.TestCase):

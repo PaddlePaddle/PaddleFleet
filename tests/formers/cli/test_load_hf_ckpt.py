@@ -65,7 +65,7 @@ _LOG_PATH = os.path.join(_SRC, "paddlefleet", "utils", "log.py")
 # Detect *real* Paddle before any stub is installed, so prepare_tensor cases
 # can be gated honestly and never run against a stub.
 try:
-    import paddle as _real_paddle  # noqa: F401
+    import paddle as _real_paddle
 
     _HAS_REAL_PADDLE = True
 except ImportError:
@@ -124,7 +124,7 @@ class _Base(unittest.TestCase):
         if _MOD is None:
             self.skipTest(
                 "load_hf_ckpt import failed (dependency unavailable): "
-                "{!r}".format(_LOAD_ERROR)
+                f"{_LOAD_ERROR!r}"
             )
 
 

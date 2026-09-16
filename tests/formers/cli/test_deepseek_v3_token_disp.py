@@ -371,7 +371,7 @@ class TestMoETokenDispatcherContract(_CpuPaddleBase):
             self.skipTest(f"token_dispatcher unavailable: {_TD_ERR}")
 
     def test_ep_size_reads_group_world_size(self):
-        paddle = self.paddle  # noqa: F841 - device already forced to cpu
+        paddle = self.paddle
         group = types.SimpleNamespace(world_size=4)
         disp = _token_dispatcher.MoETokenDispatcher(ep_group=group)
         self.assertIs(disp.ep_group, group)

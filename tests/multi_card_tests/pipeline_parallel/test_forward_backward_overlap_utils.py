@@ -12,22 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Behavior tests for pipeline forward/backward-overlap scheduling primitives.
+"""Real PP=4 behavior tests for the pipeline forward/backward-overlap utils.
 
-These utilities (``detach_and_requires_grad``, ``FakeClone``,
-``clone_and_clear_dataptr``, ``ScheduleNode`` and ``ScheduleChunk``) are the
-rank-local building blocks of the pipeline-overlap scheduler. They run on real
-``.cuda()`` tensors inside a genuine PP=4 fleet process group (launched with
-``paddle.distributed.launch``), and every expected value is derived by hand /
-with an independent NumPy reference -- never from the function under test.
+Run through ``paddle.distributed.launch`` on 4 GPUs (PP=4). The centerpiece is
+``test_four_stage_pipeline_forward_backward``: a genuine 4-stage pipeline where
+stage i (rank i) owns a distinct weight ``Wi``, the forward activation is moved
+stage->stage with a real ``paddle.distributed.send``/``recv`` and the backward
+activation gradient is moved back stage<-stage the same way -- exactly how a
+``ScheduleNode`` is consumed inside the pipeline scheduler. Every expected value
+(delivered activation, delivered gradient, per-stage weight gradient) is derived
+BY HAND from the fixed constants in ``_STAGE_WEIGHTS`` / ``_X`` / ``_G3`` below,
+never from the functions under test.
 
-The primitives themselves do not issue pipeline collectives; the cross-rank
-send/recv lives in ``p2p_communication``. Accordingly this file makes no
-cross-rank numeric claim: each of the 4 PP ranks verifies the local forward and
-backward contract independently on distinguishable, rank-dependent inputs.
+The remaining ``test_*`` functions pin the *local* (per-rank, non-collective by
+construction) numeric contracts of ``detach_and_requires_grad``, ``FakeClone``,
+``clone_and_clear_dataptr``, ``ScheduleNode`` (both the plain and the recompute
+path) and ``ScheduleChunk`` with distinguishable, rank-dependent inputs and
+independent hand-derived expectations. ``FakeClone.forward`` returns
+``empty_like`` by design (it avoids a DtoD copy), so only its shape/dtype and
+its load-bearing identity backward are asserted; its uninitialised forward
+content is deliberately not compared.
 """
-
-import unittest
 
 import numpy as np
 import paddle
@@ -41,271 +46,354 @@ from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils impor
     clone_and_clear_dataptr,
     detach_and_requires_grad,
 )
-from paddlefleet.training.initialize import initialize_fleet
 
 PP_DEGREE = 4
 
+# Fixed pipeline constants (batch=1, hidden=2). Weights are chosen so every
+# stage transforms the activation differently, making a mis-routed stage,
+# a reversed matmul or a dropped transpose observable in the exact numbers.
+_X = np.array([[1.0, 2.0]], dtype="float32")
+_STAGE_WEIGHTS = {
+    0: np.array([[1.0, 2.0], [3.0, 4.0]], dtype="float32"),
+    1: np.array([[1.0, 0.0], [1.0, 1.0]], dtype="float32"),
+    2: np.array([[2.0, 0.0], [0.0, 2.0]], dtype="float32"),
+    3: np.array([[1.0, 1.0], [0.0, 1.0]], dtype="float32"),
+}
+# Non-uniform upstream gradient on the final stage output.
+_G3 = np.array([[1.0, 2.0]], dtype="float32")
+
 
 def _init_pp():
+    """Initialise a real PP=4 fleet process group (launcher entry point)."""
     strategy = fleet.DistributedStrategy()
     strategy.hybrid_configs = {
         "dp_degree": 1,
         "mp_degree": 1,
         "pp_degree": PP_DEGREE,
-        "sharding_degree": 1,
-        "sep_degree": 1,
-        "cp_degree": 1,
-        "ep_degree": 1,
-        "moe_sharding_degree": 1,
-        "order": [
-            "sharding",
-            "moe_sharding",
-            "pp",
-            "sep",
-            "cp",
-            "dp",
-            "ep",
-            "mp",
-        ],
     }
-    initialize_fleet(strategy)
+    fleet.init(is_collective=True, strategy=strategy)
 
 
-def setUpModule():
-    _init_pp()
+def _param(arr):
+    """Create a trainable parameter holding exactly ``arr`` (float32)."""
+    return paddle.create_parameter(
+        shape=list(arr.shape),
+        dtype="float32",
+        default_initializer=paddle.nn.initializer.Assign(arr),
+    )
 
 
-class TestDetachAndRequiresGrad(unittest.TestCase):
-    def test_plain_tensor_preserves_value_and_breaks_graph(self):
-        # Rank-dependent, distinguishable content so a mixed-up tensor shows up.
-        base = (paddle.arange(6, dtype="float32").reshape([2, 3])).cuda()
-        base = base + float(dist.get_rank())
-        a = base.clone()
-        a.stop_gradient = False
-        b = a * 2.0
-
-        d = detach_and_requires_grad(b)
-
-        # Value is preserved exactly by the detach.
-        np.testing.assert_array_equal(d.numpy(), base.numpy() * 2.0)
-        # stop_gradient is copied from the source (b required grad -> d does).
-        self.assertFalse(d.stop_gradient)
-
-        # The detach must sever the graph: gradients from a function of d must
-        # not reach a, while d itself is a fresh leaf that accumulates grad.
-        loss = (d * 3.0).sum()
-        loss.backward()
-        self.assertIsNone(a.grad)
-        np.testing.assert_array_equal(
-            d.grad.numpy(), np.full([2, 3], 3.0, dtype="float32")
-        )
-
-    def test_preserves_stop_gradient_true(self):
-        a = (paddle.arange(3, dtype="float32") + dist.get_rank()).cuda()
-        a.stop_gradient = True
-
-        d = detach_and_requires_grad(a)
-
-        # Despite the name, the helper copies stop_gradient rather than forcing
-        # it False; a True input must stay True.
-        self.assertTrue(d.stop_gradient)
-        np.testing.assert_array_equal(d.numpy(), a.numpy())
-
-    def test_tuple_nested_and_nontensor_passthrough(self):
-        t1 = paddle.to_tensor([1.0, 2.0]).cuda()
-        t1.stop_gradient = False
-        t2 = paddle.to_tensor([3.0, 4.0]).cuda()
-        t2.stop_gradient = True
-        nested = [paddle.to_tensor([5.0]).cuda()]
-        sentinel = 7  # non-tensor element must pass through unchanged
-
-        out = detach_and_requires_grad((t1, t2, nested, sentinel))
-
-        self.assertIsInstance(out, tuple)
-        self.assertEqual(len(out), 4)
-        self.assertFalse(out[0].stop_gradient)
-        self.assertTrue(out[1].stop_gradient)
-        self.assertIsInstance(out[2], list)
-        np.testing.assert_array_equal(out[0].numpy(), [1.0, 2.0])
-        np.testing.assert_array_equal(out[1].numpy(), [3.0, 4.0])
-        np.testing.assert_array_equal(out[2][0].numpy(), [5.0])
-        self.assertEqual(out[3], 7)
-
-    def test_dict_preserves_keys_and_none(self):
-        t = paddle.to_tensor([1.0, 2.0]).cuda()
-        t.stop_gradient = False
-
-        out = detach_and_requires_grad({"a": t, "b": None})
-
-        self.assertIsInstance(out, dict)
-        self.assertEqual(set(out), {"a", "b"})
-        self.assertFalse(out["a"].stop_gradient)
-        np.testing.assert_array_equal(out["a"].numpy(), [1.0, 2.0])
-        self.assertIsNone(out["b"])
-
-
-class TestFakeCloneAndCloneClear(unittest.TestCase):
-    def test_fakeclone_shape_dtype_and_identity_backward(self):
-        x = (paddle.arange(6, dtype="float32").reshape([2, 3])).cuda()
-        x = x + float(dist.get_rank())
-        x.stop_gradient = False
-
-        out = FakeClone.apply(x)
-
-        # Forward returns empty_like: same shape/dtype, content is uninitialized
-        # by design (avoids the DtoD copy), so content is deliberately NOT
-        # compared. The load-bearing contract is the identity backward.
-        self.assertEqual(list(out.shape), [2, 3])
-        self.assertEqual(out.dtype, x.dtype)
-        self.assertFalse(out.stop_gradient)
-
-        upstream = (
-            paddle.arange(6, dtype="float32").reshape([2, 3]) * 0.5 + 1.0
-        ).cuda()
-        paddle.autograd.backward([out], [upstream])
-        np.testing.assert_array_equal(x.grad.numpy(), upstream.numpy())
-
-    def test_clone_and_clear_list_drops_none_and_nontensor(self):
-        t1 = (paddle.arange(4, dtype="float32") + dist.get_rank()).cuda()
-        t2 = (paddle.arange(4, dtype="float32") + 10.0).reshape([2, 2]).cuda()
-
-        ret = clone_and_clear_dataptr([t1, None, t2, 5])
-
-        # None and the plain int are filtered out; only the two tensors remain,
-        # each keeping shape/dtype (content is FakeClone empty_like, not checked).
-        self.assertIsInstance(ret, list)
-        self.assertEqual(len(ret), 2)
-        self.assertEqual(list(ret[0].shape), [4])
-        self.assertEqual(list(ret[1].shape), [2, 2])
-        self.assertEqual(ret[0].dtype, t1.dtype)
-
-    def test_clone_and_clear_dict_drops_none_value(self):
-        t = (paddle.arange(4, dtype="float32") + dist.get_rank()).cuda()
-
-        ret = clone_and_clear_dataptr({"x": t, "y": None})
-
-        self.assertIsInstance(ret, dict)
-        self.assertEqual(set(ret), {"x"})
-        self.assertEqual(list(ret["x"].shape), [4])
-
-    def test_clone_and_clear_single_tensor_identity_backward(self):
-        x = (paddle.arange(6, dtype="float32").reshape([2, 3])).cuda()
-        x = x + float(dist.get_rank())
-        x.stop_gradient = False
-
-        wrapped = clone_and_clear_dataptr(x)
-
-        self.assertEqual(list(wrapped.shape), [2, 3])
-        # Purpose of the wrapper is to retain the gradient path even when the
-        # forward data is dropped: grad must flow straight through unchanged.
-        upstream = (paddle.ones([2, 3]) * 2.0).cuda()
-        paddle.autograd.backward([wrapped], [upstream])
-        np.testing.assert_array_equal(x.grad.numpy(), upstream.numpy())
-
-
-def _linear_fwd(weight):
+def _matmul_fwd(weight):
     def fwd_func(inputs, is_first_fwd=False):
         return paddle.matmul(inputs, weight)
 
     return fwd_func
 
 
-class TestScheduleNodeForwardBackward(unittest.TestCase):
-    def _weight(self):
-        w = paddle.to_tensor(
-            [[1.0, 2.0], [0.0, 1.0], [3.0, -1.0]], dtype="float32"
-        ).cuda()
-        w.stop_gradient = True
-        return w
+def test_detach_and_requires_grad_preserves_value_and_breaks_graph():
+    # Rank-dependent, distinguishable content so a swapped tensor is visible.
+    rank = float(dist.get_rank())
+    base = (paddle.arange(6, dtype="float32").reshape([2, 3])).cuda() + rank
+    a = base.clone()
+    a.stop_gradient = False
+    b = a * 2.0
 
-    def _inputs(self):
-        x_np = np.arange(6, dtype="float32").reshape(2, 3) + dist.get_rank()
-        x = paddle.to_tensor(x_np).cuda()
-        x.stop_gradient = False
-        return x, x_np
+    d = detach_and_requires_grad(b)
 
-    def test_non_recompute_forward_and_backward(self):
-        w = self._weight()
-        w_np = w.numpy()
-        node = ScheduleNode(_linear_fwd(w), name="lin")
-        x, x_np = self._inputs()
+    # Value is preserved exactly and stop_gradient is copied from the source
+    # (b required grad -> d does too).
+    np.testing.assert_array_equal(d.numpy(), base.numpy() * 2.0)
+    assert d.stop_gradient is False
 
-        out = node.forward(x)
+    # The detach severs the graph: a function of d must not push grad into a,
+    # while d itself is a fresh leaf that accumulates a hand-known gradient.
+    (d * 3.0).sum().backward()
+    assert a.grad is None
+    np.testing.assert_array_equal(
+        d.grad.numpy(), np.full([2, 3], 3.0, dtype="float32")
+    )
+
+
+def test_detach_and_requires_grad_stop_gradient_and_containers():
+    rank = float(dist.get_rank())
+    # A stop_gradient=True input must stay True (the helper copies the flag
+    # rather than forcing requires-grad, despite its name).
+    frozen = (paddle.arange(3, dtype="float32") + rank).cuda()
+    frozen.stop_gradient = True
+    out = detach_and_requires_grad(frozen)
+    assert out.stop_gradient is True
+    np.testing.assert_array_equal(out.numpy(), frozen.numpy())
+
+    # Tuple with nested list and a non-tensor sentinel: structure, per-element
+    # stop_gradient and the pass-through of the non-tensor are all preserved.
+    t1 = paddle.to_tensor([1.0, 2.0]).cuda()
+    t1.stop_gradient = False
+    t2 = paddle.to_tensor([3.0, 4.0]).cuda()
+    t2.stop_gradient = True
+    nested = [paddle.to_tensor([5.0]).cuda()]
+    tup = detach_and_requires_grad((t1, t2, nested, 7))
+    assert isinstance(tup, tuple) and len(tup) == 4
+    assert tup[0].stop_gradient is False
+    assert tup[1].stop_gradient is True
+    assert isinstance(tup[2], list)
+    np.testing.assert_array_equal(tup[0].numpy(), [1.0, 2.0])
+    np.testing.assert_array_equal(tup[1].numpy(), [3.0, 4.0])
+    np.testing.assert_array_equal(tup[2][0].numpy(), [5.0])
+    assert tup[3] == 7
+
+    # Dict keeps keys and passes a None value straight through.
+    td = paddle.to_tensor([1.0, 2.0]).cuda()
+    td.stop_gradient = False
+    dct = detach_and_requires_grad({"a": td, "b": None})
+    assert isinstance(dct, dict) and set(dct) == {"a", "b"}
+    assert dct["a"].stop_gradient is False
+    np.testing.assert_array_equal(dct["a"].numpy(), [1.0, 2.0])
+    assert dct["b"] is None
+
+
+def test_fake_clone_shape_and_identity_backward():
+    rank = float(dist.get_rank())
+    x = (paddle.arange(6, dtype="float32").reshape([2, 3])).cuda() + rank
+    x.stop_gradient = False
+
+    out = FakeClone.apply(x)
+
+    # forward is empty_like: same shape/dtype, fresh storage. Content is
+    # uninitialised by design, so it is intentionally NOT compared; the
+    # load-bearing contract is the identity backward below.
+    assert list(out.shape) == [2, 3]
+    assert out.dtype == x.dtype
+    assert out is not x
+    assert out.stop_gradient is False
+
+    upstream = (
+        paddle.arange(6, dtype="float32").reshape([2, 3]) * 0.5 + 1.0
+    ).cuda()
+    paddle.autograd.backward([out], [upstream])
+    np.testing.assert_array_equal(x.grad.numpy(), upstream.numpy())
+
+
+def test_clone_and_clear_dataptr_filters_and_passes_grad():
+    rank = float(dist.get_rank())
+    t1 = (paddle.arange(4, dtype="float32") + rank).cuda()
+    t2 = (paddle.arange(4, dtype="float32") + 10.0).reshape([2, 2]).cuda()
+
+    # None and the plain int are dropped; only the two tensors survive, each
+    # keeping shape/dtype (content is empty_like, so not compared). A broken
+    # filter that kept None would yield length 4 instead of 2.
+    ret = clone_and_clear_dataptr([t1, None, t2, 5])
+    assert isinstance(ret, list) and len(ret) == 2
+    assert list(ret[0].shape) == [4]
+    assert list(ret[1].shape) == [2, 2]
+    assert ret[0].dtype == t1.dtype
+
+    # Dict variant drops the None value and keeps the remaining key.
+    dct = clone_and_clear_dataptr({"x": t1, "y": None})
+    assert isinstance(dct, dict) and set(dct) == {"x"}
+    assert list(dct["x"].shape) == [4]
+
+    # Single-tensor wrapper retains the gradient path even though the forward
+    # data is dropped: grad must flow straight through unchanged.
+    x = (paddle.arange(6, dtype="float32").reshape([2, 3])).cuda() + rank
+    x.stop_gradient = False
+    wrapped = clone_and_clear_dataptr(x)
+    assert list(wrapped.shape) == [2, 3]
+    upstream = (paddle.ones([2, 3]) * 2.0).cuda()
+    paddle.autograd.backward([wrapped], [upstream])
+    np.testing.assert_array_equal(x.grad.numpy(), upstream.numpy())
+
+
+def _local_linear_inputs():
+    rank = float(dist.get_rank())
+    w_np = np.array([[1.0, 2.0], [0.0, 1.0], [3.0, -1.0]], dtype="float32")
+    w = paddle.to_tensor(w_np).cuda()
+    w.stop_gradient = True
+    x_np = np.arange(6, dtype="float32").reshape(2, 3) + rank
+    x = paddle.to_tensor(x_np).cuda()
+    x.stop_gradient = False
+    return w, w_np, x, x_np
+
+
+def test_schedule_node_forward_backward():
+    w, w_np, x, x_np = _local_linear_inputs()
+    node = ScheduleNode(_matmul_fwd(w), name="lin")
+
+    out = node.forward(x)
+    np.testing.assert_allclose(out.numpy(), x_np @ w_np, rtol=1e-5, atol=1e-5)
+
+    g_np = np.arange(4, dtype="float32").reshape(2, 2) + 1.0
+    grad = node.backward(paddle.to_tensor(g_np).cuda())
+
+    # dL/dx = g @ W^T; the weight is frozen so exactly one input grad returns.
+    assert isinstance(grad, tuple) and len(grad) == 1
+    np.testing.assert_allclose(
+        grad[0].numpy(), g_np @ w_np.T, rtol=1e-5, atol=1e-5
+    )
+    # backward must clear the retained forward state.
+    assert node.inputs is None and node.outputs is None
+
+
+def test_schedule_node_recompute_forward_backward():
+    w, w_np, x, x_np = _local_linear_inputs()
+    node = ScheduleNode(_matmul_fwd(w), name="lin_rc")
+
+    # first_forward runs under no_grad and snapshots RNG/AMP state; the second
+    # forward recomputes under a real dygraph guard. The recomputed numbers
+    # must still match the independent numpy reference.
+    node.first_forward(x)
+    out = node.forward(x)
+    np.testing.assert_allclose(out.numpy(), x_np @ w_np, rtol=1e-5, atol=1e-5)
+
+    g_np = np.arange(4, dtype="float32").reshape(2, 2) + 1.0
+    grad = node.backward(paddle.to_tensor(g_np).cuda())
+    assert len(grad) == 1
+    np.testing.assert_allclose(
+        grad[0].numpy(), g_np @ w_np.T, rtol=1e-5, atol=1e-5
+    )
+
+
+def test_schedule_chunk_local_chain():
+    rank = float(dist.get_rank())
+    w1_np = np.array([[1.0, 2.0], [0.0, 1.0], [3.0, -1.0]], dtype="float32")
+    w2_np = np.array(
+        [[1.0, 0.0, 2.0, -1.0], [0.5, 1.0, -2.0, 3.0]], dtype="float32"
+    )
+    w1 = paddle.to_tensor(w1_np).cuda()
+    w1.stop_gradient = True
+    w2 = paddle.to_tensor(w2_np).cuda()
+    w2.stop_gradient = True
+
+    n1 = ScheduleNode(_matmul_fwd(w1), name="n1")
+    n2 = ScheduleNode(_matmul_fwd(w2), name="n2")
+    chunk = ScheduleChunk([n1, n2])
+    assert len(chunk.nodes) == 2
+
+    x_np = np.arange(6, dtype="float32").reshape(2, 3) + rank
+    x = paddle.to_tensor(x_np).cuda()
+    x.stop_gradient = False
+
+    out = chunk.forward(x)
+    np.testing.assert_allclose(
+        out.numpy(), (x_np @ w1_np) @ w2_np, rtol=1e-5, atol=1e-5
+    )
+
+    g_np = np.arange(8, dtype="float32").reshape(2, 4) + 1.0
+    grad = chunk.backward(paddle.to_tensor(g_np).cuda())
+    # Manual chain rule: dx = ((g @ W2^T) @ W1^T).
+    expected = (g_np @ w2_np.T) @ w1_np.T
+    assert len(grad) == 1
+    np.testing.assert_allclose(grad[0].numpy(), expected, rtol=1e-5, atol=1e-5)
+
+
+def test_schedule_chunk_rejects_invalid_node():
+    # _check_nodes_valid must reject a member that is not a ScheduleNode/Chunk.
+    raised = False
+    try:
+        ScheduleChunk([object()])
+    except AssertionError:
+        raised = True
+    assert raised, "ScheduleChunk must reject a non-ScheduleNode member"
+
+
+def test_four_stage_pipeline_forward_backward():
+    hcg = fleet.get_hybrid_communicate_group()
+    pp_group = hcg.get_pipe_parallel_group()
+    stage_id = hcg.get_stage_id()
+    next_rank = hcg._get_p2p_next_rank()
+    prev_rank = hcg._get_p2p_prev_rank()
+
+    # Independent hand derivation from the fixed constants (see module doc):
+    #   h0 = x  @ W0 = [[ 7, 10]]      h1 = h0 @ W1 = [[17, 10]]
+    #   h2 = h1 @ W2 = [[34, 20]]      y  = h2 @ W3 = [[34, 54]]
+    #   g3 = [[1, 2]]
+    #   dh2 = g3 @ W3^T = [[3, 2]]     dh1 = dh2 @ W2^T = [[6, 4]]
+    #   dh0 = dh1 @ W1^T = [[6, 10]]
+    #   dW3 = h2^T @ g3  = [[34, 68], [20, 40]]
+    #   dW2 = h1^T @ dh2 = [[51, 34], [30, 20]]
+    #   dW1 = h0^T @ dh1 = [[42, 28], [60, 40]]
+    #   dW0 = x^T  @ dh0 = [[ 6, 10], [12, 20]]
+    act_in_ref = {
+        1: np.array([[7.0, 10.0]], dtype="float32"),
+        2: np.array([[17.0, 10.0]], dtype="float32"),
+        3: np.array([[34.0, 20.0]], dtype="float32"),
+    }
+    grad_in_ref = {
+        3: np.array([[3.0, 2.0]], dtype="float32"),
+        2: np.array([[6.0, 4.0]], dtype="float32"),
+        1: np.array([[6.0, 10.0]], dtype="float32"),
+    }
+    y_ref = np.array([[34.0, 54.0]], dtype="float32")
+    dw_ref = {
+        0: np.array([[6.0, 10.0], [12.0, 20.0]], dtype="float32"),
+        1: np.array([[42.0, 28.0], [60.0, 40.0]], dtype="float32"),
+        2: np.array([[51.0, 34.0], [30.0, 20.0]], dtype="float32"),
+        3: np.array([[34.0, 68.0], [20.0, 40.0]], dtype="float32"),
+    }
+
+    weight = _param(_STAGE_WEIGHTS[stage_id])
+    node = ScheduleNode(_matmul_fwd(weight), name=f"stage{stage_id}")
+
+    # --- forward: activation flows 0 -> 1 -> 2 -> 3 via real send/recv ---
+    if stage_id == 0:
+        act = paddle.to_tensor(_X).cuda()
+        act.stop_gradient = True
+    else:
+        act = paddle.zeros([1, 2], dtype="float32").cuda()
+        dist.recv(act, src=prev_rank, group=pp_group)
+        # The activation actually delivered across ranks must match the
+        # independent hand derivation of the upstream stage's output.
         np.testing.assert_allclose(
-            out.numpy(), x_np @ w_np, rtol=1e-5, atol=1e-5
+            act.numpy(), act_in_ref[stage_id], rtol=1e-5, atol=1e-5
+        )
+        act.stop_gradient = False
+
+    out = node.forward(act)
+    if stage_id != PP_DEGREE - 1:
+        dist.send(out, dst=next_rank, group=pp_group)
+    else:
+        # Final stage output is the fully composed pipeline result.
+        np.testing.assert_allclose(out.numpy(), y_ref, rtol=1e-5, atol=1e-5)
+
+    # --- backward: gradient flows 3 -> 2 -> 1 -> 0 via real send/recv ---
+    if stage_id == PP_DEGREE - 1:
+        upstream = paddle.to_tensor(_G3).cuda()
+    else:
+        upstream = paddle.zeros([1, 2], dtype="float32").cuda()
+        dist.recv(upstream, src=next_rank, group=pp_group)
+        # The gradient actually delivered across ranks must match the hand
+        # derivation of the downstream stage's input gradient.
+        np.testing.assert_allclose(
+            upstream.numpy(), grad_in_ref[stage_id + 1], rtol=1e-5, atol=1e-5
         )
 
-        g_np = np.arange(4, dtype="float32").reshape(2, 2) + 1.0
-        grad = node.backward(paddle.to_tensor(g_np).cuda())
+    grad = node.backward(upstream)
 
-        self.assertIsInstance(grad, tuple)
-        self.assertEqual(len(grad), 1)
+    if stage_id == 0:
+        # x is frozen, so ScheduleNode returns no input gradient here.
+        assert isinstance(grad, tuple) and len(grad) == 0
+    else:
+        assert len(grad) == 1
         np.testing.assert_allclose(
-            grad[0].numpy(), g_np @ w_np.T, rtol=1e-5, atol=1e-5
+            grad[0].numpy(), grad_in_ref[stage_id], rtol=1e-5, atol=1e-5
         )
+        dist.send(grad[0], dst=prev_rank, group=pp_group)
 
-    def test_recompute_forward_and_backward(self):
-        w = self._weight()
-        w_np = w.numpy()
-        node = ScheduleNode(_linear_fwd(w), name="lin_rc")
-        x, x_np = self._inputs()
-
-        # first_forward runs under no_grad and captures RNG/AMP state; the
-        # subsequent forward recomputes under a real dygraph guard.
-        node.first_forward(x)
-        out = node.forward(x)
-        np.testing.assert_allclose(
-            out.numpy(), x_np @ w_np, rtol=1e-5, atol=1e-5
-        )
-
-        g_np = np.arange(4, dtype="float32").reshape(2, 2) + 1.0
-        grad = node.backward(paddle.to_tensor(g_np).cuda())
-        self.assertEqual(len(grad), 1)
-        np.testing.assert_allclose(
-            grad[0].numpy(), g_np @ w_np.T, rtol=1e-5, atol=1e-5
-        )
-
-
-class TestScheduleChunkComposition(unittest.TestCase):
-    def test_chunk_chains_forward_and_backward(self):
-        w1 = paddle.to_tensor(
-            [[1.0, 2.0], [0.0, 1.0], [3.0, -1.0]], dtype="float32"
-        ).cuda()
-        w1.stop_gradient = True
-        w2 = paddle.to_tensor(
-            [[1.0, 0.0, 2.0, -1.0], [0.5, 1.0, -2.0, 3.0]], dtype="float32"
-        ).cuda()
-        w2.stop_gradient = True
-        w1_np, w2_np = w1.numpy(), w2.numpy()
-
-        n1 = ScheduleNode(_linear_fwd(w1), name="n1")
-        n2 = ScheduleNode(_linear_fwd(w2), name="n2")
-        chunk = ScheduleChunk([n1, n2])
-        self.assertEqual(len(chunk.nodes), 2)
-
-        x_np = np.arange(6, dtype="float32").reshape(2, 3) + dist.get_rank()
-        x = paddle.to_tensor(x_np).cuda()
-        x.stop_gradient = False
-
-        out = chunk.forward(x)
-        np.testing.assert_allclose(
-            out.numpy(), (x_np @ w1_np) @ w2_np, rtol=1e-5, atol=1e-5
-        )
-
-        g_np = np.arange(8, dtype="float32").reshape(2, 4) + 1.0
-        grad = chunk.backward(paddle.to_tensor(g_np).cuda())
-
-        # Manual chain rule: dx = ((g @ W2^T) @ W1^T).
-        expected = (g_np @ w2_np.T) @ w1_np.T
-        self.assertEqual(len(grad), 1)
-        np.testing.assert_allclose(
-            grad[0].numpy(), expected, rtol=1e-5, atol=1e-5
-        )
-
-    def test_chunk_rejects_invalid_node(self):
-        with self.assertRaises(AssertionError):
-            ScheduleChunk([object()])
+    # Each stage's own weight gradient is checked against its hand-derived
+    # value: a mis-routed activation or gradient would corrupt these numbers.
+    assert weight.grad is not None
+    np.testing.assert_allclose(
+        weight.grad.numpy(), dw_ref[stage_id], rtol=1e-5, atol=1e-5
+    )
 
 
 if __name__ == "__main__":
-    unittest.main()
+    _init_pp()
+    test_detach_and_requires_grad_preserves_value_and_breaks_graph()
+    test_detach_and_requires_grad_stop_gradient_and_containers()
+    test_fake_clone_shape_and_identity_backward()
+    test_clone_and_clear_dataptr_filters_and_passes_grad()
+    test_schedule_node_forward_backward()
+    test_schedule_node_recompute_forward_backward()
+    test_schedule_chunk_local_chain()
+    test_schedule_chunk_rejects_invalid_node()
+    test_four_stage_pipeline_forward_backward()

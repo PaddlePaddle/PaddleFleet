@@ -47,7 +47,7 @@ import unittest
 
 import numpy as np
 import paddle
-import paddle.nn as nn
+from paddle import nn
 
 from paddlefleet.nn.moe.abstract import MOELayerBase
 from paddlefleet.nn.moe.moe_block import create_moe_block

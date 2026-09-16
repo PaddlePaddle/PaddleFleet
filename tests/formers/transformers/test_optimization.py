@@ -25,7 +25,6 @@ LRScheduler`` which advances ``last_epoch`` on every ``step()`` and recomputes
 runnable on CPU; no accelerator is required.
 """
 
-import math
 import unittest
 
 from paddlefleet.transformers.optimization import (

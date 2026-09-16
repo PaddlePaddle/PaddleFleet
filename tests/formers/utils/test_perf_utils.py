@@ -163,10 +163,10 @@ class RecordEventTest(unittest.TestCase):
                 "paddle.base.core.nvprof_nvtx_pop",
                 side_effect=lambda: calls.append(("pop",)),
             ),
+            add_record_event("region"),
         ):
-            with add_record_event("region"):
-                body_ran.append(True)
-                self.assertEqual(calls, [("push", "region")])
+            body_ran.append(True)
+            self.assertEqual(calls, [("push", "region")])
         self.assertEqual(body_ran, [True])
         self.assertEqual(calls, [("push", "region"), ("pop",)])
 
@@ -190,10 +190,10 @@ class RecordEventTest(unittest.TestCase):
                 "paddle.base.core.nvprof_nvtx_pop",
                 side_effect=lambda: calls.append("pop"),
             ),
+            self.assertRaises(ValueError),
+            add_record_event("boom"),
         ):
-            with self.assertRaises(ValueError):
-                with add_record_event("boom"):
-                    raise ValueError("boom")
+            raise ValueError("boom")
         self.assertEqual(calls, ["push", "pop"])
 
     def test_push_and_pop_record_event_respect_profiler_flag(self):

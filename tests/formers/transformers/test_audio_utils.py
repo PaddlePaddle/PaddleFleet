@@ -222,14 +222,14 @@ class TestMelFilterBank(unittest.TestCase):
         # scaling rather than only "finite" (catches wrong axis / missing norm).
         from paddlefleet.transformers.audio_utils import mel_filter_bank
 
-        kwargs = dict(
-            num_frequency_bins=20,
-            num_mel_filters=6,
-            min_frequency=0.0,
-            max_frequency=8000.0,
-            sampling_rate=16000,
-            mel_scale="htk",
-        )
+        kwargs = {
+            "num_frequency_bins": 20,
+            "num_mel_filters": 6,
+            "min_frequency": 0.0,
+            "max_frequency": 8000.0,
+            "sampling_rate": 16000,
+            "mel_scale": "htk",
+        }
         fb_none = mel_filter_bank(norm=None, **kwargs)
         fb_slaney = mel_filter_bank(norm="slaney", **kwargs)
         _, f_pts = _ref_mel_filter_bank_htk(20, 6, 0.0, 8000.0, 16000)
@@ -413,12 +413,12 @@ class TestPowerToDb(unittest.TestCase):
 
         one = np.array([[1.0]])
         for kwargs in (
-            dict(reference=0.0),
-            dict(reference=-1.0),
-            dict(min_value=0.0),
-            dict(min_value=-0.5),
-            dict(db_range=0.0),
-            dict(db_range=-10.0),
+            {"reference": 0.0},
+            {"reference": -1.0},
+            {"min_value": 0.0},
+            {"min_value": -0.5},
+            {"db_range": 0.0},
+            {"db_range": -10.0},
         ):
             with self.assertRaises(ValueError):
                 power_to_db(one, **kwargs)
@@ -453,12 +453,12 @@ class TestAmplitudeToDb(unittest.TestCase):
 
         one = np.array([[1.0]])
         for kwargs in (
-            dict(reference=0.0),
-            dict(reference=-1.0),
-            dict(min_value=0.0),
-            dict(min_value=-0.1),
-            dict(db_range=0.0),
-            dict(db_range=-10.0),
+            {"reference": 0.0},
+            {"reference": -1.0},
+            {"min_value": 0.0},
+            {"min_value": -0.1},
+            {"db_range": 0.0},
+            {"db_range": -10.0},
         ):
             with self.assertRaises(ValueError):
                 amplitude_to_db(one, **kwargs)
@@ -629,7 +629,12 @@ class TestSpectrogram(unittest.TestCase):
         rng = np.random.RandomState(0)
         waveform = rng.randn(64).astype(np.float64)
         window = np.hanning(17)[:-1].astype(np.float64)  # length 16
-        common = dict(frame_length=16, hop_length=8, power=1.0, onesided=True)
+        common = {
+            "frame_length": 16,
+            "hop_length": 8,
+            "power": 1.0,
+            "onesided": True,
+        }
         centered = spectrogram(waveform, window, center=True, **common)
         padded = np.pad(waveform, 8, mode="reflect")
         manual = spectrogram(padded, window, center=False, **common)

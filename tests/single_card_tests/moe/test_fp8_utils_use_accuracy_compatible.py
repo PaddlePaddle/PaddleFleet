@@ -64,7 +64,7 @@ try:
 
     import numpy as np
     import paddle
-    import paddle.nn.functional as F
+    import paddle.nn.functional as F  # noqa: F401
 
     from paddlefleet.transformer.moe.fp8_utils import (
         FP8_ALIGN,

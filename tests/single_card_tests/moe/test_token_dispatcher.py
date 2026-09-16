@@ -125,7 +125,7 @@ class TestIsHybridEpBackendSelected(unittest.TestCase):
     def test_hybridep_requires_available_runtime(self):
         # When the runtime is unavailable the hybridep branch must fail loudly
         # instead of silently selecting an unusable backend.
-        with mock.patch.object(td, "HAVE_HYBRID_EP", False):
+        with mock.patch.object(td, "HAVE_HYBRID_EP", False):  # noqa: SIM117
             with self.assertRaises(ImportError):
                 td.is_hybrid_ep_backend_selected("hybridep")
 

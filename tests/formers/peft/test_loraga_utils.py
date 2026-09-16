@@ -36,7 +36,7 @@ import unittest
 
 import numpy as np
 import paddle
-import paddle.nn as nn
+from paddle import nn
 
 from paddlefleet.peft.lora import LoRALinear
 from paddlefleet.peft.lora.loraga_utils import (

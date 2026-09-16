@@ -53,7 +53,7 @@ import unittest
 from unittest import mock
 
 try:
-    import paddlefleet.cli.train.dpo.workflow as workflow
+    from paddlefleet.cli.train.dpo import workflow
     from paddlefleet.cli.train.dpo.workflow import run_dpo
 
     _IMPORT_ERROR = None
@@ -69,13 +69,13 @@ _REAL_ATTN_IMPLS = ("eager", "sdpa", "flashmask")
 
 
 def _make_model_args(**overrides):
-    defaults = dict(
-        model_name_or_path="dummy/model",
-        download_hub="huggingface",
-        copy_custom_file_list=None,
-        _attn_implementation="eager",
-        lora=False,
-    )
+    defaults = {
+        "model_name_or_path": "dummy/model",
+        "download_hub": "huggingface",
+        "copy_custom_file_list": None,
+        "_attn_implementation": "eager",
+        "lora": False,
+    }
     defaults.update(overrides)
     return types.SimpleNamespace(**defaults)
 
@@ -83,15 +83,15 @@ def _make_model_args(**overrides):
 def _make_training_args(**overrides):
     # ``clear_every_step_cache`` is intentionally absent by default so the
     # pipeline-parallel guard fires when ``pipeline_model_parallel_size > 1``.
-    defaults = dict(
-        device="cpu",
-        seed=42,
-        loss_type="sigmoid",
-        reference_free=False,
-        sft_loss_ratio=0.0,
-        pipeline_model_parallel_size=1,
-        sequence_parallel=False,
-    )
+    defaults = {
+        "device": "cpu",
+        "seed": 42,
+        "loss_type": "sigmoid",
+        "reference_free": False,
+        "sft_loss_ratio": 0.0,
+        "pipeline_model_parallel_size": 1,
+        "sequence_parallel": False,
+    }
     defaults.update(overrides)
     return types.SimpleNamespace(**defaults)
 
@@ -101,7 +101,7 @@ class _RunDPOTestBase(unittest.TestCase):
         if _IMPORT_ERROR is not None:
             self.skipTest(
                 "paddlefleet.cli.train.dpo.workflow import failed "
-                "(dependency unavailable): {!r}".format(_IMPORT_ERROR)
+                f"(dependency unavailable): {_IMPORT_ERROR!r}"
             )
         # Isolate the not-under-test seed/device preamble so the assertions
         # target only the workflow's own validation/normalization logic.

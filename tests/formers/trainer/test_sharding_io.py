@@ -70,14 +70,14 @@ def _named(array, name):
 
 def _make_args(**overrides):
     """Minimal TrainingArguments-like holder for ShardingIO (a data collaborator)."""
-    defaults = dict(
-        use_hybrid_parallel=False,
-        reshard_bucketed_broadcast_max_chunk_gb=1.0,
-        tensor_parallel_rank=0,
-        pipeline_parallel_rank=0,
-        expert_model_parallel_size=1,
-        expert_parallel_rank=0,
-    )
+    defaults = {
+        "use_hybrid_parallel": False,
+        "reshard_bucketed_broadcast_max_chunk_gb": 1.0,
+        "tensor_parallel_rank": 0,
+        "pipeline_parallel_rank": 0,
+        "expert_model_parallel_size": 1,
+        "expert_parallel_rank": 0,
+    }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
 
@@ -282,7 +282,7 @@ class TestLoadModelMetaImpl(unittest.TestCase):
 
     def test_missing_file_asserts(self):
         io = _make_io()
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory() as d:  # noqa: SIM117
             with self.assertRaises(AssertionError):
                 io._load_model_meta_impl(os.path.join(d, "nope"))
 

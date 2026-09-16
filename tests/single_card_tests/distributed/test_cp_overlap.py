@@ -123,7 +123,7 @@ def independent_block_order(cp_size, rank, backward, mode):
     elif gpus_per_node:
         positions = list(range(cp_size - 1, -1, -1))
     else:
-        positions = list(range(1, cp_size)) + [0]
+        positions = [*list(range(1, cp_size)), 0]
     order = []
     for pos in positions:
         owner = traversal[pos]
@@ -446,27 +446,27 @@ class TestOverlapEntryGuards(unittest.TestCase):
         return ocp.overlap_flashmask_attention_cp(q, q, q, mask, **kwargs)
 
     def test_requires_capable_build(self):
-        with mock.patch.object(ocp, "OVERLAP_SUPPORTED", False):
+        with mock.patch.object(ocp, "OVERLAP_SUPPORTED", False):  # noqa: SIM117
             with self.assertRaises(AssertionError):
                 self._call()
 
     def test_dropout_not_implemented(self):
-        with mock.patch.object(ocp, "OVERLAP_SUPPORTED", True):
+        with mock.patch.object(ocp, "OVERLAP_SUPPORTED", True):  # noqa: SIM117
             with self.assertRaises(NotImplementedError):
                 self._call(dropout=0.1)
 
     def test_causal_not_implemented(self):
-        with mock.patch.object(ocp, "OVERLAP_SUPPORTED", True):
+        with mock.patch.object(ocp, "OVERLAP_SUPPORTED", True):  # noqa: SIM117
             with self.assertRaises(NotImplementedError):
                 self._call(causal=True)
 
     def test_fixed_seed_offset_not_implemented(self):
-        with mock.patch.object(ocp, "OVERLAP_SUPPORTED", True):
+        with mock.patch.object(ocp, "OVERLAP_SUPPORTED", True):  # noqa: SIM117
             with self.assertRaises(NotImplementedError):
                 self._call(fixed_seed_offset=paddle.zeros([1], dtype="int64"))
 
     def test_odd_local_sequence_length_rejected(self):
-        with mock.patch.object(ocp, "OVERLAP_SUPPORTED", True):
+        with mock.patch.object(ocp, "OVERLAP_SUPPORTED", True):  # noqa: SIM117
             with self.assertRaises(AssertionError):
                 self._call(seqlen=7)
 

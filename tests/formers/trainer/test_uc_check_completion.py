@@ -73,7 +73,8 @@ import unittest
 from types import SimpleNamespace
 
 try:
-    import paddle  # noqa: F401
+    import paddle
+
     from paddlefleet.trainer.unified_checkpoint.check_completion import (
         check_unified_checkpoint,
         check_unified_optimizer,
@@ -169,7 +170,7 @@ class TestCheckUnifiedCheckpoint(unittest.TestCase):
     def test_no_index_present_raises_for_safe_serialization_too(self):
         args = SimpleNamespace(dataset_rank=0, use_expert_parallel=False)
         model = SimpleNamespace()
-        with tempfile.TemporaryDirectory() as ckpt:
+        with tempfile.TemporaryDirectory() as ckpt:  # noqa: SIM117
             with self.assertRaises(ValueError):
                 check_unified_checkpoint(
                     args, model, ckpt, safe_serialization=True

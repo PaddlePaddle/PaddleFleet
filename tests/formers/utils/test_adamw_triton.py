@@ -54,7 +54,7 @@ if paddle is not None:
 else:
     _IMPORT_ERROR = "paddle is not importable"
 
-_SKIP_REASON = "triton/use-triton-in-paddle not available: %s" % _IMPORT_ERROR
+_SKIP_REASON = f"triton/use-triton-in-paddle not available: {_IMPORT_ERROR}"
 
 
 class _KernelRecorder:

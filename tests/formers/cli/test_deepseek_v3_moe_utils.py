@@ -118,7 +118,7 @@ class _MoeUtilsTestBase(unittest.TestCase):
         if _IMPORT_ERROR is not None:
             self.skipTest(
                 "paddlefleet.cli.train.deepseek_v3_pretrain.moe_utils import "
-                "failed (dependency unavailable): {!r}".format(_IMPORT_ERROR)
+                f"failed (dependency unavailable): {_IMPORT_ERROR!r}"
             )
 
 

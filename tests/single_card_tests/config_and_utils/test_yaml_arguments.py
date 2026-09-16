@@ -61,7 +61,7 @@ ListConfig = None
 OmegaConf = None
 
 try:
-    from omegaconf import DictConfig, ListConfig, OmegaConf
+    from omegaconf import DictConfig, ListConfig, OmegaConf  # noqa: F401
 
     _HAVE_OMEGACONF = True
 except ImportError as exc:  # honest: real dependency missing, do not fake pass

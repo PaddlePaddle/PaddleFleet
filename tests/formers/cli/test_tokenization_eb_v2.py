@@ -30,7 +30,7 @@ import unittest
 try:
     import sentencepiece as spm
 
-    from paddlefleet.cli.train.ernie_pretrain.src.tokenizers.tokenization_eb_v2 import (  # noqa: E501
+    from paddlefleet.cli.train.ernie_pretrain.src.tokenizers.tokenization_eb_v2 import (
         ErnieBotTokenizer,
     )
 
@@ -75,8 +75,7 @@ def _build_tiny_spm_model(directory):
     ]
     with open(corpus, "w", encoding="utf-8") as handle:
         for _ in range(50):
-            for line in sentences:
-                handle.write(line + "\n")
+            handle.writelines(line + "\n" for line in sentences)
 
     prefix = os.path.join(directory, "tokenizer")
     spm.SentencePieceTrainer.train(
@@ -138,7 +137,7 @@ class TestErnieBotTokenizerBehavior(unittest.TestCase):
                 f"id {want_id} should map back to piece {piece!r}",
             )
         # Ids are distinct (no collision / no silent aliasing).
-        all_ids = [0] + list(expected.values())
+        all_ids = [0, *list(expected.values())]
         self.assertEqual(len(set(all_ids)), len(all_ids))
 
     def test_named_special_token_properties(self):
@@ -171,7 +170,7 @@ class TestErnieBotTokenizerBehavior(unittest.TestCase):
         # from the raw oracle applied to the *split* substrings.
         left = self.oracle.encode_as_pieces("hello")
         right = self.oracle.encode_as_pieces("world")
-        expected = left + ["<mask:1>"] + right
+        expected = [*left, "<mask:1>", *right]
 
         got = self.tokenizer.tokenize("hello<mask:1>world")
         self.assertEqual(got, expected)
@@ -186,11 +185,11 @@ class TestErnieBotTokenizerBehavior(unittest.TestCase):
         self.assertNotEqual(got, whole)
 
     def test_convert_tokens_to_string_keeps_special_tokens_literal(self):
-        tokens = (
-            self.oracle.encode_as_pieces("hello")
-            + ["<mask:1>"]
-            + self.oracle.encode_as_pieces("world")
-        )
+        tokens = [
+            *self.oracle.encode_as_pieces("hello"),
+            "<mask:1>",
+            *self.oracle.encode_as_pieces("world"),
+        ]
         # Hand-derived: ordinary runs are decoded by the oracle, the special
         # token is emitted verbatim and separates the runs.
         expected = (

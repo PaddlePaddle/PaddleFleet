@@ -68,27 +68,27 @@ def _make_config(**overrides):
     (replaced) ``get_gpt_spec``; the fields that drive control flow are set
     explicitly by each test via ``overrides``.
     """
-    base = dict(
-        moe_token_dispatcher_type=None,
-        n_routed_experts=0,
-        layer_types=None,
-        num_hidden_layers=3,
-        num_empty_layers_add_in_head=2,
-        num_empty_layers_add_in_tail=0,
-        separate_mtp_headloss=False,
-        use_qk_norm=False,
-        multi_latent_attention=False,
-        normalization="RMSNorm",
-        vocab_size=1000,
-        tie_word_embeddings=False,
-        max_sequence_length=128,
-        position_embedding_type="rope",
-        rotary_percent=1.0,
-        rope_theta=10000.0,
-        swa_rope_theta=10000.0,
-        rope_scaling=None,
-        parallel_output=True,
-    )
+    base = {
+        "moe_token_dispatcher_type": None,
+        "n_routed_experts": 0,
+        "layer_types": None,
+        "num_hidden_layers": 3,
+        "num_empty_layers_add_in_head": 2,
+        "num_empty_layers_add_in_tail": 0,
+        "separate_mtp_headloss": False,
+        "use_qk_norm": False,
+        "multi_latent_attention": False,
+        "normalization": "RMSNorm",
+        "vocab_size": 1000,
+        "tie_word_embeddings": False,
+        "max_sequence_length": 128,
+        "position_embedding_type": "rope",
+        "rotary_percent": 1.0,
+        "rope_theta": 10000.0,
+        "swa_rope_theta": 10000.0,
+        "rope_scaling": None,
+        "parallel_output": True,
+    }
     base.update(overrides)
     return SimpleNamespace(**base)
 

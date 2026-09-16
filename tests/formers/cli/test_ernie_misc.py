@@ -19,7 +19,7 @@ from types import SimpleNamespace
 # import time, so the whole module is unimportable without paddle. Guard the
 # import honestly; the local CI box has no paddle and will skip these tests.
 try:
-    import paddle  # noqa: F401
+    import paddle
 
     from paddlefleet.cli.train.ernie_pretrain.src.utils.misc import (
         SmoothedValue,

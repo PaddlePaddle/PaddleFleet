@@ -99,7 +99,9 @@ def _gpu_ready():
 _SKIP_REASON = (
     "fused MoE topk kernels require paddle + triton and a CUDA GPU with an "
     "active Triton runtime; the kernels compile to PTX and have no CPU "
-    "implementation to validate (import error: %s)" % (_IMPORT_ERR or "none",)
+    "implementation to validate (import error: {})".format(
+        _IMPORT_ERR or "none"
+    )
 )
 
 

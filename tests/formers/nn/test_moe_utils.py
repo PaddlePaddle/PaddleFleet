@@ -58,18 +58,18 @@ import numpy as np
 try:
     import paddle
 
-    from paddlefleet.nn.moe import utils as moe_utils
+    from paddlefleet.nn.moe import utils as moe_utils  # noqa: F401
     from paddlefleet.nn.moe.utils import (
         AllGatherGroupOp,
         FakeClone,
         ReduceScatterGroupOp,
         ScatterOp,
+        _parse_moe_group,
         all_gather_group,
         detach_and_requires_grad_,
         manual_backward,
         reduce_scatter_group,
         scatter_axis,
-        _parse_moe_group,
     )
 
     _HAS_PADDLE = True

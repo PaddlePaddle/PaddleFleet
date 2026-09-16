@@ -41,14 +41,14 @@ _load_custom_template = None
 _parse_args = None
 _IMPORT_ERROR = None
 try:
-    from paddlefleet.cli.hparams.parser import (  # noqa: E501
+    from paddlefleet.cli.hparams.parser import (
         _load_custom_template,
         _parse_args,
         read_args,
     )
 except ImportError as exc:  # missing paddle in local env
     _IMPORT_ERROR = exc
-except Exception as exc:  # noqa: BLE001 - broken omegaconf/antlr install
+except Exception as exc:
     # The parser imports omegaconf before paddle; the local omegaconf raises a
     # non-ImportError at import time. This is a third-party dependency wall, not
     # a parser regression; the exact error is preserved in the skip reason.
@@ -56,7 +56,7 @@ except Exception as exc:  # noqa: BLE001 - broken omegaconf/antlr install
 
 _SKIP_REASON = (
     "paddlefleet.cli.hparams.parser is not importable in this environment "
-    "(no paddle / broken omegaconf): {!r}".format(_IMPORT_ERROR)
+    f"(no paddle / broken omegaconf): {_IMPORT_ERROR!r}"
 )
 
 
@@ -123,7 +123,7 @@ class TestReadArgs(unittest.TestCase):
     def test_py_config_is_rejected(self):
         path = self._write(".py", "x = 1\n")
         argv = ["fleet", "train", path]
-        with mock.patch.object(sys, "argv", argv):
+        with mock.patch.object(sys, "argv", argv):  # noqa: SIM117
             with self.assertRaises(ValueError) as ctx:
                 read_args()
         self.assertIn("Yaml/Json/Arguments", str(ctx.exception))
@@ -149,7 +149,7 @@ class TestReadArgs(unittest.TestCase):
     def test_missing_config_file_raises_assertion(self):
         # Only prog + subcommand present -> len(sys.argv) == 2, guard trips.
         argv = ["fleet", "train"]
-        with mock.patch.object(sys, "argv", argv):
+        with mock.patch.object(sys, "argv", argv):  # noqa: SIM117
             with self.assertRaises(AssertionError) as ctx:
                 read_args()
         self.assertIn("Missing configuration files", str(ctx.exception))
@@ -240,11 +240,7 @@ class TestParseArgs(unittest.TestCase):
         marker = os.path.join(workdir, "loaded.txt")
         template = os.path.join(workdir, "reg.py")
         with open(template, "w") as fh:
-            fh.write(
-                "with open({m!r}, 'w') as _f:\n    _f.write('ok')\n".format(
-                    m=marker
-                )
-            )
+            fh.write(f"with open({marker!r}, 'w') as _f:\n    _f.write('ok')\n")
 
         received = {}
 

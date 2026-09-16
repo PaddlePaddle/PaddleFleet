@@ -40,7 +40,7 @@ from unittest import mock
 
 import numpy as np
 import paddle
-import paddle.nn as nn
+from paddle import nn
 from paddle.distributed.communication.group import Group
 
 from paddlefleet.nn.moe.abstract import MOELayerBase

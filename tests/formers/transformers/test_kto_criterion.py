@@ -42,7 +42,7 @@ import unittest
 
 import numpy as np
 import paddle
-import paddle.nn as nn
+from paddle import nn
 
 from paddlefleet.transformers.kto_criterion import KTOCriterion
 

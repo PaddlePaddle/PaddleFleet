@@ -27,8 +27,8 @@ import unittest
 
 import numpy as np
 
-from paddlefleet.datasets.DPODataset import Sequence
 from paddlefleet.datasets.collate import calc_padding_size, dpo_collate_fn
+from paddlefleet.datasets.DPODataset import Sequence
 
 
 class _TrainingArgs:

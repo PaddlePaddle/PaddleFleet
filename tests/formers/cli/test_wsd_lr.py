@@ -77,6 +77,7 @@ import unittest
 
 try:
     from paddle.optimizer.lr import LambdaDecay
+
     from paddlefleet.cli.train.ernie_pretrain.src.lr_schedulers.wsd_lr import (
         get_wsd_schedule_with_warmup,
     )
@@ -235,13 +236,13 @@ class WsdScheduleWithWarmupTest(unittest.TestCase):
         It is documented here so a future wiring-in of num_cycles updates this
         expectation rather than silently changing the schedule shape.
         """
-        common = dict(
-            learning_rate=2.0,
-            num_warmup_steps=10,
-            num_training_steps=100,
-            num_steady_steps=80,
-            decay_function="half_life",
-        )
+        common = {
+            "learning_rate": 2.0,
+            "num_warmup_steps": 10,
+            "num_training_steps": 100,
+            "num_steady_steps": 80,
+            "decay_function": "half_life",
+        }
         sched_a = get_wsd_schedule_with_warmup(num_cycles=0.5, **common)
         sched_b = get_wsd_schedule_with_warmup(num_cycles=3.0, **common)
         for step in (5, 40, 80, 90, 100):

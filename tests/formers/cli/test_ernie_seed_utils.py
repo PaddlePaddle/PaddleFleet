@@ -23,7 +23,7 @@ import numpy as np
 # local CI box has no paddle installed and will skip these tests. Only genuine
 # import failures are treated as "no dependency"; other errors propagate.
 try:
-    import paddle  # noqa: F401
+    import paddle
     from paddle.distributed.fleet import fleet
 
     from paddlefleet.cli.train.ernie_pretrain.src.utils.seed_utils import (
@@ -83,7 +83,7 @@ class TestSetSeed(unittest.TestCase):
         cls.set_seed_error = None
         try:
             set_seed(cls.SEED)
-        except Exception as exc:  # noqa: BLE001 - recorded, re-raised in a test
+        except Exception as exc:
             # Do not swallow: surface it as an explicit failing assertion in
             # test_set_seed_runs_without_error so the traceback is visible.
             cls.set_seed_error = exc

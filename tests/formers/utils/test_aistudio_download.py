@@ -78,7 +78,7 @@ class TestGetTokenToSend(unittest.TestCase):
     def test_true_without_cached_token_raises(self):
         # get_token is a non-under-test collaborator (reads env var + token
         # file); isolate it to reach the "required but absent" branch.
-        with mock.patch.object(mod, "get_token", return_value=None):
+        with mock.patch.object(mod, "get_token", return_value=None):  # noqa: SIM117
             with self.assertRaises(LocalTokenNotFoundError):
                 get_token_to_send(True)
 
@@ -374,7 +374,7 @@ class TestDownloadCacheShortCircuit(unittest.TestCase):
                 self.assertEqual(f.read(), "cached-bytes")
 
     def test_invalid_repo_type_raises_before_network(self):
-        with tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp:  # noqa: SIM117
             with self.assertRaises(ValueError):
                 aistudio_hub_download(
                     repo_id="acme/mymodel",

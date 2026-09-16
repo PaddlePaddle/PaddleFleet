@@ -54,23 +54,23 @@ from paddlefleet.transformers.deepseek_v3.mfu_utils import DeepSeekProjection
 #   num_experts_per_tok (topk)  = 2
 # ---------------------------------------------------------------------------
 def _cfg(**overrides):
-    base = dict(
-        vocab_size=100,
-        seq_length=8,
-        hidden_size=16,
-        intermediate_size=32,
-        moe_intermediate_size=12,
-        num_hidden_layers=3,
-        first_k_dense_replace=1,
-        num_attention_heads=2,
-        qk_nope_head_dim=4,
-        q_lora_rank=6,
-        kv_lora_rank=5,
-        qk_rope_head_dim=3,
-        n_shared_experts=1,
-        n_routed_experts=4,
-        num_experts_per_tok=2,
-    )
+    base = {
+        "vocab_size": 100,
+        "seq_length": 8,
+        "hidden_size": 16,
+        "intermediate_size": 32,
+        "moe_intermediate_size": 12,
+        "num_hidden_layers": 3,
+        "first_k_dense_replace": 1,
+        "num_attention_heads": 2,
+        "qk_nope_head_dim": 4,
+        "q_lora_rank": 6,
+        "kv_lora_rank": 5,
+        "qk_rope_head_dim": 3,
+        "n_shared_experts": 1,
+        "n_routed_experts": 4,
+        "num_experts_per_tok": 2,
+    }
     base.update(overrides)
     return SimpleNamespace(**base)
 

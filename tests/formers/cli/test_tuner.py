@@ -52,7 +52,7 @@ import unittest
 from unittest import mock
 
 try:
-    import paddle  # noqa: F401
+    import paddle
 
     _PADDLE_IMPORT_ERROR = None
 except ImportError as exc:  # pragma: no cover - env dependent
@@ -257,7 +257,7 @@ class TunerBehaviorTest(unittest.TestCase):
 
     def test_unknown_stage_raises_value_error_naming_stage(self):
         args_tuple = self._make_args("BOGUS", dataset_type="pretrain")
-        with (
+        with (  # noqa: SIM117
             mock.patch.object(
                 self.tuner, "get_train_args", return_value=args_tuple
             ),
@@ -299,7 +299,7 @@ class TunerBehaviorTest(unittest.TestCase):
         args_tuple = self._make_args(
             "SFT", dataset_type="sft", train_path=None, eval_path="/data/eval"
         )
-        with (
+        with (  # noqa: SIM117
             mock.patch.object(
                 self.tuner, "get_train_args", return_value=args_tuple
             ),
@@ -315,7 +315,7 @@ class TunerBehaviorTest(unittest.TestCase):
         args_tuple = self._make_args(
             "SFT", dataset_type="sft", train_path="/data/train", eval_path=None
         )
-        with (
+        with (  # noqa: SIM117
             mock.patch.object(
                 self.tuner, "get_train_args", return_value=args_tuple
             ),
@@ -377,11 +377,13 @@ class TunerBehaviorTest(unittest.TestCase):
             train_path=None,
             eval_path="/data/eval",
         )
-        with mock.patch.object(
-            self.tuner, "get_train_args", return_value=args_tuple
+        with (
+            mock.patch.object(
+                self.tuner, "get_train_args", return_value=args_tuple
+            ),
+            self.assertRaises(ValueError) as ctx,
         ):
-            with self.assertRaises(ValueError) as ctx:
-                self.tuner._training_function({"args": None})
+            self.tuner._training_function({"args": None})
         self.assertIn("Dataset Path is None", str(ctx.exception))
 
     # ------------------------------------------------------------------

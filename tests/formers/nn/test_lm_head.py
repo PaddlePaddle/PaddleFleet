@@ -35,13 +35,13 @@ from paddlefleet.transformers import LlamaConfig
 
 def _small_config(**overrides):
     """Build a small *real* LlamaConfig so the production init/forward run."""
-    kwargs = dict(
-        vocab_size=8,
-        hidden_size=4,
-        intermediate_size=16,
-        num_hidden_layers=2,
-        num_attention_heads=2,
-    )
+    kwargs = {
+        "vocab_size": 8,
+        "hidden_size": 4,
+        "intermediate_size": 16,
+        "num_hidden_layers": 2,
+        "num_attention_heads": 2,
+    }
     kwargs.update(overrides)
     return LlamaConfig(**kwargs)
 

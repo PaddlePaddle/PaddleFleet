@@ -27,7 +27,7 @@ import unittest
 
 import numpy as np
 import paddle
-import paddle.nn as nn
+from paddle import nn
 
 from paddlefleet.utils.initializer import (
     _calculate_correct_fan,
@@ -74,7 +74,7 @@ class _StatMixin:
             emp,
             target,
             delta=max(rtol * target, 5e-3),
-            msg="empirical std {:.6f} vs target {:.6f}".format(emp, target),
+            msg=f"empirical std {emp:.6f} vs target {target:.6f}",
         )
 
 

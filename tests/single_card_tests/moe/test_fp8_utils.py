@@ -80,7 +80,7 @@ def _make_custom_map(num_experts):
 
 def _make_node(num_experts=2, **kwargs):
     """Construct a bf16, non-fused node -- the CPU-constructible control path."""
-    defaults = dict(use_fp8_mlp=False, moe_expert_fusion=False)
+    defaults = {"use_fp8_mlp": False, "moe_expert_fusion": False}
     defaults.update(kwargs)
     return ExpertsGroupGemmContiguousNode(
         _make_custom_map(num_experts), **defaults

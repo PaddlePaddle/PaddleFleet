@@ -34,7 +34,7 @@ import unittest
 
 import numpy as np
 import paddle
-import paddle.nn as nn
+from paddle import nn
 
 from paddlefleet.nn.attention.sdpa_attention import sdpa_attention_forward
 

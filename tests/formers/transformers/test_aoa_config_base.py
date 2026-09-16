@@ -41,9 +41,11 @@ class _Config:
     ``.get`` to exercise the "no dict interface" extraction branch.
     """
 
-    _REQUIRED = dict(
-        num_hidden_layers=0, num_attention_heads=0, num_key_value_heads=0
-    )
+    _REQUIRED = {
+        "num_hidden_layers": 0,
+        "num_attention_heads": 0,
+        "num_key_value_heads": 0,
+    }
 
     def __init__(self, **kwargs):
         for key, value in {**self._REQUIRED, **kwargs}.items():
@@ -103,21 +105,23 @@ class TestExtractParamsAliases(unittest.TestCase):
     def test_fd_fallback_requires_dict_get_interface(self):
         # Same fd_fallback=True attribute, but only the config exposing .get
         # actually turns it on; the attribute-only config stays False.
-        common = dict(
-            num_hidden_layers=1,
-            num_attention_heads=8,
-            num_key_value_heads=2,
-            fd_fallback=True,
-        )
+        common = {
+            "num_hidden_layers": 1,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 2,
+            "fd_fallback": True,
+        }
         with_get = MoEAOAConfigGenerator._extract_params(_DictConfig(**common))
         without_get = MoEAOAConfigGenerator._extract_params(_Config(**common))
         self.assertTrue(with_get.fd_fallback)
         self.assertFalse(without_get.fd_fallback)
 
     def test_num_head_empty_layers_alias_and_falsy(self):
-        base = dict(
-            num_hidden_layers=1, num_attention_heads=8, num_key_value_heads=2
-        )
+        base = {
+            "num_hidden_layers": 1,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 2,
+        }
         aliased = MoEAOAConfigGenerator._extract_params(
             _Config(num_empty_layers_add_in_head=3, **base)
         )

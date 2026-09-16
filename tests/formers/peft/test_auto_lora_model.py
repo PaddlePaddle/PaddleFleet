@@ -29,7 +29,7 @@ import unittest
 import numpy as np
 import paddle
 import paddle.distributed as dist
-import paddle.nn as nn
+from paddle import nn
 
 from paddlefleet.peft.lora.auto_lora_model import (
     AVAILABLE_LAYERS,

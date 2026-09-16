@@ -67,7 +67,7 @@ except (ImportError, ModuleNotFoundError) as exc:  # pragma: no cover
 
 _SKIP_REASON = (
     "paddlefleet.parallel_state imports paddle at module load; it is not "
-    "importable here: %r" % (_IMPORT_ERROR,)
+    f"importable here: {_IMPORT_ERROR!r}"
 )
 
 # Every module global any test below writes to. Snapshotted per-test so the

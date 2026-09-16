@@ -238,7 +238,7 @@ class TestIsPaddleMinVersion(unittest.TestCase):
     def test_missing_packaging_raises_import_error(self):
         # When the packaging dependency is unavailable the function must raise
         # ImportError (a precise contract), not silently return a bool.
-        with mock.patch.object(fu, "HAVE_PACKAGING", False):
+        with mock.patch.object(fu, "HAVE_PACKAGING", False):  # noqa: SIM117
             with self.assertRaises(ImportError):
                 fu.is_paddle_min_version("3.0.0")
 

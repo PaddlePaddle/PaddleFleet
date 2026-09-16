@@ -191,7 +191,7 @@ class TestArgumentParserWiring(unittest.TestCase):
     def _namespace(self, extra_argv):
         parser = PdArgumentParser(FinetuningArguments)
         # output_dir has no default -> parser marks it required.
-        argv = ["--output_dir", "/tmp/finetuning_args_test"] + extra_argv
+        argv = ["--output_dir", "/tmp/finetuning_args_test", *extra_argv]
         namespace, remaining = parser.parse_known_args(argv)
         return namespace, remaining
 

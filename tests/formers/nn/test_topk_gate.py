@@ -44,12 +44,11 @@ import unittest
 
 import numpy as np
 import paddle
-import paddle.nn.functional as F
 
 # No-card: force CPU and keep any visible accelerator out of the math.
 paddle.set_device("cpu")
 
-from paddlefleet.nn.moe.topk_gate import (  # noqa: E402
+from paddlefleet.nn.moe.topk_gate import (
     FusedGateDetachMatmul,
     TopKGate,
     cast_if_needed,
@@ -65,28 +64,28 @@ class _GateConfig:
     config protocol; values are chosen per-test, not copied from any fixture.
     """
 
-    _DEFAULTS = dict(
-        hidden_size=8,
-        moe_num_experts=4,
-        moe_capacity=[1.0, 1.0, 1.0],
-        moe_k=2,
-        fuse_gate_detach_matmul=False,
-        scoring_func="softmax",
-        global_aux_loss=False,
-        sinkhorn_2gate=False,
-        sinkhorn_temp=1.0,
-        moe_use_aux_free=False,
-        router_aux_loss_coef=0.01,
-        router_z_loss_coef=0.0,
-        moe_orthogonal_loss_lambda=0.0,
-        moe_norm_gate_logits=False,
-        moe_group_experts=False,
-        moe_use_token_type_bias=False,
-        moe_world_size=1,
-        multimodel_experts=False,
-        moe_use_hard_gate=False,
-        moe_group_orthogonal_loss=False,
-    )
+    _DEFAULTS = {
+        "hidden_size": 8,
+        "moe_num_experts": 4,
+        "moe_capacity": [1.0, 1.0, 1.0],
+        "moe_k": 2,
+        "fuse_gate_detach_matmul": False,
+        "scoring_func": "softmax",
+        "global_aux_loss": False,
+        "sinkhorn_2gate": False,
+        "sinkhorn_temp": 1.0,
+        "moe_use_aux_free": False,
+        "router_aux_loss_coef": 0.01,
+        "router_z_loss_coef": 0.0,
+        "moe_orthogonal_loss_lambda": 0.0,
+        "moe_norm_gate_logits": False,
+        "moe_group_experts": False,
+        "moe_use_token_type_bias": False,
+        "moe_world_size": 1,
+        "multimodel_experts": False,
+        "moe_use_hard_gate": False,
+        "moe_group_orthogonal_loss": False,
+    }
 
     def __init__(self, **overrides):
         for key, value in {**self._DEFAULTS, **overrides}.items():

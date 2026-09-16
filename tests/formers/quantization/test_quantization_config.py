@@ -212,7 +212,7 @@ class TestQuantizationConfigFp8Arch(unittest.TestCase):
 
     def test_fp8linear_dict_on_non_hopper_raises(self):
         QuantizationConfig = _load_config_cls()
-        with patch(f"{CONFIG_MODULE}._get_arch_info", return_value=80):
+        with patch(f"{CONFIG_MODULE}._get_arch_info", return_value=80):  # noqa: SIM117
             with self.assertRaises(RuntimeError):
                 QuantizationConfig(
                     weight_quantize_algo={"fp8linear": [".*mlp.*"]}

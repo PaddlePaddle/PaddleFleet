@@ -61,6 +61,7 @@ import unittest
 from types import SimpleNamespace
 
 try:
+    from paddlefleet.trainer.trainer_utils import ShardingOption
     from paddlefleet.trainer.unified_checkpoint.utils import (
         FP32_MASTER,
         PADDLE_MASTER_WEIGHTS_INDEX_NAME,
@@ -79,7 +80,6 @@ try:
         unwrap_optimizer,
         update_master_weight_status,
     )
-    from paddlefleet.trainer.trainer_utils import ShardingOption
 
     _IMPORT_ERROR = None
 except ImportError as exc:  # paddle / paddlefleet not installed on this runner

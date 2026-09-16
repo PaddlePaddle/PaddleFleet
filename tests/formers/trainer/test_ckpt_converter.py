@@ -238,7 +238,7 @@ class TestRenameUsingStructuredNameMapping(unittest.TestCase):
     def setUp(self):
         self.conv = _new_converter()
         # Required by the paddle-only value filter inside the method.
-        import paddle  # noqa: F401
+        import paddle
 
         self.paddle = paddle
         self.p2s = {

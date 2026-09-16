@@ -113,15 +113,15 @@ class TestFusedScaleMaskSoftmaxForward(unittest.TestCase):
 
     def _build(self, **overrides):
         """Construct with valid fp32/CPU defaults, overriding tested fields."""
-        params = dict(
-            input_in_fp16=False,
-            input_in_bf16=False,
-            attn_mask_type=self.AttnMaskType.no_mask,
-            scaled_masked_softmax_fusion=True,
-            mask_func=lambda x, m: x,
-            softmax_in_fp32=True,
-            scale=None,
-        )
+        params = {
+            "input_in_fp16": False,
+            "input_in_bf16": False,
+            "attn_mask_type": self.AttnMaskType.no_mask,
+            "scaled_masked_softmax_fusion": True,
+            "mask_func": lambda x, m: x,
+            "softmax_in_fp32": True,
+            "scale": None,
+        }
         params.update(overrides)
         return self.FusedScaleMaskSoftmax(**params)
 

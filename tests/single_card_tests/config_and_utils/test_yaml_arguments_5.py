@@ -61,9 +61,7 @@ try:
     import omegaconf as _OMEGACONF
 
     if not os.path.isfile(_PROD_PATH):
-        raise ImportError(
-            "yaml_arguments.py source not found at %s" % _PROD_PATH
-        )
+        raise ImportError(f"yaml_arguments.py source not found at {_PROD_PATH}")
 
     _spec = importlib.util.spec_from_file_location(
         "paddlefleet_yaml_arguments_under_test", _PROD_PATH
@@ -79,7 +77,7 @@ _AVAILABLE = _LOAD_YAML is not None and _OMEGACONF is not None
 
 @unittest.skipUnless(
     _AVAILABLE,
-    "omegaconf or yaml_arguments source unavailable: %s" % (_IMPORT_ERROR,),
+    f"omegaconf or yaml_arguments source unavailable: {_IMPORT_ERROR}",
 )
 class TestLoadYamlFlattenSlice5(unittest.TestCase):
     """load_yaml end-to-end flatten behavior (slice 5)."""

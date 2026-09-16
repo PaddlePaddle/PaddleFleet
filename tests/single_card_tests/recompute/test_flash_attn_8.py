@@ -165,18 +165,18 @@ class TestFlashMaskAttnCpFunctorBackwardGradientRouting(unittest.TestCase):
         ):
             out = FlashMaskAttnCpFunctor.backward(ctx, grad)
 
-        forwarded = dict(
-            q=q,
-            k=k,
-            v=v,
-            startend=startend,
-            result_attn=result_attn,
-            softmax_lse=softmax_lse,
-            group=group,
-            grad=grad,
-            learnable_sink=learnable_sink,
-        )
-        grads = dict(q=q_grad, k=k_grad, v=v_grad, sink=sink_grad)
+        forwarded = {
+            "q": q,
+            "k": k,
+            "v": v,
+            "startend": startend,
+            "result_attn": result_attn,
+            "softmax_lse": softmax_lse,
+            "group": group,
+            "grad": grad,
+            "learnable_sink": learnable_sink,
+        }
+        grads = {"q": q_grad, "k": k_grad, "v": v_grad, "sink": sink_grad}
         return out, captured["args"], forwarded, grads
 
     def _assert_forwarded_positionally(self, args, fwd):

@@ -81,15 +81,15 @@ class TestFusedScaleMaskSoftmaxInit(unittest.TestCase):
 
     def _build(self, **overrides):
         """Construct with valid defaults, overriding only the fields tested."""
-        params = dict(
-            input_in_fp16=False,
-            input_in_bf16=False,
-            attn_mask_type=self.AttnMaskType.causal,
-            scaled_masked_softmax_fusion=True,
-            mask_func=_identity_mask,
-            softmax_in_fp32=True,
-            scale=None,
-        )
+        params = {
+            "input_in_fp16": False,
+            "input_in_bf16": False,
+            "attn_mask_type": self.AttnMaskType.causal,
+            "scaled_masked_softmax_fusion": True,
+            "mask_func": _identity_mask,
+            "softmax_in_fp32": True,
+            "scale": None,
+        }
         params.update(overrides)
         return self.FusedScaleMaskSoftmax(**params)
 
