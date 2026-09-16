@@ -16,7 +16,7 @@ if [[ -z "${GLM52_VENV_ROOT:-}" ]]; then
         --no-deps --require-hashes --reinstall \
         -r "${SCRIPT_DIR}/reference_wheels.txt"
     uv pip install --python "${SCRIPT_DIR}/../venv/torch/bin/python" \
-        "transformers==5.12.1"
+        "transformers==5.12.1" "pynvml==13.0.1"
     # The flex dispatcher and DSA indexer need Torch DeepEP and Hadamard kernels.
     # Build against this environment's Torch; the Paddle extension cannot serve it.
     (

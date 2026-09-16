@@ -26,6 +26,7 @@ use `GLM52_VENV_ROOT` for a preconfigured environment that must not be modified.
 The default CI case builds Torch DeepEP at
 `17cfb817bccec3a9c247013360cc550c2bac441e` and fast-hadamard-transform at
 `f134af63deb2df17e1171a9ec1ea4a7d8604d5ca` for DSA indexer rotation.
+It also installs `pynvml==13.0.1` for DeepEP's NVLink connectivity check.
 Hadamard kernels are built from source against the installed Torch rather than
 using the package's guessed prebuilt wheel. The Torch cu130 environment needs
 CUDA 13.0 even when the shared image has a 12.9 compiler. The case downloads
