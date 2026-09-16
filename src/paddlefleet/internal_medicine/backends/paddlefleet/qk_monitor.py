@@ -651,10 +651,9 @@ class PaddleQKStatsMonitor(PaddleProbe):
                 config, "cp_balance_mode", "dualchunk_allgather"
             )
             logger.warning(
-                "[PaddleQKMonitor] CP=%d detected with mode=%s. QK reconstruction "
-                "is enabled only for contiguous_allgather; dualchunk_allgather "
-                "keeps local Q in a non-contiguous layout and is skipped for "
-                "correctness.",
+                "[PaddleQKMonitor] CP=%d detected with mode=%s. Reconstructing "
+                "full-sequence Q/K with the matching gather so causal, entropy "
+                "and sink stats use global token order.",
                 self.cp_size,
                 self.cp_balance_mode,
             )
@@ -708,10 +707,6 @@ class PaddleQKStatsMonitor(PaddleProbe):
                         layer_idx,
                         item.attn_type,
                         record_qkv_norms=not is_sparse,
-                        record_qk_stats=(
-                            self.cp_size <= 1
-                            or self.cp_balance_mode.startswith("contiguous")
-                        ),
                     )
                 )
                 self.hooks.append(hook)
@@ -929,22 +924,28 @@ class PaddleQKStatsMonitor(PaddleProbe):
         return attention_layers
 
     def _cp_gather_seq(self, tensor: paddle.Tensor) -> paddle.Tensor | None:
-        """All-gather ``tensor`` along its seq dim across the CP group."""
+        """Restore ``tensor`` to global sequence order across the CP group.
+
+        Contiguous CP concatenates rank shards in rank order. Dual-chunk CP
+        stores a front chunk plus a rear chunk on every rank, so a plain
+        all-gather would leave both Q rows and K columns in the balanced
+        layout. ``all_gather_balance`` undoes that layout; without it causal
+        masks, entropy and sink would silently compare the wrong tokens.
+        """
         if self.cp_group is None or self.cp_size <= 1:
             return tensor
         try:
-            import paddle.distributed as dist
-
-            # all_gather concatenates along axis=0. Move seq to axis 0 first,
-            # gather, then reshape back to [B, S_full, H, D].
-            # tensor: [B, S_local, H, D] -> [S_local, B, H, D]
-            t = tensor.transpose([1, 0, 2, 3]).contiguous()
-            gathered = paddle.empty(
-                [self.cp_size * t.shape[0], *t.shape[1:]], dtype=t.dtype
+            from paddlefleet.context_parallel_utils import (
+                all_gather_balance,
+                all_gather_contiguous,
             )
-            dist.all_gather(gathered, t, group=self.cp_group)
-            # gathered: [S_full, B, H, D] -> [B, S_full, H, D]
-            return gathered.transpose([1, 0, 2, 3]).contiguous()
+
+            gather = (
+                all_gather_contiguous
+                if self.cp_balance_mode.startswith("contiguous")
+                else all_gather_balance
+            )
+            return gather(tensor, group=self.cp_group, axis=1)
         except Exception as e:
             if not self._warned_cp_gather_failed:
                 logger.warning(
@@ -962,7 +963,6 @@ class PaddleQKStatsMonitor(PaddleProbe):
         attn_type: str | None = None,
         *,
         record_qkv_norms: bool = True,
-        record_qk_stats: bool = True,
     ):
         def hook_fn(layer, inputs):
             if not layer.training:
@@ -996,19 +996,16 @@ class PaddleQKStatsMonitor(PaddleProbe):
                                 vector_norm.max(),
                                 attn_type=attn_type,
                             )
-                    if not record_qk_stats:
-                        return
                     if self.cp_size > 1:
-                        # CP > 1: gather K only, keep Q local.
-                        query = query.detach()
-                        q_local_seq = query.shape[1]  # rows on this rank
-                        q_row_offset = self.cp_rank * q_local_seq
-                        gathered_k = self._cp_gather_seq(key.detach())
-                        if gathered_k is None:
+                        # Restore both Q and K to global token order. Dual-chunk
+                        # shards are two non-contiguous intervals, so a single
+                        # q_row_offset cannot describe them; gathering Q as well
+                        # lets the kernel run with offset 0 on the full sequence.
+                        query = self._cp_gather_seq(query.detach())
+                        key = self._cp_gather_seq(key.detach())
+                        if query is None or key is None:
                             return
-                        key = gathered_k
-                    else:
-                        q_row_offset = 0
+                    q_row_offset = 0
 
                     # query: [B, S_q, H, D]; seq_len is a static shape int (no D2H sync).
                     seq_len = query.shape[1]
@@ -1045,16 +1042,6 @@ class PaddleQKStatsMonitor(PaddleProbe):
                         else sink_logit.detach().astype("float32"),
                         softmax_scale=getattr(layer, "softmax_scale", None),
                     )
-
-                    if self.cp_size > 1 and self.cp_group is not None:
-                        import paddle.distributed as dist
-
-                        for key_name in ("entropy_per_head", "sink_per_head"):
-                            t = stats[key_name].astype("float32")
-                            dist.all_reduce(
-                                t, op=dist.ReduceOp.SUM, group=self.cp_group
-                            )
-                            stats[key_name] = t / float(self.cp_size)
 
                 self._record_common_stats(layer_idx, attn_type, stats)
                 # A frozen offset ("off-by-one") has no learned magnitude to
