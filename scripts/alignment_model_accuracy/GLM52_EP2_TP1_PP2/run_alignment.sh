@@ -10,6 +10,13 @@ RUN_DIR="${SCRIPT_DIR}/results/${ALIGNMENT_RUN_TAG}"
 if [[ -z "${GLM52_VENV_ROOT:-}" ]]; then
     uv pip install --python "${SCRIPT_DIR}/../venv/torch/bin/python" \
         "transformers==5.12.1"
+    # The GLM52 flex dispatcher requires Torch DeepEP on the H20 CI runner.
+    # Build against this environment's Torch; the Paddle extension cannot serve it.
+    TORCH_CUDA_ARCH_LIST=9.0 MAX_JOBS="${MAX_JOBS:-2}" \
+        CPATH="${CUDA_HOME:-/usr/local/cuda}/include/cccl${CPATH:+:${CPATH}}" \
+        uv pip install --python "${SCRIPT_DIR}/../venv/torch/bin/python" \
+        --no-build-isolation --no-deps \
+        "deep_ep @ git+https://github.com/deepseek-ai/DeepEP.git@17cfb817bccec3a9c247013360cc550c2bac441e"
 fi
 bash "${SCRIPT_DIR}/run_paddle_glm52.sh"
 bash "${SCRIPT_DIR}/run_torch_glm52.sh"
