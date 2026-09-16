@@ -66,6 +66,10 @@ scripts, loss comparison and cleanup remain unchanged. GLM52 retains its own
 logs, raw loss, environment records and checkpoints under
 `GLM52_EP2_TP1_PP2/results/<ALIGNMENT_RUN_TAG>/`, including failed runs.
 The two framework scripts use the same tag when launched by run_alignment.sh.
+The case logs SHA256 fingerprints of its model, tokenizer and data files before
+training, and prints native environment, input and loss receipts on exit. These
+records remain in CI logs after container cleanup. Reporting does not change
+the training or comparison exit status.
 
 The case-local comparator requires complete native artifacts with consecutive
 steps 1–100, finite values and bitwise identical main training loss. Missing or
