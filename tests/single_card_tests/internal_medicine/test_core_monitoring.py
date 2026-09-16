@@ -341,6 +341,115 @@ class CoreMonitoringTest(unittest.TestCase):
 
         self.assertEqual(sampled, [3, 4])
 
+    def test_reducer_keeps_aligned_layout_for_heterogeneous_rank_keys(self):
+        """PP/VPP ranks may own different keys; layout must still align once.
+
+        The stale flag is local-fingerprint based. Comparing fingerprints
+        across ranks would re-align every step because PP stages naturally
+        report disjoint layer keys.
+        """
+        from paddlefleet.internal_medicine.backends.paddlefleet.gather import (
+            _PaddleReducer,
+        )
+
+        class FakeTensor:
+            def __init__(self, array):
+                import numpy as np
+
+                self._array = np.array(array, copy=True)
+
+            def __setitem__(self, key, value):
+                self._array[key] = value
+
+            @property
+            def shape(self):
+                return self._array.shape
+
+            def numpy(self):
+                return self._array
+
+        class FakePaddle:
+            def to_tensor(self, data, dtype="int64"):
+                import numpy as np
+
+                return FakeTensor(np.array(data))
+
+        class FakeDist:
+            ReduceOp = SimpleNamespace(MAX="max")
+
+            def all_reduce(self, tensor, op=None):
+                tensor[:] = max(self.stale_flags)
+
+            def all_gather_object(self, gathered, payload):
+                gathered.extend(self.payloads)
+
+        schema_a = training_logs.build_reduce_schema(
+            {"dummy/layer_0/mean": 2.0, "dummy/layer_0/peak": 5.0}
+        )
+        schema_b = training_logs.build_reduce_schema(
+            {"dummy/layer_1/mean": 4.0, "dummy/layer_1/floor": 1.0}
+        )
+        self.assertNotEqual(schema_a.fingerprint, schema_b.fingerprint)
+
+        fake_dist = FakeDist()
+        fake_paddle = FakePaddle()
+        fake_dist.payloads = [
+            {
+                "mean": schema_a.mean_keys,
+                "max": schema_a.max_keys,
+                "min": schema_a.min_keys,
+            },
+            {
+                "mean": schema_b.mean_keys,
+                "max": schema_b.max_keys,
+                "min": schema_b.min_keys,
+            },
+        ]
+
+        reducer_a = _PaddleReducer()
+        reducer_b = _PaddleReducer()
+        align_calls = {"n": 0}
+
+        def wrap_align(reducer):
+            original = reducer._align
+
+            def counting_align(schema, dist):
+                align_calls["n"] += 1
+                original(schema, dist)
+
+            reducer._align = counting_align
+            return original
+
+        original_a = wrap_align(reducer_a)
+        original_b = wrap_align(reducer_b)
+
+        fake_dist.stale_flags = [1, 1]
+        self.assertFalse(
+            reducer_a._agree_on_layout(schema_a, fake_paddle, fake_dist)
+        )
+        original_a(schema_a, fake_dist)
+        original_b(schema_b, fake_dist)
+        self.assertEqual(align_calls["n"], 0)
+        self.assertEqual(set(reducer_a._layout), set(reducer_b._layout))
+        self.assertEqual(
+            set(reducer_a._layout),
+            {
+                "dummy/layer_0/mean",
+                "dummy/layer_0/peak",
+                "dummy/layer_1/mean",
+                "dummy/layer_1/floor",
+            },
+        )
+
+        fake_dist.stale_flags = [0, 0]
+        self.assertTrue(
+            reducer_a._agree_on_layout(schema_a, fake_paddle, fake_dist)
+        )
+        self.assertTrue(
+            reducer_b._agree_on_layout(schema_b, fake_paddle, fake_dist)
+        )
+        self.assertEqual(align_calls["n"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
