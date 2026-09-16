@@ -718,9 +718,9 @@ class TestLayerLevelBlockRecompute(unittest.TestCase):
         collected = []
         real_add = RecomputeWithoutOutputManager.add
 
-        def spy(manager, recompute):
+        def spy(manager, recompute, *args, **kwargs):
             collected.append(recompute)
-            return real_add(manager, recompute)
+            return real_add(manager, recompute, *args, **kwargs)
 
         layers = self._build(
             recompute_granularity="selective",
@@ -766,9 +766,9 @@ class TestLayerLevelBlockRecompute(unittest.TestCase):
         collected = []
         real_add = RecomputeWithoutOutputManager.add
 
-        def spy(manager, recompute):
+        def spy(manager, recompute, *args, **kwargs):
             collected.append(recompute)
-            return real_add(manager, recompute)
+            return real_add(manager, recompute, *args, **kwargs)
 
         layers = self._build(
             recompute_granularity="selective",
@@ -1138,14 +1138,14 @@ class TestLayerLevelBlockRecompute(unittest.TestCase):
         shapes = {}
         real_add = RecomputeWithoutOutputManager.add
 
-        def spy(manager, recompute_unit):
+        def spy(manager, recompute_unit, *args, **kwargs):
             # Recorded here rather than after the run: _recompute drops
             # ``outputs`` once it has replayed.
             for output in recompute_unit.outputs:
                 if output is not None:
                     key = tuple(output.shape)
                     shapes[key] = shapes.get(key, 0) + 1
-            return real_add(manager, recompute_unit)
+            return real_add(manager, recompute_unit, *args, **kwargs)
 
         with mock.patch.object(RecomputeWithoutOutputManager, "add", spy):
             blocked = self._run(layers, x_np)
