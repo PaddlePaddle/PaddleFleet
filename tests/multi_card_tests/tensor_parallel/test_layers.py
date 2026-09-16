@@ -638,19 +638,153 @@ def test_Linear_via_backend_linear():
     assert layer.weight.grad.shape == [16, 8]
 
 
+def test_ColumnParallelLinear_no_gather(
+    tensor_parallel,
+    output_baseline,
+    input_grad_baseline,
+):
+    """gather_output=False: each rank keeps its own column shard Y_i = X A_i.
+
+    The gather_output=True test (test_ColumnParallelLinear) gathers every
+    partition before comparing, so it never observes the per-rank column
+    slice or its ordering. Here the independent reference is the full TP=1
+    output (output_baseline). With gather_output=False the local output must
+    equal exactly the rank's contiguous column slice of that full output, and
+    the input gradient (input is replicated across ranks, so dgrad is
+    all-reduced back to the full gradient) must equal the full baseline grad.
+    A wrong column offset, a transposed partition, or a missing dgrad
+    all-reduce would all be rejected here but pass the gather_output=True test.
+    """
+    transformer_config = TransformerConfig(
+        num_hidden_layers=1,
+        hidden_size=12,
+        num_attention_heads=4,
+        use_cpu_initialization=True,
+    )
+
+    paddle.manual_seed(42)
+    model_parallel_cuda_manual_seed(42)
+    shard = int(8 / tensor_parallel)
+    col_tp4 = ColumnParallelLinear(
+        input_size=8,
+        output_size=8,
+        init_method=transformer_config.init_method,
+        bias=True,
+        config=transformer_config,
+        skip_bias_add=False,
+        gather_output=False,
+    )
+
+    input_data = paddle.arange(64).reshape((8, 8)) * 0.1
+    input_data.requires_grad = True
+
+    output, _ = col_tp4(input_data)
+    output.sum().backward()
+
+    rank = ps.get_tensor_model_parallel_rank()
+    # Local output is only this rank's column shard, not the gathered result.
+    assert output.shape == [8, shard]
+    assert paddle.allclose(
+        output, output_baseline[:, rank * shard : (rank + 1) * shard]
+    )
+    # Replicated input => dgrad is all-reduced back to the full gradient.
+    assert paddle.allclose(input_data.grad, input_grad_baseline)
+
+
+def test_VocabParallelEmbedding_reduce_scatter(tensor_parallel):
+    """reduce_scatter_embeddings=True scatters the [s, b, h] output over ranks.
+
+    test_VocabParallelEmbedding only exercises the default all-reduce path
+    (full [b, s, h] output on every rank). The reduce-scatter path is a
+    distinct collective: it transposes [b, s, h] -> [s, b, h] and
+    reduce-scatters the sequence dimension, so each rank ends up holding only
+    s // TP sequence positions.
+
+    Independent reference: build a second embedding with identical weights
+    (same seeds) running the all-reduce path, giving the full [b, s, h]
+    output; transpose it to [s, b, h] and slice this rank's contiguous
+    sequence block. The reduce-scatter output must match that block exactly.
+    This validates the transpose axes, the sequence partition size and the
+    rank->slice ordering; the underlying vocab-parallel lookup itself is
+    independently verified by test_VocabParallelEmbedding.
+    """
+    num_embeddings = 16
+    embedding_dim = 4
+    transformer_config = TransformerConfig(
+        num_hidden_layers=1,
+        hidden_size=12,
+        num_attention_heads=4,
+        use_cpu_initialization=True,
+    )
+
+    # Fixed, distinguishable ids covering the full vocab range [0, 16).
+    input_data = paddle.to_tensor(
+        [
+            [6, 3, 4, 1, 7, 13, 8, 0],
+            [0, 5, 12, 11, 9, 2, 1, 15],
+            [2, 2, 3, 3, 4, 4, 5, 5],
+            [15, 14, 13, 12, 11, 10, 9, 8],
+        ],
+        dtype="int64",
+    )
+    batch, seq_len = input_data.shape
+    seq_per_rank = int(seq_len / tensor_parallel)
+
+    # Same seeds => identical partitioned weights for both layers.
+    paddle.manual_seed(7)
+    model_parallel_cuda_manual_seed(7)
+    emb_full = VocabParallelEmbedding(
+        num_embeddings=num_embeddings,
+        embedding_dim=embedding_dim,
+        init_method=transformer_config.init_method,
+        config=transformer_config,
+        reduce_scatter_embeddings=False,
+    )
+
+    paddle.manual_seed(7)
+    model_parallel_cuda_manual_seed(7)
+    emb_rs = VocabParallelEmbedding(
+        num_embeddings=num_embeddings,
+        embedding_dim=embedding_dim,
+        init_method=transformer_config.init_method,
+        config=transformer_config,
+        reduce_scatter_embeddings=True,
+    )
+
+    # Sanity: the two layers really do hold the same partitioned weight.
+    assert paddle.allclose(emb_full.weight, emb_rs.weight)
+
+    full_output = emb_full(input_data)
+    assert full_output.shape == [batch, seq_len, embedding_dim]
+
+    rs_output = emb_rs(input_data)
+    rank = ps.get_tensor_model_parallel_rank()
+
+    # [b, s, h] -> [s, b, h], then take this rank's sequence block.
+    expected = full_output.transpose([1, 0, 2])[
+        rank * seq_per_rank : (rank + 1) * seq_per_rank
+    ]
+
+    assert rs_output.shape == [seq_per_rank, batch, embedding_dim]
+    assert paddle.allclose(rs_output, expected)
+
+
 if __name__ == "__main__":
     tensor_parallel = 4
     Utils.initialize_model_parallel(tensor_parallel, 1)
     test_LinearWithFrozenWeight(4, True)
-    output_tp1, input_grad_tp1, weight_grad_tp1, bias_grad_tp1 = (
-        column_parallel_baseline()
-    )
+    col_out, col_in_grad, col_w_grad, col_b_grad = column_parallel_baseline()
     test_ColumnParallelLinear(
         tensor_parallel,
-        output_tp1,
-        input_grad_tp1,
-        weight_grad_tp1,
-        bias_grad_tp1,
+        col_out,
+        col_in_grad,
+        col_w_grad,
+        col_b_grad,
+    )
+    test_ColumnParallelLinear_no_gather(
+        tensor_parallel,
+        col_out,
+        col_in_grad,
     )
     output_tp1, input_grad_tp1, weight_grad_tp1, bias_grad_tp1 = (
         row_parallel_baseline()
@@ -664,6 +798,7 @@ if __name__ == "__main__":
     )
     output_tp1, weight_grad_tp1 = embedding_baseline()
     test_VocabParallelEmbedding(4, output_tp1, weight_grad_tp1)
+    test_VocabParallelEmbedding_reduce_scatter(tensor_parallel)
     test_Linear_forward_basic()
     test_Linear_skip_bias_add()
     test_Linear_no_bias()

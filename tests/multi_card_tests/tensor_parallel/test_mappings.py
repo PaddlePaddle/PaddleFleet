@@ -266,6 +266,118 @@ def test_ReduceScatterToSequenceParallelRegion():
     assert paddle.equal_all(output_data, expected_output)
 
 
+def test_AllGatherFromTensorParallelRegion():
+    tp_group = get_tensor_model_parallel_group_if_none(tp_group=None)
+    local_rank = tp_group.rank
+
+    # Forward: all-gather along last dim concatenates every rank's local
+    # column in rank order. Each rank contributes a distinct constant so a
+    # wrong gather order or a dropped rank changes the exact column layout.
+    input_data = (
+        paddle.ones([2, 1], dtype="float32") * (local_rank + 1)
+    ).cuda()
+    output_data = mappings.all_gather_last_dim_from_tensor_parallel_region(
+        input_data
+    )
+    expected = paddle.to_tensor(
+        [[1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0]], dtype="float32"
+    ).cuda()
+    assert paddle.equal_all(output_data, expected)
+    assert paddle.equal_all(
+        mappings._AllGatherFromTensorParallelRegion.symbolic(
+            None, input_data, tp_group
+        ),
+        expected,
+    )
+
+    # Backward: reduce-scatter along last dim. Rank r keeps the sum over all
+    # ranks of the r-th last-dim chunk. With row value (r*100 + col) the sum
+    # over ranks 0..3 of a two-wide chunk starting at column 2r is
+    # [600 + 8r, 604 + 8r] on both rows.
+    row = paddle.arange(8, dtype="float32") + local_rank * 100
+    grad_input = paddle.stack([row, row], axis=0).cuda()
+
+    class Ctx:
+        group = tp_group
+
+    grad_output = mappings._AllGatherFromTensorParallelRegion.backward(
+        Ctx(), grad_input
+    )
+    c0 = 600.0 + 8 * local_rank
+    c1 = 604.0 + 8 * local_rank
+    expected_grad = paddle.to_tensor(
+        [[c0, c1], [c0, c1]], dtype="float32"
+    ).cuda()
+    assert paddle.equal_all(grad_output, expected_grad)
+
+
+def test_ReduceScatterToTensorParallelRegion():
+    tp_group = get_tensor_model_parallel_group_if_none(tp_group=None)
+    local_rank = tp_group.rank
+
+    # Forward: reduce-scatter along last dim. Rank r receives the summed
+    # r-th last-dim chunk across all ranks. Input row value is (r*100 + col),
+    # so rank r's slice is [600 + 8r, 604 + 8r] on both rows.
+    row = paddle.arange(8, dtype="float32") + local_rank * 100
+    input_data = paddle.stack([row, row], axis=0).cuda()
+    output_data = mappings.reduce_scatter_last_dim_to_tensor_parallel_region(
+        input_data
+    )
+    c0 = 600.0 + 8 * local_rank
+    c1 = 604.0 + 8 * local_rank
+    expected = paddle.to_tensor([[c0, c1], [c0, c1]], dtype="float32").cuda()
+    assert paddle.equal_all(output_data, expected)
+    assert paddle.equal_all(
+        mappings._ReduceScatterToTensorParallelRegion.symbolic(
+            None, input_data, tp_group
+        ),
+        expected,
+    )
+
+    # Backward: all-gather along last dim. Each rank feeds a distinct constant
+    # column; the gathered result is [1, 2, 3, 4] in rank order on both rows.
+    grad_input = (
+        paddle.ones([2, 1], dtype="float32") * (local_rank + 1)
+    ).cuda()
+
+    class Ctx:
+        group = tp_group
+
+    grad_output = mappings._ReduceScatterToTensorParallelRegion.backward(
+        Ctx(), grad_input
+    )
+    expected_grad = paddle.to_tensor(
+        [[1.0, 2.0, 3.0, 4.0], [1.0, 2.0, 3.0, 4.0]], dtype="float32"
+    ).cuda()
+    assert paddle.equal_all(grad_output, expected_grad)
+
+
+def test_AllToAll():
+    tp_group = get_tensor_model_parallel_group_if_none(tp_group=None)
+    local_rank = tp_group.rank
+
+    # Equal-split all-to-all: rank r sends its j-th row block to rank j and
+    # receives, as its i-th row, the r-th block from rank i. With input row
+    # value (r*10 + j), rank r's output is [r, 10+r, 20+r, 30+r]. A reversed
+    # direction or wrong peer selection changes these exact values.
+    input_data = (
+        (paddle.arange(4, dtype="float32") + local_rank * 10)
+        .reshape([4, 1])
+        .cuda()
+    )
+    output_data = mappings.all_to_all(tp_group, input_data)
+    expected = paddle.to_tensor(
+        [
+            [float(local_rank)],
+            [10.0 + local_rank],
+            [20.0 + local_rank],
+            [30.0 + local_rank],
+        ],
+        dtype="float32",
+    ).cuda()
+    assert paddle.equal_all(output_data, expected)
+
+
 if __name__ == "__main__":
     Utils.initialize_model_parallel(4, 1)
     test_CopyToModelParallelRegion()
@@ -274,3 +386,6 @@ if __name__ == "__main__":
     test_GatherFromModelParallelRegion()
     test_ReduceScatterToSequenceParallelRegion()
     test_GatherFromSequenceParallelRegion()
+    test_AllGatherFromTensorParallelRegion()
+    test_ReduceScatterToTensorParallelRegion()
+    test_AllToAll()
