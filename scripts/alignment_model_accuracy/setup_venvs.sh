@@ -128,7 +128,7 @@ setup_paddle_venv() {
     local -a paddle_index=(
         --no-config
         --index-url "${PADDLE_INDEX_URL}"
-        --extra-index-url https://pypi.org/simple/
+        # --extra-index-url https://pypi.org/simple/
         --index-strategy unsafe-best-match
     )
 
