@@ -146,9 +146,9 @@ setup_paddle_venv() {
     # PaddleFleet. --no-deps is intentionally dropped: the wheel's pinned
     # paddlepaddle-gpu dependency must be installed here, otherwise
     # venv/paddle/bin/paddlefleet-cli fails to import paddle at runtime.
-    uv pip install --python "${paddle_py}" \
-        --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/  \
-        --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/ \
+    uv pip install --python "${paddle_py}" "${paddle_index[@]}" \
+        --force-reinstall \
+        --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ \
         "${PADDLEFLEET_WHEEL}"
     # (
     #     cd ./PaddleFleet
