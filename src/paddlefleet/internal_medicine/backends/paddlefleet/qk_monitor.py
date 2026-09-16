@@ -574,6 +574,7 @@ class PaddleQKStatsMonitor(PaddleProbe):
         self.cp_size = 1
         self.cp_rank = 0
         self.cp_group = None
+        self.cp_balance_mode = "dualchunk_allgather"
         self.pp_rank = 0
         self.sink_head_threshold = sink_head_threshold
         if int(row_stride) < 1:
@@ -637,13 +638,25 @@ class PaddleQKStatsMonitor(PaddleProbe):
             )
 
         if self.cp_size > 1:
+            config = getattr(attention_layers[0][1], "config", None)
+            if config is None:
+                config = getattr(
+                    getattr(attention_layers[0][1], "core_attention", None),
+                    "config",
+                    None,
+                )
+            if config is None:
+                config = getattr(attention_layers[0][2].layer, "config", None)
+            self.cp_balance_mode = getattr(
+                config, "cp_balance_mode", "dualchunk_allgather"
+            )
             logger.warning(
-                "[PaddleQKMonitor] CP=%d detected. Using K-only all_gather + "
-                "per-head CP mean-reduce to preserve exact metric semantics "
-                "while keeping Q local. If qk_stats overhead is still too high, raise "
-                "internal_medicine_monitor_interval or remove 'qk_stats' from "
-                "internal_medicine_monitors.",
+                "[PaddleQKMonitor] CP=%d detected with mode=%s. QK reconstruction "
+                "is enabled only for contiguous_allgather; dualchunk_allgather "
+                "keeps local Q in a non-contiguous layout and is skipped for "
+                "correctness.",
                 self.cp_size,
+                self.cp_balance_mode,
             )
 
         for layer_idx, attn_module, item in attention_layers:
@@ -695,6 +708,10 @@ class PaddleQKStatsMonitor(PaddleProbe):
                         layer_idx,
                         item.attn_type,
                         record_qkv_norms=not is_sparse,
+                        record_qk_stats=(
+                            self.cp_size <= 1
+                            or self.cp_balance_mode.startswith("contiguous")
+                        ),
                     )
                 )
                 self.hooks.append(hook)
@@ -945,6 +962,7 @@ class PaddleQKStatsMonitor(PaddleProbe):
         attn_type: str | None = None,
         *,
         record_qkv_norms: bool = True,
+        record_qk_stats: bool = True,
     ):
         def hook_fn(layer, inputs):
             if not layer.training:
@@ -978,6 +996,8 @@ class PaddleQKStatsMonitor(PaddleProbe):
                                 vector_norm.max(),
                                 attn_type=attn_type,
                             )
+                    if not record_qk_stats:
+                        return
                     if self.cp_size > 1:
                         # CP > 1: gather K only, keep Q local.
                         query = query.detach()

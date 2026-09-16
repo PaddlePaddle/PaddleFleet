@@ -42,8 +42,8 @@ class _PaddleReducer:
     ``all_reduce`` needs every rank to pass the same shape, so the key layout has
     to be global. Deriving it is a collective operation, which means the
     *decision* to re-derive it must be collective too — a rank that re-aligns
-    alone would hang the job. Hence every call first agrees, in two tiny
-    reductions, on whether the cached layout still holds.
+    alone would hang the job. Hence every call first agrees, in one tiny
+    reduction, on whether the cached layout still holds.
     """
 
     def __init__(self):
@@ -51,7 +51,9 @@ class _PaddleReducer:
         self._modes: tuple[
             int, ...
         ] = ()  # 0=mean, 1=max, 2=min, parallel to _layout
-        self._fingerprint: int | None = None
+        # This is deliberately local. PP/VPP ranks may own different key sets,
+        # so their fingerprints are not expected to match.
+        self._local_fingerprint: int | None = None
 
     def __call__(self, schema):
         import paddle
@@ -71,16 +73,12 @@ class _PaddleReducer:
     # ------------------------------------------------------------------
 
     def _agree_on_layout(self, schema, paddle, dist) -> bool:
-        """True when every rank still shares the cached layout."""
+        """True when no rank changed its locally cached layout."""
         local_fp = schema.fingerprint
-        stale = 1 if (not self._layout or local_fp != self._fingerprint) else 0
-        probe = paddle.to_tensor([local_fp, stale], dtype="int64")
+        stale = int(not self._layout or local_fp != self._local_fingerprint)
+        probe = paddle.to_tensor([stale], dtype="int64")
         dist.all_reduce(probe, op=dist.ReduceOp.MAX)
-        fp_max, any_stale = (int(v) for v in probe.numpy())
-        fp_only = paddle.to_tensor([local_fp], dtype="int64")
-        dist.all_reduce(fp_only, op=dist.ReduceOp.MIN)
-        fp_min = int(fp_only.numpy()[0])
-        return fp_max == fp_min and not any_stale
+        return not int(probe.numpy()[0])
 
     def _align(self, schema, dist) -> None:
         """Derive the global layout from every rank's key names.
@@ -110,7 +108,7 @@ class _PaddleReducer:
                 modes.append(mode)
         self._layout = tuple(layout)
         self._modes = tuple(modes)
-        self._fingerprint = schema.fingerprint
+        self._local_fingerprint = schema.fingerprint
         logger.info(
             f"[internal_medicine] reduce layout aligned: {len(self._layout)} keys"
         )
@@ -175,12 +173,9 @@ class _PaddleReducer:
 def install_gather_fn():
     """Install the paddle-based aggregation into the global training_logs.
 
-    ``IM_DISABLE_REDUCE=1`` keeps the object-gather path. It exists so the
-    reduction can be switched off in a running job — and so an A/B can hold
-    everything else fixed — without shipping a different build.
+    The object-gather implementation remains available as an internal fallback;
+    the numeric reducer is the single configured distributed path.
     """
-    import os
-
     from ...core.training_logs import training_logs
 
     try:
@@ -188,11 +183,6 @@ def install_gather_fn():
 
         if dist.is_initialized():
             training_logs.set_gather_fn(_paddle_gather)
-            if os.environ.get("IM_DISABLE_REDUCE", "") == "1":
-                logger.info(
-                    "[internal_medicine] IM_DISABLE_REDUCE=1: using all_gather_object"
-                )
-            else:
-                training_logs.set_reduce_fn(_PaddleReducer())
+            training_logs.set_reduce_fn(_PaddleReducer())
     except ImportError:
         pass

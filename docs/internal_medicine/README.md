@@ -932,7 +932,7 @@ from paddlefleet.internal_medicine import training_logs
 
 PaddleFleet 后端默认走**数值 all_reduce**：首次采样只 `all_gather_object` 各 rank 的 key 名
 以对齐 layout，之后每次采样只交换一个 float64 向量（3 次 all_reduce：SUM 值与 count、MAX、MIN），
-载荷不随 world size 增长。`all_gather_object` 保留为回退路径，`IM_DISABLE_REDUCE=1` 可切回。
+载荷不随 world size 增长。`all_gather_object` 仅保留为内部回退路径，不通过环境变量切换。
 
 **`monitor_interval > 1` 时不要每步都调用**：`gather_and_aggregate()` 是全 world 的
 集合通信，只有采样步才可能产出指标，其余步跑的是一次空的 `all_gather_object`
