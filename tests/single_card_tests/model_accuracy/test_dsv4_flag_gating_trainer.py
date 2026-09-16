@@ -377,5 +377,110 @@ class TestPipelineStepLossAccStepsGating(unittest.TestCase):
         set_loss_acc_steps.assert_not_called()
 
 
+class TestInitOptimizerShardingV2HackOffGating(unittest.TestCase):
+    """trainer_utils.py:1731 - the flag-off DygraphShardingOptimizerV2 branch.
+
+    ``TestInitOptimizerShardingV2Gating`` pins the flag-off path with
+    ``HACK_CONVERT_CKPT=1`` (the ``elif`` guard is False so line 1731 never
+    runs and the param is kept). With the hack disabled the guard falls through
+    to the ``has_optimizer_state`` check at line 1731: a missing state drops the
+    param, a present state keeps it.
+    """
+
+    def _run(self, has_state):
+        grad_view = _GradView(paddle.arange(4, dtype="float32"), 0, 2)
+        buffer = types.SimpleNamespace(
+            _sharding_param_grad_view={"p0": grad_view}
+        )
+        opt, captured = _capturing_optimizer(
+            _inner_opt=_FakeShardingV2(), _comm_buffer_list=[buffer]
+        )
+        meta = _sharded_meta("p0", "struct.p0")
+        with (
+            patch.object(
+                trainer_utils, "DygraphShardingOptimizerV2", _FakeShardingV2
+            ),
+            _dsv4_flag(trainer_utils, False),
+            patch.object(
+                trainer_utils, "has_optimizer_state", return_value=has_state
+            ),
+            patch.dict(os.environ, {"HACK_CONVERT_CKPT": "0"}),
+        ):
+            trainer_utils.init_optimizer(opt, meta, state_dict_metadata=set())
+        return captured["parameter_list"]
+
+    def test_missing_state_drops_the_param(self):
+        self.assertEqual(len(self._run(False)), 0)
+
+    def test_present_state_keeps_the_param(self):
+        self.assertEqual(len(self._run(True)), 1)
+
+
+class TestInitOptimizerMuon1DHackOffGating(unittest.TestCase):
+    """trainer_utils.py:1784 - the flag-off Muon 1D branch honours the missing
+    optimizer state when HACK_CONVERT_CKPT is off (line 1784)."""
+
+    def _run(self, has_state):
+        grad_view = _GradView(paddle.arange(4, dtype="float32"), 0, 2)
+        buffer = types.SimpleNamespace(
+            _sharding_param_grad_view={"p0": grad_view}
+        )
+        opt, captured = _capturing_optimizer(
+            _inner_opt=_FakeMuon(),
+            _comm_buffer_list=[buffer],
+            _params_2d_by_color={},
+        )
+        meta = _sharded_meta("p0", "struct.p0")
+        with (
+            patch.object(trainer_utils, "MuonShardingOptimizer", _FakeMuon),
+            _dsv4_flag(trainer_utils, False),
+            patch.object(
+                trainer_utils, "has_optimizer_state", return_value=has_state
+            ),
+            patch.dict(os.environ, {"HACK_CONVERT_CKPT": "0"}),
+        ):
+            trainer_utils.init_optimizer(opt, meta, state_dict_metadata=set())
+        return captured["parameter_list"]
+
+    def test_missing_state_drops_the_param(self):
+        self.assertEqual(len(self._run(False)), 0)
+
+    def test_present_state_keeps_the_param(self):
+        self.assertEqual(len(self._run(True)), 1)
+
+
+class TestInitOptimizerMuon2DHackOffGating(unittest.TestCase):
+    """trainer_utils.py:1834 - the flag-off Muon 2D-by-color branch honours the
+    missing optimizer state when HACK_CONVERT_CKPT is off (line 1834)."""
+
+    def _run(self, has_state):
+        color = "c0"
+        param = types.SimpleNamespace(name="p2d")
+        opt, captured = _capturing_optimizer(
+            _inner_opt=_FakeMuon(),
+            _comm_buffer_list=[],
+            _params_2d_by_color={color: object()},
+            _rank2params_2d_by_color={color: {0: [param]}},
+            _color_to_group_info={color: {"rank": 0}},
+        )
+        meta = _sharded_meta("p2d", "struct.p2d")
+        with (
+            patch.object(trainer_utils, "MuonShardingOptimizer", _FakeMuon),
+            _dsv4_flag(trainer_utils, False),
+            patch.object(
+                trainer_utils, "has_optimizer_state", return_value=has_state
+            ),
+            patch.dict(os.environ, {"HACK_CONVERT_CKPT": "0"}),
+        ):
+            trainer_utils.init_optimizer(opt, meta, state_dict_metadata=set())
+        return captured["parameter_list"]
+
+    def test_missing_state_drops_the_param(self):
+        self.assertEqual(len(self._run(False)), 0)
+
+    def test_present_state_keeps_the_param(self):
+        self.assertEqual(len(self._run(True)), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

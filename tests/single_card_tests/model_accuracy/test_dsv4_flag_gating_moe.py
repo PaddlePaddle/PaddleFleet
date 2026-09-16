@@ -39,7 +39,7 @@ import numpy as np
 import paddle
 
 from paddlefleet import accuracy_compatible_patch
-from paddlefleet.transformer.moe import moe_layer, token_dispatcher
+from paddlefleet.transformer.moe import moe_layer, moe_router, token_dispatcher
 
 
 def _dsv4_flag(module, enabled):
@@ -278,6 +278,393 @@ class TestExpertForwardKernelProbsGating(unittest.TestCase):
             )
 
         self.assertEqual(list(out.shape), [0, 4])
+
+
+def _allgather_moe_init_config():
+    """Minimal config that drives ``MoELayer.__init__`` to the gate check.
+
+    Only the attributes read before line 342 are supplied; every field is a
+    plain value so ``deepcopy`` works and no process group is touched.
+    """
+    return types.SimpleNamespace(
+        use_accuracy_compatible=True,
+        use_bias=False,
+        moe_routed_expert_use_bias=None,
+        hidden_size=8,
+        moe_intermediate_size=16,
+        n_routed_experts=4,
+        n_shared_experts=0,
+        num_experts_per_tok=2,
+        hidden_act="swiglu",
+        sequence_parallel=False,
+        tensor_model_parallel_size=1,
+        moe_token_dispatcher_type="allgather",
+        moe_allgather_gate_overlap=False,
+    )
+
+
+class TestMoELayerInitAllgatherRejectionGating(unittest.TestCase):
+    """``MoELayer.__init__`` intermediate-EP rejection (line 342).
+
+    With ``use_accuracy_compatible=True`` the layer silently rewrites the
+    dispatcher to ``alltoall`` -- but only for the plain per-device layouts.
+    ``allgather`` / ``ringmoe`` shard experts along the intermediate dim, so
+    pairing them with the forced all-to-all path would build experts for a
+    layout the dispatcher never produces; the historical path raises instead.
+    The DSV4 flag disables that whole rewrite (the replay keeps the configured
+    dispatcher), so with the flag *on* the guard must not fire. The raise sits
+    before any expert-parallel setup (``pg_collection.ep`` at line 482), so the
+    flag-off rejection is reachable on a single card with no process group.
+    """
+
+    def test_flag_off_rejects_intermediate_ep_dispatcher(self):
+        with (
+            _dsv4_flag(moe_layer, False),
+            self.assertRaises(ValueError) as ctx,
+        ):
+            moe_layer.MoELayer(
+                config=_allgather_moe_init_config(), pg_collection=None
+            )
+        self.assertIn("moe_token_dispatcher_type", str(ctx.exception))
+        self.assertIn("all-to-all", str(ctx.exception))
+
+    def test_flag_on_skips_the_rejection(self):
+        # Flag on disables the rewrite/guard entirely, so __init__ runs past
+        # line 342 and only fails later when it dereferences the (absent) EP
+        # group -- never with the intermediate-EP ValueError.
+        with (
+            _dsv4_flag(moe_layer, True),
+            self.assertRaises(Exception) as ctx,
+        ):
+            moe_layer.MoELayer(
+                config=_allgather_moe_init_config(), pg_collection=None
+            )
+        self.assertNotIn("forces the all-to-all token", str(ctx.exception))
+
+
+class _StopForward(Exception):
+    """Sentinel raised from a stubbed ``self.gate`` to halt ``forward`` early."""
+
+
+class TestMoeForwardSequenceFirstInputTranspose(unittest.TestCase):
+    """``MoELayer.forward`` sequence-first input transpose (lines 1878-1882).
+
+    Only ``FLAGS_use_dsv4_accuracy`` and ``use_accuracy_compatible`` together (on
+    a rank-3 input) flip the MoE into the Torch "sequence-first" layout, moving
+    the sequence axis to the front of ``hidden_states``/``input_ids``/``residual``
+    before routing. The transpose sits at the very top of ``forward`` -- ahead of
+    dispatch/experts -- so it is isolated here by stubbing ``self.gate`` to halt
+    the pass, then reading back what routing was handed. Flag off must leave the
+    ``[batch, seq, hidden]`` layout untouched.
+    """
+
+    def _run(self, enabled):
+        captured = {}
+
+        def _prep_gate_input(hs, residual):
+            captured["residual"] = residual
+            return hs
+
+        fake_self = types.SimpleNamespace(
+            expert_model_parallel_size=1,
+            sequence_parallel=False,
+            use_accuracy_compatible=True,
+            layer_number=0,
+            _maybe_pre_allgather_overlap=lambda hs: None,
+            _prepare_gate_input=_prep_gate_input,
+            _supports_three_path_clone=lambda: False,
+            gate=MagicMock(side_effect=_StopForward()),
+        )
+        hidden_states = paddle.zeros([2, 3, 4], dtype="float32")
+        hidden_states.stop_gradient = True
+        input_ids = paddle.zeros([2, 3], dtype="int64")
+        residual = paddle.zeros([2, 3, 4], dtype="float32")
+        with (
+            _dsv4_flag(moe_layer, enabled),
+            patch.object(moe_layer, "targets_hf", return_value=False),
+            patch.object(
+                moe_layer, "inspect_tensor", side_effect=lambda *a, **k: a[2]
+            ),
+            patch.object(moe_layer, "inspect_tensor_set_current_layer"),
+        ):
+            try:
+                moe_layer.MoELayer.forward(
+                    fake_self,
+                    hidden_states,
+                    input_ids=input_ids,
+                    residual=residual,
+                )
+            except _StopForward:
+                pass
+        gate_input = fake_self.gate.call_args.args[0]
+        routed_input_ids = fake_self.gate.call_args.kwargs["input_ids"]
+        return gate_input, routed_input_ids, captured["residual"]
+
+    def test_flag_on_moves_the_sequence_axis_to_front(self):
+        gate_input, routed_input_ids, residual = self._run(True)
+        self.assertEqual(gate_input.shape, [3, 2, 4])
+        self.assertEqual(routed_input_ids.shape, [3, 2])
+        self.assertEqual(residual.shape, [3, 2, 4])
+
+    def test_flag_off_keeps_the_batch_first_layout(self):
+        gate_input, routed_input_ids, residual = self._run(False)
+        self.assertEqual(gate_input.shape, [2, 3, 4])
+        self.assertEqual(routed_input_ids.shape, [2, 3])
+        self.assertEqual(residual.shape, [2, 3, 4])
+
+
+class TestMoeForwardSequenceFirstOutputTranspose(unittest.TestCase):
+    """``MoELayer.forward`` sequence-first output transpose (line 2102).
+
+    The sequence-first replay transposes the input to ``[seq, batch, hidden]``
+    (so ``orig_shape`` and the flattened expert-token order follow that layout)
+    and must transpose the expert output *back* to ``[batch, seq, hidden]`` at
+    the end. Both ends are driven here on a single card by stubbing the router
+    (``self.gate``) and the single-card expert compute; the stub tags each
+    flattened token with its row index, so the sequence-first vs batch-first
+    flatten order produces a different final tensor -- pinning that both the
+    input transpose (via ``orig_shape``) and the output transpose (line 2102)
+    executed only when the flag is on.
+    """
+
+    def _run(self, enabled):
+        b, s, h = 2, 3, 4
+
+        def _expert(reshaped_input, topk_indices, topk_weights):
+            row = paddle.arange(reshaped_input.shape[0], dtype="float32")
+            return reshaped_input + row.reshape([-1, 1])
+
+        fake_self = types.SimpleNamespace(
+            expert_model_parallel_size=1,
+            sequence_parallel=False,
+            use_accuracy_compatible=True,
+            layer_number=0,
+            training=False,
+            router_aux_loss_coef=0.0,
+            use_latent_moe=False,
+            moe_expert_fusion=False,
+            shared_experts=None,
+            _maybe_pre_allgather_overlap=lambda hs: None,
+            _prepare_gate_input=lambda hs, residual: hs,
+            _prepare_expert_input=lambda hs, residual: hs,
+            _post_routed_output=lambda o: o,
+            _supports_three_path_clone=lambda: False,
+            _forward_single_card_moe=_expert,
+            gate=MagicMock(
+                return_value=(
+                    None,
+                    paddle.ones([b * s, 1]),
+                    paddle.zeros([b * s, 1], dtype="int64"),
+                    paddle.ones([b * s, 4]),
+                    paddle.ones([b * s, 4]),
+                    None,
+                    None,
+                    None,
+                )
+            ),
+        )
+        hidden_states = paddle.zeros([b, s, h], dtype="float32")
+        hidden_states.stop_gradient = True
+        with (
+            _dsv4_flag(moe_layer, enabled),
+            patch.object(moe_layer, "targets_hf", return_value=False),
+            patch.object(
+                moe_layer, "inspect_tensor", side_effect=lambda *a, **k: a[2]
+            ),
+            patch.object(moe_layer, "inspect_tensor_set_current_layer"),
+            patch.object(moe_layer, "log_moe_losses"),
+        ):
+            output, bias = moe_layer.MoELayer.forward(fake_self, hidden_states)
+        return output
+
+    def test_flag_on_transposes_output_back_to_batch_first(self):
+        b, s, h = 2, 3, 4
+        out = self._run(True)
+        # Input was transposed to [s, b, h]; expert tags row r (== seq*b + batch)
+        # and the output is transposed back, so element [batch, seq] carries
+        # (seq * b + batch).
+        self.assertEqual(out.shape, [b, s, h])
+        expected = (
+            paddle.arange(s * b, dtype="float32")
+            .reshape([s, b, 1])
+            .transpose([1, 0, 2])
+            .broadcast_to([b, s, h])
+        )
+        np.testing.assert_allclose(out.numpy(), expected.numpy())
+
+    def test_flag_off_keeps_batch_first_flatten_order(self):
+        b, s, h = 2, 3, 4
+        out = self._run(False)
+        self.assertEqual(out.shape, [b, s, h])
+        expected = (
+            paddle.arange(b * s, dtype="float32")
+            .reshape([b, s, 1])
+            .broadcast_to([b, s, h])
+        )
+        np.testing.assert_allclose(out.numpy(), expected.numpy())
+
+    def test_the_two_orders_are_actually_distinguishable(self):
+        self.assertFalse(
+            np.array_equal(self._run(True).numpy(), self._run(False).numpy())
+        )
+
+
+class TestTopKRouterMtpPaddingMaskGating(unittest.TestCase):
+    """``TopKRouter.forward`` MTP padding-mask drop (line 1648).
+
+    The router normally zeroes out padded tokens (``input_ids == pad``) from the
+    routing map. On an MTP layer the DSV4 replay instead keeps them, because the
+    MTP shift already realigned the labels and re-masking here would drop the
+    wrong tokens; line 1648 sets ``input_ids_none_zero_mask = None`` only when
+    the flag *and* ``is_mtp_layer`` are both set. The effect is observed through
+    the hash-routing early-return path (the shortest single-card route that
+    consumes the mask): the router matmul and hash lookup are stubbed so no gate
+    weights or process group are needed, and the padded token's routing is the
+    observable.
+    """
+
+    def _run(self, enabled, is_mtp_layer):
+        fake_self = types.SimpleNamespace(
+            sequence_parallel=False,
+            config=types.SimpleNamespace(moe_router_force_load_balancing=False),
+            is_mtp_layer=is_mtp_layer,
+            is_hash_layer=True,
+            moe_split_feature_routing=False,
+            use_accuracy_compatible=False,
+            weight=paddle.ones([4, 3], dtype="float32"),
+            _layer_number=0,
+            _hash_routing=lambda logits, flat_ids: (
+                paddle.ones([2, 1], dtype="float32"),
+                paddle.to_tensor([[0], [1]], dtype="int64"),
+            ),
+        )
+        # [batch=1, seq=2, hidden=4]; second token is padding (id == 0).
+        hidden = paddle.zeros([1, 2, 4], dtype="float32")
+        input_ids = paddle.to_tensor([[5, 0]], dtype="int64")
+        with (
+            _dsv4_flag(moe_router, enabled),
+            patch.object(
+                moe_router, "get_context_parallel_world_size", return_value=1
+            ),
+            patch.object(
+                moe_router,
+                "gate_detach_matmul",
+                return_value=paddle.ones([2, 3], dtype="float32"),
+            ),
+        ):
+            _, top_gate, top_idx, probs, mask, *_ = (
+                moe_router.TopKRouter.forward(
+                    fake_self, hidden, input_ids=input_ids
+                )
+            )
+        return top_idx, probs, mask
+
+    def test_flag_on_mtp_layer_keeps_the_padded_token_routed(self):
+        top_idx, probs, mask = self._run(True, is_mtp_layer=True)
+        # Padded token (row 1) keeps its expert-1 assignment.
+        np.testing.assert_array_equal(top_idx.numpy(), [[0], [1]])
+        np.testing.assert_array_equal(mask.numpy(), [[1, 0, 0], [0, 1, 0]])
+
+    def test_flag_off_masks_the_padded_token(self):
+        top_idx, probs, mask = self._run(False, is_mtp_layer=True)
+        # Padded token is dropped: index -> -1 and its row is zeroed.
+        np.testing.assert_array_equal(top_idx.numpy(), [[0], [-1]])
+        np.testing.assert_array_equal(mask.numpy(), [[1, 0, 0], [0, 0, 0]])
+
+    def test_flag_on_non_mtp_layer_still_masks(self):
+        # The drop requires *both* the flag and is_mtp_layer; a non-MTP layer
+        # with the flag on must keep masking the padded token.
+        top_idx, probs, mask = self._run(True, is_mtp_layer=False)
+        np.testing.assert_array_equal(top_idx.numpy(), [[0], [-1]])
+        np.testing.assert_array_equal(mask.numpy(), [[1, 0, 0], [0, 0, 0]])
+
+
+class TestDeepEPDispatchOverlapResetsGlobalProbs(unittest.TestCase):
+    """``_DeepEPManager.dispatch_overlap`` clears ``global_input_probs`` (line 899).
+
+    ``dispatch_overlap`` records the fused-dispatch state and then resets
+    ``global_input_probs`` to ``None`` so the expert path recaptures it fresh on
+    the next ``get_permuted_hidden_states_by_experts``. The fused all-to-all is a
+    collective, so it is stubbed here; the observable is that a stale
+    ``global_input_probs`` is cleared while the dispatched state is taken from the
+    returned handle. No process group is created.
+    """
+
+    def test_dispatch_overlap_resets_global_input_probs(self):
+        states = {
+            "handle": "HANDLE",
+            "tokens_per_expert": "TPE",
+            "dispatched_indices": "DINDICES",
+        }
+        owner = types.SimpleNamespace(
+            num_experts=4,
+            group=None,
+            handle=None,
+            tokens_per_expert=None,
+            dispatched_indices=None,
+            dispatched_probs=None,
+            global_input_probs="STALE",
+        )
+        with patch.object(
+            token_dispatcher,
+            "fused_dispatch",
+            return_value=("HS_OUT", "PROBS", states, "SCALE"),
+        ) as fused:
+            hs, scale = token_dispatcher._DeepEPManager.dispatch_overlap(
+                owner,
+                paddle.zeros([2, 4], dtype="float32"),
+                paddle.zeros([2, 2], dtype="int64"),
+                paddle.ones([2, 2], dtype="float32"),
+            )
+
+        fused.assert_called_once()
+        self.assertIsNone(owner.global_input_probs)
+        self.assertEqual(owner.handle, "HANDLE")
+        self.assertEqual(owner.tokens_per_expert, "TPE")
+        self.assertEqual(owner.dispatched_indices, "DINDICES")
+        self.assertEqual(owner.dispatched_probs, "PROBS")
+        self.assertEqual((hs, scale), ("HS_OUT", "SCALE"))
+
+
+class TestFlexDispatchPostprocessCapturesGlobalProbs(unittest.TestCase):
+    """``MoEFlexTokenDispatcher.dispatch_postprocess`` mirrors global probs (line 1253).
+
+    After the comm manager permutes tokens into expert-major order,
+    ``dispatch_postprocess`` copies the manager's ``global_input_probs`` up onto
+    the dispatcher (defaulting to ``None`` when the manager never captured any)
+    and returns the permuted tokens plus per-expert counts. The comm manager is
+    faked here so the whole thing runs single-card with no collectives.
+    """
+
+    def _run(self, comm_manager):
+        owner = types.SimpleNamespace(
+            _comm_manager=comm_manager, global_input_probs="STALE"
+        )
+        tokens, tpe = (
+            token_dispatcher.MoEFlexTokenDispatcher.dispatch_postprocess(
+                owner, paddle.zeros([2, 4], dtype="float32")
+            )
+        )
+        return owner, tokens, tpe
+
+    def test_captures_the_managers_global_input_probs(self):
+        comm = types.SimpleNamespace(
+            get_permuted_hidden_states_by_experts=lambda hs: "GLOBAL_TOKENS",
+            global_input_probs="GIP",
+            get_number_of_tokens_per_expert=lambda: "TPE",
+        )
+        owner, tokens, tpe = self._run(comm)
+        self.assertEqual(tokens, "GLOBAL_TOKENS")
+        self.assertEqual(tpe, "TPE")
+        self.assertEqual(owner.global_input_probs, "GIP")
+
+    def test_defaults_to_none_when_manager_has_no_probs(self):
+        comm = types.SimpleNamespace(
+            get_permuted_hidden_states_by_experts=lambda hs: "GLOBAL_TOKENS",
+            get_number_of_tokens_per_expert=lambda: "TPE",
+        )
+        owner, _, _ = self._run(comm)
+        self.assertIsNone(owner.global_input_probs)
 
 
 if __name__ == "__main__":

@@ -462,5 +462,110 @@ class TestDeepseekV4AoaDtypeGating(unittest.TestCase):
         self.assertNotIn("dtype=", gate)
 
 
+class TestLmHeadUnfusedSequenceFirstTranspose(unittest.TestCase):
+    """lm_head.py:281-282 - the unfused LM-head projection transposes the logits
+    back to batch-first after the sequence-first linear.
+
+    The already-covered ``TestLmHeadSequenceFirstLinear`` runs the fused path
+    (``fused_linear_ce_loss_chunk`` > 0), which returns the hidden states before
+    ever reaching ``super().forward`` and so never touches line 282. Here the
+    fused chunk is 0, so ``_forward`` runs the real
+    ``ColumnParallelLinear.forward`` (stubbed to skip tensor-parallel comms).
+    With the flag on the ``[S, B, V]`` logits are transposed back to
+    ``[B, S, V]`` at line 282; with the flag off no transpose happens.
+    """
+
+    def _run(self, enabled):
+        head = lm_head.GPTLMHead.__new__(lm_head.GPTLMHead)
+        # Populate __dict__ directly: ``paddle.nn.Layer.__setattr__`` rejects
+        # tensor assignment before ``__init__`` runs, and we deliberately skip
+        # the real (TP-requiring) constructor here.
+        head.__dict__["config"] = types.SimpleNamespace(
+            sequence_parallel=False,
+            fused_linear_ce_loss_chunk=0,
+            gpt_model_use_experimental_version=False,
+        )
+        head.__dict__["weight"] = paddle.zeros([5, 4], dtype="float32")
+        head.__dict__["bias"] = None
+        # The (stubbed) column-parallel linear returns fixed [S, B, V] logits.
+        seq_first_logits = paddle.to_tensor(
+            np.arange(3 * 2 * 5, dtype="float32").reshape([3, 2, 5])
+        )
+
+        def fake_linear_forward(_self, _hidden, _weight):
+            return seq_first_logits, None
+
+        hidden = paddle.randn([2, 3, 4], dtype="float32")  # [B, S, H]
+        with (
+            _dsv4_flag(lm_head, enabled),
+            patch.object(lm_head, "module_needs_recompute", return_value=False),
+            patch.object(
+                lm_head.ColumnParallelLinear, "forward", fake_linear_forward
+            ),
+        ):
+            out = lm_head.GPTLMHead._forward(head, hidden)
+        return out, seq_first_logits
+
+    def test_flag_on_transposes_logits_back_to_batch_first(self):
+        out, seq_first_logits = self._run(True)
+        self.assertEqual(out.shape, [2, 3, 5])
+        np.testing.assert_array_equal(
+            out.numpy(), seq_first_logits.transpose([1, 0, 2]).numpy()
+        )
+
+    def test_flag_off_keeps_the_linear_output_untransposed(self):
+        out, seq_first_logits = self._run(False)
+        self.assertEqual(out.shape, [3, 2, 5])
+        np.testing.assert_array_equal(out.numpy(), seq_first_logits.numpy())
+
+
+class TestDeepseekV4MtpGateDtypeGating(unittest.TestCase):
+    """deepseek_v4/modeling.py:821,824-825 - the MTP-layer MoE gate weight cast.
+
+    The already-covered ``TestDeepseekV4AoaDtypeGating`` runs ``_gen_aoa_config``
+    with ``mtp_num_layers=0``, so the MTP-layer loop (and its gate-weight
+    statement at 821-829) never executes. With at least one MTP layer the same
+    float32-cast gating applies: flag off keeps the explicit ``dtype='float32'``
+    cast on the MTP gate weight (line 825), flag on drops it (bfloat16 replay).
+    """
+
+    def _config(self):
+        return types.SimpleNamespace(
+            num_hidden_layers=1,
+            n_routed_experts=1,
+            n_shared_experts=1,
+            moe_n_hash_layers=3,
+            csa_dense_mode=False,
+            csa_compress_ratios=[0],
+            mtp_num_layers=1,
+            num_nextn_predict_layers=0,
+            tie_word_embeddings=True,
+            enable_mtp_magic_send=False,
+            moe_expert_fusion=False,
+            fp8=False,
+            moe_deep_gemm=False,
+        )
+
+    def _gen(self, enabled):
+        with _dsv4_flag(modeling, enabled):
+            return modeling.DeepseekV4PreTrainedModel._gen_aoa_config(
+                self._config()
+            )["aoa_statements"]
+
+    @staticmethod
+    def _find(stmts, needle):
+        return next(s for s in stmts if needle in s)
+
+    def test_flag_off_keeps_the_float32_gate_cast(self):
+        stmts = self._gen(False)
+        gate = self._find(stmts, "mtp.0.ffn.gate.weight ->")
+        self.assertIn("dtype='float32'", gate)
+
+    def test_flag_on_drops_the_gate_cast(self):
+        stmts = self._gen(True)
+        gate = self._find(stmts, "mtp.0.ffn.gate.weight ->")
+        self.assertNotIn("dtype=", gate)
+
+
 if __name__ == "__main__":
     unittest.main()

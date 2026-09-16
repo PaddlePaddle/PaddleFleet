@@ -648,5 +648,110 @@ class TestUnfusedSparseAttnSinkSoftmaxGating(unittest.TestCase):
         compat.apply.assert_not_called()
 
 
+class TestQRmsNormGating(unittest.TestCase):
+    """``dsv4_hybrid_attention._q_rms_norm`` (lines 99, 101).
+
+    ``_q_rms_norm`` normalizes the query by its per-row RMS with no learnable
+    weight. Flag off runs the pure-Paddle spelling (``q * rsqrt(mean(q^2)+eps)``,
+    optionally in fp32 for ``high_precision_norm``); flag on hands the work to
+    the ``CompatibleQRMSNorm`` PyLayer (the Torch replay, which additionally
+    supplies the fp32 backward). The two forward maths are identical, so the
+    flag must (a) leave the output numerically unchanged and (b) only route
+    through the replay PyLayer when it is on. The flag is imported into the
+    module namespace, and ``CompatibleQRMSNorm`` is imported *inside* the
+    function from ``accuracy_compatible_patch``, so the spy is pinned there.
+    """
+
+    def setUp(self):
+        self.q = paddle.to_tensor(
+            np.random.RandomState(0).randn(2, 8).astype("float32")
+        )
+        self.eps = 1e-6
+
+    def _reference(self):
+        return (
+            self.q
+            * paddle.rsqrt(self.q.square().mean(-1, keepdim=True) + self.eps)
+        ).numpy()
+
+    def test_flag_on_routes_through_compatible_qrms_norm(self):
+        real = accuracy_compatible_patch.CompatibleQRMSNorm
+        wrapped = MagicMock(wraps=real)
+        wrapped.apply = MagicMock(side_effect=real.apply)
+        with (
+            _dsv4_flag(dsv4_hybrid_attention, True),
+            patch.object(
+                accuracy_compatible_patch, "CompatibleQRMSNorm", wrapped
+            ),
+        ):
+            out = dsv4_hybrid_attention._q_rms_norm(
+                self.q, self.eps, high_precision_norm=True, use_fusion=False
+            )
+
+        wrapped.apply.assert_called_once()
+        called_q, called_eps = wrapped.apply.call_args.args
+        np.testing.assert_array_equal(called_q.numpy(), self.q.numpy())
+        self.assertEqual(called_eps, self.eps)
+        np.testing.assert_allclose(
+            out.numpy(), self._reference(), rtol=1e-6, atol=1e-6
+        )
+
+    def test_flag_off_uses_the_pure_paddle_path(self):
+        with (
+            _dsv4_flag(dsv4_hybrid_attention, False),
+            patch.object(
+                accuracy_compatible_patch, "CompatibleQRMSNorm"
+            ) as compat,
+        ):
+            out = dsv4_hybrid_attention._q_rms_norm(
+                self.q, self.eps, high_precision_norm=True, use_fusion=False
+            )
+
+        compat.apply.assert_not_called()
+        np.testing.assert_allclose(
+            out.numpy(), self._reference(), rtol=1e-6, atol=1e-6
+        )
+
+    def test_both_sides_agree_numerically(self):
+        with _dsv4_flag(dsv4_hybrid_attention, False):
+            off = dsv4_hybrid_attention._q_rms_norm(
+                self.q, self.eps, high_precision_norm=False, use_fusion=False
+            )
+        with _dsv4_flag(dsv4_hybrid_attention, True):
+            on = dsv4_hybrid_attention._q_rms_norm(
+                self.q, self.eps, high_precision_norm=False, use_fusion=False
+            )
+
+        np.testing.assert_allclose(
+            on.numpy(), off.numpy(), rtol=1e-6, atol=1e-6
+        )
+
+
+class TestCsaForwardCpTilelangIndexerGating(unittest.TestCase):
+    """``CompressedSparseAttention._forward_cp`` tilelang-indexer branch (line 3468).
+
+    SKIPPED: line 3468 is the ``else`` (tilelang) arm of the indexer-backend
+    dispatch *inside* ``_forward_cp`` -- the context-parallel forward path. It is
+    only reachable after ``_forward_cp`` has already issued CP collectives on a
+    real process group: ``all_gather_cp(kv_local, group=self.cp_group)`` /
+    ``prepend_prev_window(..., self.cp_group)`` (lines 3319/3326), the compressor
+    all-gather (line 3359), and ``self.indexer.forward_before_topk(..., cp_group=
+    self.cp_group)`` (line 3419). Even with ``cp_size == 1`` the method is written
+    around ``self.cp_group`` and the compressor/indexer submodules, and the branch
+    itself dispatches to the ``paddlefleet.tilelang_ops.csa_indexer_topk_fwd`` GPU
+    kernel. There is no single-card, no-process-group way to reach it without
+    standing up a CP group and the full CSA compressor+indexer stack, which
+    violates the single-card rules.
+    """
+
+    def test_forward_cp_tilelang_indexer_requires_cp_group(self):
+        self.skipTest(
+            "csa_attention.py:3468 is inside _forward_cp; reaching the tilelang "
+            "indexer branch needs a context-parallel process group (all_gather_cp "
+            "/ prepend_prev_window on self.cp_group) plus the compressor+indexer "
+            "stack and a tilelang GPU kernel -- not single-card isolatable."
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

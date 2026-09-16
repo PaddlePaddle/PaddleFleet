@@ -530,5 +530,83 @@ class TestCollateFixedDataGating(unittest.TestCase):
         np.testing.assert_array_equal(result["input_ids"][0], [1, 2, 3])
 
 
+class TestCollateMd5LoggingGating(unittest.TestCase):
+    """collate.py:798-803 - the ``LOG_DATA_MD5`` / ``LOG_LAYER_MD5`` md5-logging block.
+
+    With ``LOG_DATA_MD5=1`` the tail of ``collate_fn`` hashes the fixed-token
+    batch for the data-consistency log. That block has two sources for the
+    hashed arrays:
+
+    * the DSV4 replay branch (flag on, ``fixed_data is not None``, lines
+      798-800) reads ``input_ids`` / ``labels`` back out of the assembled
+      ``input_dict``;
+    * the historical ``.npy`` branch (flag off, ``fixed_data is None``, lines
+      802-803) hashes the raw ``fixed_input_ids`` / ``fixed_labels`` loaded via
+      ``np.load``.
+
+    The md5 prints are pure side effects, so each test drives ``collate_fn`` down
+    one branch with the logging block enabled and asserts the batch is still
+    assembled correctly (i.e. the logging lines executed without error).
+    """
+
+    def _run_with_md5(self, enabled, fixed_data):
+        training_args, model_args, tokenizer = _fixed_data_collate_args()
+        with (
+            _dsv4_flag(collate, enabled),
+            patch.dict(
+                os.environ,
+                {"LOAD_FIXED_DATA_PATH": "/tmp/fixed", "LOG_DATA_MD5": "1"},
+            ),
+            patch.object(
+                accuracy_compatible_patch,
+                "load_fixed_training_data",
+                return_value=fixed_data,
+            ) as load_fixed,
+            patch.object(
+                collate.np, "load", return_value=np.array([20, 21, 22, 23])
+            ) as np_load,
+        ):
+            result = collate.collate_fn(
+                batch=[None],
+                tokenizer=tokenizer,
+                training_args=training_args,
+                model_args=model_args,
+                max_seq_len=0,
+                padding_free=False,
+            )
+        return result, load_fixed, np_load
+
+    def test_flag_on_logs_md5_via_the_replay_branch(self):
+        # fixed_data is not None -> collate.py:798-800 hash input_dict arrays.
+        fixed_data = FixedTrainingData(
+            input_ids=[10, 11, 12, 13],
+            labels=[10, 11, 12, 13],
+            position_ids=[0, 1, 2, 3],
+            max_seq_len=4,
+        )
+
+        result, load_fixed, np_load = self._run_with_md5(True, fixed_data)
+
+        load_fixed.assert_called_once()
+        np_load.assert_not_called()
+        np.testing.assert_array_equal(result["input_ids"][0], [10, 11, 12, 13])
+
+    def test_flag_off_logs_md5_via_the_npy_branch(self):
+        # fixed_data is None (flag off) -> collate.py:802-803 hash the raw
+        # fixed_input_ids / fixed_labels loaded from the historical .npy files.
+        fixed_data = FixedTrainingData(
+            input_ids=[10, 11, 12, 13],
+            labels=[10, 11, 12, 13],
+            position_ids=[0, 1, 2, 3],
+            max_seq_len=4,
+        )
+
+        result, load_fixed, np_load = self._run_with_md5(False, fixed_data)
+
+        load_fixed.assert_not_called()
+        self.assertEqual(np_load.call_count, 2)  # tokens_*.npy + labels_*.npy
+        np.testing.assert_array_equal(result["input_ids"][0], [20, 21, 22, 23])
+
+
 if __name__ == "__main__":
     unittest.main()
