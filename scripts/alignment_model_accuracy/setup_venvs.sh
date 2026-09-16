@@ -128,7 +128,7 @@ setup_paddle_venv() {
     local -a paddle_index=(
         --no-config
         --index-url "${PADDLE_INDEX_URL}"
-        # --extra-index-url https://pypi.org/simple/
+        --extra-index-url https://pypi.org/simple/
         --index-strategy unsafe-best-match
     )
 
@@ -146,8 +146,9 @@ setup_paddle_venv() {
     # PaddleFleet. --no-deps is intentionally dropped: the wheel's pinned
     # paddlepaddle-gpu dependency must be installed here, otherwise
     # venv/paddle/bin/paddlefleet-cli fails to import paddle at runtime.
-    uv pip install --python "${paddle_py}" "${paddle_index[@]}" \
-        --force-reinstall \
+    uv pip install --python "${paddle_py}" \
+        --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/  \
+        --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/ \
         "${PADDLEFLEET_WHEEL}"
     # (
     #     cd ./PaddleFleet
