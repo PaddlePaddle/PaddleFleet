@@ -4763,11 +4763,11 @@ def save_full_param(
 
     On GPU, weights are offloaded asynchronously through a small pinned-memory
     window: each param is DMA-copied D2H into its own page-locked buffer on a
-    dedicated loader stream, and once more than MAX_INFLIGHT copies are
+    dedicated loader stream, and once more than pinned_param_pool_capacity copies are
     outstanding the oldest is waited on (cpu_wait) and moved into ordinary
     pageable host memory, freeing its pinned buffer immediately. The shard is
     accumulated in pageable memory and written once full, so resident pinned
-    memory stays at roughly MAX_INFLIGHT tensors regardless of max_shard_size.
+    memory stays at roughly pinned_param_pool_capacity tensors regardless of max_shard_size.
     On non-GPU devices (XPU/CPU) every param falls back to a synchronous
     param.cpu() copy.
 
@@ -4806,9 +4806,9 @@ def save_full_param(
 
     # Keep only a couple of async D2H copies outstanding at once; each param is
     # staged through its own pinned buffer and then moved to pageable host
-    # memory, so resident pinned memory is bounded by MAX_INFLIGHT tensors
+    # memory, so resident pinned memory is bounded by pinned_param_pool_capacity tensors
     # instead of a whole shard.
-    MAX_INFLIGHT = 2
+    pinned_param_pool_capacity = 4
     use_async = paddle.get_device().startswith("gpu")
     async_loader = create_async_load() if use_async else None
 
@@ -4879,11 +4879,11 @@ def save_full_param(
                 current_shard_state_dict[param_key] = param.cpu()
             else:
                 # Async D2H into a private pinned buffer; keep at most
-                # MAX_INFLIGHT outstanding, landing the oldest into pageable
+                # pinned_param_pool_capacity outstanding, landing the oldest into pageable
                 # memory to cap resident pinned memory.
                 dst, task = async_offload(param, async_loader)
                 pinned_param_pool.append((task, dst, param_key, param))
-                if len(pinned_param_pool) > MAX_INFLIGHT:
+                if len(pinned_param_pool) > pinned_param_pool_capacity:
                     pinned_to_cpu()
             current_shard_size_bytes += param_size_bytes
 
