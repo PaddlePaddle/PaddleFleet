@@ -14,69 +14,25 @@
 
 """Check the scoped expert implementation on native BF16 tensors."""
 
-import ast
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-import numpy
 import paddle
 import paddle.nn.functional as F
 
+from paddlefleet.transformer.moe.fp8_utils import (
+    ExpertsGroupGemmContiguousNode,
+    moe_token_padding_alignment,
+    use_sequential_bf16_experts,
+)
+from paddlefleet.transformer.moe.fusion_layer_utils import UnZipNode
+from tests.single_card_tests.accuracy_compatible_test._assertions import (
+    assert_bitwise_equal,
+)
 
-class TestIEEEGroupedBF16(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        source = (
-            Path(__file__).resolve().parents[3]
-            / "src/paddlefleet/transformer/moe/fp8_utils.py"
-        )
-        tree = ast.parse(source.read_text())
-        node = next(
-            n
-            for n in tree.body
-            if isinstance(n, ast.ClassDef)
-            and n.name == "ExpertsGroupGemmContiguousNode"
-        )
-        names = {
-            "fwd_gate_up_bf16",
-            "fwd_down_bf16",
-            "bwd_down_input_bf16",
-            "bwd_gate_up_input_bf16",
-        }
-        methods = [
-            n
-            for n in node.body
-            if isinstance(n, ast.FunctionDef) and n.name in names
-        ]
-        helpers = [
-            n
-            for n in tree.body
-            if isinstance(n, ast.FunctionDef)
-            and n.name
-            in {
-                "use_sequential_bf16_experts",
-                "_sequential_expert_matmul",
-                "moe_token_padding_alignment",
-            }
-        ]
-        cls.ns = {
-            "paddle": paddle,
-            "F": F,
-            "numpy": numpy,
-            "FP8_ALIGN": 128,
-            "ieee_kernel_enabled": lambda: True,
-        }
-        exec(
-            compile(
-                ast.Module(body=helpers + methods, type_ignores=[]),
-                str(source),
-                "exec",
-            ),
-            cls.ns,
-        )
 
+class TestAccuracyCompatibleGroupedBF16(unittest.TestCase):
     def node(self, counts):
         return SimpleNamespace(
             sequential_bf16_experts=True,
@@ -91,12 +47,7 @@ class TestIEEEGroupedBF16(unittest.TestCase):
         )
 
     def equal(self, a, b):
-        self.assertEqual(a.shape, b.shape)
-        self.assertEqual(a.dtype, b.dtype)
-        self.assertEqual(
-            a.cast("float32").numpy().tobytes(),
-            b.cast("float32").numpy().tobytes(),
-        )
+        assert_bitwise_equal(a, b)
 
     def test_gate_excludes_other_modes_and_padding_is_opt_in(self):
         options = {
@@ -107,7 +58,7 @@ class TestIEEEGroupedBF16(unittest.TestCase):
             "activation_type": "swiglu",
             "clamp_value": None,
         }
-        gate = self.ns["use_sequential_bf16_experts"]
+        gate = use_sequential_bf16_experts
         self.assertTrue(gate(**options))
         for key, value in [
             ("use_accuracy_compatible", False),
@@ -121,9 +72,7 @@ class TestIEEEGroupedBF16(unittest.TestCase):
         ]:
             with self.subTest(key=key, value=value):
                 self.assertFalse(gate(**(options | {key: value})))
-        with patch.dict(self.ns, ieee_kernel_enabled=lambda: False):
-            self.assertTrue(gate(**options))
-        alignment = self.ns["moe_token_padding_alignment"]
+        alignment = moe_token_padding_alignment
         base = {
             "use_accuracy_compatible": True,
             "use_fp8_mlp": False,
@@ -149,12 +98,16 @@ class TestIEEEGroupedBF16(unittest.TestCase):
         )
         dy = paddle.randn([5, 32], dtype="float32").cast("bfloat16")
         with paddle.no_grad():
-            o1 = self.ns["fwd_gate_up_bf16"](node, x, w1)
-            output = self.ns["fwd_down_bf16"](node, o1, probs, w2)
-            do1, o2, dp = self.ns["bwd_down_input_bf16"](
+            o1 = ExpertsGroupGemmContiguousNode.fwd_gate_up_bf16(node, x, w1)
+            output = ExpertsGroupGemmContiguousNode.fwd_down_bf16(
+                node, o1, probs, w2
+            )
+            do1, o2, dp = ExpertsGroupGemmContiguousNode.bwd_down_input_bf16(
                 node, w2, dy, o1, probs
             )
-            dx = self.ns["bwd_gate_up_input_bf16"](node, do1, w1)
+            dx = ExpertsGroupGemmContiguousNode.bwd_gate_up_input_bf16(
+                node, do1, w1
+            )
         expected_y, expected_dx, expected_dp, expected_o2 = [], [], [], []
         for expert, lo, hi in [(0, 0, 2), (2, 2, 5)]:
             xi = x[lo:hi].detach()
@@ -198,27 +151,13 @@ class TestIEEEGroupedBF16(unittest.TestCase):
             "batched_gemm",
             Mock(return_value=sentinel),
         ) as grouped:
-            self.assertIs(self.ns["fwd_gate_up_bf16"](node, x, w1), sentinel)
+            self.assertIs(
+                ExpertsGroupGemmContiguousNode.fwd_gate_up_bf16(node, x, w1),
+                sentinel,
+            )
             grouped.assert_called_once_with(x, w1, node.tokens_per_expert)
 
     def test_unzip_rebuilds_expert_order_and_retains_disabled_output(self):
-        source = (
-            Path(__file__).resolve().parents[3]
-            / "src/paddlefleet/transformer/moe/fusion_layer_utils.py"
-        )
-        tree = ast.parse(source.read_text())
-        cls = next(
-            n
-            for n in tree.body
-            if isinstance(n, ast.ClassDef) and n.name == "UnZipNode"
-        )
-        namespace = {"paddle": paddle, "FP8_ALIGN": 128}
-        exec(
-            compile(
-                ast.Module(body=[cls], type_ignores=[]), str(source), "exec"
-            ),
-            namespace,
-        )
         hidden = paddle.to_tensor([[1, 2], [3, 4], [5, 6]], dtype="bfloat16")
         rowmap = paddle.to_tensor([[-1, 2], [0, -1], [1, 3]], dtype="int32")
         for enabled, fill, rows in [
@@ -227,7 +166,7 @@ class TestIEEEGroupedBF16(unittest.TestCase):
             (False, True, 4),
             (True, False, 4),
         ]:
-            node = namespace["UnZipNode"](None, sequential_bf16_experts=enabled)
+            node = UnZipNode(None, sequential_bf16_experts=enabled)
             raw = paddle.full([rows, 2], -1, dtype="bfloat16")
             probs = paddle.ones([rows], dtype="float32")
             with patch.object(
@@ -256,7 +195,7 @@ class TestIEEEGroupedBF16(unittest.TestCase):
                 )
             else:
                 self.assertIs(result[0], raw)
-        node = namespace["UnZipNode"](None, sequential_bf16_experts=True)
+        node = UnZipNode(None, sequential_bf16_experts=True)
         with (
             patch.object(
                 F,
@@ -278,9 +217,9 @@ class TestIEEEGroupedBF16(unittest.TestCase):
         node = self.node([0, 0, 0])
         x = paddle.empty([0, 32], dtype="bfloat16")
         w1 = paddle.ones([3, 32, 64], dtype="bfloat16")
-        o1 = self.ns["fwd_gate_up_bf16"](node, x, w1)
+        o1 = ExpertsGroupGemmContiguousNode.fwd_gate_up_bf16(node, x, w1)
         self.assertEqual(o1.shape, [0, 64])
-        dx = self.ns["bwd_gate_up_input_bf16"](node, o1, w1)
+        dx = ExpertsGroupGemmContiguousNode.bwd_gate_up_input_bf16(node, o1, w1)
         self.assertEqual(dx.shape, [0, 32])
         self.assertEqual(dx.dtype, paddle.bfloat16)
 

@@ -21,8 +21,12 @@ from types import SimpleNamespace
 
 import paddle
 
+from tests.single_card_tests.accuracy_compatible_test._assertions import (
+    assert_bitwise_equal,
+)
 
-class TestIEEEMLAKVLayout(unittest.TestCase):
+
+class TestAccuracyCompatibleMLAKVLayout(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         source = (
@@ -65,14 +69,16 @@ class TestIEEEMLAKVLayout(unittest.TestCase):
         )
 
     def equal(self, a, b):
-        self.assertEqual(a.shape, b.shape)
-        self.assertEqual(
-            a.cast("float32").numpy().tobytes(),
-            b.cast("float32").numpy().tobytes(),
-        )
+        assert_bitwise_equal(a, b)
 
     def run_layout(
-        self, *, feature_sharded=False, ieee=True, tp=2, sp=True, mqa=False
+        self,
+        *,
+        feature_sharded=False,
+        compatible=True,
+        tp=2,
+        sp=True,
+        mqa=False,
     ):
         paddle.seed(516)
         full = paddle.randn([6, 1, 12]).cast("bfloat16")
@@ -99,12 +105,11 @@ class TestIEEEMLAKVLayout(unittest.TestCase):
                 kv_lora_rank=8,
                 qk_rope_head_dim=4,
                 config=SimpleNamespace(
-                    sequence_parallel=sp, use_accuracy_compatible=ieee
+                    sequence_parallel=sp, use_accuracy_compatible=compatible
                 ),
                 pg_collection=SimpleNamespace(tp=group),
                 mqa_latent=mqa,
             ),
-            "ieee_kernel_enabled": lambda: ieee,
             "get_pg_size": lambda group: group.nranks,
             "gather_from_tensor_model_parallel_region": gather_features,
             "gather_from_sequence_parallel_region": gather_positions,
@@ -114,7 +119,7 @@ class TestIEEEMLAKVLayout(unittest.TestCase):
         return full, ns["kv_compressed"], ns["k_pos_emb"], calls
 
     def test_kv_up_gathers_only_sequence_local_down_output(self):
-        for ieee, partition, expected in [
+        for compatible, partition, expected in [
             (True, None, True),
             (True, 6, False),
             (True, 12, True),
@@ -131,7 +136,7 @@ class TestIEEEMLAKVLayout(unittest.TestCase):
             )
             layer = SimpleNamespace(
                 config=SimpleNamespace(
-                    use_accuracy_compatible=ieee, sequence_parallel=True
+                    use_accuracy_compatible=compatible, sequence_parallel=True
                 ),
                 kv_a_proj_with_mqa=down,
                 kv_b_proj=up,
@@ -140,7 +145,6 @@ class TestIEEEMLAKVLayout(unittest.TestCase):
             exec(
                 self.up_layout,
                 {
-                    "ieee_kernel_enabled": lambda: ieee,
                     "self": layer,
                     "kv_lora_rank": 8,
                 },
@@ -161,7 +165,12 @@ class TestIEEEMLAKVLayout(unittest.TestCase):
         self.assertEqual(calls, ["gather_features"])
 
     def test_default_tp1_nonsp_and_new_mqa_modes_keep_local_positions(self):
-        for args in [{"ieee": False}, {"tp": 1}, {"sp": False}, {"mqa": True}]:
+        for args in [
+            {"compatible": False},
+            {"tp": 1},
+            {"sp": False},
+            {"mqa": True},
+        ]:
             with self.subTest(**args):
                 full, kv, rope, calls = self.run_layout(**args)
                 self.equal(kv, full[:3, :, :8])

@@ -22,7 +22,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 
-class TestIEEEExpertDispatchSelection(unittest.TestCase):
+class TestAccuracyCompatibleExpertDispatchSelection(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         source = (
@@ -61,18 +61,18 @@ class TestIEEEExpertDispatchSelection(unittest.TestCase):
 
     def test_constructor_respects_actual_group_and_default_off_contract(self):
         cases = [
-            # compatible, IEEE, fused, actual EP, requested, expected
-            (True, True, True, 2, "deepep", "deepep"),
-            (True, False, True, 2, "deepep", "deepep"),
-            (True, True, False, 2, "deepep", "alltoall"),
-            (True, True, True, 1, "deepep", "alltoall"),
-            (True, True, True, None, "deepep", "alltoall"),
-            (True, True, True, 2, "alltoall", "alltoall"),
-            (True, True, True, 2, "hybridep", "alltoall"),
-            (False, False, True, 2, "hybridep", "hybridep"),
+            # compatible, fused, actual EP, requested, expected
+            (True, True, 2, "deepep", "deepep"),
+            (True, False, 2, "deepep", "alltoall"),
+            (True, True, 1, "deepep", "alltoall"),
+            (True, True, None, "deepep", "alltoall"),
+            (True, True, 2, "alltoall", "alltoall"),
+            (True, True, 2, "hybridep", "alltoall"),
+            (False, True, 2, "hybridep", "hybridep"),
+            (False, False, 1, "deepep", "deepep"),
         ]
-        for compatible, ieee, fused, ep, requested, expected in cases:
-            with self.subTest(case=(compatible, ieee, fused, ep, requested)):
+        for compatible, fused, ep, requested, expected in cases:
+            with self.subTest(case=(compatible, fused, ep, requested)):
                 instance = SimpleNamespace(
                     use_accuracy_compatible=compatible,
                     moe_token_dispatcher_type=requested,
@@ -91,14 +91,13 @@ class TestIEEEExpertDispatchSelection(unittest.TestCase):
                     "utils": SimpleNamespace(
                         get_pg_size=lambda group: group.nranks
                     ),
-                    "ieee_kernel_enabled": lambda: ieee,
                 }
                 instance.config = namespace["config"]
                 exec(self.code, namespace)
                 self.assertEqual(instance.moe_token_dispatcher_type, expected)
 
 
-class TestIEEEFusionForwardSelection(unittest.TestCase):
+class TestAccuracyCompatibleFusionForwardSelection(unittest.TestCase):
     def test_actual_forward_routes_fused_dispatch_and_preserves_defaults(self):
         source = (
             Path(__file__).resolve().parents[3]
@@ -122,17 +121,16 @@ class TestIEEEFusionForwardSelection(unittest.TestCase):
             ast.Module(body=[method], type_ignores=[]), str(source), "exec"
         )
         cases = [
-            # compatibility, IEEE, fusion, backend, EP, MTP, selected path
-            (True, True, True, "deepep", 2, False, "fused"),
-            (True, True, True, "deepep", 2, True, "fused"),
-            (True, False, True, "deepep", 2, True, "fused"),
-            (True, True, False, "deepep", 2, True, "custom"),
-            (True, True, True, "alltoall", 2, True, "custom"),
-            (True, True, True, "deepep", 1, True, "custom"),
-            (False, True, True, "deepep", 2, True, "ordinary"),
+            # compatibility, fusion, backend, EP, MTP, selected path
+            (True, True, "deepep", 2, False, "fused"),
+            (True, True, "deepep", 2, True, "fused"),
+            (True, False, "deepep", 2, True, "custom"),
+            (True, True, "alltoall", 2, True, "custom"),
+            (True, True, "deepep", 1, True, "custom"),
+            (False, True, "deepep", 2, True, "ordinary"),
         ]
-        for compatible, ieee, fused, backend, ep, mtp, path in cases:
-            with self.subTest(case=(compatible, ieee, fused, backend, ep, mtp)):
+        for compatible, fused, backend, ep, mtp, path in cases:
+            with self.subTest(case=(compatible, fused, backend, ep, mtp)):
                 hs = Mock(dtype="bfloat16")
                 fp32, recast, fusion_output, cloned = (
                     Mock(),
@@ -185,7 +183,6 @@ class TestIEEEFusionForwardSelection(unittest.TestCase):
                     setattr(instance, key, False)
                 fusion = Mock(return_value=fusion_output)
                 namespace = {
-                    "ieee_kernel_enabled": lambda: ieee,
                     "inspect_tensor": lambda name, layer, value, **kwargs: (
                         value
                     ),

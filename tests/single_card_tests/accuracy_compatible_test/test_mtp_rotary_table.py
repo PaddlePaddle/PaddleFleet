@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import paddle
 
 
-class TestIEEEMTPRotaryTable(unittest.TestCase):
+class TestAccuracyCompatibleMTPRotaryTable(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         source = (
@@ -64,8 +64,7 @@ class TestIEEEMTPRotaryTable(unittest.TestCase):
         self,
         *,
         depth=0,
-        ieee=True,
-        uac=True,
+        compatible=True,
         mtp=True,
         training=True,
         packed=False,
@@ -76,11 +75,10 @@ class TestIEEEMTPRotaryTable(unittest.TestCase):
         table = paddle.arange(8, dtype="float32").reshape([1, 4, 1, 2])
         namespace = {
             "paddle": paddle,
-            "ieee_kernel_enabled": lambda: ieee,
             "get_context_parallel_world_size": lambda: cp,
             "self": SimpleNamespace(
                 config=SimpleNamespace(
-                    use_accuracy_compatible=uac,
+                    use_accuracy_compatible=compatible,
                     rope_type=rope,
                     apply_rope_fusion=fused,
                 ),
@@ -109,7 +107,7 @@ class TestIEEEMTPRotaryTable(unittest.TestCase):
 
     def test_other_paths_preserve_original_table(self):
         for change in [
-            {"uac": False},
+            {"compatible": False},
             {"mtp": False},
             {"training": False},
             {"packed": True},

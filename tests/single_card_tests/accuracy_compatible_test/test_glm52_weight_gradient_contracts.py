@@ -116,7 +116,7 @@ class TestGLM52WeightGradientContracts(unittest.TestCase):
                 backward = production_function(
                     "src/paddlefleet/transformer/moe/moe_router.py",
                     "backward",
-                    {"paddle": paddle, "ieee_kernel_enabled": lambda: enabled},
+                    {"paddle": paddle},
                 )
                 _, gradient = backward(ctx, dy)
                 self.assertEqual(gradient.casts, expected)
@@ -129,7 +129,6 @@ class TestGLM52WeightGradientContracts(unittest.TestCase):
         )
         namespace = {
             "paddle": paddle,
-            "ieee_kernel_enabled": lambda: True,
             "self": SimpleNamespace(
                 use_accuracy_compatible=True,
                 use_fp8_mlp=False,
@@ -154,9 +153,9 @@ class TestGLM52WeightGradientContracts(unittest.TestCase):
         )
         self.assertEqual(calls, [("float32", "float32", True)] * 2)
 
-    def test_expert_non_ieee_or_non_uac_keeps_native_batched_gemm(self):
-        for compatible, enabled in ((False, True), (False, False)):
-            with self.subTest(compatible=compatible, enabled=enabled):
+    def test_expert_disabled_or_fp8_keeps_native_batched_gemm(self):
+        for compatible, fp8 in ((False, False), (True, True)):
+            with self.subTest(compatible=compatible, fp8=fp8):
                 calls = []
                 fallback = lambda *args, **kwargs: (
                     calls.append((args, kwargs)) or "native"
@@ -170,10 +169,9 @@ class TestGLM52WeightGradientContracts(unittest.TestCase):
                 )
                 namespace = {
                     "paddle": paddle,
-                    "ieee_kernel_enabled": lambda: enabled,
                     "self": SimpleNamespace(
                         use_accuracy_compatible=compatible,
-                        use_fp8_mlp=False,
+                        use_fp8_mlp=fp8,
                         tokens_per_expert=[1],
                     ),
                     "x": "x",

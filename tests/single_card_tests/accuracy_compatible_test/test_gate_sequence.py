@@ -25,17 +25,16 @@ from paddlefleet.transformer.moe.moe_router import (
     StandardMoERouter,
 )
 from paddlefleet.transformer.transformer_config import TransformerConfig
+from tests.single_card_tests.accuracy_compatible_test._assertions import (
+    assert_bitwise_equal,
+)
 
 
-class TestIEEEGateSequence(unittest.TestCase):
+class TestAccuracyCompatibleGateSequence(unittest.TestCase):
     gate = FusedGateDetachMatmul
 
     def equal(self, a, b):
-        self.assertEqual(a.shape, b.shape)
-        self.assertEqual(
-            a.cast("float32").numpy().tobytes(),
-            b.cast("float32").numpy().tobytes(),
-        )
+        assert_bitwise_equal(a, b)
 
     def test_local_graphs_preserve_forward_dx_and_local_wgrad_rounding(self):
         for shards in (1, 2):
@@ -190,14 +189,21 @@ class TestIEEEGateSequence(unittest.TestCase):
         x.stop_gradient = w.stop_gradient = False
         # The pre-existing public call must retain its FP32 parameter semantics,
         # even when sequence_shards is supplied by a newer caller.
-        y = self.gate.apply(x, w, False, True, 2)
+        with patch.object(F, "linear", wraps=F.linear) as linear:
+            y = self.gate.apply(x, w, False, True, 2)
+        linear.assert_called_once()
+        self.equal(linear.call_args.args[0], x.detach().cast("float32"))
+        self.equal(linear.call_args.args[1], w.detach().T)
         y.backward(dy)
-        self.equal(y, F.linear(x.detach().cast("float32"), w.detach().T))
-        self.equal(x.grad, paddle.matmul(dy, w.detach()).cast("bfloat16"))
-        self.equal(
-            w.grad,
-            paddle.matmul(dy, x.detach().cast("float32"), transpose_x=True),
-        )
+        # Compare to the legacy public call in the same autograd/layout context.
+        # A standalone F.linear graph can choose different FP32 GEMM arithmetic.
+        reference_x, reference_w = x.detach().clone(), w.detach().clone()
+        reference_x.stop_gradient = reference_w.stop_gradient = False
+        reference = self.gate.apply(reference_x, reference_w, False, True)
+        reference.backward(dy)
+        self.equal(y, reference)
+        self.equal(x.grad, reference_x.grad)
+        self.equal(w.grad, reference_w.grad)
         self.assertNotEqual(
             w.numpy().tobytes(),
             w.cast("bfloat16").cast("float32").numpy().tobytes(),

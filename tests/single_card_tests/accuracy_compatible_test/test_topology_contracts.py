@@ -61,14 +61,14 @@ def load(path, names, namespace):
     return namespace
 
 
-class TestIEEETopologyContracts(unittest.TestCase):
+class TestAccuracyCompatibleTopologyContracts(unittest.TestCase):
     def setUp(self):
         previous_device = paddle.get_device()
         paddle.set_device("gpu:0")
         self.addCleanup(paddle.set_device, previous_device)
 
-    def test_mtp_uses_own_indexer_only_for_ieee_tp2(self):
-        state = SimpleNamespace(tp=1, ieee=True)
+    def test_mtp_uses_own_indexer_only_for_compatible_tp2(self):
+        state = SimpleNamespace(tp=1)
         ns = load(
             "transformer/dsa_attention.py",
             [
@@ -80,9 +80,9 @@ class TestIEEETopologyContracts(unittest.TestCase):
                 "resolve_dsa_indexer_layout",
             ],
             {
-                "get_pg_size": lambda group: 1
-                if group is None
-                else group.nranks,
+                "get_pg_size": lambda group: (
+                    1 if group is None else group.nranks
+                ),
                 "parallel_state": SimpleNamespace(
                     get_tensor_model_parallel_world_size=lambda: state.tp
                 ),
@@ -94,21 +94,21 @@ class TestIEEETopologyContracts(unittest.TestCase):
             dsa_index_share_for_mtp_iteration=True,
             dsa_indexer_types=["full", "full", "full", "shared"],
         )
-        for ieee, tp, expected in [
+        for compatible, tp, expected in [
             (True, 1, ("shared", True, True, 2)),
             (True, 2, ("full", False, False, 4)),
             (False, 1, ("shared", True, True, 2)),
             (False, 2, ("shared", True, True, 2)),
         ]:
-            config.use_accuracy_compatible = ieee
-            with self.subTest(ieee=ieee, tp=tp):
+            config.use_accuracy_compatible = compatible
+            with self.subTest(compatible=compatible, tp=tp):
                 self.assertEqual(
                     ns["resolve_dsa_indexer_layout"](
                         config, 4, True, tensor_parallel_size=tp
                     ),
                     expected,
                 )
-        state.ieee, state.tp = True, 2
+        state.tp = 2
         config.use_accuracy_compatible = False
         self.assertEqual(
             ns["resolve_dsa_indexer_layout"](
@@ -118,16 +118,15 @@ class TestIEEETopologyContracts(unittest.TestCase):
         )
 
     def test_router_topk_keeps_tp1_take_along_axis_gradient(self):
-        state = SimpleNamespace(ieee=True)
         ns = load(
             "transformer/moe/moe_router.py",
             ["StandardMoERouter._topk_noaux_tc"],
             {
                 "paddle": paddle,
                 "F": paddle.nn.functional,
-                "get_pg_size": lambda group: 1
-                if group is None
-                else group.nranks,
+                "get_pg_size": lambda group: (
+                    1 if group is None else group.nranks
+                ),
             },
         )
         router = SimpleNamespace(
@@ -141,8 +140,12 @@ class TestIEEETopologyContracts(unittest.TestCase):
         )
         paddle.seed(514)
         original = paddle.randn([4, 16])
-        for ieee, tp, calls in [(True, 1, 0), (True, 2, 1), (False, 1, 0)]:
-            router.use_accuracy_compatible = ieee
+        for compatible, tp, calls in [
+            (True, 1, 0),
+            (True, 2, 1),
+            (False, 1, 0),
+        ]:
+            router.use_accuracy_compatible = compatible
             router.tensor_model_parallel_size = tp
             scores = original.detach().clone()
             scores.stop_gradient = False
@@ -165,7 +168,7 @@ class TestIEEETopologyContracts(unittest.TestCase):
             )
 
     def test_zero_coefficient_indexer_graph_and_input_edges(self):
-        state = SimpleNamespace(ieee=True, tp=1)
+        state = SimpleNamespace(tp=1)
         indices = paddle.zeros([1, 4, 1], dtype="int64")
         loss = SimpleNamespace(
             apply=Mock(return_value=paddle.zeros([], dtype="float32")),
@@ -178,32 +181,29 @@ class TestIEEETopologyContracts(unittest.TestCase):
             {
                 "paddle": paddle,
                 "F": paddle.nn.functional,
-                "get_pg_size": lambda group: 1
-                if group is None
-                else group.nranks,
+                "get_pg_size": lambda group: (
+                    1 if group is None else group.nranks
+                ),
                 "parallel_state": SimpleNamespace(
                     get_tensor_model_parallel_world_size=lambda: state.tp
                 ),
                 "FusedDSAIndexerLoss": loss,
                 "DSAIndexerLossAutoScaler": scaler,
-                "_unfused_dsa_attention": lambda q,
-                k,
-                v,
-                mask,
-                scale,
-                **kwargs: v,
+                "_unfused_dsa_attention": lambda q, k, v, mask, scale, **kwargs: (
+                    v
+                ),
             },
         )
         x = paddle.ones([1, 4, 8], dtype="bfloat16")
         qr = paddle.ones([1, 4, 4], dtype="bfloat16")
         x.stop_gradient = qr.stop_gradient = False
         q = paddle.ones([1, 4, 2, 4], dtype="bfloat16")
-        for ieee, tp, fused_calls, attach_calls in [
+        for compatible, tp, fused_calls, attach_calls in [
             (True, 1, 1, 0),
             (True, 2, 1, 1),
             (False, 1, 0, 0),
         ]:
-            state.ieee, state.tp = ieee, tp
+            state.tp = tp
             indexer = SimpleNamespace(
                 forward_before_topk=Mock(return_value=(x, qr, qr)),
                 forward=Mock(return_value=(None, indices)),
@@ -211,14 +211,14 @@ class TestIEEETopologyContracts(unittest.TestCase):
             )
             layer = SimpleNamespace(
                 config=SimpleNamespace(
-                    sequence_parallel=False, use_accuracy_compatible=ieee
+                    sequence_parallel=False, use_accuracy_compatible=compatible
                 ),
                 pg_collection=SimpleNamespace(tp=SimpleNamespace(nranks=tp)),
                 index_share=False,
                 skip_topk=False,
                 training=True,
                 dsa_indexer_loss_coeff=0.0,
-                retain_indexer_loss_graph=ieee,
+                retain_indexer_loss_graph=compatible,
                 dsa_indexer_use_sparse_loss=False,
                 indexer=indexer,
                 softmax_scale=0.5,
@@ -232,23 +232,22 @@ class TestIEEETopologyContracts(unittest.TestCase):
                 indexer.forward_before_topk if fused_calls else indexer.forward
             )
             consumed_x, consumed_qr = call.call_args.args[:2]
-            if ieee and tp == 1:
+            if compatible and tp == 1:
                 self.assertIs(consumed_x, x)
                 self.assertIs(consumed_qr, qr)
             else:
                 self.assertIsNot(consumed_x, x)
                 self.assertIsNot(consumed_qr, qr)
 
-    def test_tp1_gather_preserves_tensor_identity_only_in_ieee_mode(self):
-        state = SimpleNamespace(ieee=True)
+    def test_tp1_gather_preserves_tensor_identity_only_in_compatible_mode(self):
         gather = Mock(return_value=object())
         ns = load(
             "tensor_parallel/mappings.py",
             ["gather_from_tensor_model_parallel_region"],
             {
-                "get_pg_size": lambda group: 1
-                if group is None
-                else group.nranks,
+                "get_pg_size": lambda group: (
+                    1 if group is None else group.nranks
+                ),
                 "get_tensor_model_parallel_group_if_none": lambda group: group,
                 "_GatherFromModelParallelRegion": SimpleNamespace(apply=gather),
             },
@@ -260,12 +259,10 @@ class TestIEEETopologyContracts(unittest.TestCase):
         gather.assert_not_called()
         fn(x, SimpleNamespace(nranks=2), use_accuracy_compatible=True)
         self.assertEqual(gather.call_count, 1)
-        state.ieee = False
         fn(x, SimpleNamespace(nranks=1))
         self.assertEqual(gather.call_count, 2)
 
     def test_tp1_linear_uses_native_forward_and_backward(self):
-        state = SimpleNamespace(ieee=True)
         communication = Mock(return_value=object())
         ns = load(
             "tensor_parallel/layers.py",
@@ -276,9 +273,9 @@ class TestIEEETopologyContracts(unittest.TestCase):
             {
                 "paddle": paddle,
                 "F": paddle.nn.functional,
-                "get_pg_size": lambda group: 1
-                if group is None
-                else group.nranks,
+                "get_pg_size": lambda group: (
+                    1 if group is None else group.nranks
+                ),
                 "get_tensor_model_parallel_group_if_none": lambda group: group,
                 "LinearWithGradAccumulationAndAsyncCommunication": SimpleNamespace(
                     apply=communication
