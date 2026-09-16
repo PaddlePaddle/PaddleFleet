@@ -567,6 +567,7 @@ def collate_fn(
     model_args,
     max_seq_len: int,
     padding_free: bool,
+    input_pad_token_id: int = None,
 ):
     """Convert batch of sequences into training tensors.
 
@@ -660,8 +661,13 @@ def collate_fn(
             labels = [sum([seq.labels for seq in batch_sequence], [])]
             position_ids = [sum(original_position_ids, [])]
         # padding
+        pad_token_id = (
+            tokenizer.pad_token_id
+            if input_pad_token_id is None
+            else input_pad_token_id
+        )
         padded_token_ids = pad_batch_data(
-            token_ids, pad_idx=tokenizer.pad_token_id, max_seq_len=max_seq_len
+            token_ids, pad_idx=pad_token_id, max_seq_len=max_seq_len
         )
         padded_labels = pad_batch_data(
             labels, pad_idx=-100, max_seq_len=max_seq_len

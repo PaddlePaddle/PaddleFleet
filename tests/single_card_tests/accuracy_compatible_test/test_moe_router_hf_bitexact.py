@@ -51,6 +51,9 @@ from paddlefleet.transformer.moe.moe_router import (
     FusedGateDetachMatmul,
     HFBitexactSoftmax,
 )
+from tests.single_card_tests.accuracy_compatible_test._assertions import (
+    assert_bitwise_equal,
+)
 
 
 class TestHFBitexactSoftmaxForward(unittest.TestCase):
@@ -67,7 +70,7 @@ class TestHFBitexactSoftmaxForward(unittest.TestCase):
             x = self.logits.astype(paddle.float32)
             exp = paddle.exp(x - x.max(axis=-1, keepdim=True))
             expected = exp / exp.sum(axis=-1, keepdim=True)
-        np.testing.assert_array_equal(out.numpy(), expected.numpy())
+        assert_bitwise_equal(out.numpy(), expected.numpy())
 
     def test_rows_sum_to_one(self):
         out = HFBitexactSoftmax.apply(self.logits)
@@ -116,7 +119,7 @@ class TestHFBitexactSoftmaxBackward(unittest.TestCase):
             p = probs.detach()
             inner = (g * p).sum(axis=-1, keepdim=True)
             expected = (g * p - inner * p).astype(paddle.float32)
-        np.testing.assert_array_equal(gx.numpy(), expected.numpy())
+        assert_bitwise_equal(gx.numpy(), expected.numpy())
 
     def test_grad_is_cast_back_to_logits_dtype(self):
         x = self.logits.astype(paddle.bfloat16)
@@ -153,7 +156,7 @@ class TestFusedGateDetachMatmulTarget(unittest.TestCase):
         expected = paddle.nn.functional.linear(
             self.x, self.w.T.cast(self.x.dtype)
         ).cast(paddle.float32)
-        np.testing.assert_array_equal(out.numpy(), expected.numpy())
+        assert_bitwise_equal(out.numpy(), expected.numpy())
 
     def test_megatron_forward_promotes_both_operands_first(self):
         """``F.linear(x.cast(fp32), w.cast(fp32))`` -- cast before the GEMM."""
@@ -163,7 +166,7 @@ class TestFusedGateDetachMatmulTarget(unittest.TestCase):
                 expected = paddle.nn.functional.linear(
                     self.x.cast(paddle.float32), self.w.T.cast(paddle.float32)
                 )
-                np.testing.assert_array_equal(out.numpy(), expected.numpy())
+                assert_bitwise_equal(out.numpy(), expected.numpy())
 
     def test_hf_and_megatron_forwards_differ_in_bf16(self):
         """Guard against the target being ignored on this path."""
@@ -190,13 +193,13 @@ class TestFusedGateDetachMatmulTarget(unittest.TestCase):
         g = paddle.randn(out.shape, dtype=paddle.float32)
         gx, gw = paddle.grad([out], [x, w], grad_outputs=[g])
         gr = g.cast(self.x.dtype)
-        np.testing.assert_array_equal(
+        assert_bitwise_equal(
             gx.numpy(),
             paddle.matmul(gr, self.w.cast(self.x.dtype))
             .cast(self.x.dtype)
             .numpy(),
         )
-        np.testing.assert_array_equal(
+        assert_bitwise_equal(
             gw.numpy(),
             paddle.matmul(gr, self.x, transpose_x=True)
             .cast(self.w.dtype)
@@ -269,7 +272,7 @@ class TestRouterHFScoreAndNormalization(unittest.TestCase):
         paddle.seed(51)
         logits = paddle.randn([6, 4], dtype=paddle.float32)
         out = router.gate_score_func(logits)
-        np.testing.assert_array_equal(
+        assert_bitwise_equal(
             out.numpy(), HFBitexactSoftmax.apply(logits).numpy()
         )
 

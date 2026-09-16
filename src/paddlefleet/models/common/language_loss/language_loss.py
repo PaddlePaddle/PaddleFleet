@@ -35,7 +35,6 @@ from paddlefleet.context_parallel_utils import (
 )
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
-    get_expert_model_parallel_group,
     get_tensor_model_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -49,12 +48,150 @@ def _loss_md5_enabled() -> bool:
     return os.environ.get("LOG_LOSS_MD5", "0") == "1"
 
 
-def _use_accuracy_compatible_kernel() -> bool:
-    """Switch for Megatron-aligned (accuracy-compatible) numeric paths.
+# E-233/E-234: deferred token normalization. Divide the reported loss in
+# forward; leave the bf16 logits gradient unnormalized (1/N is not exact
+# in bf16). The trainer scales fp32 main_grad after SP all-reduce.
+_PENDING_GRADIENT_DIVISOR: dict[str, float] = {}
 
-    Controlled by the ``FLAGS_use_accuracy_compatible_kernel`` env variable.
+
+# Reporting owns its native MAIN numerator independently of gradient normalization.
+_LOCAL_MAIN_VALID_TOKENS: dict[str, float] = {}
+_MAIN_REPORTING_CONTEXT = None
+
+
+def begin_main_reporting_microbatch(step: int, microbatch: int) -> None:
+    global _MAIN_REPORTING_CONTEXT
+    if _MAIN_REPORTING_CONTEXT is not None:
+        raise RuntimeError("unconsumed MAIN reporting context")
+    _MAIN_REPORTING_CONTEXT = {
+        "step": int(step),
+        "microbatch": int(microbatch),
+        "pending": None,
+    }
+
+
+def _record_main_reporting_sum(loss_sum: Tensor, valid_tokens: float) -> None:
+    context = _MAIN_REPORTING_CONTEXT
+    if context is None:
+        return
+    if context["pending"] is not None:
+        raise RuntimeError(
+            "duplicate MAIN numerator in one reporting microbatch"
+        )
+    if loss_sum.dtype != paddle.float32 or list(loss_sum.shape) != []:
+        raise RuntimeError("MAIN numerator must be a native FP32 scalar")
+    context["pending"] = {
+        "sum": loss_sum.detach(),
+        "count": float(valid_tokens),
+        "step": context["step"],
+        "microbatch": context["microbatch"],
+    }
+
+
+def consume_main_reporting_microbatch(step: int, microbatch: int):
+    global _MAIN_REPORTING_CONTEXT
+    context = _MAIN_REPORTING_CONTEXT
+    if context is None or (context["step"], context["microbatch"]) != (
+        int(step),
+        int(microbatch),
+    ):
+        raise RuntimeError("missing or stale MAIN reporting context")
+    receipt = context["pending"]
+    _MAIN_REPORTING_CONTEXT = None
+    return receipt
+
+
+def get_local_main_valid_tokens() -> float | None:
+    """MAIN-loss valid tokens on this rank, set at LanguageLoss, not after resolve."""
+    return _LOCAL_MAIN_VALID_TOKENS.get("value")
+
+
+def get_pending_gradient_divisor() -> float | None:
+    """Token count the current step's gradients still have to be divided by."""
+    return _PENDING_GRADIENT_DIVISOR.get("value")
+
+
+def set_pending_gradient_divisor(value: float) -> None:
+    """Publish the divisor on ranks that did not compute the loss."""
+    _PENDING_GRADIENT_DIVISOR["value"] = float(value)
+
+
+def clear_pending_gradient_divisor() -> None:
+    """Drop the recorded divisor after the trainer has applied it."""
+    _PENDING_GRADIENT_DIVISOR.pop("value", None)
+
+
+class DeferTokenNormalizationOp(PyLayer):
+    """Divide the loss for reporting while leaving the gradient unnormalized.
+
+    Dividing by N before bf16 logits-grad rounding asks bf16 to store 1/N
+    (for N=44 that is -2^-10 relative). Megatron divides fp32 buffers after
+    backward instead. Forward still divides so the scalar stays IEEE.
+    The divisor must be a 0-d tensor of the same dtype: ``x / 44.0`` and
+    ``x / paddle.full([], 44.0)`` differ by 1 ulp on this GPU.
     """
-    return os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
+
+    @staticmethod
+    def forward(ctx, loss_sum, divisor, backward_scale):
+        ctx.backward_scale = float(backward_scale)
+        divisor_tensor = paddle.full([], float(divisor), dtype=loss_sum.dtype)
+        return loss_sum / divisor_tensor
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output * ctx.backward_scale
+
+
+def _normalize_loss_by_tokens(
+    loss_sum: Tensor,
+    valid_tokens: float,
+    main_tokens: float | None = None,
+    *,
+    use_accuracy_compatible: bool = False,
+) -> Tensor:
+    """Token-normalize ``loss_sum``, deferring the gradient share under UAC."""
+    if not use_accuracy_compatible or valid_tokens <= 0:
+        return loss_sum / valid_tokens
+
+    if main_tokens is None or main_tokens <= 0:
+        main_tokens = valid_tokens
+        _PENDING_GRADIENT_DIVISOR["value"] = float(main_tokens)
+        _LOCAL_MAIN_VALID_TOKENS["value"] = float(valid_tokens)
+        _record_main_reporting_sum(loss_sum, valid_tokens)
+
+    return DeferTokenNormalizationOp.apply(
+        loss_sum, valid_tokens, main_tokens / valid_tokens
+    )
+
+
+def _accuracy_compatible_cross_entropy(
+    logits: Tensor, labels: Tensor, ignored_index: int
+) -> Tensor:
+    """Run Megatron-style CE while preserving its masked sentinel gradient."""
+    from paddlefleet.tensor_parallel import vocab_parallel_cross_entropy
+
+    labels = paddle.where(
+        labels == ignored_index, paddle.zeros_like(labels), labels
+    )
+    return vocab_parallel_cross_entropy(logits, labels)
+
+
+def _uac_vocab_parallel_ce(logits: Tensor, labels: Tensor) -> Tensor:
+    """IEEE E-608 needle: TP>1 UAC vocab-parallel CE, not fleet ParallelCrossEntropy.
+
+    Layout matches Megatron vocab-parallel CE: 3D logits [s, b, v] with
+    labels [s, b]. The live GLM-5.2 trainer feeds [b, s, v] / [b, s].
+    """
+    from paddlefleet.tensor_parallel.cross_entropy import (
+        vocab_parallel_cross_entropy,
+    )
+
+    if logits.ndim == 3 and labels.ndim == 2:
+        lg = logits.transpose([1, 0, 2])
+        lb = labels.transpose([1, 0])
+        loss = vocab_parallel_cross_entropy(lg, lb)
+        return loss.transpose([1, 0])
+    return vocab_parallel_cross_entropy(logits, labels)
 
 
 def _tensor_md5(tensor: Tensor, dtype: str = "float32") -> str:
@@ -234,6 +371,9 @@ class LanguageLoss(FleetLayer):
         self.use_accuracy_compatible = getattr(
             config, "use_accuracy_compatible", False
         )
+        self.defer_token_normalization = (
+            self.use_accuracy_compatible and config.defer_token_normalization
+        )
         self.ignored_index = -100
         self.enable_parallel_cross_entropy = (
             paddle.distributed.is_initialized()
@@ -242,8 +382,22 @@ class LanguageLoss(FleetLayer):
         )
 
         if self.enable_parallel_cross_entropy:
-            self.loss_func = (
-                paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy()
+            if self.use_accuracy_compatible:
+                # Match the reference vocabulary-parallel CE reduction.
+                self.loss_func = _uac_vocab_parallel_ce
+                print(
+                    "[UAC-CE] LanguageLoss.loss_func="
+                    "vocab_parallel_cross_entropy "
+                    f"live_tp={get_tensor_model_parallel_world_size()}",
+                    flush=True,
+                )
+            else:
+                self.loss_func = paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy()
+        elif self.use_accuracy_compatible:
+            # TP1 reference uses native ignore-index cross entropy. The TP2
+            # vocabulary partition above retains its separate reduction graph.
+            self.loss_func = paddle.nn.CrossEntropyLoss(
+                reduction="none", ignore_index=self.ignored_index
             )
         else:
             self.loss_func = paddle.nn.CrossEntropyLoss(
@@ -254,6 +408,8 @@ class LanguageLoss(FleetLayer):
             config.loss_subbatch_sequence_length
         )
         self.use_subbatch = self.loss_subbatch_sequence_length > 0
+        # None: this call is the main loss and registers the global divisor.
+        self._deferred_main_tokens: float | None = None
 
     def forward_impl(self, logits: Tensor | tuple, labels: Tensor) -> Tensor:
         # Fused linear + cross-entropy path: `logits` is actually a
@@ -375,7 +531,7 @@ class LanguageLoss(FleetLayer):
                 labels, axis=1, mode=self.config.cp_balance_mode
             )
 
-        if _use_accuracy_compatible_kernel():
+        if self.use_accuracy_compatible:
             # 定位锚点 1：CP gather 后、mask/归一化前的 per-token CE，
             # 两侧语义唯一，未掺入归一化差异。
             print(
@@ -385,10 +541,12 @@ class LanguageLoss(FleetLayer):
             )
 
         lossmask = labels != self.ignored_index
+        _valid_tokens = -1.0
         if (~lossmask).all():
             loss = paddle.mean(loss) * 0.0
         else:
             lossmask = lossmask.reshape([-1]).cast(paddle.float32)
+            _valid_tokens = float(lossmask.sum())
 
             # Loss-path MD5 probe: per-token loss and lossmask
             if (
@@ -460,36 +618,44 @@ class LanguageLoss(FleetLayer):
                     (1 - is_invalid_line_float).sum() + 1e-6
                 )
             else:
-                if self.use_accuracy_compatible:
-                    _flat = loss.cast(paddle.float32).reshape([-1]) * lossmask
-                    loss_sum = (
-                        _flat.cast(paddle.float64).sum().cast(paddle.float32)
+                if self.defer_token_normalization:
+                    # leftover / IEEE E-654: fp32 sum then DeferToken.
+                    loss = paddle.sum(
+                        loss.cast(paddle.float32).reshape([-1]) * lossmask
                     )
-                    _count = lossmask.sum()
-                    import paddle.distributed as _pdist
-
-                    _pg_collection = getattr(self, "pg_collection", None)
-                    _ep_group = getattr(_pg_collection, "ep", None)
-                    if _ep_group is None:
-                        _ep_group = get_expert_model_parallel_group(
-                            check_initialized=False
-                        )
-                    _ep_size = (
-                        _pdist.get_world_size(group=_ep_group)
-                        if _ep_group is not None
+                    loss = _normalize_loss_by_tokens(
+                        loss,
+                        _valid_tokens,
+                        main_tokens=self._deferred_main_tokens,
+                        use_accuracy_compatible=self.use_accuracy_compatible,
+                    )
+                elif self.use_accuracy_compatible:
+                    flat_loss = (
+                        loss.cast(paddle.float32).reshape([-1]) * lossmask
+                    )
+                    loss_sum = (
+                        flat_loss.cast(paddle.float64)
+                        .sum()
+                        .cast(paddle.float32)
+                    )
+                    ep_group = self.pg_collection.ep
+                    ep_size = (
+                        dist.get_world_size(group=ep_group)
+                        if ep_group is not None
                         else 1
                     )
-                    _acc_sum = paddle.zeros([1], dtype=paddle.float32)
-                    for _ in range(_ep_size):
-                        _acc_sum = _acc_sum + loss_sum
-                    loss = _acc_sum[0] / (_count * _ep_size)
+                    accumulated_sum = paddle.zeros([1], dtype=paddle.float32)
+                    for _ in range(ep_size):
+                        accumulated_sum = accumulated_sum + loss_sum
+                    loss = accumulated_sum[0] / (lossmask.sum() * ep_size)
                 else:
+                    # Default path must keep structure's tensor divisor.
                     loss = paddle.sum(
                         loss.cast(paddle.float32).reshape([-1]) * lossmask
                     )
                     loss = loss / lossmask.sum()
 
-        if _use_accuracy_compatible_kernel():
+        if self.use_accuracy_compatible:
             # 定位锚点 2：mask + 归一化后的标量 loss，与锚点 1 配合可切开
             # 「CE 上游差异」和「lossmask / valid_token / 除法差异」。
             print(
@@ -632,152 +798,178 @@ class LanguageLoss(FleetLayer):
                 else:
                     lm_loss = self._forward(logits[0], lm_labels)
 
-                for depth in range(self.config.num_nextn_predict_layers):
-                    logits_cur_depth = mtp_logits[depth]
-                    if _mtp_is_megatron:
-                        # Under use_erndata=True labels_ori is [B, L]
-                        # (no L+K padding). MTP depth k predicts x[i+k+2],
-                        # i.e. labels rolled left (k+1) times with per-doc
-                        # boundary fill via cu_seqlens_q. For labels the
-                        # boundary MUST be filled with ignored_index (not 0),
-                        # otherwise the cross-doc position would train token 0.
-                        #
-                        # Strict per-doc parity: when cu_seqlens_q is
-                        # available, use `_roll_tensor_packed_seq` with
-                        # pad_value=ignored_index — same helper the embedding
-                        # side uses (pad_value=0 there), so the EOS boundaries
-                        # line up bit-exactly. When unavailable, fall back to
-                        # plain `paddle.roll` + ignored_index tail.
-                        _cu = LanguageLoss._cu_seqlens_q_stash
-                        if _cu is not None:
-                            from paddlefleet.transformer.multi_token_prediction import (
-                                _roll_tensor_packed_seq,
-                            )
+                _main_tokens = get_pending_gradient_divisor()
+                self._deferred_main_tokens = _main_tokens
+                try:
+                    for depth in range(self.config.num_nextn_predict_layers):
+                        logits_cur_depth = mtp_logits[depth]
+                        if _mtp_is_megatron:
+                            # Under use_erndata=True labels_ori is [B, L]
+                            # (no L+K padding). MTP depth k predicts x[i+k+2],
+                            # i.e. labels rolled left (k+1) times with per-doc
+                            # boundary fill via cu_seqlens_q. For labels the
+                            # boundary MUST be filled with ignored_index (not 0),
+                            # otherwise the cross-doc position would train token 0.
+                            #
+                            # Strict per-doc parity: when cu_seqlens_q is
+                            # available, use `_roll_tensor_packed_seq` with
+                            # pad_value=ignored_index — same helper the embedding
+                            # side uses (pad_value=0 there), so the EOS boundaries
+                            # line up bit-exactly. When unavailable, fall back to
+                            # plain `paddle.roll` + ignored_index tail.
+                            _cu = LanguageLoss._cu_seqlens_q_stash
+                            if _cu is not None:
+                                from paddlefleet.transformer.multi_token_prediction import (
+                                    _roll_tensor_packed_seq,
+                                )
 
-                            _lbl = labels_ori
-                            for _ in range(depth + 1):
-                                _lbl, _ = _roll_tensor_packed_seq(
+                                _lbl = labels_ori
+                                for _ in range(depth + 1):
+                                    _lbl, _ = _roll_tensor_packed_seq(
+                                        _lbl,
+                                        shifts=-1,
+                                        dims=1,
+                                        cu_seqlens_q=_cu,
+                                        pad_value=self.ignored_index,
+                                    )
+                            else:
+                                # No cu_seqlens_q on this rank. A plain
+                                # paddle.roll cannot respect packed-doc
+                                # boundaries, so it would leak labels across
+                                # documents (train the first token of doc N+1 as
+                                # the target at the last position of doc N). Fail
+                                # loudly instead of silently corrupting.
+                                # cu_seqlens_q is normally stashed by
+                                # GPTEmbedding.forward (PP=1 / first stage) and by
+                                # GPTLMHead.forward on the last PP stage; reaching
+                                # here means neither ran on this rank.
+                                raise RuntimeError(
+                                    "use_erndata=True requires cu_seqlens_q "
+                                    "to be stashed on LanguageLoss._cu_seqlens_q_stash "
+                                    "before the loss stage, but it is None on this "
+                                    "rank. It should be set by GPTEmbedding.forward "
+                                    "(PP=1) or GPTLMHead.forward (last PP stage)."
+                                )
+                            if _cp_size_for_extract > 1:
+                                # Match local logits shape by extracting this
+                                # rank's zigzag chunks.
+                                _lbl = _extract_cp(
                                     _lbl,
-                                    shifts=-1,
-                                    dims=1,
-                                    cu_seqlens_q=_cu,
-                                    pad_value=self.ignored_index,
+                                    _cp_rank_for_extract,
+                                    _cp_size_for_extract,
+                                    axis=1,
+                                )
+                            labels_cur_depth = _lbl
+                        else:
+                            labels_cur_depth = labels_ori[
+                                :, (depth + 1) : (depth + 1 + seq_length)
+                            ]
+                        if self.config.gpt_model_use_experimental_version:
+                            # Align with EB: compute per-token loss matrix and reduce
+                            # with global sum/count instead of going through forward_impl
+                            # which applies line-wise loss.
+
+                            if (
+                                get_context_parallel_world_size() > 1
+                                and not _mtp_is_megatron
+                            ):
+                                # In EB data flow and CP size > 1, since we do not use _forward
+                                # we need to scatter labels to cp local here.
+                                # Under use_erndata=True labels_cur_depth is
+                                # already local zigzag chunks (extract_local_zigzag_chunks
+                                # above), so skip the scatter to avoid double-scatter.
+                                labels_cur_depth = (
+                                    ContextParallelScatterOp.apply(
+                                        labels_cur_depth,
+                                        axis=1,
+                                        mode=self.config.cp_balance_mode,
+                                    )
+                                )
+
+                            if self.config.fused_linear_ce_loss_chunk > 0:
+                                loss_matrix_cur_depth = self._forward(
+                                    logits_cur_depth,
+                                    labels_cur_depth,
+                                )
+                            else:
+                                if (
+                                    self.config.gpt_model_use_experimental_version
+                                    and self.config.sequence_parallel
+                                ):
+                                    logits_cur_depth = logits_cur_depth.reshape(
+                                        [
+                                            labels_cur_depth.shape[0],
+                                            -1,
+                                            logits_cur_depth.shape[-1],
+                                        ]
+                                    )
+                                loss_matrix_cur_depth = self.loss_func(
+                                    logits_cur_depth.cast("float32"),
+                                    labels_cur_depth,
+                                )
+
+                            if (
+                                get_context_parallel_world_size() > 1
+                                and not _mtp_is_megatron
+                            ):
+                                # In EB data flow and CP size > 1, loss and labels need to be gathered back.
+                                # Under use_erndata=True labels stay local — the
+                                # subsequent lossmask/sum reduction is per-rank (allreduce
+                                # happens implicitly via DP grad-averaging), so skip the
+                                # gather to keep the length-L/cp local view.
+                                loss_matrix_cur_depth = (
+                                    ContextParallelGatherOp.apply(
+                                        loss_matrix_cur_depth,
+                                        axis=1,
+                                        mode=self.config.cp_balance_mode,
+                                    )
+                                )
+                                labels_cur_depth = (
+                                    ContextParallelGatherOp.apply(
+                                        labels_cur_depth,
+                                        axis=1,
+                                        mode=self.config.cp_balance_mode,
+                                    )
+                                )
+
+                            lossmask_cur_depth = (
+                                labels_cur_depth != self.ignored_index
+                            ).cast(paddle.float32)
+                            loss_matrix_cur_depth = loss_matrix_cur_depth.cast(
+                                paddle.float32
+                            ).reshape([-1]) * lossmask_cur_depth.reshape([-1])
+                            depth_tokens = float(
+                                lossmask_cur_depth.sum().item()
+                            )
+                            if (
+                                self.defer_token_normalization
+                                and depth_tokens > 0
+                            ):
+                                loss_cur_depth = _normalize_loss_by_tokens(
+                                    loss_matrix_cur_depth.sum(),
+                                    depth_tokens,
+                                    main_tokens=getattr(
+                                        self, "_deferred_main_tokens", None
+                                    ),
+                                    use_accuracy_compatible=self.use_accuracy_compatible,
+                                )
+                            elif depth_tokens > 0:
+                                loss_cur_depth = (
+                                    loss_matrix_cur_depth.sum()
+                                    / lossmask_cur_depth.sum()
+                                )
+                            else:
+                                loss_cur_depth = (
+                                    loss_matrix_cur_depth.sum() * 0.0
                                 )
                         else:
-                            # No cu_seqlens_q on this rank. A plain
-                            # paddle.roll cannot respect packed-doc
-                            # boundaries, so it would leak labels across
-                            # documents (train the first token of doc N+1 as
-                            # the target at the last position of doc N). Fail
-                            # loudly instead of silently corrupting.
-                            # cu_seqlens_q is normally stashed by
-                            # GPTEmbedding.forward (PP=1 / first stage) and by
-                            # GPTLMHead.forward on the last PP stage; reaching
-                            # here means neither ran on this rank.
-                            raise RuntimeError(
-                                "use_erndata=True requires cu_seqlens_q "
-                                "to be stashed on LanguageLoss._cu_seqlens_q_stash "
-                                "before the loss stage, but it is None on this "
-                                "rank. It should be set by GPTEmbedding.forward "
-                                "(PP=1) or GPTLMHead.forward (last PP stage)."
-                            )
-                        if _cp_size_for_extract > 1:
-                            # Match local logits shape by extracting this
-                            # rank's CP slice.
-                            _lbl = _extract_cp(
-                                _lbl,
-                                _cp_rank_for_extract,
-                                _cp_size_for_extract,
-                                axis=1,
-                            )
-                        labels_cur_depth = _lbl
-                    else:
-                        labels_cur_depth = labels_ori[
-                            :, (depth + 1) : (depth + 1 + seq_length)
-                        ]
-                    if self.config.gpt_model_use_experimental_version:
-                        # Align with EB: compute per-token loss matrix and reduce
-                        # with global sum/count instead of going through forward_impl
-                        # which applies line-wise loss.
-
-                        if (
-                            get_context_parallel_world_size() > 1
-                            and not _mtp_is_megatron
-                        ):
-                            # In EB data flow and CP size > 1, since we do not use _forward
-                            # we need to scatter labels to cp local here.
-                            # Under use_erndata=True labels_cur_depth is
-                            # already the local CP slice (extract_local_cp_chunks
-                            # above), so skip the scatter to avoid double-scatter.
-                            labels_cur_depth = ContextParallelScatterOp.apply(
-                                labels_cur_depth,
-                                axis=1,
-                                mode=self.config.cp_balance_mode,
-                            )
-
-                        if self.config.fused_linear_ce_loss_chunk > 0:
-                            loss_matrix_cur_depth = self._forward(
+                            loss_cur_depth = self._forward(
                                 logits_cur_depth,
                                 labels_cur_depth,
                             )
-                        else:
-                            if (
-                                self.config.gpt_model_use_experimental_version
-                                and self.config.sequence_parallel
-                            ):
-                                logits_cur_depth = logits_cur_depth.reshape(
-                                    [
-                                        labels_cur_depth.shape[0],
-                                        -1,
-                                        logits_cur_depth.shape[-1],
-                                    ]
-                                )
-                            loss_matrix_cur_depth = self.loss_func(
-                                logits_cur_depth.cast("float32"),
-                                labels_cur_depth,
-                            )
-
-                        if (
-                            get_context_parallel_world_size() > 1
-                            and not _mtp_is_megatron
-                        ):
-                            # In EB data flow and CP size > 1, loss and labels need to be gathered back.
-                            # Under use_erndata=True labels stay local — the
-                            # subsequent lossmask/sum reduction is per-rank (allreduce
-                            # happens implicitly via DP grad-averaging), so skip the
-                            # gather to keep the length-L/cp local view.
-                            loss_matrix_cur_depth = (
-                                ContextParallelGatherOp.apply(
-                                    loss_matrix_cur_depth,
-                                    axis=1,
-                                    mode=self.config.cp_balance_mode,
-                                )
-                            )
-                            labels_cur_depth = ContextParallelGatherOp.apply(
-                                labels_cur_depth,
-                                axis=1,
-                                mode=self.config.cp_balance_mode,
-                            )
-
-                        lossmask_cur_depth = (
-                            labels_cur_depth != self.ignored_index
-                        ).cast(paddle.float32)
-                        loss_matrix_cur_depth = loss_matrix_cur_depth.cast(
-                            paddle.float32
-                        ).reshape([-1]) * lossmask_cur_depth.reshape([-1])
-                        if lossmask_cur_depth.sum().item() > 0:
-                            loss_cur_depth = (
-                                loss_matrix_cur_depth.sum()
-                                / lossmask_cur_depth.sum()
-                            )
-                        else:
-                            loss_cur_depth = loss_matrix_cur_depth.sum() * 0.0
-                    else:
-                        loss_cur_depth = self._forward(
-                            logits_cur_depth,
-                            labels_cur_depth,
-                        )
-                    mtp_loss.append(loss_cur_depth)
+                        mtp_loss.append(loss_cur_depth)
+                finally:
+                    self._deferred_main_tokens = None
             else:
                 lm_loss = self._forward(logits[0], lm_labels)
                 if get_tensor_model_parallel_world_size() > 1:
@@ -944,12 +1136,13 @@ class LanguageLoss(FleetLayer):
                     logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
 
             def add_loss(main_loss, loss):
-                if _use_accuracy_compatible_kernel():
+                if self.use_accuracy_compatible:
                     # Megatron-aligned: MTP loss gradient flows but loss scalar unchanged.
                     # This matches Megatron's behavior where MTP contributes to training
                     # gradients without affecting the reported loss value.
                     if self.config.add_mtp_loss:
-                        return main_loss + loss - loss.detach()
+                        # Cancel the detached value before adding MAIN.
+                        return main_loss + (loss - loss.detach())
                     else:
                         return main_loss
                 else:
@@ -963,7 +1156,7 @@ class LanguageLoss(FleetLayer):
                 # Align with EB: accumulate inside loop to match float32
                 # arithmetic order: loss += scaling * loss_i / N
                 loss = lm_loss
-                if _use_accuracy_compatible_kernel():
+                if self.use_accuracy_compatible:
                     # Megatron-aligned: only add MTP loss when add_mtp_loss=True.
                     # Use add_loss() to keep single maintenance point for compat
                     # behavior (loss + val - val.detach() for gradient-only flow).
@@ -1060,7 +1253,7 @@ class MainLanguageLoss(LanguageLoss):
                 logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
 
         def add_loss(main_loss, loss):
-            if _use_accuracy_compatible_kernel():
+            if self.use_accuracy_compatible:
                 # Megatron-aligned: MTP loss gradient flows but loss scalar unchanged.
                 # This matches Megatron's behavior
                 if self.config.add_mtp_loss:

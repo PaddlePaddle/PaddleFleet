@@ -40,6 +40,10 @@ from paddlefleet.transformer.moe.moe_layer import MoELayer
 class MinimalMoE:
     _use_grouped_mlp_expert = False
 
+    def __init__(self):
+        self.config = type("Config", (), {"use_accuracy_compatible": False})()
+        self.moe_expert_fusion = False
+
 
 class Expert:
     def __init__(self, offset):
@@ -128,15 +132,13 @@ class TestMoELayerLightweightMethods(unittest.TestCase):
         model.moe_rank = 0
         model.num_experts_per_device = 1
         model.use_accuracy_compatible = True
+        model.config.use_accuracy_compatible = True
         model.token_dispatcher = type("Dispatcher", (), {})()
         model.experts = [Expert(1)]
         dispatched_input = paddle.ones([1, 2], dtype="float32")
 
         with (
-            patch(
-                "paddlefleet.transformer.moe.moe_layer.use_accuracy_compatible_kernel",
-                return_value=True,
-            ),
+            patch.object(model.config, "use_accuracy_compatible", True),
             self.assertRaisesRegex(
                 RuntimeError, "requires dispatched router probabilities"
             ),
@@ -148,16 +150,19 @@ class TestMoELayerLightweightMethods(unittest.TestCase):
             def __init__(self):
                 self.inputs = []
 
-            def __call__(self, x):
+            def __call__(self, x, per_token_scale):
                 self.inputs.append(x)
-                return x * 2, None
+                return x * 2 * per_token_scale.unsqueeze(-1), None
 
         model = MinimalMoE()
         model.moe_rank = 0
         model.num_experts_per_device = 2
         model.use_accuracy_compatible = True
+        model.config.use_accuracy_compatible = True
         model.token_dispatcher = type("Dispatcher", (), {})()
-        model.token_dispatcher.global_input_probs = None
+        model.token_dispatcher.global_input_probs = paddle.ones(
+            [2], dtype="float32"
+        )
         model.experts = [TwiceExpert(), TwiceExpert()]
 
         dispatched_input = paddle.arange(8, dtype="float32").reshape([2, 4])
@@ -187,6 +192,7 @@ class TestMoELayerLightweightMethods(unittest.TestCase):
         model.moe_rank = 0
         model.num_experts_per_device = 1
         model.use_accuracy_compatible = True
+        model.config.use_accuracy_compatible = True
         model.token_dispatcher = type("Dispatcher", (), {})()
         model.token_dispatcher.global_input_probs = paddle.to_tensor(
             [0.25, 0.75], dtype="float32"
@@ -194,10 +200,7 @@ class TestMoELayerLightweightMethods(unittest.TestCase):
         model.experts = [ScaledExpert()]
         dispatched_input = paddle.ones([2, 3], dtype="float32")
 
-        with patch(
-            "paddlefleet.transformer.moe.moe_layer.use_accuracy_compatible_kernel",
-            return_value=True,
-        ):
+        with patch.object(model.config, "use_accuracy_compatible", True):
             output = MoELayer.expert_forward(model, dispatched_input, [2])
 
         self.assertEqual(model.experts[0].scales[0].shape, [32])
@@ -212,6 +215,7 @@ class TestMoELayerLightweightMethods(unittest.TestCase):
     def test_accuracy_fusion_forward_populates_overlap_output(self):
         model = MinimalMoE()
         model.use_accuracy_compatible = True
+        model.config.use_accuracy_compatible = True
         hidden_states = paddle.ones([2, 3], dtype="float32")
         shared_calls = []
 
