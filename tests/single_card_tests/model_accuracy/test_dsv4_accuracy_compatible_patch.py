@@ -701,6 +701,21 @@ class TestParamGradAndFlush(unittest.TestCase):
         acp.flush_sequence_first_wgrad(linear)
         np.testing.assert_allclose(linear.weight.grad.numpy(), before)
 
+    def test_flush_skips_param_with_stash_but_no_grad(self):
+        # A fresh Linear has never run backward, so its weight grad is None.
+        # With a stash present this hits the ``grad is None`` skip (line 1141):
+        # the stash must be left untouched.
+        linear = paddle.nn.Linear(4, 4)
+        param = linear.weight
+        self.assertIsNone(acp._get_param_grad(param))
+        param._dsv4_attn_o_group_seqfirst_wgrad = paddle.ones_like(param) * 5.0
+
+        acp.flush_sequence_first_wgrad(linear)
+
+        self.assertIsNotNone(
+            getattr(param, "_dsv4_attn_o_group_seqfirst_wgrad", None)
+        )
+
 
 class TestLossScaleHelpers(unittest.TestCase):
     """Loss-scaling entry points used by the trainer."""
@@ -767,6 +782,222 @@ class TestHasOptimizerState(unittest.TestCase):
 
     def test_false_when_absent(self):
         self.assertFalse(acp.has_optimizer_state("layer.w", {}, [".moment1"]))
+
+
+@requires_torch
+class TestCompatibleOGroupProjectionAccumulate(unittest.TestCase):
+    """Running backward twice on one weight hits the accumulate branch (467)."""
+
+    def test_backward_twice_accumulates_the_stash(self):
+        g, r, d = 2, 5, 4
+        b, s = 2, 3
+        w_np = np.random.randn(g, r, d).astype("float32")
+        x1_np = np.random.randn(b, s, g, d).astype("float32")
+        x2_np = np.random.randn(b, s, g, d).astype("float32")
+
+        def single(x_np):
+            weight = _grad_enabled(paddle.to_tensor(w_np))
+            x = _grad_enabled(paddle.to_tensor(x_np))
+            acp.CompatibleOGroupProjection.apply(
+                x, weight, g, r, 0, 0
+            ).sum().backward()
+            return weight._dsv4_attn_o_group_seqfirst_wgrad.numpy().copy()
+
+        contribution1 = single(x1_np)
+        contribution2 = single(x2_np)
+
+        # Reuse a SINGLE weight object across two passes: the second backward
+        # sees ``prev is not None`` and adds into the stash (466-467).
+        weight = _grad_enabled(paddle.to_tensor(w_np))
+        x1 = _grad_enabled(paddle.to_tensor(x1_np))
+        acp.CompatibleOGroupProjection.apply(
+            x1, weight, g, r, 0, 0
+        ).sum().backward()
+        first = weight._dsv4_attn_o_group_seqfirst_wgrad.numpy().copy()
+        x2 = _grad_enabled(paddle.to_tensor(x2_np))
+        acp.CompatibleOGroupProjection.apply(
+            x2, weight, g, r, 0, 0
+        ).sum().backward()
+        accumulated = weight._dsv4_attn_o_group_seqfirst_wgrad.numpy()
+
+        np.testing.assert_allclose(first, contribution1, rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(
+            accumulated, contribution1 + contribution2, rtol=1e-4, atol=1e-4
+        )
+
+
+@requires_torch
+class TestLinearSeqfirstWgradElseBranches(unittest.TestCase):
+    """The ``first >= second`` non-transposed 3D/4D flatten paths."""
+
+    def _reference(self, inp, grad):
+        return np.matmul(
+            inp.cast("float32").numpy().reshape(-1, inp.shape[-1]).T,
+            grad.cast("float32").numpy().reshape(-1, grad.shape[-1]),
+        )
+
+    def test_three_dim_first_ge_second_non_transposed(self):
+        paddle.seed(30)
+        hidden = 6
+        inp = paddle.randn([4, 2, hidden], dtype="float32").cast("bfloat16")
+        grad = paddle.randn([4, 2, 4], dtype="float32").cast("bfloat16")
+        weight = paddle.randn([hidden, 4], dtype="float32").cast("bfloat16")
+
+        out = acp.linear_seqfirst_wgrad(inp, grad, weight)
+
+        self.assertEqual(out.shape, [hidden, 4])
+        np.testing.assert_allclose(
+            out.cast("float32").numpy(),
+            self._reference(inp, grad),
+            rtol=6e-2,
+            atol=6e-2,
+        )
+
+    def test_four_dim_first_ge_second_non_transposed(self):
+        paddle.seed(31)
+        hidden, streams = 6, 3
+        inp = paddle.randn([4, 2, streams, hidden], dtype="float32").cast(
+            "bfloat16"
+        )
+        grad = paddle.randn([4, 2, streams, 4], dtype="float32").cast(
+            "bfloat16"
+        )
+        weight = paddle.randn([hidden, 4], dtype="float32").cast("bfloat16")
+
+        out = acp.linear_seqfirst_wgrad(inp, grad, weight)
+
+        self.assertEqual(out.shape, [hidden, 4])
+        np.testing.assert_allclose(
+            out.cast("float32").numpy(),
+            self._reference(inp, grad),
+            rtol=6e-2,
+            atol=6e-2,
+        )
+
+
+# APPEND_MARKER_GROUP_B
+class TestResolveFixedTrainingFilesManifestBranches(unittest.TestCase):
+    """Manifest mismatch ``continue`` paths (970/972/974) and break (978)."""
+
+    def _touch(self, d, name):
+        np.save(os.path.join(d, name), np.array([0]))
+
+    def _write_manifest(self, d, records):
+        with open(
+            os.path.join(d, "manifest_rank0.jsonl"), "w", encoding="utf-8"
+        ) as fh:
+            fh.writelines(json.dumps(record) + "\n" for record in records)
+
+    def test_manifest_skips_step_micro_rank_mismatches(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._touch(d, "custom_tokens.npy")
+            self._touch(d, "custom_labels.npy")
+            self._write_manifest(
+                d,
+                [
+                    {
+                        "step": 9,
+                        "micro": 0,
+                        "rank": 0,
+                        "tokens_file": "x",
+                        "labels_file": "y",
+                    },
+                    {
+                        "step": 0,
+                        "micro": 9,
+                        "rank": 0,
+                        "tokens_file": "x",
+                        "labels_file": "y",
+                    },
+                    {
+                        "step": 0,
+                        "micro": 0,
+                        "rank": 9,
+                        "tokens_file": "x",
+                        "labels_file": "y",
+                    },
+                    {
+                        "step": 0,
+                        "micro": 0,
+                        "rank": 0,
+                        "tokens_file": "custom_tokens.npy",
+                        "labels_file": "custom_labels.npy",
+                    },
+                ],
+            )
+
+            tokens, labels = acp._resolve_fixed_training_files(d, 0, 0, 0, 4)
+
+            self.assertTrue(tokens.endswith("custom_tokens.npy"))
+            self.assertTrue(labels.endswith("custom_labels.npy"))
+
+    def test_manifest_break_on_missing_file_names(self):
+        with tempfile.TemporaryDirectory() as d:
+            self._write_manifest(
+                d,
+                [
+                    {
+                        "step": 0,
+                        "micro": 0,
+                        "rank": 0,
+                        "tokens_file": "",
+                        "labels_file": "",
+                    },
+                ],
+            )
+            with self.assertRaises(FileNotFoundError):
+                acp._resolve_fixed_training_files(d, 0, 0, 0, 4)
+
+
+# APPEND_MARKER_GROUP_B
+class TestLoadFixedTrainingDataRaises(unittest.TestCase):
+    """``load_fixed_training_data`` rejects >2D and shape-mismatched arrays."""
+
+    def setUp(self):
+        self._saved_count = acp._LOAD_FIXED_DATA_CALL_COUNT
+        acp._LOAD_FIXED_DATA_CALL_COUNT = 0
+        self._saved_env = os.environ.get("LOAD_FIXED_DATA_PATH")
+
+    def tearDown(self):
+        acp._LOAD_FIXED_DATA_CALL_COUNT = self._saved_count
+        if self._saved_env is None:
+            os.environ.pop("LOAD_FIXED_DATA_PATH", None)
+        else:
+            os.environ["LOAD_FIXED_DATA_PATH"] = self._saved_env
+
+    def test_three_dim_tokens_raise_value_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            np.save(
+                os.path.join(d, "tokens_step0_micro0_rank0_seq4.npy"),
+                np.zeros([1, 2, 4], dtype="int64"),
+            )
+            np.save(
+                os.path.join(d, "labels_step0_micro0_rank0_seq4.npy"),
+                np.zeros([1, 2, 4], dtype="int64"),
+            )
+            os.environ["LOAD_FIXED_DATA_PATH"] = d
+            acp._LOAD_FIXED_DATA_CALL_COUNT = 0
+            with self.assertRaises(ValueError):
+                acp.load_fixed_training_data(
+                    _training_args(), 0, lambda n, a: n
+                )
+
+    def test_label_shape_mismatch_raises_value_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            np.save(
+                os.path.join(d, "tokens_step0_micro0_rank0_seq4.npy"),
+                np.zeros([2, 4], dtype="int64"),
+            )
+            np.save(
+                os.path.join(d, "labels_step0_micro0_rank0_seq4.npy"),
+                np.zeros([2, 3], dtype="int64"),
+            )
+            os.environ["LOAD_FIXED_DATA_PATH"] = d
+            acp._LOAD_FIXED_DATA_CALL_COUNT = 0
+            with self.assertRaises(ValueError):
+                acp.load_fixed_training_data(
+                    _training_args(), 0, lambda n, a: n
+                )
 
 
 if __name__ == "__main__":
