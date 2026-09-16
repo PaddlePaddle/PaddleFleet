@@ -42,12 +42,7 @@
 
 ## 测试质量
 
-- 行为变化应放入最接近变更模块的现有测试目录，例如 `tests/single_card_tests/`、`tests/multi_card_tests/` 或 `auto_configurator/tests/`；分布式行为需要代表性的多卡覆盖。
-- 测试必须覆盖关键边界和异常路径，并使用 `pytest.raises` 等机制验证预期错误。
-- 测试之间不得相互依赖；外部网络、文件系统或服务应隔离，不能依赖不稳定的共享状态。
-- 断言应验证核心结果，不接受吞掉异常、`assert True` 或通过 mock 掉被测函数来制造成功。
-- 浮点结果应使用合理容差；重复场景优先参数化；异步测试必须正确 `await`。
-- 修改 `ci/rules` 时同步检查 `ci/rule-tests` 和快照；新增 blacklist 不能替代回归测试。
+测试细则见[单测规则](unit-test-rules.md)：仓库模块主表、各模块的无卡/单卡/多卡适用范围与证据要求、用例设计与运行方式，反例见[典型单测反例](unit-test-antipatterns.md)。评审测试时按该文件判定。
 
 ## PR 信息与评论
 

@@ -879,11 +879,11 @@ class ZeroCostCheckpointCallback(TrainerCallback):
                 (save_infos, non_cached_objects)
             )
             self.runtime_timer.stop()
-            if not (
-                args.pipeline_model_parallel_size > 1
-                and isinstance(model, PipelineLayer)
-            ):
-                self.manager.zcc_pipeline_hook(0)
+        if not (
+            args.pipeline_model_parallel_size > 1
+            and isinstance(model, PipelineLayer)
+        ):
+            self.manager.zcc_pipeline_hook(0)
 
     def get_rng_states(self, args):
         if not args.save_rng_states:
