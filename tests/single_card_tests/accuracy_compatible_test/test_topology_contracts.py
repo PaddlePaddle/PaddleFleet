@@ -189,8 +189,8 @@ class TestAccuracyCompatibleTopologyContracts(unittest.TestCase):
                 ),
                 "FusedDSAIndexerLoss": loss,
                 "DSAIndexerLossAutoScaler": scaler,
-                "_unfused_dsa_attention": lambda q, k, v, mask, scale, **kwargs: (
-                    v
+                "_unfused_dsa_attention": (
+                    lambda q, k, v, mask, scale, **kwargs: v
                 ),
             },
         )
