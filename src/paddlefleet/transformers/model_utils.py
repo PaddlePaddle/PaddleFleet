@@ -4761,15 +4761,14 @@ def save_full_param(
     Saves model weights from an iterator into shards, supporting max shard size
     and a limited number of saver ranks.
 
-    On GPU, weights are offloaded asynchronously through a small pinned-memory
-    window: each param is DMA-copied D2H into its own page-locked buffer on a
-    dedicated loader stream, and once more than pinned_param_pool_capacity copies are
-    outstanding the oldest is waited on (cpu_wait) and moved into ordinary
-    pageable host memory, freeing its pinned buffer immediately. The shard is
-    accumulated in pageable memory and written once full, so resident pinned
-    memory stays at roughly pinned_param_pool_capacity tensors regardless of max_shard_size.
-    On non-GPU devices (XPU/CPU) every param falls back to a synchronous
-    param.cpu() copy.
+    On GPU each param is offloaded asynchronously: DMA-copied D2H into its own
+    pinned buffer, then once more than pinned_param_pool_capacity copies are
+    outstanding the oldest is waited on and moved to pageable host memory,
+    freeing its pinned buffer. Shards accumulate in pageable memory, so resident
+    pinned memory stays around pinned_param_pool_capacity tensors. Params larger
+    than sync_copy_threshold_bytes, and all params on non-GPU devices, skip the
+    pool and copy synchronously via param.cpu(), so one huge tensor never needs
+    an equally huge pinned buffer.
 
     Only ranks less than `num_saver_ranks` will perform disk I/O. All other ranks
     will iterate through the data to maintain synchronization but will not save.
@@ -4804,14 +4803,9 @@ def save_full_param(
 
     os.makedirs(save_dir, exist_ok=True)
 
-    # Keep only a couple of async D2H copies outstanding at once; each param is
-    # staged through its own pinned buffer and then moved to pageable host
-    # memory, so resident pinned memory is bounded by pinned_param_pool_capacity tensors
-    # instead of a whole shard.
+    # Max async D2H copies (each = one pinned buffer) kept outstanding.
     pinned_param_pool_capacity = 4
-    # Tensors larger than this bypass the pinned pool and use a synchronous
-    # copy, so a single huge param (e.g. a fused MoE expert weight) never
-    # allocates an equally huge pinned buffer.
+    # Params larger than this skip the pinned pool and copy synchronously.
     sync_copy_threshold_bytes = 1 << 30  # 1 GiB
     use_async = paddle.get_device().startswith("gpu")
     async_loader = create_async_load() if use_async else None
@@ -4882,9 +4876,7 @@ def save_full_param(
             if not use_async or param_size_bytes > sync_copy_threshold_bytes:
                 current_shard_state_dict[param_key] = param.cpu()
             else:
-                # Async D2H into a private pinned buffer; keep at most
-                # pinned_param_pool_capacity outstanding, landing the oldest into pageable
-                # memory to cap resident pinned memory.
+                # Async D2H into a private pinned buffer (drained by the pool).
                 dst, task = async_offload(param, async_loader)
                 pinned_param_pool.append((task, dst, param_key, param))
                 if len(pinned_param_pool) > pinned_param_pool_capacity:
