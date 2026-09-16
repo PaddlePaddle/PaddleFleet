@@ -67,6 +67,9 @@ use_accuracy_compatible: true
 recompute_granularity: none
 
 megatron_extra_kwargs:
+  norm_accuracy_compatible: true
+  router_accuracy_compatible: true
+  dsa_accuracy_compatible: true
   moe_router_bias_update_rate: 0.0
   dsa_kernel_backend: none
   persist_layer_norm: false

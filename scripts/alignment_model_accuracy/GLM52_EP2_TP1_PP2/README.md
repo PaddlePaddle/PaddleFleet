@@ -62,10 +62,11 @@ The Paddle YAML sets `hybrid_parallel_expert_grad_scale: 1.0`: EP2/TP1 deferred
 token normalization must not apply the automatic TP/EP scale of 0.5 first.
 
 Both YAML files select numerical alignment with `use_accuracy_compatible: true`.
-On the Torch side this also selects reference optimizer numerics and reproducible
-gradient clipping when `clip_grad > 0`. DSA norm, router and backward behavior
-follow the model architecture automatically; no per-component alignment flags
-are required.
+On the Torch side this selects reproducible gradient clipping when `clip_grad > 0`.
+The Torch YAML also explicitly enables the existing `norm_accuracy_compatible`,
+`router_accuracy_compatible` and `dsa_accuracy_compatible` options in
+`megatron_extra_kwargs` for GLM52 reference numerics. These options retain their
+existing names and defaults in Megatron-Core.
 PaddleFleet applies the corresponding Paddle backend flag before constructing
 the GLM model. Model layers receive the mode through configuration or explicit
 function arguments; no `MODEL_REPRO_IEEE_KERNEL` or FP32 accumulator override is
