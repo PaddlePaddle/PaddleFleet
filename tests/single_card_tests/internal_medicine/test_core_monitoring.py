@@ -377,8 +377,16 @@ class CoreMonitoringTest(unittest.TestCase):
         class FakeDist:
             ReduceOp = SimpleNamespace(MAX="max")
 
+            def __init__(self):
+                self.sent = []
+                self.payloads = []
+
             def all_reduce(self, tensor, op=None):
-                tensor[:] = max(self.stale_flags)
+                # Record the bit the SUT wrote, then MAX-reduce those bits.
+                # Sequential two-rank simulation: later ranks see the running
+                # max, so call a stale rank first when mixed flags are needed.
+                self.sent.append(int(tensor.numpy()[0]))
+                tensor[:] = max(self.sent)
 
             def all_gather_object(self, gathered, payload):
                 gathered.extend(self.payloads)
@@ -423,10 +431,15 @@ class CoreMonitoringTest(unittest.TestCase):
         original_a = wrap_align(reducer_a)
         original_b = wrap_align(reducer_b)
 
-        fake_dist.stale_flags = [1, 1]
+        # Empty cache → each rank must send stale=1. Hardcoding stale to 0
+        # would make sent == [0, 0] and fail this assertion.
         self.assertFalse(
             reducer_a._agree_on_layout(schema_a, fake_paddle, fake_dist)
         )
+        self.assertFalse(
+            reducer_b._agree_on_layout(schema_b, fake_paddle, fake_dist)
+        )
+        self.assertEqual(fake_dist.sent, [1, 1])
         original_a(schema_a, fake_dist)
         original_b(schema_b, fake_dist)
         self.assertEqual(align_calls["n"], 0)
@@ -441,14 +454,37 @@ class CoreMonitoringTest(unittest.TestCase):
             },
         )
 
-        fake_dist.stale_flags = [0, 0]
+        # Local fingerprints still match each rank's cache, even though the
+        # two ranks own disjoint keys. Hardcoding stale to 1 fails here.
+        fake_dist.sent = []
         self.assertTrue(
             reducer_a._agree_on_layout(schema_a, fake_paddle, fake_dist)
         )
         self.assertTrue(
             reducer_b._agree_on_layout(schema_b, fake_paddle, fake_dist)
         )
+        self.assertEqual(fake_dist.sent, [0, 0])
         self.assertEqual(align_calls["n"], 0)
+
+        # One rank's schema changes: that rank sends 1, the other sends 0,
+        # MAX is 1 so both must re-align. Call the stale rank first so the
+        # sequential running-max mock matches a real collective.
+        schema_b2 = training_logs.build_reduce_schema(
+            {
+                "dummy/layer_1/mean": 4.0,
+                "dummy/layer_1/floor": 1.0,
+                "dummy/layer_2/mean": 3.0,
+            }
+        )
+        self.assertNotEqual(schema_b.fingerprint, schema_b2.fingerprint)
+        fake_dist.sent = []
+        self.assertFalse(
+            reducer_b._agree_on_layout(schema_b2, fake_paddle, fake_dist)
+        )
+        self.assertFalse(
+            reducer_a._agree_on_layout(schema_a, fake_paddle, fake_dist)
+        )
+        self.assertEqual(fake_dist.sent, [1, 0])
 
 
 if __name__ == "__main__":
