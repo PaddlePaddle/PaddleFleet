@@ -126,9 +126,16 @@ class CliDispatchTest(unittest.TestCase):
         module_patch.start()
         self.addCleanup(module_patch.stop)
 
-        # ``from . import launcher`` / ``from .export.export import ...`` set
-        # attributes on the *real* paddlefleet.cli package. Restore them so a
-        # later real import in the same process is not shadowed by our stubs.
+        # ``main()`` runs ``from . import launcher`` (and ``from .export.export
+        # import ...`` / ``from .train.tuner import ...``). For a *submodule of
+        # the package*, ``from . import launcher`` binds whatever attribute the
+        # package already carries: once anything in the test session has done a
+        # real ``import paddlefleet.cli.launcher``, ``paddlefleet.cli.launcher``
+        # stays the real module and our ``sys.modules`` stub is bypassed, so the
+        # launch command would embed the *real* launcher path instead of
+        # ``_FAKE_LAUNCHER_FILE``. Bind the stubs onto the package directly so
+        # the dispatch resolves them deterministically, then restore the
+        # originals in cleanup so a later real import is not shadowed.
         import paddlefleet.cli as pkg
 
         self._pkg = pkg
@@ -137,6 +144,9 @@ class CliDispatchTest(unittest.TestCase):
             for name in ("launcher", "train", "export")
         }
         self.addCleanup(self._restore_pkg_attrs)
+        pkg.launcher = launcher
+        pkg.train = train_pkg
+        pkg.export = export_pkg
 
     def _restore_pkg_attrs(self):
         for name, val in self._saved_attrs.items():
