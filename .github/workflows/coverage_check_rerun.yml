@@ -1,0 +1,190 @@
+name: Coverage-check Re-run
+
+on:
+  workflow_run:
+    workflows: ["Coverage Approval"]
+    types: [completed]
+
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: coverage-rerun-${{ github.event.workflow_run.pull_requests[0].number }}-${{ github.event.workflow_run.pull_requests[0].head.sha }}
+  cancel-in-progress: true
+
+jobs:
+  rerun-on-approval:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on:
+      group: APPROVAL
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      REPO: ${{ github.repository }}
+      PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
+      HEAD_SHA: ${{ github.event.workflow_run.pull_requests[0].head.sha }}
+      TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+      API_VERSION: 2022-11-28
+    steps:
+      - name: Cancel coverage check and rerun approval
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          api() {
+            local response status body
+            response=$(curl --silent --show-error \
+              --request "$1" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: ${API_VERSION}" \
+              --write-out $'\n%{http_code}' \
+              "https://api.github.com${2}")
+            status=$(printf '%s\n' "${response}" | tail -n 1)
+            body=$(printf '%s\n' "${response}" | sed '$d')
+            if [[ "${status}" -lt 200 || "${status}" -ge 300 ]]; then
+              printf 'GitHub API %s %s failed with HTTP %s\n%s\n' "$1" "$2" "${status}" "${body}" >&2
+              return 1
+            fi
+            printf '%s' "${body}"
+          }
+
+          if [[ -z "${PR_NUMBER}" || -z "${HEAD_SHA}" ]]; then
+            echo "The triggering workflow run is not associated with a pull request; nothing to rerun."
+            exit 0
+          fi
+
+          trigger_jobs=$(api GET "/repos/${REPO}/actions/runs/${TRIGGER_RUN_ID}/jobs?filter=latest&per_page=100")
+          signal_conclusion=$(jq -r '
+            [.jobs[] | select(.name == "signal")]
+            | last
+            | .conclusion // empty
+          ' <<<"${trigger_jobs}")
+          if [[ "${signal_conclusion}" != "success" ]]; then
+            echo "Coverage Approval signal did not succeed; nothing to rerun."
+            exit 0
+          fi
+
+          pr=$(api GET "/repos/${REPO}/pulls/${PR_NUMBER}")
+          current_sha=$(jq -r '.head.sha' <<<"${pr}")
+          head_repo=$(jq -r '.head.repo.full_name // empty' <<<"${pr}")
+          head_ref=$(jq -r '.head.ref // empty' <<<"${pr}")
+          if [[ -z "${head_repo}" || -z "${head_ref}" ]]; then
+            echo "The PR source repository or branch is unavailable; nothing to rerun."
+            exit 0
+          fi
+          if [[ "${current_sha}" != "${HEAD_SHA}" ]]; then
+            echo "PR head changed from ${HEAD_SHA} to ${current_sha}; nothing to rerun."
+            exit 0
+          fi
+
+          workflow=$(api GET "/repos/${REPO}/actions/workflows/Test-release.yml")
+          workflow_id=$(jq -r '.id // empty' <<<"${workflow}")
+          if [[ -z "${workflow_id}" ]]; then
+            echo "Test-release workflow was not found."
+            exit 0
+          fi
+
+          runs=$(api GET "/repos/${REPO}/actions/workflows/${workflow_id}/runs?event=pull_request&head_sha=${HEAD_SHA}&per_page=100")
+          run_id=$(jq -r --arg sha "${HEAD_SHA}" --arg head_repo "${head_repo}" --arg head_ref "${head_ref}" '
+            [.workflow_runs[]
+              | select(.head_sha == $sha)
+              | select(.head_repository.full_name == $head_repo)
+              | select(.head_branch == $head_ref)
+              | select(.event == "pull_request")
+            ]
+            | sort_by(.run_number)
+            | last
+            | .id // empty
+          ' <<<"${runs}")
+
+          if [[ -z "${run_id}" ]]; then
+            echo "No matching Test-release run found for PR ${PR_NUMBER} at ${HEAD_SHA}."
+            exit 0
+          fi
+          echo "Selected Test-release run: ${run_id}"
+
+          jobs=$(api GET "/repos/${REPO}/actions/runs/${run_id}/jobs?filter=latest&per_page=100")
+          approval_job=$(jq -c '
+            [.jobs[] | select(.name == "Check coverage approval")]
+            | sort_by(.started_at // .completed_at // "")
+            | last // empty
+          ' <<<"${jobs}")
+          coverage_job=$(jq -c '
+            [.jobs[] | select(.name == "Coverage Upload And Check")]
+            | sort_by(.started_at // .completed_at // "")
+            | last // empty
+          ' <<<"${jobs}")
+
+          if [[ -z "${approval_job}" ]]; then
+            echo "Coverage approval job is not available yet."
+            exit 0
+          fi
+
+          required_jobs=(
+            "Check bypass"
+            "Unit test (single card)"
+            "Unit test (multi-card)"
+            "Integration test (H20, single card)"
+            "Integration test (H20, multi-card)"
+            "Integration test (A100)"
+            "Check coverage approval"
+          )
+          unfinished_jobs=()
+          for job_name in "${required_jobs[@]}"; do
+            job_status=$(jq -r --arg name "${job_name}" '
+              [.jobs[]
+                | select(
+                    .name == $name or
+                    ($name == "Check bypass" and (.name | endswith(" / Check bypass")))
+                  )
+              ]
+              | sort_by(.started_at // .completed_at // "")
+              | last
+              | .status // "missing"
+            ' <<<"${jobs}")
+            if [[ "${job_status}" != "completed" ]]; then
+              unfinished_jobs+=("${job_name} (${job_status})")
+            fi
+          done
+
+          if (( ${#unfinished_jobs[@]} > 0 )); then
+            printf 'Previous jobs are not completed yet: %s\n' "${unfinished_jobs[*]}"
+            echo "Leaving the Test-release run intact."
+            exit 0
+          fi
+
+          approval_conclusion=$(jq -r '.conclusion // empty' <<<"${approval_job}")
+          coverage_status="not_started"
+          if [[ -n "${coverage_job}" ]]; then
+            coverage_status=$(jq -r '.status' <<<"${coverage_job}")
+          fi
+          approval_job_id=$(jq -r '.id' <<<"${approval_job}")
+
+          if [[ -z "${approval_conclusion}" ]]; then
+            echo "Coverage approval job has no conclusion; leaving the Test-release run intact."
+            exit 0
+          fi
+
+          if [[ "${coverage_status}" == "queued" || "${coverage_status}" == "in_progress" ]]; then
+            echo "Cancelling Test-release run ${run_id} while coverage check is ${coverage_status}."
+            api POST "/repos/${REPO}/actions/runs/${run_id}/cancel" >/dev/null
+
+            for attempt in {1..60}; do
+              run=$(api GET "/repos/${REPO}/actions/runs/${run_id}")
+              status=$(jq -r '.status' <<<"${run}")
+              if [[ "${status}" != "queued" && "${status}" != "in_progress" ]]; then
+                break
+              fi
+              sleep 5
+            done
+
+            if [[ "${status}" == "queued" || "${status}" == "in_progress" ]]; then
+              echo "Test-release run ${run_id} did not finish cancelling in time."
+              exit 1
+            fi
+          fi
+
+          echo "Rerunning coverage approval job ${approval_job_id}."
+          api POST "/repos/${REPO}/actions/jobs/${approval_job_id}/rerun" >/dev/null

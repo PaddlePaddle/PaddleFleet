@@ -152,7 +152,12 @@ class TestRefinedRecomputeSinkGuard(unittest.TestCase):
         sink. (256, 128) is not in the cutedsl head-dim whitelist (256 requires
         ``head_dim_v == 256``), so it degrades to FA2 and the guard fires.
         Turning the hotfix switch off routes FA3 to Paddle's kernel, where the
-        sink does not exist at any head dim."""
+        sink does not exist at any head dim.
+
+        On SM100 production picks FA4, which is cutedsl-only: the switch is an
+        FA3 routing flag and does not touch FA4, so (192, 128) stays on cute
+        with the switch off as well; only (256, 128) degrades, via the
+        whitelist."""
         try:
             from paddlefleet_ops.flash_mask_facade import (
                 get_fa_version,
@@ -174,11 +179,23 @@ class TestRefinedRecomputeSinkGuard(unittest.TestCase):
             self.assertTrue(_cute(192), "(192, 128) should stay on cute")
             self.assertFalse(_cute(256), "(256, 128) should degrade to FA2")
             with cpp_flashmask_backend():
-                for qd in (192, 256):
-                    self.assertFalse(
-                        _cute(qd),
-                        f"({qd}, 128) must leave cute once the switch is off",
+                if production == 4:
+                    # FA4 is cutedsl-only and the hotfix switch routes FA3
+                    # only: flipping it must not move FA4 off cute.
+                    self.assertTrue(
+                        _cute(192),
+                        "(192, 128) should stay on cute: the switch "
+                        "does not route FA4",
                     )
+                    self.assertFalse(
+                        _cute(256), "(256, 128) should degrade to FA2"
+                    )
+                else:
+                    for qd in (192, 256):
+                        self.assertFalse(
+                            _cute(qd),
+                            f"({qd}, 128) must leave cute once the switch is off",
+                        )
 
 
 # ===========================================================================

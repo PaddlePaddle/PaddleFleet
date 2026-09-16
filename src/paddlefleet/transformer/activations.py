@@ -38,8 +38,24 @@ def situ_glu(
     x: paddle.Tensor,
     beta: float = 1.0,
     linear_beta: float | None = None,
+    situ_glu_plain_fusion: bool = False,
 ) -> paddle.Tensor:
-    """Apply Kimi-K3 SiTU-GLU to concatenated ``[gate, up]`` projections."""
+    """Apply Kimi-K3 SiTU-GLU to concatenated ``[gate, up]`` projections.
+
+    ``situ_glu_plain_fusion`` opts into the single fused Triton kernel in
+    ``triton_ops/situ_glu_plain.py``, replacing the op chain below (13 fp32
+    launches, each round-tripping a full ``[M, N]`` fp32 tensor through DRAM).
+    It is off by default and falls back to the op chain whenever the kernel's
+    preconditions do not hold (CPU tensor, non-contiguous input, no Triton).
+
+    The router-scaled call sites keep going through
+    ``triton_ops/situ_glu.py`` under the separate ``situ_glu_fusion`` flag; see
+    :func:`situ_glu_scale_forward`, which calls this function with the fusion
+    off on purpose -- its caller (``moe/fp8_utils.py``) runs the forward outside
+    autograd and pairs it with an explicitly-called
+    :func:`situ_glu_scale_backward`, so handing it a ``PyLayer`` would attach a
+    graph node nobody walks and pin ``x`` alive for nothing.
+    """
 
     if x.shape[-1] % 2 != 0:
         raise ValueError(
@@ -60,6 +76,29 @@ def situ_glu(
         )
 
     input_dtype = x.dtype
+    if (
+        situ_glu_plain_fusion
+        and x.place.is_gpu_place()
+        and x.is_contiguous()
+        # The kernel widens in-register from these three; the op chain below
+        # casts to fp32 first and so also accepts e.g. float64. Checking the
+        # dtype here keeps that case a fallback rather than a TypeError out of
+        # the kernel's own ``_geom`` guard.
+        and x.dtype in (paddle.float16, paddle.bfloat16, paddle.float32)
+    ):
+        from paddlefleet.triton_ops.utils import is_triton_available
+
+        if is_triton_available():
+            from paddlefleet.triton_ops.situ_glu_plain import (
+                fused_situ_glu_plain,
+            )
+
+            # One kernel for the whole chain below, forward and backward. The
+            # fp32 intermediates never leave registers, so the fp32 dtype of
+            # the reference is a numeric contract, not a materialization: the
+            # kernel widens in-register and returns ``input_dtype``.
+            return fused_situ_glu_plain(x, beta, linear_beta)
+
     gate, up = paddle.chunk(x, chunks=2, axis=-1)
     gate = gate.astype("float32")
     up = up.astype("float32")

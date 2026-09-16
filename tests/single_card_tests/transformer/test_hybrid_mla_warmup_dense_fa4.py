@@ -241,14 +241,13 @@ class TestBackendSelection(unittest.TestCase):
             _forward(module, tensors, row_end, w_v)
         return calls
 
-    def _assert_forward_refuses(self, module, fa_version=4, deterministic=0):
+    def _assert_forward_refuses(self, module, fa_version=4):
         """The forward must raise, and must do so before touching a backend."""
         seqlen = 256
         row_end = _row_end([seqlen], seqlen)
         tensors, w_v = _inputs(seqlen)
         with (
             _flash_attn_version(fa_version),
-            _cudnn_deterministic(deterministic),
             _backend_spy(module) as calls,
             self.assertRaisesRegex(RuntimeError, "requires FA4"),
         ):
@@ -309,37 +308,43 @@ class TestBackendSelection(unittest.TestCase):
         ):
             module._assert_dense_fa4(576, 511, row_end)
 
-    def test_deterministic_raises(self):
-        """(576, 512) has no deterministic FA4 backward.
+    def test_deterministic_is_not_a_rejection_condition(self):
+        """``FLAGS_cudnn_deterministic`` keeps (576, 512) on FA4.
 
-        FA4 solves it with the big-head-dim kernel, which asserts
-        ``not deterministic`` (``flash_mask/cute/interface.py:1238,1249``), so
-        ``get_fa_version`` degrades the pair under ``FLAGS_cudnn_deterministic``.
-        For these phases that degradation is not usable, and a Python error
-        naming the flag is more actionable than the kernel's own assert firing in
-        the middle of a backward.
+        It used to degrade the pair: FA4 serves it with the big-head-dim
+        backward, which accumulated dQ / dK / dV with unordered
+        ``red.global.add`` and asserted ``not deterministic``. flash-attention
+        ``5007a05`` pins that order with a global semaphore, so the pair stays
+        FA4 and the layer has nothing left to refuse. Pinned because the flag is
+        still one of the two inputs ``get_fa_version`` reads, and a re-tightening
+        on either side would otherwise surface as a mid-backward failure.
         """
         module = _module()
         row_end = _row_end([256], 256)
-        with (
-            _flash_attn_version(4),
-            _cudnn_deterministic(1),
-            self.assertRaisesRegex(RuntimeError, "cudnn_deterministic"),
-        ):
-            module._assert_dense_fa4(576, 512, row_end)
-        # Nothing else about the layer changed: the same call is fine again
-        # once determinism is off.
+        with _flash_attn_version(4), _cudnn_deterministic(1):
+            self.assertIsNone(module._assert_dense_fa4(576, 512, row_end))
         with _flash_attn_version(4), _cudnn_deterministic(0):
             self.assertIsNone(module._assert_dense_fa4(576, 512, row_end))
 
-    def test_deterministic_forward_raises_before_the_backward(self):
-        """The error has to arrive in the forward, not in the backward.
+    def test_deterministic_forward_still_takes_the_dense_path(self):
+        """The whole forward, not just the assertion, survives determinism.
 
-        Reaching the kernel's own ``assert not deterministic`` would mean a step
-        that had already spent its forward, with a message that names neither
-        the layer nor the flag.
+        ``_assert_dense_fa4`` is only one of two places the flag could bite; the
+        forward also has to reach ``_dense_attn`` rather than a substituted
+        backend, so the spy is what decides this rather than the absence of a
+        raise.
         """
-        self._assert_forward_refuses(_module(), deterministic=1)
+        seqlen = 256
+        module = _module()
+        row_end = _row_end([seqlen], seqlen)
+        tensors, w_v = _inputs(seqlen)
+        with (
+            _flash_attn_version(4),
+            _cudnn_deterministic(1),
+            _backend_spy(module) as calls,
+        ):
+            _forward(module, tensors, row_end, w_v)
+        self.assertEqual(calls, ["dense"])
 
     def test_missing_flash_mask_extension_raises(self):
         """FA4 as a flag value is not FA4 as a backend.

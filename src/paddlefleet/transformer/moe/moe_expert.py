@@ -247,6 +247,9 @@ class GroupedMLPExpert(FleetLayer):
                         x,
                         beta=self.config.activation_situ_beta,
                         linear_beta=self.config.activation_situ_linear_beta,
+                        situ_glu_plain_fusion=getattr(
+                            self.config, "situ_glu_plain_fusion", False
+                        ),
                     )
 
             else:
@@ -306,7 +309,7 @@ class GroupedMLPExpert(FleetLayer):
         self.weight1.is_distributed = self.expert_parallel
         self.weight2.is_distributed = self.expert_parallel
 
-    def update_activation_recompute(self, layer_number):
+    def update_activation_recompute(self, layer_number, is_mtp_layer=False):
         """Resolve the ``moe_act`` flag; re-called once the layer id is known.
 
         ``layer_number=None`` (construction time) means a count-based selector
@@ -319,6 +322,7 @@ class GroupedMLPExpert(FleetLayer):
                 layer_number,
                 self.config,
                 defer_if_layer_unknown=True,
+                is_mtp_layer=is_mtp_layer,
             )
         )
         if self.activation_recompute and self.config.fp8:

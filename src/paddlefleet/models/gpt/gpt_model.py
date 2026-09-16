@@ -388,9 +388,23 @@ class GPTModel(PipelineLayer):
 
         if spec.mtp:
             for mtp_spec in spec.mtp:
-                if self.config.enable_mtp_magic_send:
-                    desc = LayerDesc(mtp_spec)
-                elif getattr(self.config, "mtp_shared_last_layer", False):
+                # NOTE: test mtp_shared_last_layer FIRST. It used to sit behind an
+                # `enable_mtp_magic_send` branch that short-circuited to a plain
+                # LayerDesc, so with both flags on the tie silently did nothing.
+                # The two are orthogonal -- magic send owns `mtp_embed` (synced
+                # via _mtp_embed_global_group below) while SharedLayerDesc(
+                # shared_submodule_weight_only=True) aliases only the params
+                # under `transformer_layer` -- and TransformerConfig no longer
+                # rejects the combination, so the order matters for real.
+                #
+                # The pivot for this key is emitted above, on the last backbone
+                # TransformerLayer; aliasing needs both on the same rank (see the
+                # co-location note in transformer_config.py). All K descs reuse
+                # the one key, so at K > 1 an off-stage pivot aborts the build
+                # rather than degrading to broadcast -- depth 0 becomes the stored
+                # shared layer and depth 1 aliases against its
+                # `transformer_layer.`-prefixed names.
+                if getattr(self.config, "mtp_shared_last_layer", False):
                     desc = SharedLayerDesc(
                         "mtp_reuse_transformer",
                         mtp_spec,

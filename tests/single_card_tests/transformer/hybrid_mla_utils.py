@@ -818,7 +818,7 @@ def cpp_flashmask_backend():
 
 @contextlib.contextmanager
 def _fa4_pin():
-    """``_flash_attn_version(4)`` where FA4 can serve, a no-op where it cannot.
+    """FA4's *whole* flag pair where FA4 can serve, a no-op where it cannot.
 
     The full-causal phases have exactly one backend, and
     ``MQALatentAttention._assert_dense_fa4`` raises when the process flags do not
@@ -827,11 +827,22 @@ def _fa4_pin():
     where ``_fa4_can_serve()`` is True -- and the same modules also hold ``mha``
     cases that do run without FA4, which is why the pin has to stand down rather
     than force a value the box cannot honour.
+
+    ``FLAGS_cudnn_deterministic`` is part of the pin, not a separate concern:
+    ``_dispatch_fa_version`` (``flash_mask_facade.py``) whitelists the
+    ``(576, 512)`` head-dim pair for FA4 only ``and not deterministic``, because
+    FA4's big-head-dim backward has no ordered-accumulation variant. Both CI
+    entrypoints export ``FLAGS_cudnn_deterministic=1``
+    (``ci/multi-card_test.sh``, ``ci/single_card_test.sh``), so pinning the
+    version alone still degrades to FA2 and trips ``_assert_dense_fa4``. The
+    non-deterministic FA4 backward is what production runs, and the gradient
+    comparisons here use bf16-scale relative tolerances that have room for the
+    atomics accumulation order.
     """
     if not _fa4_can_serve():
         yield
         return
-    with _flash_attn_version(4):
+    with _flash_attn_version(4), _cudnn_deterministic(0):
         yield
 
 

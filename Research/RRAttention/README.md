@@ -79,7 +79,7 @@ attn_output, sparse_ratio = rrattn_prefill(
 )
 ```
 
-For model-level use, patch a supported PaddleFormers model before generation:
+For model-level use, patch a supported PaddleFleet model before generation:
 
 ```python
 from rrattn import patch_llama_attention
@@ -144,7 +144,7 @@ python scripts/speed_test.py \
 
 ### Repository Layout
 
-- `rrattn/`: Paddle RRAttention implementation and PaddleFormers patch entrypoints
+- `rrattn/`: Paddle RRAttention implementation and PaddleFleet patch entrypoints
 - `eval/HELMET/`: HELMET evaluation code, configs, prompts, data/cache/output layout
 - `scripts/`: environment setup and evaluation launch scripts
 - `tests/`: public API import checks

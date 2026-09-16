@@ -89,7 +89,7 @@ def parse_training_logs(
                         "time_per_step": round(sum(stable) / len(stable), 4)
                     }
 
-        # PaddleFormers log format: extract per-step metrics
+        # PaddleFleet log format: extract per-step metrics
         # Format: interval_runtime: 162.57, interval_tokens_per_second_per_device: 6449.99, ...
         runtime_values = []
         tokens_per_s_values = []

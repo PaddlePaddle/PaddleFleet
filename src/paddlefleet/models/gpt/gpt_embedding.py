@@ -39,6 +39,7 @@ from paddlefleet.parallel_state import (
 from paddlefleet.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
+from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.kimi_delta_attention import build_cu_seqlens
 from paddlefleet.transformer.layer import FleetLayer
 
@@ -146,6 +147,11 @@ class GPTEmbedding(FleetLayer):
                     rotary_interleaved=config.rotary_interleaved,
                     rotary_base=swa_rotary_base,
                     rope_scaling=rope_scaling,
+                    # Same target as the full-attention table above: the two must
+                    # not disagree about whether AMP O2 may truncate ``inv_freq``.
+                    use_accuracy_compatible=getattr(
+                        config, "use_accuracy_compatible", False
+                    ),
                 )
 
     @property
@@ -304,6 +310,7 @@ class GPTEmbedding(FleetLayer):
                     "multi_latent_attention is not supported when gpt_model_use_experimental_version=True and sequence_parallel=True"
                 )
         input_ids = dict_args["input_ids"]
+        input_ids = inspect_tensor("embedding_input", -1, input_ids)
         labels = dict_args.get("labels", None)
         if labels is not None:
             labels = labels.cuda()
@@ -333,7 +340,7 @@ class GPTEmbedding(FleetLayer):
         deepstack_visual_embeds = None
         visual_pos_mask = None
         mtp_emb_res = None
-        # CP zigzag context of the use_erndata MTP branch below.
+        # CP slicing context of the use_erndata MTP branch below.
         # The branch slices the embeddings itself (no ContextParallelScatterOp,
         # which is gated on experimental_dataflow and therefore never runs for
         # this style), so the RoPE tables have to be sliced with the very same
@@ -385,6 +392,9 @@ class GPTEmbedding(FleetLayer):
                 if self.multimodal_embedding
                 else position_ids,
             )
+            decoder_input = inspect_tensor(
+                "embedding_output", -1, decoder_input
+            )
             # Padding-Token is 0，avoiding Grad updating (ernie_core fill_feature func）
             if (
                 self.config.expert_model_parallel_size > 1
@@ -428,8 +438,8 @@ class GPTEmbedding(FleetLayer):
                 # place with per-doc boundary zero-fill via cu_seqlens_q.
                 # Under CP>1, each rank holds the full-length embedding (per
                 # PaddleFleet dataloader broadcast) and slices its own
-                # zigzag chunks via extract_local_zigzag_chunks — no
-                # ContextParallelScatterOp needed.
+                # local slice via extract_local_cp_chunks (layout follows
+                # config.cp_balance_mode) — no ContextParallelScatterOp needed.
                 # The ernie5 (default) path in the ``else`` below retains
                 # upstream develop's full logic, including multimodal + MTP.
                 # ------------------------------------------------------------
@@ -439,7 +449,7 @@ class GPTEmbedding(FleetLayer):
                     )
                     from paddlefleet.transformer.multi_token_prediction import (
                         build_startend_row_indices_from_cu_seqlens,
-                        extract_local_zigzag_chunks,
+                        extract_local_cp_chunks,
                         roll_tensor,
                     )
 
@@ -482,10 +492,16 @@ class GPTEmbedding(FleetLayer):
                     mtp_megatron_cp_size = _cp_size
                     mtp_megatron_cp_rank = _cp_rank
 
-                    # Main embedding: [B, L, H] → [B, L/cp_size, H] via zigzag.
+                    # Main embedding: [B, L, H] → [B, L/cp_size, H] with the
+                    # model's own CP layout (zigzag for dualchunk_allgather,
+                    # contiguous slice for contiguous_allgather).
                     if _cp_size > 1:
-                        inputs_embeds = extract_local_zigzag_chunks(
-                            inputs_embeds_ori, _cp_rank, _cp_size, axis=1
+                        inputs_embeds = extract_local_cp_chunks(
+                            inputs_embeds_ori,
+                            _cp_rank,
+                            _cp_size,
+                            axis=1,
+                            mode=self.config.cp_balance_mode,
                         )
                     else:
                         inputs_embeds = inputs_embeds_ori
@@ -509,7 +525,7 @@ class GPTEmbedding(FleetLayer):
                     # Cumulative rolls: depth k uses decoder_input rolled by
                     # (k+1) positions. Roll on the full-length float embedding
                     # (identical on every CP rank), then extract this rank's
-                    # zigzag chunks — avoids a ContextParallelScatterOp per depth.
+                    # local slice — avoids a ContextParallelScatterOp per depth.
                     rolled_embed = inputs_embeds_ori
                     for depth in range(self.config.num_nextn_predict_layers):
                         rolled_embed, _ = roll_tensor(
@@ -521,8 +537,12 @@ class GPTEmbedding(FleetLayer):
                         )
 
                         if _cp_size > 1:
-                            inputs_embeds_mtp = extract_local_zigzag_chunks(
-                                rolled_embed, _cp_rank, _cp_size, axis=1
+                            inputs_embeds_mtp = extract_local_cp_chunks(
+                                rolled_embed,
+                                _cp_rank,
+                                _cp_size,
+                                axis=1,
+                                mode=self.config.cp_balance_mode,
                             )
                         else:
                             inputs_embeds_mtp = rolled_embed
@@ -753,28 +773,29 @@ class GPTEmbedding(FleetLayer):
         swa_rotary_pos_sin = None
 
         def _slice_rope_for_mtp_megatron_cp(rope_table):
-            """Zigzag-slice a RoPE table for use_erndata + CP > 1.
+            """Slice a RoPE table for use_erndata + CP > 1.
 
             ``RotaryEmbedding.get_rotary_seq_len`` scales the rank-local input
             length back up by ``cp_group.world_size``, so the tables below are
             always built for the FULL sequence length L while the hidden states
-            this rank carries are its two zigzag chunks. The generic
+            this rank carries are its local slice. The generic
             ``ContextParallelScatterOp`` further down only runs for
             ``experimental_dataflow``, which megatron style forbids, so the
             slicing has to happen here -- with exactly the layout the megatron
-            MTP branch used for the embeddings.
+            MTP branch used for the embeddings (``config.cp_balance_mode``).
             """
             if mtp_megatron_cp_size == 1 or rope_table is None:
                 return rope_table
             from paddlefleet.transformer.multi_token_prediction import (
-                extract_local_zigzag_chunks,
+                extract_local_cp_chunks,
             )
 
-            return extract_local_zigzag_chunks(
+            return extract_local_cp_chunks(
                 rope_table,
                 mtp_megatron_cp_rank,
                 mtp_megatron_cp_size,
                 axis=1,
+                mode=self.config.cp_balance_mode,
             )
 
         # For MTP mode: truncate position_ids to match the actual sequence length
@@ -788,8 +809,8 @@ class GPTEmbedding(FleetLayer):
             # erndata keeps the main decoder at the full length L (the
             # per-doc shift happens inside the MTP layer), so position_ids
             # already matches. Under CP mtp_emb_res[0] is the rank-local
-            # zigzag slice, whose length must not be mistaken for L - K: a
-            # contiguous prefix of position_ids is not this rank's chunk.
+            # CP slice, whose length must not be mistaken for L - K (and
+            # under dualchunk a prefix of position_ids is not this rank's chunk).
             and not getattr(self.config, "use_erndata", False)
         ):
             # mtp_emb_res[0] has shape [B, seq_len - num_nextn_predict_layers, H]

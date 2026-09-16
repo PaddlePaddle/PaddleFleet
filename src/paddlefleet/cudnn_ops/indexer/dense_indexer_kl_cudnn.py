@@ -57,6 +57,85 @@ def _require_cudnn_frontend():
         raise ImportError(CUDNN_FRONTEND_HINT)
 
 
+# Query-head counts the two dense score epilogues can tile. This is a property
+# of the device, not of the op, because the two arch paths are separate kernels
+# (``api.py`` dispatches on ``get_device_capability``).
+#
+# On SM100+ both epilogues address TMEM
+# through ``tcgen05.copy.Repetition(m_block_size // 4)``
+# (``dense_score_recompute_sm100.py:163,1043,1332``), and that enum admits only
+# powers of two -- x1 .. x128 (``cutlass/cute/nvgpu/tcgen05/copy.py:46``). The
+# tile dispatch derives ``m_block_size = qhead_per_kv_head * 2``, falling back
+# to ``* 1`` when shared memory is tight (``_interface_sm100.py:699-713``), so a
+# head count that is not a power of two has no valid tile at all: ``h == 24``
+# with ``head_dim == 576`` picks ``m_block_size = 48`` and dies with
+# ``ValueError: 12 is not a valid Repetition`` raised from inside the CuTe
+# trace, i.e. from wherever the recompute segment is replayed rather than from
+# the call site.
+#
+# 16 rather than 4 as the SM100+ floor: the attention epilogue unrolls its head
+# sum by ``2 * LSE_ILP == 8`` (``dense_score_recompute_sm100.py:1378-1382``) and
+# the indexer one by ``2 * W_ILP == 16`` (``:1095-1097``), both with a
+# truncating ``range_constexpr``, so narrower tiles start dropping heads from
+# the sum. 16 is also where the sparse sibling kernel stops returning an
+# all-zero target (``mqa_latent_attention._TARGET_QHEAD_MIN``).
+#
+# SM90 has neither constraint. It caps ``tile_m`` at 64 and loops over
+# ``qhead_per_kvhead // tile_m`` head tiles
+# (``_interface_sm90._compute_tile_m``), with no TMEM copy and no fixed-width
+# head-sum unroll, so it serves any width up to 64 in a single tile and any
+# multiple of 64 above that -- ``index_n_heads == 192`` included. Holding it to
+# the SM100+ rule would reject widths its kernel handles natively, so the
+# supported set is computed per device instead.
+#
+# Its one floor is a single head: the same ``_compute_tile_m`` opens with
+# ``assert qhead_per_kvhead > 1, "SM90 kernel requires MQA/GQA"``, and
+# ``_validate_and_prepare_*`` re-derives the ratio as ``num_head // num_head_kv``
+# behind ``assert num_head > num_head_kv`` (``_interface_sm90.py:71,129,338``).
+# Since these callers hand the kernel a single latent KV head, ``h == 1`` trips
+# both. Two is enough to clear them and is the narrowest pad that does.
+_DENSE_SCORE_QHEAD_MIN = 16
+_SM90_HEAD_TILE = 64
+_SM90_QHEAD_MIN = 2
+
+
+def _dense_score_qheads(num_heads: int) -> int:
+    """Narrowest width this device's dense score can tile ``num_heads`` at."""
+    num_heads = int(num_heads)
+    major, _ = paddle.device.cuda.get_device_capability()
+    if major < 10:
+        if num_heads <= _SM90_HEAD_TILE:
+            return max(_SM90_QHEAD_MIN, num_heads)
+        return -(-num_heads // _SM90_HEAD_TILE) * _SM90_HEAD_TILE
+    return max(_DENSE_SCORE_QHEAD_MIN, 1 << (num_heads - 1).bit_length())
+
+
+def _require_dense_score_qheads(num_heads: int, name: str) -> None:
+    """Reject a head count the dense score cannot tile, from the call site.
+
+    The indexer pair is checked rather than padded: unlike the attention score,
+    whose outputs are head-reduced, ``dense_indexer_kl_bwd`` returns per-head
+    ``d_index_q`` / ``d_weights``, so padding would have to be threaded through
+    the backward's tiling as well for no gain -- every indexer this path is built
+    for runs at ``index_n_heads == 64``, which is a supported width on both arch
+    paths (and ``mqa_latent_attention._check_cudnn_dense_indexer_support``
+    rejects narrower ones at the layer). This exists so a future config lands on
+    a named error instead of ``N is not a valid Repetition`` from inside a
+    recompute replay.
+    """
+    num_heads = int(num_heads)
+    supported = _dense_score_qheads(num_heads)
+    if num_heads != supported:
+        raise ValueError(
+            f"the dense cuDNN score kernel tiles its MMA ``M`` on {name}, and "
+            f"the narrowest tile this device can cover {num_heads} heads with "
+            f"is {supported}, so {name} must be {supported}, got {num_heads}. "
+            "On SM100+ an untileable width instead fails as 'N is not a valid "
+            "Repetition' from inside the CuTe trace, i.e. from wherever the "
+            "segment is replayed."
+        )
+
+
 class _HashableTensor(paddle.Tensor):
     """``paddle.Tensor`` with hashable ``shape`` / ``stride()``.
 
@@ -125,6 +204,7 @@ def dense_indexer_kl_scores(
         dense_indexer_score_recompute_wrapper,
     )
 
+    _require_dense_score_qheads(index_q.shape[1], "index_n_heads")
     res = dense_indexer_score_recompute_wrapper(
         _HashableTensor(index_q.contiguous()),
         _HashableTensor(index_k.unsqueeze(1).contiguous()),
@@ -238,6 +318,62 @@ def dense_indexer_kl_bwd(
     )
 
 
+def _pad_attn_kl_heads(
+    query: paddle.Tensor, lse: paddle.Tensor
+) -> tuple[paddle.Tensor, paddle.Tensor]:
+    """Widen ``query``/``lse`` to a head count the dense attention score tiles.
+
+    Zeros for the query pad and ``+inf`` for its LSE, which is the same pair the
+    sparse sibling path uses (``mqa_latent_attention._attn_target_cudnn``) and it
+    is exact rather than approximate here:
+
+    * A pad head scores ``0`` against every key (its query row is zeros), so the
+      epilogue evaluates ``0 * scale - inf = -inf``, clamps it to
+      ``EXP2_ARG_MIN = -126`` (``dense_score_recompute_sm100.py:1403``) and adds
+      ``exp2(-126) = 1.18e-38`` to that column's head sum. At the production
+      geometry a real column sum is ~3.7e-4, whose fp32 ULP is ~4.4e-11, so
+      eight pad heads move the result by 27 orders of magnitude less than one
+      unit in the last place: the fp32 accumulation is bit-identical.
+    * The ``l1norm`` denominator accumulates the same per-column sums, so it
+      inherits the same non-perturbation.
+    * Columns outside the causal candidate set are force-zeroed by the kernel
+      before they reach either accumulator (``:1419-1421``), pad heads included.
+
+    Nothing is sliced back off: both kernel outputs are already head-reduced
+    (``[s_local, max_seqlen_k]`` and ``[s_local]``), so the pad heads leave no
+    trace in the returned shapes. And this function is on the *score* path only,
+    which carries no sink and no forced window (see
+    ``mqa_latent_attention._dense_kl_attn_lse``) -- the sink-bearing DSA paths do
+    their own head padding with ``_NEG_SINK`` in ``fusions/mqa_sparse_attn.py``
+    and ``fusions/csa_sparse_attn.py``.
+
+    Called from both the forward and the backward of the warmup KL, which is why
+    it lives here rather than at either call site: the two must hand the kernel
+    the same head count or the backward would build its gradient on a target the
+    forward never measured.
+    """
+    h = int(query.shape[1])
+    h_padded = _dense_score_qheads(h)
+    if h_padded == h:
+        return query, lse
+    pad = h_padded - h
+    s_local, head_dim = int(query.shape[0]), int(query.shape[2])
+    query = paddle.concat(
+        [query, paddle.zeros([s_local, pad, head_dim], dtype=query.dtype)],
+        axis=1,
+    )
+    lse = paddle.concat(
+        [
+            lse.cast("float32"),
+            paddle.full(
+                [int(lse.shape[0]), pad], float("inf"), dtype="float32"
+            ),
+        ],
+        axis=1,
+    )
+    return query, lse
+
+
 def dense_attn_kl_scores(
     query: paddle.Tensor,
     kv: paddle.Tensor,
@@ -259,7 +395,9 @@ def dense_attn_kl_scores(
     *mass-weighted* mixture instead, so ``lse`` is not a free normaliser.
 
     Args:
-        query: ``[s_local, H, D]`` bf16 absorbed queries (local rows).
+        query: ``[s_local, H, D]`` bf16 absorbed queries (local rows). ``H`` is
+            padded up to a supported tile width here when it is not one already;
+            see :func:`_dense_score_qheads`.
         kv: ``[s_global, D]`` bf16 latent keys (globally gathered).
         lse: ``[s_local, H]`` fp32 per-head LSE over the candidate set. Rows set
             to ``+inf`` come back as an all-zero score row, which is how an
@@ -276,6 +414,7 @@ def dense_attn_kl_scores(
         dense_attn_score_recompute_wrapper,
     )
 
+    query, lse = _pad_attn_kl_heads(query, lse)
     res = dense_attn_score_recompute_wrapper(
         _HashableTensor(query.contiguous()),
         _HashableTensor(kv.unsqueeze(1).contiguous()),

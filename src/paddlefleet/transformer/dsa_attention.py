@@ -79,7 +79,7 @@ def hadamard_transform(x: Tensor, scale: float = 1.0) -> Tensor:
 
     Reference:
         - fast-hadamard-transform (Tri Dao): csrc/fast_hadamard_transform_cuda.cu
-        - PaddleFormers/paddleformers/quantization/hadamard_utils.py (matmul_hadU)
+        - PaddleFleet/src/paddlefleet/quantization/hadamard_utils.py (matmul_hadU)
 
     Args:
         x: Input tensor of shape (..., dim). dim must be a power of 2.
@@ -381,6 +381,7 @@ class DSAIndexer(paddle.nn.Layer):
                 ),
                 rotary_base=config.rope_theta,
                 cp_group=pg_collection.cp,
+                rotary_embed_cache=getattr(config, "rotary_embed_cache", False),
             )
         elif config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(

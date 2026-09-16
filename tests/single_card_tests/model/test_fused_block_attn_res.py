@@ -22,7 +22,11 @@ either is missing; `TestBlockAttnResFallback` keeps the extension-free fallback
 path covered in that case.
 """
 
+import builtins
+import importlib.util
+import sys
 import unittest
+from unittest import mock
 
 import paddle
 
@@ -32,6 +36,9 @@ from paddlefleet.transformer.block_attn_res import (
     FusedAttnResTritonFunc,
     _block_attn_res_rmsnorm,
 )
+from paddlefleet.transformer.identity_op import IdentityOp
+from paddlefleet.transformer.paddle_norm import RMSNorm
+from paddlefleet.transformer.transformer_config import TransformerConfig
 
 # The FLA extension is optional in production (block_attn_res.py guards its
 # import and falls back), so the tests must not fail at collection time when it
@@ -337,6 +344,93 @@ class TestFusedAttnResPrecision(unittest.TestCase):
             f"norm_weight grad mismatch: {grad_norm_diff:.2e}",
         )
 
+    def test_backward_with_frozen_inputs(self):
+        """Frozen forward inputs must come back as None, not as a gradient.
+
+        Paddle requires a PyLayer's backward to return None at every forward
+        Tensor position whose stop_gradient is True; returning a real gradient
+        raises "backward function should return None at N position, because
+        it's forward Tensor's stopgradient is true" from py_layer_node.cc. Every
+        other fused case here marks all inputs trainable, so dropping
+        FusedAttnResTritonFunc's stop_gradient filtering would leave them green
+        while any frozen parameter blew up at runtime.
+
+        Freezing is applied to proj_weight, norm_weight and one completed block
+        at once, which is also the layout a partially frozen expert produces.
+        The surviving inputs are checked against the unfused reference so a
+        filter that returned None too eagerly fails too.
+        """
+        batch_seq, hidden_size, num_blocks = 4, 256, 3
+        norm_eps = 1e-6
+        frozen_block = 1
+
+        def build():
+            paddle.seed(self.seed)
+            blocks = [
+                paddle.randn([batch_seq, hidden_size], dtype="bfloat16")
+                for _ in range(num_blocks)
+            ]
+            partial = paddle.randn([batch_seq, hidden_size], dtype="bfloat16")
+            proj = paddle.randn([1, hidden_size], dtype="bfloat16")
+            norm_w = (
+                paddle.ones([hidden_size], dtype="bfloat16")
+                + paddle.randn([hidden_size], dtype="bfloat16") * 0.1
+            )
+            return blocks, partial, proj, norm_w
+
+        # Reference: everything trainable, unfused eager math.
+        blocks_ref, partial_ref, proj_ref, norm_ref = build()
+        for t in [*blocks_ref, partial_ref, proj_ref, norm_ref]:
+            t.stop_gradient = False
+        _block_attn_res_rmsnorm(
+            partial_ref, blocks_ref, proj_ref, norm_ref, norm_eps
+        ).astype("float32").sum().backward()
+
+        # Fused: proj_weight, norm_weight and blocks[frozen_block] are frozen.
+        blocks, partial, proj, norm_w = build()
+        partial.stop_gradient = False
+        for i, block in enumerate(blocks):
+            block.stop_gradient = i == frozen_block
+        proj.stop_gradient = True
+        norm_w.stop_gradient = True
+
+        # Without the stop_gradient filtering this call is what raises.
+        FusedAttnResTritonFunc.apply(
+            proj, norm_w, norm_eps, *blocks, partial
+        ).astype("float32").sum().backward()
+
+        self.assertIsNone(proj.grad, "frozen proj_weight must not get a grad")
+        self.assertIsNone(norm_w.grad, "frozen norm_weight must not get a grad")
+        self.assertIsNone(
+            blocks[frozen_block].grad,
+            f"frozen residual[{frozen_block}] must not get a grad",
+        )
+
+        # The trainable inputs still have to carry the same gradients.
+        atol = rtol = 5e-2
+        survivors = [
+            (f"residual[{i}]", blocks[i], blocks_ref[i])
+            for i in range(num_blocks)
+            if i != frozen_block
+        ] + [("partial_block", partial, partial_ref)]
+        for name, got, expected in survivors:
+            self.assertIsNotNone(got.grad, f"{name} lost its gradient")
+            diff = (
+                (got.grad.astype("float32") - expected.grad.astype("float32"))
+                .abs()
+                .max()
+                .item()
+            )
+            self.assertTrue(
+                paddle.allclose(
+                    got.grad.astype("float32"),
+                    expected.grad.astype("float32"),
+                    atol=atol,
+                    rtol=rtol,
+                ).item(),
+                f"{name} grad mismatch with frozen peers: {diff:.2e}",
+            )
+
 
 class TestBlockAttnResFallback(unittest.TestCase):
     """Cover the extension-free fallback path.
@@ -473,6 +567,176 @@ class TestBlockAttnResFallback(unittest.TestCase):
             self.assertTrue(all(h is not None for h in handles))
         else:
             self.assertTrue(all(h is None for h in handles))
+
+
+def _import_block_attn_res_without_extension():
+    """Execute a private copy of block_attn_res with the FLA import blocked.
+
+    Covers the `except (ImportError, AttributeError)` import arm, which is dead
+    code wherever the extension is installed. A private copy is used because
+    `importlib.reload` would swap `BlockAttnRes` out from under other tests.
+    """
+    from paddlefleet.transformer import block_attn_res
+
+    blocked = "paddlefleet_ops.fla.ops.attnres.fused"
+    real_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == blocked:
+            raise ImportError(f"blocked by {__name__}: {name}")
+        return real_import(name, *args, **kwargs)
+
+    name = "paddlefleet.transformer._block_attn_res_no_fla"
+    spec = importlib.util.spec_from_file_location(name, block_attn_res.__file__)
+    module = importlib.util.module_from_spec(spec)
+    # @dataclass resolves string annotations through sys.modules, so the copy
+    # must be registered while its body runs; patch.dict drops it again.
+    with (
+        mock.patch.dict(sys.modules, {name: module}),
+        mock.patch.object(builtins, "__import__", guarded_import),
+    ):
+        spec.loader.exec_module(module)
+    return module
+
+
+class TestFusedAttnResUnavailable(unittest.TestCase):
+    """The missing-extension gating and its once-per-process warning.
+
+    `HAVE_FUSED_ATTNRES` is patched rather than skipped on: these lines are
+    unreachable where the extension exists and the fused tests are unreachable
+    where it does not, so skipping either way leaves the path never covered.
+    """
+
+    def setUp(self):
+        from paddlefleet.transformer import block_attn_res
+
+        self.mod = block_attn_res
+        paddle.set_device("gpu:0" if _HAVE_GPU else "cpu")
+        # Once-per-process state; restore it so test order cannot matter.
+        self.addCleanup(
+            setattr,
+            block_attn_res,
+            "_fused_attnres_fallback_warned",
+            block_attn_res._fused_attnres_fallback_warned,
+        )
+
+    def _build(self, module=None, norm=RMSNorm, have_fused=False, **kwargs):
+        """Build a BlockAttnRes and return it with the captured warning mock."""
+        module = module or self.mod
+        module._fused_attnres_fallback_warned = False
+        config = TransformerConfig(
+            hidden_size=16,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            **kwargs,
+        )
+        with (
+            mock.patch.object(module, "HAVE_FUSED_ATTNRES", have_fused),
+            mock.patch.object(module.logger, "warning") as warning,
+        ):
+            layer = module.BlockAttnRes(
+                config, module.BlockAttnResSublayersSpec(norm=norm)
+            )
+        return layer, warning
+
+    def test_eligible_layer_reports_the_import_failure(self):
+        """The recorded import error must reach the log, not a bare message."""
+        reason = "ImportError: sentinel from test"
+        with mock.patch.object(self.mod, "_FUSED_ATTNRES_IMPORT_ERROR", reason):
+            layer, warning = self._build()
+
+        self.assertFalse(layer._use_fused)
+        self.assertEqual(
+            warning.call_count, 1, "the missing extension must be reported"
+        )
+        self.assertIn(reason, warning.call_args.args)
+
+    def test_ineligible_layers_stay_quiet(self):
+        """The warning tracks real eligibility, not just the missing extension.
+
+        A LayerNorm or deterministic-mode layer was never going to use the fused
+        kernel, so warning about it misreads as a missing extension.
+        """
+        for label, norm, kwargs in (
+            ("non-RMSNorm", IdentityOp, {}),
+            ("deterministic_mode", RMSNorm, {"deterministic_mode": True}),
+            ("attn_res_fusion off", RMSNorm, {"attn_res_fusion": False}),
+        ):
+            with self.subTest(ineligible=label):
+                layer, warning = self._build(norm=norm, **kwargs)
+                self.assertFalse(layer._use_fused)
+                self.assertEqual(
+                    warning.call_count,
+                    0,
+                    f"{label} was never fused-eligible, so it must stay quiet",
+                )
+
+    def test_eligible_layer_with_extension_uses_fused_and_stays_quiet(self):
+        """The other side of the gate: present extension, no warning."""
+        layer, warning = self._build(have_fused=True)
+
+        self.assertTrue(layer._use_fused)
+        self.assertEqual(warning.call_count, 0)
+
+    def test_warning_is_emitted_once_per_process(self):
+        """Every layer of a deep model hits this; only the first may log."""
+        self.mod._fused_attnres_fallback_warned = False
+        with mock.patch.object(self.mod.logger, "warning") as warning:
+            self.mod._warn_fused_attnres_unavailable_once()
+            self.mod._warn_fused_attnres_unavailable_once()
+
+        self.assertEqual(warning.call_count, 1)
+
+    def test_warning_is_rank_zero_only(self):
+        """Otherwise the line is repeated once per card on every job."""
+        self.mod._fused_attnres_fallback_warned = False
+        with (
+            mock.patch.object(paddle.distributed, "get_rank", return_value=1),
+            mock.patch.object(self.mod.logger, "warning") as warning,
+        ):
+            self.mod._warn_fused_attnres_unavailable_once()
+
+        self.assertEqual(warning.call_count, 0)
+
+    def test_warning_survives_an_unavailable_rank(self):
+        """A failed rank lookup must be reported, not swallowed, and not crash."""
+        self.mod._fused_attnres_fallback_warned = False
+        with (
+            mock.patch.object(
+                paddle.distributed,
+                "get_rank",
+                side_effect=ValueError("bad PADDLE_TRAINER_ID"),
+            ),
+            mock.patch.object(self.mod.logger, "warning") as warning,
+        ):
+            self.mod._warn_fused_attnres_unavailable_once()
+
+        self.assertEqual(warning.call_count, 2)
+        self.assertIn(
+            "bad PADDLE_TRAINER_ID",
+            [str(a) for call in warning.call_args_list for a in call.args],
+        )
+
+    def test_module_imports_without_the_extension(self):
+        """Importing with no FLA extension must degrade, not raise."""
+        module = _import_block_attn_res_without_extension()
+
+        self.assertFalse(module.HAVE_FUSED_ATTNRES)
+        self.assertIsNone(module.fused_attnres_fwd)
+        self.assertIsNone(module.fused_attnres_bwd)
+        self.assertIsNone(module._build_ptr_table)
+        self.assertIn("ImportError", module._FUSED_ATTNRES_IMPORT_ERROR)
+
+        # And an eligible layer built against it reports that same reason,
+        # without any patching of the availability flag.
+        layer, warning = self._build(
+            module=module, have_fused=module.HAVE_FUSED_ATTNRES
+        )
+        self.assertFalse(layer._use_fused)
+        self.assertEqual(warning.call_count, 1)
+        self.assertIn(
+            module._FUSED_ATTNRES_IMPORT_ERROR, warning.call_args.args
+        )
 
 
 if __name__ == "__main__":

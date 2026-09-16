@@ -24,6 +24,16 @@ from paddlefleet.fusions.fused_swiglu_scale import (
     fused_swiglu_scale_backward,
     fused_swiglu_scale_forward,
 )
+from paddlefleet.train_infer_consistent_ops.ffn_act import (
+    dequant_dispatched_hidden_bf16,
+    requant_swiglu_output,
+    scatter_dispatched_hidden_bf16,
+)
+from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
+from paddlefleet.train_infer_consistent_ops.permute import (
+    canonical_rows,
+    scatter_canonical_rows,
+)
 
 try:
     from paddlefleet_ops import (
@@ -948,6 +958,8 @@ class ExpertsGroupGemmContiguousNode:
         else:
             self.grouped_gemm_experts = custom_map.grouped_gemm_experts
         self.expert_id = expert_id
+
+        self.layer_number = getattr(custom_map, "layer_number", None)
         self.recompute_moe_gate_up = recompute_moe_gate_up
         self.dequant_input = dequant_input
         self.tokens_per_expert = None
@@ -1652,6 +1664,18 @@ class ExpertsGroupGemmContiguousNode:
             )
         o2_scale = paddle.transpose(
             paddle.transpose(o2_scale, [1, 0]).contiguous(), [1, 0]
+        )
+
+        o2_fp8, o2_scale = inspect_tensor(
+            "moe_act_quant_output",
+            self.layer_number,
+            (o2_fp8, o2_scale),
+            pre_save_func=lambda pair: canonical_rows(
+                dequant_dispatched_hidden_bf16(*pair)
+            ),
+            post_load_func=lambda canon: requant_swiglu_output(
+                o2_fp8, o2_scale, canon, self.use_ue8m0
+            ),
         )
 
         if clear_o1:
@@ -2396,9 +2420,29 @@ class ExpertsGroupGemmContiguousNode:
 
         num_expert = len(expert_w1)
 
+        hs_out, scale = inspect_tensor(
+            "moe_dispatched_hidden",
+            self.layer_number,
+            (hs_out, scale),
+            pre_save_func=lambda pair: canonical_rows(
+                dequant_dispatched_hidden_bf16(*pair)
+            ),
+            post_load_func=lambda canon: (
+                scatter_dispatched_hidden_bf16(hs_out, scale, canon),
+                None,
+            ),
+        )
+
         # o1
         o1 = self.fwd_gate_up(
             hs_out, expert_w1, num_expert, tokens_per_expert, scale=scale
+        )
+        o1 = inspect_tensor(
+            "moe_ffn1_output",
+            self.layer_number,
+            o1,
+            pre_save_func=canonical_rows,
+            post_load_func=lambda canon: scatter_canonical_rows(o1, canon),
         )
         if not self.recompute_moe_gate_up:
             self.o1 = o1
@@ -2422,6 +2466,19 @@ class ExpertsGroupGemmContiguousNode:
             num_expert,
             o3=fwd_down_output,
             clear_o1=clear_o1,
+        )
+        # This side folds the routing weight into the SwiGLU kernel, so o3 is
+        # only comparable with the inference side's down-GEMM output while that
+        # weight is forced to 1. `inspect_tensor_force_unit_probs()` does that for
+        # the `moe_act_quant_output` probe, so o3 is the comparable one exactly in
+        # the runs where that tag is live -- whitelisting `moe_ffn2_output` alone
+        # leaves the weights in place and this dump incomparable.
+        o3 = inspect_tensor(
+            "moe_ffn2_output",
+            self.layer_number,
+            o3,
+            pre_save_func=canonical_rows,
+            post_load_func=lambda canon: scatter_canonical_rows(o3, canon),
         )
         return o3
 

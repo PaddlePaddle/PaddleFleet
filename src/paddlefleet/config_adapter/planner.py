@@ -16,11 +16,13 @@
 
 :func:`plan_parallelism` picks one of two planners from the options:
 
-* frozen (``--test-performance``) -- every parallel dimension stays as the
-  source declares it; an incompatible target scale is rejected with the list
-  of legal node counts rather than forced through.
-* shrink (default) -- candidates are tried in order of increasing structural
-  intrusion and the first feasible one wins::
+* frozen (the default, and ``--test-performance``) -- every parallel
+  dimension stays as the source declares it; an incompatible target scale is
+  rejected with the list of legal node counts rather than forced through.
+  Shrinking changes the model structure, so it is never a silent default.
+* shrink (``--test-accuracy`` without ``--test-performance``) -- candidates
+  are tried in order of increasing structural intrusion and the first
+  feasible one wins::
 
       Case A (dims already legal) < EP-only < PP-only < EP+PP joint
 
@@ -82,7 +84,12 @@ def plan_parallelism(
 ):
     """Plan the final parallel dims. Returns ``(plan, error_or_None)``."""
     if options.freeze_parallel:
-        plan, err = plan_frozen(dims, target_cards, cards_per_node)
+        plan, err = plan_frozen(
+            dims,
+            target_cards,
+            cards_per_node,
+            frozen_by_performance=options.test_performance,
+        )
     else:
         plan, err = ShrinkPlanner().plan(
             config, dims, target_cards, cards_per_node, context
@@ -112,30 +119,47 @@ def enforce_vpp_limit(config, plan):
     plan.yaml_changes.append((VPP_FIELD, 1, _vpp_off_reason(vpp, plan.pp)))
 
 
-def plan_frozen(dims, target_cards, cards_per_node):
-    """Keep every parallel dim; fail when the target scale needs changes."""
+def plan_frozen(dims, target_cards, cards_per_node, frozen_by_performance=True):
+    """Keep every parallel dim; fail when the target scale needs changes.
+
+    ``frozen_by_performance`` only shapes the diagnostics: the dims are
+    frozen either because ``--test-performance`` demanded it, or because no
+    switch was given and shrinking (a model-structure change) requires the
+    explicit ``--test-accuracy`` opt-in.
+    """
     tp, pp, ep, cp, sep = dims
     validator = TopologyValidator(target_cards, cards_per_node)
     ok, message, _details = validator.validate(tp, pp, ep, cp, sep)
     if not ok:
-        return None, (
-            f"{message}\n"
-            f"  说明：--test-performance 只调整 sharding 与 "
-            f"global_batch_size，不修改 TP/PP/EP/CP/SEP 和 acc，"
-            f"因此目标机器规模必须与源并行度兼容。\n"
-            f"  建议：换用上面列出的合法节点数，"
-            f"或去掉 --test-performance（默认允许缩小 EP/PP）"
-        )
+        if frozen_by_performance:
+            why = (
+                "--test-performance 只调整 sharding 与 global_batch_size，"
+                "不修改 TP/PP/EP/CP/SEP 和 acc，"
+                "因此目标机器规模必须与源并行度兼容。"
+            )
+            hint = (
+                "换用上面列出的合法节点数；确要缩小 EP/PP 请去掉 "
+                "--test-performance 并加 --test-accuracy"
+            )
+        else:
+            why = (
+                "默认不缩小 EP/PP：缩容会等比改写专家数 / 层数，"
+                "属于模型结构变更，不应默默发生，"
+                "因此目标机器规模必须与源并行度兼容。"
+            )
+            hint = (
+                "换用上面列出的合法节点数，"
+                "或加 --test-accuracy 显式允许缩小 EP/PP"
+            )
+        return None, f"{message}\n  说明：{why}\n  建议：{hint}"
+    note = (
+        "并行度全部保持不变（--test-performance 冻结 TP/PP/EP/CP/SEP 与 acc）"
+        if frozen_by_performance
+        else "并行度全部保持不变（默认冻结；缩小 EP/PP 需显式加 "
+        "--test-accuracy）"
+    )
     return (
-        ParallelismPlan(
-            tp,
-            pp,
-            ep,
-            cp,
-            sep,
-            note="并行度全部保持不变（--test-performance 冻结 "
-            "TP/PP/EP/CP/SEP 与 acc）",
-        ),
+        ParallelismPlan(tp, pp, ep, cp, sep, note=note),
         None,
     )
 

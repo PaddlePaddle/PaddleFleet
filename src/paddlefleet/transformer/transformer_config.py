@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Literal
 
 import paddle.nn.functional as F
 
+from ..accuracy_target import AccuracyTarget, normalize_accuracy_target
 from ..model_parallel_config import ModelParallelConfig
 from ..recompute_utils import validate_recompute_modules
 from ..utils import (
@@ -317,6 +318,22 @@ class TransformerConfig(ModelParallelConfig):
     flashmask_use_varlen: bool = False
     """If True, convert flashmask to varlen in attention."""
 
+    # ---- HyperEncoder attention backend ----
+    # Used only by the HyperEncoder model (models/hyperencoder/*). Declared here
+    # so the switches are first-class config fields (validated, serialized,
+    # test-covered) instead of environment variables. Other models leave them at
+    # their defaults and never read them. The Triton kernel launch tuning
+    # (block size / warps / stages / plan-cache) is not exposed: production never
+    # varies it, so those values are fixed in the kernel.
+    hyperencoder_attn_backend: str = "dp"
+    """HyperEncoder core-attention backend: "dp" (dense per-layer mask) or
+    "triton" (packed prefix-LM core). Validated in the model config's
+    __post_init__ ("flex" and unknown values raise)."""
+
+    hyperencoder_packed_decoder: bool = False
+    """Run the HyperEncoder trunk as a single packed call. Requires
+    hyperencoder_attn_backend="triton"."""
+
     intermediate_size: int | None = None
     """Transformer Feed-Forward Network hidden size. This is set to 4*hidden_size
     if not provided."""
@@ -338,6 +355,19 @@ class TransformerConfig(ModelParallelConfig):
     for both the BF16 and the FP8 expert path. Off by default, which runs
     SiTU-GLU as separate ops; the fused kernel also falls back to those ops
     when Triton is unavailable."""
+
+    situ_glu_plain_fusion: bool = False
+    """Opt into the fused Triton SiTU-GLU kernel on the call sites that have no
+    router scaling: the dense MLP (``StandardMLPSharedExpert`` and the
+    ``first_k_dense_replace`` layer) and the non-FP8 GroupedMLP experts. This is
+    a different kernel from the one ``situ_glu_fusion`` selects -- that one also
+    fuses the per-token router scale and only serves FusionMoe -- so the two
+    flags are independent. Off by default, which runs SiTU-GLU as 13 separate
+    fp32 ops; the fused kernel also falls back to those ops when Triton is
+    unavailable or the input is not a contiguous GPU tensor. The forward is
+    bit-exact against the op chain; the backward is not (0.07% of gradient
+    elements differ, all near zero, in the direction of being more accurate --
+    see ``triton_ops/situ_glu_plain.py``)."""
 
     use_bias: bool = False
     """Include a bias term in all linear layers (QKV projections and Output projections, after core attention, and two in
@@ -568,6 +598,38 @@ class TransformerConfig(ModelParallelConfig):
 
     high_precision_rope: bool = False
     swa_high_precision_norm: bool = False
+
+    rotary_embed_cache: bool = False
+    """If True, ``RotaryEmbedding.forward`` memoises its angle table per
+    ``(max_seq_len, offset)``.
+
+    The table is a pure function of that key plus instance constants, so a hit is
+    bit-identical to recomputing. Training rebuilds the identical table once per
+    attention module per microbatch (~95 us of host dispatch each for an 8192 x 64
+    table), which the cache collapses to a dict lookup. Calls that pass
+    ``position_ids`` are never cached -- the result then depends on a runtime
+    tensor. Off by default so the original code path is unchanged.
+
+    Scope, on purpose: the ``RotaryEmbedding`` instances that attention layers own
+    -- MLA (``multi_latent_attention.py``), DSv4 hybrid (``dsv4_hybrid_attention.py``)
+    and the DSA indexer (``dsa_attention.py``). Those are the ones that rebuild the
+    table, because every layer holds its own instance and calls it once per
+    microbatch; a 44-layer model does that a few hundred times per step.
+
+    Deliberately *not* wired into ``GPTEmbedding``: models that take that path build
+    one table per forward at the embedding stage and pass it down through
+    ``dict_args``, so there is no repeated rebuild to remove and caching would add
+    surface without a measurable win. ``YarnRotaryEmbedding`` and
+    ``MultimodalRotaryEmbedding`` override ``forward`` outright and are likewise out
+    of scope.
+
+    The memo is a single slot, not a dict. On the training path the key is fixed --
+    that is where the win comes from, and the slot is a permanent hit. Callers that
+    vary the key get no benefit: incremental decode reaches ``_build_rope_freqs``'s
+    ``sq + position_offset`` form, whose key grows with the KV cache, so every step
+    replaces the slot and misses. That is why one slot is enough -- what it holds is
+    bounded by construction, without an eviction policy."""
+
     ####################
     # fusion
     ####################
@@ -758,11 +820,19 @@ class TransformerConfig(ModelParallelConfig):
     ``list[str]``: every listed submodule shares the layers picked by
     ``recompute_num_layers`` + ``recompute_method`` (all layers if the count is
     None). ``dict[str, spec]``: per-submodule, where ``spec`` is ``"all"``
-    (negative int / None equivalent), a list of global 0-based layer ids
-    (empty head/tail layers included), or a count resolved through
-    ``recompute_method``::
+    (negative int / None equivalent), a list of layer ids, or a count resolved
+    through ``recompute_method``::
 
         recompute_modules: {core_attn: [0, 1, 2], mlp: 2, moe_gate_up: all}
+
+    Layer ids are 0-based in the same space ``csa_compress_ratios`` indexes:
+    ``0 .. num_hidden_layers - 1`` are the backbone layers, then
+    ``num_hidden_layers + i`` addresses MTP layer ``i``. The
+    ``num_empty_layers_add_in_head`` / ``_tail`` layers hold no submodule and
+    are not addressable, so they take up no ids -- an id is a real layer.
+
+    A count selector is resolved over the physical layer number instead, which
+    is how ``recompute_method`` has always counted, empty layers included.
 
     ``flash_attn`` / ``moe_combine`` are refined-recompute entries and invert
     the spec: selected layers keep plain recompute, RR runs on the rest.
@@ -980,6 +1050,45 @@ class TransformerConfig(ModelParallelConfig):
     "dualchunk_allgather": balanced front+rear chunk splitting (default).
     "contiguous_allgather": simple rank-order contiguous slicing.
     "contiguous_a2a".
+    An optional "_overlap"/"_nonoverlap" suffix selects `flashmask_cp_overlap`; it is
+    stripped from this field during post-init.
+    """
+
+    flashmask_cp_overlap: bool = False
+    """Whether context parallel FlashMask attention overlaps the KV
+    communication inside the attention kernel. Normally set through the
+    "_overlap" suffix of `cp_balance_mode`.
+    """
+
+    linear_cp_mode: str = "chunkwise"
+    """How the linear-attention layers (KDA, ...) parallelise over the CP group.
+
+    This is *not* a kernel selector -- the kernel is chunkwise either way. It
+    picks which axis the CP group cuts, and it only affects these layers: the
+    global token layout stays whatever ``cp_balance_mode`` says, and every other
+    layer of the same model is unaffected.
+
+    ``"chunkwise"`` (default) cuts the **sequence**, which is what the layer has
+    always done: each rank owns ``s/cp`` tokens, relays the chunk state rank to
+    rank, and exchanges a conv halo with its neighbours. Works under any
+    ``cp_balance_mode``, but cannot be bitwise against a single card -- the halo
+    backward is a partial sum, and a rank whose local varlen segments do not line
+    up with the global 64-token chunk grid re-segments the recurrence.
+
+    ``"headwise"`` cuts the **heads** (Ulysses): before the short conv each rank
+    trades its ``[s/cp, all heads]`` slice for ``[s, heads/cp]``, so the conv and
+    the recurrence see the *whole* sequence and run with plain single-card
+    semantics -- no halo, no state relay, global ``cu_seqlens`` -- and the output
+    is swapped back before ``out_norm``. That is what buys bitwise: the forward,
+    the input gradients and the per-head parameter gradients match a single card
+    exactly, leaving only the dense projections' ``dW`` at the ~1e-7 any-CP floor.
+
+    Costs and limits of ``"headwise"``: five all-to-all exchanges forward and one
+    back per layer instead of the halo exchange; requires
+    ``(num_key_heads // tp) % cp == 0`` and ``(num_value_heads // tp) % cp == 0``
+    (``KimiDeltaAttention.__init__`` raises otherwise); and because the swap
+    assumes rank ``r`` owns the contiguous token block ``[r*s/cp, (r+1)*s/cp)``,
+    ``cp_balance_mode`` must be one of the contiguous layouts.
     """
 
     ####################
@@ -1631,6 +1740,13 @@ class TransformerConfig(ModelParallelConfig):
     compressed positions.
     """
 
+    cp_compress_p2p: bool = False
+    """If True, the CSA/HCA compressor pools each group on the CP rank owning its
+    start via a one-hop P2P window instead of an all-gather of the whole projected
+    sequence. Only takes effect for non-overlapping (ratio 128) layers under CP;
+    off falls back to the all-gather baseline, bit-for-bit.
+    """
+
     indexer_init_from_scratch: bool | None = None
     """Whether the Indexer weights are initialized instead of loaded.
 
@@ -1838,9 +1954,16 @@ class TransformerConfig(ModelParallelConfig):
     gpt_model_use_experimental_version: bool = False
     """Enable experimental version code paths for precision alignment."""
 
-    use_accuracy_compatible: bool = False
-    """Whether to enable accuracy-compatible kernels for cross-framework numerical
-    alignment. Defaults to False."""
+    use_accuracy_compatible: AccuracyTarget = False
+    """Which reference the accuracy-compatible kernels reproduce bit-for-bit.
+
+    ``False`` (default) uses the throughput kernels. ``"megatron"`` -- also
+    accepted as ``True``, which is what it has always meant -- aligns with
+    Megatron-LM. ``"hf"`` aligns with the HuggingFace/Torch reference. Both
+    non-default values are truthy, so ``if config.use_accuracy_compatible:``
+    still means "in some alignment mode"; use
+    ``paddlefleet.accuracy_target.targets_hf`` only where the two references
+    require different arithmetic. Normalized in ``__post_init__``."""
 
     moe_topk_fusion: bool = False
     """If True, use Triton fused MoE TopK kernel for expert selection."""
@@ -2015,6 +2138,14 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        # ``True`` predates the "hf" target and has always meant Megatron, so
+        # canonicalize it to the explicit name; every falsy spelling collapses to
+        # False. An unknown target raises rather than falling back to the default
+        # kernels, which would turn a typo into a slow run that silently aligns
+        # with nothing.
+        self.use_accuracy_compatible = normalize_accuracy_target(
+            self.use_accuracy_compatible
+        )
         # Normalize the indexer loss coefficient: None (e.g. from a HuggingFace
         # config.json ``"indexer_loss_coeff": null`` or explicit config) means
         # "disabled" and collapses to 0.0, so this config object never exposes
@@ -2092,15 +2223,49 @@ class TransformerConfig(ModelParallelConfig):
                 )
 
         if self.enable_mtp_magic_send:
-            assert not getattr(self, "tie_word_embeddings", False), (
-                "enable_mtp_magic_send with tie_word_embeddings=True is not yet validated. "
-                "Please disable tie_word_embeddings when using magic send MTP."
-            )
-            assert not self.mtp_shared_last_layer, (
-                "enable_mtp_magic_send and mtp_shared_last_layer cannot both be True. "
-                "Magic send uses per-layer mtp_embed with broadcast sync, which is "
-                "incompatible with SharedLayerDesc-based last-layer reuse."
-            )
+            # Raise, not assert, for the same reason as multimodal_embedding
+            # below: stripped by ``python -O``, this one fails silently rather
+            # than loudly. get_layer_desc_list tests tie_word_embeddings before
+            # enable_mtp_magic_send, so the tie wins and `mtp_embed` is never
+            # emitted; _mtp_embed_global_group then collapses to None and
+            # _synchronize_mtp_embed_weight broadcasts a zero buffer from
+            # stage 0 into the MTP stage's real (perform_initialization=False)
+            # table. Training proceeds on an all-zero, never-synced vocab table.
+            if getattr(self, "tie_word_embeddings", False):
+                raise ValueError(
+                    "enable_mtp_magic_send with tie_word_embeddings=True is "
+                    "not yet validated: the embedding desc branch emits the "
+                    "tie and drops magic send's `mtp_embed`, leaving the MTP "
+                    "stage with an all-zero vocab table and no gradient sync. "
+                    "Please disable tie_word_embeddings when using magic send "
+                    "MTP."
+                )
+            # NOTE: mtp_shared_last_layer is deliberately NOT rejected here. The
+            # two are orthogonal -- SharedLayerDesc with
+            # shared_submodule_weight_only=True aliases only the params under
+            # `transformer_layer`, while magic send owns `mtp_embed` (synced via
+            # gpt_model's _mtp_embed_global_group) -- so their parameter sets do
+            # not overlap.
+            #
+            # Two preconditions the combination relies on, neither asserted:
+            # 1. The tie pivot (last backbone layer) and the MTP desc must land
+            #    on the same rank. PipelineLayer._build_layer_impl registers only
+            #    descs inside this rank's range, so a PP boundary between them
+            #    downgrades _alias_shared_layer to _construct_shared_comm: still
+            #    numerically tied, but two copies, so the memory saving is gone.
+            #    At num_nextn_predict_layers > 1 an off-stage pivot is worse than
+            #    that -- it aborts construction. paddle stores the *whole* first
+            #    desc it sees for the key, so on an MTP-only stage depth 0 becomes
+            #    shared_layers['mtp_reuse_transformer'] and depth 1 aliases
+            #    against it: source names carry the `transformer_layer.` prefix,
+            #    dest names (taken from dest_layer.transformer_layer) do not,
+            #    every lookup misses, and the assert below fires with
+            #    "miss parameters:N". Only seg_method="layer:..." keeps them
+            #    co-located; paddle's default is "uniform", which can split them.
+            # 2. _alias_shared_layer asserts `total_params == aliased_count`, so
+            #    the pivot and the MTP layer must resolve to the same attention
+            #    parameter set -- for dsv4_hybrid, csa_compress_ratios at indices
+            #    num_hidden_layers-1 and num_hidden_layers must agree.
             if self.num_nextn_predict_layers > 1:
                 assert self.variable_seq_lengths, (
                     "enable_mtp_magic_send with num_nextn_predict_layers > 1 requires "
@@ -2136,9 +2301,33 @@ class TransformerConfig(ModelParallelConfig):
         if self.use_erndata and self.num_nextn_predict_layers > 0:
             # erndata + MTP selects the packed-doc (MCore 8c4df6b07) contract.
             if self.enable_mtp_magic_send:
+                # Refused by design, not for lack of implementation. erndata
+                # already puts full-length input_ids and cu_seqlens_q into
+                # preproc_output and no backbone layer consumes them (
+                # transformer_layer only re-slices input_ids when it is longer
+                # than the backbone sequence, which never happens for length-L
+                # erndata tensors), so they reach the MTP layer intact without
+                # magic send.
+                #
+                # What the flag would still add is its other half: a second
+                # *trainable* vocab table (`mtp_embed`) on the MTP stage, tied to
+                # the stage-0 embedding logically but physically replicated
+                # whenever stage 0 is a different rank -- exactly the PP>1 case
+                # the flag exists for. That costs V*H in weights, the same in
+                # gradients and 3x in fp32 master+m+v (only the optimizer state
+                # is sharded) to shrink the hidden-state P2P payload from (K+1)x
+                # to 1x, traffic overlap_p2p_comm already hides. Keep the default
+                # batch-axis carrier, which already supports any PP depth here.
                 raise ValueError(
-                    "use_erndata=True with MTP is incompatible with "
-                    "enable_mtp_magic_send=True."
+                    "use_erndata=True with MTP does not need (and does not "
+                    "support) enable_mtp_magic_send=True. erndata already "
+                    "delivers full-length input_ids and cu_seqlens_q to the MTP "
+                    "stage through the pipeline dict, so magic send would only "
+                    "add a replicated trainable vocab table on that stage in "
+                    "order to shrink a P2P payload that overlap_p2p_comm "
+                    "already hides. Set enable_mtp_magic_send=False; the "
+                    "default batch-axis MTP carrier works at any "
+                    "pipeline_model_parallel_size."
                 )
             if self.experimental_dataflow:
                 # experimental_dataflow specifically produces
@@ -2162,16 +2351,75 @@ class TransformerConfig(ModelParallelConfig):
                     "the shifted embeddings from hidden_states, not from "
                     "mtp_decoder_inputs)."
                 )
-            # PaddleFleet's `dualchunk_allgather` scatter layout is the only
-            # mode equivalent to MCore's zigzag balancing; the other two
-            # (`contiguous_allgather`, `contiguous_a2a`) are not covered by
-            # this path's MTP roll semantics.
+            # The erndata MTP path slices its full-length tensors locally
+            # (extract_local_cp_chunks) instead of calling
+            # ContextParallelScatterOp, so cp_balance_mode has to name a layout
+            # the rest of the model also uses:
+            #   dualchunk_allgather  -> scatter_balance    (zigzag, MCore-like)
+            #   contiguous_allgather -> scatter_contiguous (rank-order slices)
+            #
+            # contiguous_a2a shards the sequence contiguously too, but its mask
+            # contract differs (DotProductAttention.forward skips
+            # expand_attn_mask_startend_row_indices_for_cp under a2a) and has
+            # never been run here, so it is refused rather than assumed to work.
+            #
+            # contiguous_allgather is necessary but not sufficient for the DSv4
+            # hybrid stack: DSv4HybridAttention/MQALatentAttention assert on it
+            # under CP, and the Indexer rejection in the dsv4_hybrid block below
+            # still rules the combination out.
             if self.context_parallel_size > 1:
-                if self.cp_balance_mode != "dualchunk_allgather":
+                if self.cp_balance_mode not in (
+                    "dualchunk_allgather",
+                    "contiguous_allgather",
+                ):
                     raise ValueError(
                         f"use_erndata=True with MTP + context_parallel_size>1 "
-                        f"requires cp_balance_mode='dualchunk_allgather', got "
+                        f"requires cp_balance_mode in "
+                        f"{{'dualchunk_allgather', 'contiguous_allgather'}}, got "
                         f"{self.cp_balance_mode!r}."
+                    )
+                if self.gpt_model_use_experimental_version:
+                    # Not a mask-shape problem, despite what the CP mask
+                    # expansion in DotProductAttention.forward suggests: the
+                    # erndata loader co-emits attn_mask_startend_row_indices
+                    # [B, 1, L, 1] with cu_seqlens (both under pack_by_cu_seqlen,
+                    # which defaults True), so GPTEmbedding's
+                    # include_position_axis branch -- gated on the mask being
+                    # absent -- never fires and no 2-column mask is ever built.
+                    #
+                    # What the flag does change here is the attention entry
+                    # point: it routes query/key through _apply_ec_complex_3d_mrope,
+                    # which indexes position_ids on a 3-way last axis, while
+                    # erndata delivers position_ids as [B, L] and
+                    # transformer_layer leaves it untouched. It also nulls the
+                    # rotary tables, making the CP RoPE slicing this path relies
+                    # on inert. Neither has been run under CP, so refuse rather
+                    # than let it fail deep inside attention.
+                    raise ValueError(
+                        "use_erndata=True with MTP + context_parallel_size>1 is "
+                        "incompatible with "
+                        "gpt_model_use_experimental_version=True: that flag "
+                        "switches attention to the EC 3-axis MRoPE path, which "
+                        "expects position_ids with a mode axis, while erndata "
+                        "delivers [B, L]. Set "
+                        "gpt_model_use_experimental_version=False."
+                    )
+                if self.mtp_distillation_loss:
+                    # LanguageLoss's distillation branch builds lossmask from
+                    # labels_cur_depth, which the erndata path has already sliced
+                    # to L/cp, and then scatters it again -- the sibling
+                    # non-distillation branch skips that second scatter for
+                    # erndata, this one does not. The result is
+                    # [B, L/cp**2, 1] * [B, L/cp, V]. Its `xishu` normaliser is a
+                    # rank-local token count divided into a CP-all-reduced sum on
+                    # top of that. Both are pre-existing; reject the combination
+                    # here rather than ship a broadcast error.
+                    raise ValueError(
+                        "use_erndata=True with MTP + context_parallel_size>1 is "
+                        "incompatible with mtp_distillation_loss=True: the "
+                        "distillation branch double-scatters its loss mask and "
+                        "normalises a CP-reduced sum by a rank-local token "
+                        "count. Set mtp_distillation_loss=False."
                     )
             # PP>1 is supported without any external dataloader help:
             # cu_seqlens_q travels down the pipeline dict (like position_ids)
@@ -2181,6 +2429,43 @@ class TransformerConfig(ModelParallelConfig):
             # writes the same stash on the PP=1 / first stage. If the stash is
             # ever missing on the loss rank, LanguageLoss.forward raises rather
             # than silently rolling labels across packed-doc boundaries.
+
+        if (
+            self.use_erndata
+            and self.context_parallel_size > 1
+            and not self.experimental_dataflow
+        ):
+            # Under erndata nothing upstream shards by CP: the loader broadcasts
+            # every tensor full-length to the whole CP group
+            # (erndata_paddle_adapter._get_cp_group_and_src) and the model is
+            # expected to take its own slice. Exactly two paths do that:
+            #   * GPTEmbedding's MTP branch (extract_local_cp_chunks), gated on
+            #     num_nextn_predict_layers > 0 and not mtp_load_weight_only;
+            #   * the plain-path ContextParallelScatterOp beside it, gated on
+            #     experimental_dataflow, which also scatters the RoPE tables and
+            #     -- in LanguageLoss._forward -- the labels. The MTP block above
+            #     forbids experimental_dataflow whenever
+            #     num_nextn_predict_layers > 0, so this path is only reachable at
+            #     K == 0, and there it is legal: hence the guard is skipped
+            #     rather than applied to it.
+            # With neither active the hidden states stay length L while
+            # DotProductAttention computes seq_len = key.shape[1] * cp_size and
+            # expand() fails against an L-row mask -- a shape error naming
+            # neither use_erndata nor cp_balance_mode. Note use_erndata is set
+            # implicitly by erniebot whenever the YAML carries an `erndata:`
+            # section, so this is reachable without any MTP-specific flag.
+            if self.num_nextn_predict_layers <= 0 or self.mtp_load_weight_only:
+                raise ValueError(
+                    "use_erndata=True with context_parallel_size>1 needs some "
+                    "path that slices the loader's full-length sequence: "
+                    "either MTP (num_nextn_predict_layers>0, "
+                    "mtp_load_weight_only=False), which slices in GPTEmbedding, "
+                    "or experimental_dataflow=True, whose plain-path "
+                    "ContextParallelScatterOp does it. With neither, no CP "
+                    "sharding happens at all. Got num_nextn_predict_layers="
+                    f"{self.num_nextn_predict_layers}, mtp_load_weight_only="
+                    f"{self.mtp_load_weight_only}."
+                )
 
         if self.intermediate_size is None:
             self.intermediate_size = 4 * self.hidden_size
@@ -2702,6 +2987,38 @@ class TransformerConfig(ModelParallelConfig):
             )
             if (
                 (has_csa_indexer or has_mqa_indexer)
+                and self.use_erndata
+                and self.num_nextn_predict_layers > 0
+                and self.context_parallel_size > 1
+            ):
+                # Both Indexers assume input_ids arrives CP-*local*:
+                # CompressedSparseAttention.forward and
+                # MQALatentAttention._indexer_loss_mask all-gather it whenever
+                # `cp_world_size > 1 and not experimental_dataflow` and reshape
+                # to [b, cp_size * s_local]. That condition is exactly the
+                # erndata condition, but the premise is wrong here -- erndata
+                # hands the model a full-length global input_ids and nothing
+                # trims it -- so the gather over-counts by cp_size and dies on
+                # the reshape, and the position_offset = cp_rank * sq slice below
+                # it would be wrong even with the reshape fixed.
+                #
+                # Accepting contiguous_allgather above made this combination
+                # config-legal for the first time (it previously required
+                # dualchunk_allgather, which the DSv4 layers reject), so reject
+                # it here rather than let it resurface as a runtime crash.
+                raise ValueError(
+                    "use_erndata=True with MTP + context_parallel_size>1 does "
+                    "not support a model that builds an Indexer (CSAIndexer="
+                    f"{has_csa_indexer}, DSAIndexer={has_mqa_indexer}). The "
+                    "Indexer loss-mask path all-gathers input_ids and reshapes "
+                    "to [b, cp_size * s_local], but erndata already delivers "
+                    "input_ids full-length and global, so the gather "
+                    "over-counts by cp_size and fails inside attention. Run "
+                    "this model with context_parallel_size=1, or without "
+                    "use_erndata."
+                )
+            if (
+                (has_csa_indexer or has_mqa_indexer)
                 and self.dsa_indexer_use_sparse_loss
                 and self.indexer_init_from_scratch
             ):
@@ -3150,15 +3467,50 @@ class TransformerConfig(ModelParallelConfig):
                 )
             _warnings.warn(f"[MULTIMAX-CONFIG] multimax_modules={_multimax}")
 
-        if self.cp_balance_mode not in {
+        # Split the optional overlap suffix off the layout name, so that every
+        # cp_balance_mode comparison keeps matching the plain layout. Configs
+        # written before the suffix existed carry no suffix and stay
+        # non-overlap.
+        for _suffix, _overlap in (("_overlap", True), ("_nonoverlap", False)):
+            if self.cp_balance_mode.endswith(_suffix):
+                self.cp_balance_mode = self.cp_balance_mode[: -len(_suffix)]
+                self.flashmask_cp_overlap = _overlap
+                break
+
+        valid_cp_balance_modes = {
             "dualchunk_allgather",
             "contiguous_allgather",
             "contiguous_a2a",
-        }:
+        }
+        if self.cp_balance_mode not in valid_cp_balance_modes:
             raise ValueError(
                 f"cp_balance_mode={self.cp_balance_mode!r} is invalid. "
-                "Must be one of {'dualchunk_allgather', 'contiguous_allgather', 'contiguous_a2a'}."
+                f"Must be one of {sorted(valid_cp_balance_modes)}."
             )
+
+        # only support linear_cp_mode in {chunkwise, headwise}
+        valid_linear_cp_modes = {"chunkwise", "headwise"}
+        if self.linear_cp_mode not in valid_linear_cp_modes:
+            raise ValueError(
+                f"linear_cp_mode={self.linear_cp_mode!r} is invalid. "
+                f"Must be one of {sorted(valid_linear_cp_modes)}."
+            )
+        if self.linear_cp_mode == "headwise" and self.context_parallel_size > 1:
+            # The head swap is layer-local: heads are exchanged by all-to-all
+            # inside the layer and swapped back before ``out_norm``, which is only
+            # sound while the *global* token layout is the contiguous one the swap
+            # assumes ("rank r owns tokens [r*s/cp, (r+1)*s/cp)").  Under the
+            # dualchunk layout each rank holds two non-adjacent chunks, so the
+            # gathered sequence would be permuted and the recurrence -- which is
+            # order-dependent -- would silently compute against the wrong token
+            # order.  ``startswith`` rather than an exact value: the swap does not
+            # care which *contiguous* mode the non-linear-attention layers use.
+            if not self.cp_balance_mode.startswith("contiguous"):
+                raise ValueError(
+                    "linear_cp_mode='headwise' needs a contiguous "
+                    "cp_balance_mode (the head swap assumes rank r owns the "
+                    f"contiguous token block), got {self.cp_balance_mode!r}."
+                )
 
         # only support hybrid_mla_cp_mode == contiguous_a2a if not None
         if self.hybrid_mla_cp_mode is not None:
@@ -3348,3 +3700,11 @@ class TransformerConfig(ModelParallelConfig):
                 f"{self.flash_attn_fa3_backend!r}"
             )
         set_fa3_backend(self.flash_attn_fa3_backend)
+        if self.flashmask_cp_overlap and self.cp_balance_mode not in {
+            "dualchunk_allgather",
+            "contiguous_allgather",
+        }:
+            raise ValueError(
+                "Overlapped context parallel attention only supports "
+                f"cp_balance_mode='dualchunk_allgather' and 'contiguous_allgather', got {self.cp_balance_mode!r}."
+            )

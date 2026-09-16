@@ -14,21 +14,23 @@
 
 """Adapt a large-cluster training YAML to a smaller machine scale.
 
-Without any switch the adapter simply makes the config fit the target scale:
-it recomputes ``sharding`` / batch and, when the target is incompatible with
-the source parallelism, shrinks EP / PP (never below 2) and rewrites a copy of
-``model_config.json`` accordingly.  A smaller ``sharding`` also gets the
-compensations in :mod:`paddlefleet.config_adapter.sharding_shrink` (data-stream
-width, optimizer offload).
+Without any switch the adapter keeps every parallel dimension frozen and only
+recomputes ``sharding`` / batch, so the target scale must be compatible with
+the source parallelism (incompatible targets get an error listing the valid
+node counts).  A smaller ``sharding`` also gets the compensations in
+:mod:`paddlefleet.config_adapter.sharding_shrink` (data-stream width,
+optimizer offload).
 
 Two orthogonal, optional test dimensions refine that:
 
 * ``--test-performance`` -- freeze every parallel dimension and
   ``gradient_accumulation_steps`` so the step time stays comparable; only
   ``sharding`` and ``global_batch_size`` move.
-* ``--test-accuracy`` -- pin the determinism switches in
-  :mod:`paddlefleet.config_adapter.precision` so the run does not aadiff, and
-  (unless the performance switch froze ``acc``) keep the effective batch.
+* ``--test-accuracy`` -- the ONLY mode that may shrink EP / PP (never below
+  2, rewriting a copy of ``model_config.json`` accordingly); it also pins
+  the determinism switches in :mod:`paddlefleet.config_adapter.precision`
+  so the run does not aadiff, and (unless the performance switch froze
+  ``acc``) keeps the effective batch.
 
 Usage::
 

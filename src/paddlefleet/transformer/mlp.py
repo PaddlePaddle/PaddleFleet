@@ -42,6 +42,10 @@ from paddlefleet.fusions.fused_bias_swiglu import (
     bias_swiglu_impl,
     weighted_bias_swiglu_impl,
 )
+from paddlefleet.train_infer_consistent_ops.inspect_util import (
+    get_current_layer,
+    inspect_tensor,
+)
 from paddlefleet.transformer.activations import situ, situ_glu
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.layer import FleetLayer
@@ -102,6 +106,7 @@ class MLP(FleetLayer):
         hidden_size: int | None = None,
         tp_group=None,
         disable_fp8: bool = False,
+        inspect_name: str = "moe_shared",
     ):
         super().__init__(config=config)
 
@@ -109,6 +114,8 @@ class MLP(FleetLayer):
         self.use_accuracy_compatible = getattr(
             config, "use_accuracy_compatible", False
         )
+
+        self.inspect_name = inspect_name
 
         self.input_size = (
             input_size if input_size is not None else self.config.hidden_size
@@ -212,17 +219,49 @@ class MLP(FleetLayer):
             return {}
         return {"up_gate_proj.weight": (ortho_gate_up, {})}
 
-    def forward(self, hidden_states, per_token_scale=None):
-        """Perform the forward pass through the MLP block."""
+    def forward(
+        self, hidden_states, per_token_scale=None, hidden_states_up=None
+    ):
+        """Perform the forward pass through the MLP block.
+
+        ``hidden_states_up`` splits the fused gate/up projection into two
+        independent autograd consumers, matching a reference implementation that
+        keeps ``gate_proj`` and ``up_proj`` as separate ``nn.Linear`` modules
+        (e.g. HF ``Qwen3_5MoeMLP``). The fused K=2*inter dgrad is *not* bitwise
+        equal to the sum of the two K=inter dgrads, so reproducing the reference
+        gradient requires two projections whose grads enter the accumulation
+        chain separately. Each call sees a grad that is zero on the other half,
+        which is bitwise identical to the narrow per-half GEMM.
+        """
         # [s, b, 4 * h/p]
         nvtx_range_push(suffix="up_gate_proj")
-        intermediate_parallel, bias_parallel = deferrable_linear(
-            self.config,
-            self._dw_up_gate_point,
-            self.up_gate_proj,
-            hidden_states,
-        )
+        if hidden_states_up is None:
+            intermediate_parallel, bias_parallel = deferrable_linear(
+                self.config,
+                self._dw_up_gate_point,
+                self.up_gate_proj,
+                hidden_states,
+            )
+        else:
+            # Two independent consumers, so the shared dw deferral point is not
+            # usable here: it would be armed twice for one weight. The HF
+            # bit-exact path never runs with dw/p2p overlap, so call the
+            # projection directly and leave ``deferrable_linear`` to the default
+            # single-consumer branch above.
+            intermediate_gate, bias_parallel = self.up_gate_proj(hidden_states)
+            intermediate_up, _ = self.up_gate_proj(hidden_states_up)
+            half = intermediate_gate.shape[-1] // 2
+            intermediate_parallel = paddle.concat(
+                [intermediate_gate[..., :half], intermediate_up[..., half:]],
+                axis=-1,
+            )
         nvtx_range_pop(suffix="up_gate_proj")
+
+        intermediate_parallel = inspect_tensor(
+            f"{self.inspect_name}_ffn1_output",
+            get_current_layer(),
+            intermediate_parallel,
+        )
 
         nvtx_range_push(suffix="activation")
 
@@ -252,6 +291,9 @@ class MLP(FleetLayer):
                 intermediate_parallel,
                 beta=self.config.activation_situ_beta,
                 linear_beta=self.config.activation_situ_linear_beta,
+                situ_glu_plain_fusion=getattr(
+                    self.config, "situ_glu_plain_fusion", False
+                ),
             )
             if per_token_scale is not None:
                 original_dtype = intermediate_parallel.dtype
@@ -359,6 +401,12 @@ class MLP(FleetLayer):
                 intermediate_parallel = intermediate_parallel.to(original_dtype)
         nvtx_range_pop(suffix="activation")
 
+        intermediate_parallel = inspect_tensor(
+            f"{self.inspect_name}_swiglu_output",
+            get_current_layer(),
+            intermediate_parallel,
+        )
+
         # [s, b, h]
         nvtx_range_push(suffix="down_proj")
         output, output_bias = deferrable_linear(
@@ -368,6 +416,9 @@ class MLP(FleetLayer):
             intermediate_parallel,
         )
         nvtx_range_pop(suffix="down_proj")
+        output = inspect_tensor(
+            f"{self.inspect_name}_ffn2_output", get_current_layer(), output
+        )
 
         if per_token_scale is not None and output_bias is not None:
             # if this MLP is an expert, and bias is required, we add the bias to output directly

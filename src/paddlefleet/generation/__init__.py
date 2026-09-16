@@ -1,4 +1,4 @@
-# Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,25 +12,118 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generation module for Fleet models."""
+import sys
+from typing import TYPE_CHECKING
 
-from .config import GenerationConfig
-from .csa_cache import CSADynamicCache
-from .greedy_generator import DynamicKVCache, GreedyGenerator
-from .inference_utils import init_inference_fleet
-from .utils import (
-    apply_repetition_penalty,
-    sample_with_top_k,
-    sample_with_top_p,
-)
+from ..utils.lazy_import import _LazyModule
 
-__all__ = [
-    "CSADynamicCache",
-    "DynamicKVCache",
-    "GenerationConfig",
-    "GreedyGenerator",
-    "apply_repetition_penalty",
-    "init_inference_fleet",
-    "sample_with_top_k",
-    "sample_with_top_p",
-]
+import_structure = {
+    "utils": [
+        "GenerationMixin",
+        "MinLengthLogitsProcessor",
+        "convert_dtype",
+        "get_unfinished_flag",
+        "LogitsProcessor",
+        "BeamHypotheses",
+        "RepetitionPenaltyLogitsProcessor",
+        "LogitsProcessorList",
+        "TopKProcess",
+        "map_structure",
+        "BeamSearchScorer",
+        "TopPProcess",
+        "get_scale_by_dtype",
+        "validate_stopping_criteria",
+    ],
+    "sampling": [
+        "apply_repetition_penalty",
+        "sample_with_top_k",
+        "sample_with_top_p",
+    ],
+    "config": ["FleetGenerationConfig"],
+    "csa_cache": ["CSADynamicCache"],
+    "greedy_generator": ["DynamicKVCache", "GreedyGenerator"],
+    "inference_utils": ["init_inference_fleet"],
+    "model_outputs": ["ModelOutput"],
+    "configuration_utils": [
+        "GenerationConfig",
+        "resolve_hf_generation_config_path",
+    ],
+    "logits_process": [
+        "MinLengthLogitsProcessor",
+        "SequenceBiasLogitsProcessor",
+        "NoRepeatNGramLogitsProcessor",
+        "PrefixConstrainedLogitsProcessor",
+        "TopPProcess",
+        "LogitsWarper",
+        "HammingDiversityLogitsProcessor",
+        "ForcedEOSTokenLogitsProcessor",
+        "ForcedBOSTokenLogitsProcessor",
+        "LogitsProcessor",
+        "RepetitionPenaltyLogitsProcessor",
+        "TemperatureLogitsWarper",
+        "TopKProcess",
+        "_get_ngrams",
+        "_get_generated_ngrams",
+        "LogitsProcessorList",
+        "NoBadWordsLogitsProcessor",
+        "_calc_banned_ngram_tokens",
+    ],
+    "stopping_criteria": [
+        "validate_stopping_criteria",
+        "StoppingCriteria",
+        "MaxLengthCriteria",
+        "StoppingCriteriaList",
+        "MaxTimeCriteria",
+    ],
+    "streamers": ["BaseStreamer", "TextIteratorStreamer", "TextStreamer"],
+}
+
+if TYPE_CHECKING:
+    from .config import FleetGenerationConfig as FleetGenerationConfig
+    from .configuration_utils import GenerationConfig as GenerationConfig
+    from .csa_cache import CSADynamicCache as CSADynamicCache
+    from .greedy_generator import (
+        DynamicKVCache as DynamicKVCache,
+        GreedyGenerator as GreedyGenerator,
+    )
+    from .inference_utils import init_inference_fleet as init_inference_fleet
+    from .logits_process import (
+        ForcedBOSTokenLogitsProcessor as ForcedBOSTokenLogitsProcessor,
+        ForcedEOSTokenLogitsProcessor as ForcedEOSTokenLogitsProcessor,
+        HammingDiversityLogitsProcessor as HammingDiversityLogitsProcessor,
+        LogitsProcessor as LogitsProcessor,
+        LogitsProcessorList as LogitsProcessorList,
+        MinLengthLogitsProcessor as MinLengthLogitsProcessor,
+        RepetitionPenaltyLogitsProcessor as RepetitionPenaltyLogitsProcessor,
+        TopKProcess as TopKProcess,
+        TopPProcess as TopPProcess,
+    )
+    from .sampling import (
+        apply_repetition_penalty as apply_repetition_penalty,
+        sample_with_top_k as sample_with_top_k,
+        sample_with_top_p as sample_with_top_p,
+    )
+    from .stopping_criteria import (
+        MaxLengthCriteria as MaxLengthCriteria,
+        MaxTimeCriteria as MaxTimeCriteria,
+        StoppingCriteria as StoppingCriteria,
+        StoppingCriteriaList as StoppingCriteriaList,
+        validate_stopping_criteria as validate_stopping_criteria,
+    )
+    from .streamers import (
+        BaseStreamer as BaseStreamer,
+        TextIteratorStreamer as TextIteratorStreamer,
+        TextStreamer as TextStreamer,
+    )
+    from .utils import (
+        BeamSearchScorer as BeamSearchScorer,
+        GenerationMixin as GenerationMixin,
+        get_unfinished_flag as get_unfinished_flag,
+    )
+else:
+    sys.modules[__name__] = _LazyModule(
+        __name__,
+        globals()["__file__"],
+        import_structure,
+        module_spec=__spec__,
+    )
