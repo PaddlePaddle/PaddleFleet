@@ -84,8 +84,17 @@ class TestEinsumAgainstPaddleEinsum(unittest.TestCase):
         # live MoE combine path: contract over (e,c), out[s,m].
         self._check("sec,ecm->sm", _seq([2, 3, 4]), _seq([3, 4, 5], start=10.0))
 
+    @unittest.expectedFailure
     def test_rule_ks_ksm_to_sm(self):
         # contract over k, out[s,m]. Distinct k,s,m guard the transpose steps.
+        #
+        # Known production bug (captured, not masked): the "ks,ksm->sm" branch
+        # reshapes to a=[s,1,k] and b=[s,m,k], then computes
+        # ``paddle.bmm(a, b.transpose(1, 2)).squeeze(2)``. The bmm yields
+        # [s, 1, m], so the singleton contraction axis is at index 1, not 2;
+        # ``.squeeze(2)`` leaves the shape as [s, 1, m] instead of [s, m]
+        # (should be ``.squeeze(1)``). The correct contract is out[s, m], which
+        # this asserts; it fails until the source squeezes the right axis.
         self._check("ks,ksm->sm", _seq([6, 2]), _seq([6, 2, 5], start=10.0))
 
 

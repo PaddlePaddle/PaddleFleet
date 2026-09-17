@@ -295,13 +295,26 @@ class TestErnie45MoePipeWiring(unittest.TestCase):
         )
 
     def test_tp_mapping_and_init_bound_from_model(self):
+        # modeling.py binds ``_get_tensor_parallel_mappings`` and
+        # ``_init_weights`` on the Pipe class directly from the model class.
+        # ``_get_tensor_parallel_mappings`` is a classmethod, so accessing it
+        # returns a *fresh* bound-method object each time and ``assertIs`` on
+        # the bound methods fails even though they wrap the same function.
+        # Compare the underlying function instead (``__func__`` for a bound
+        # classmethod, the plain function itself for a regular method), which is
+        # the stable identity that proves the binding.
+        def _underlying(fn):
+            return getattr(fn, "__func__", fn)
+
         self.assertIs(
-            Ernie4_5_MoeForCausalLMPipe._get_tensor_parallel_mappings,
-            Ernie4_5_MoeModel._get_tensor_parallel_mappings,
+            _underlying(
+                Ernie4_5_MoeForCausalLMPipe._get_tensor_parallel_mappings
+            ),
+            _underlying(Ernie4_5_MoeModel._get_tensor_parallel_mappings),
         )
         self.assertIs(
-            Ernie4_5_MoeForCausalLMPipe._init_weights,
-            Ernie4_5_MoeModel._init_weights,
+            _underlying(Ernie4_5_MoeForCausalLMPipe._init_weights),
+            _underlying(Ernie4_5_MoeModel._init_weights),
         )
 
     @unittest.skip(

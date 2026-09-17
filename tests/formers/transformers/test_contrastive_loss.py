@@ -140,11 +140,27 @@ class TestSimpleContrastiveLoss(unittest.TestCase):
         )
 
     def test_temperature_is_consumed(self):
-        q = np.array(
-            [[1.0, 2.0, -1.0, 0.5], [0.5, -1.0, 2.0, 1.0]], dtype=np.float32
+        # Use small-magnitude embeddings so the similarity scores stay in the
+        # unsaturated region of the softmax. With the larger fixture used above
+        # the raw scores are big enough that dividing by BOTH 0.5 and 0.1
+        # saturates the row softmaxes to essentially one-hot, so both losses
+        # collapse to ~0 and appear equal for a numeric (saturation) reason
+        # rather than because temperature is ignored. Scaling the embeddings
+        # down keeps scores/temperature small enough that temperature visibly
+        # changes the loss.
+        q = (
+            np.array(
+                [[1.0, 2.0, -1.0, 0.5], [0.5, -1.0, 2.0, 1.0]],
+                dtype=np.float32,
+            )
+            * 0.15
         )
-        p = np.array(
-            [[0.9, 1.5, -0.5, 0.2], [0.1, -0.8, 1.7, 0.6]], dtype=np.float32
+        p = (
+            np.array(
+                [[0.9, 1.5, -0.5, 0.2], [0.1, -0.8, 1.7, 0.6]],
+                dtype=np.float32,
+            )
+            * 0.15
         )
 
         loss_hi = self._loss(q, p, temperature=0.5)

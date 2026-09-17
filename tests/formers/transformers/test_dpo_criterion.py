@@ -156,15 +156,31 @@ class TestDPOLossFormulas(unittest.TestCase):
     def test_label_smoothing_blends_both_terms(self):
         ls = 0.2
         crit = _make_criterion("sigmoid", beta=_BETA, label_smoothing=ls)
-        logits = (_PC - _PR) - (_RC - _RR)
+        # Use an asymmetric logits set for this test. The module fixture happens
+        # to yield logits {0.0, -0.4, 0.4}, symmetric about 0, so the smoothing
+        # term ``-log_sigmoid(-beta*logits)*ls`` is the mirror of the base term
+        # and its antisymmetric contribution cancels in the mean -- making the
+        # smoothed loss numerically equal to the ls=0 baseline for the wrong
+        # reason. Pick strictly asymmetric per-sample logits instead.
+        pc = np.array([2.0, 3.0, 1.5], dtype=np.float64)
+        pr = np.zeros(3, dtype=np.float64)
+        rc = np.zeros(3, dtype=np.float64)
+        rr = np.zeros(3, dtype=np.float64)
+        logits = (pc - pr) - (rc - rr)
         per = (
             -_log_sigmoid(_BETA * logits) * (1 - ls)
             - _log_sigmoid(-_BETA * logits) * ls
         )
-        self.assertAlmostEqual(self._call(crit), float(np.mean(per)), places=6)
+        self.assertAlmostEqual(
+            self._call(crit, pc, pr, rc, rr), float(np.mean(per)), places=6
+        )
         # Smoothing must actually change the result vs the ls=0 baseline.
         base = _make_criterion("sigmoid", beta=_BETA, label_smoothing=0.0)
-        self.assertNotAlmostEqual(self._call(crit), self._call(base), places=6)
+        self.assertNotAlmostEqual(
+            self._call(crit, pc, pr, rc, rr),
+            self._call(base, pc, pr, rc, rr),
+            places=6,
+        )
 
     def test_hinge_matches_relu_margin(self):
         crit = _make_criterion("hinge", beta=_BETA)
@@ -276,10 +292,19 @@ class TestDPOLossInvariants(unittest.TestCase):
 
     def test_chosen_rejected_swap_flips_logits_sign(self):
         crit = _make_criterion("sigmoid", beta=_BETA)
-        base = self._loss(crit, _PC, _PR, _RC, _RR)
+        # Use an asymmetric fixture. The module-level logps yield logits
+        # {0.0, -0.4, 0.4}, a set symmetric about 0; negating it (the effect of
+        # a chosen<->rejected swap) maps the set to itself, so the mean loss is
+        # unchanged for the wrong reason and ``assertNotAlmostEqual`` fails.
+        # Strictly asymmetric per-sample logps make the sign flip observable.
+        pc = np.array([2.0, 3.0, 1.5], dtype=np.float64)
+        pr = np.zeros(3, dtype=np.float64)
+        rc = np.zeros(3, dtype=np.float64)
+        rr = np.zeros(3, dtype=np.float64)
+        base = self._loss(crit, pc, pr, rc, rr)
         # Swapping chosen<->rejected on both policy and reference negates logits.
-        swapped = self._loss(crit, _PR, _PC, _RR, _RC)
-        logits = (_PC - _PR) - (_RC - _RR)
+        swapped = self._loss(crit, pr, pc, rr, rc)
+        logits = (pc - pr) - (rc - rr)
         expected_swapped = float(np.mean(_neg_log_sigmoid(_BETA * (-logits))))
         self.assertAlmostEqual(swapped, expected_swapped, places=6)
         self.assertNotAlmostEqual(base, swapped, places=6)
