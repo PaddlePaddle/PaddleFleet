@@ -40,8 +40,8 @@ if [[ "${check_status}" -ne 0 ]]; then
     check_output="$(cat "${check_log}")"
     if [[ "${check_status}" -ne 1 \
         || "${check_output}" != *"Found 1 incompatibility"* \
-        || "${check_output}" != *'The package `paddlepaddle-gpu` requires `nvidia-cublas-cu12==12.9.0.13 '* \
-        || "${check_output}" != *'but `12.9.1.4` is installed'* ]]; then
+        || "${check_output}" != *"paddlepaddle-gpu"*"nvidia-cublas-cu12==12.9.0.13"* \
+        || "${check_output}" != *"12.9.1.4"*"is installed"* ]]; then
         exit "${check_status}"
     fi
     echo "GLM52 uses an explicit cuBLAS 12.9.1.4 override; the one declared Paddle dependency conflict is retained above."

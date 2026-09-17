@@ -44,8 +44,11 @@ cd "${WORKSPACE_DIR}"
 unset RANK LOCAL_RANK LOCAL_WORLD_SIZE WORLD_SIZE
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 export NPROC_PER_NODE=4 NNODES=1 NODE_RANK=0 MASTER_ADDR=127.0.0.1
-# Let torchrun own its free rendezvous port for the whole single-node launch.
-export PET_STANDALONE=1
+# Fleet CI runs under docker --network host; pick a free MASTER_PORT to avoid
+# EADDRINUSE on torchrun's default 29500 (ms-swift's launcher forwards
+# MASTER_PORT when set). Mirror the Paddle side's port selection.
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/_pick_master_port.sh"
 export CUBLAS_WORKSPACE_CONFIG=:4096:8 NCCL_ALGO=Ring
 export LD_LIBRARY_PATH="${TORCH_VENV}/lib/python3.12/site-packages/nvidia/cudnn/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 export MODEL_REPRO_DISABLE_LIVE_XY_DUMP=1

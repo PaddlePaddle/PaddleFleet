@@ -21,7 +21,12 @@ CI supplies `PADDLEFLEET_WHEEL_PATH` and `PADDLEFLEET_OPS_WHEEL_PATH` from the
 current build. Both are required when creating the private Paddle environment.
 For preconfigured environments, set `GLM52_VENV_ROOT` to the parent of `paddle/`
 and `torch/`. `GLM52_TORCH_VENV` can select a separate Torch path. Explicit
-`GLM52_VENV_ROOT` skips dependency installation on both sides.
+`GLM52_VENV_ROOT` skips dependency installation on both sides. Such a
+preconfigured environment must already provide the reference implementations
+from `reference_wheels.txt` (Megatron `40456374`, Swift `baa4ba73`),
+`transformers==5.12.1`, Torch DeepEP (required by `moe_token_dispatcher_type:
+flex` in `glm52_torch.yaml`) and fast-hadamard-transform; otherwise the run
+fails only after training starts.
 
 The case builds DeepEP `17cfb817bccec3a9c247013360cc550c2bac441e` and
 fast-hadamard-transform `f134af63deb2df17e1171a9ec1ea4a7d8604d5ca` against its
