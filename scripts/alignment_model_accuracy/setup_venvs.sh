@@ -20,12 +20,12 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="${SCRIPT_DIR}"
 
 readonly PYTHON_VERSION="3.12"
-readonly TORCH_VERSION="2.12.0+cu130"
-readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu130"
+readonly TORCH_VERSION="2.12.0+cu129"
+readonly TORCH_INDEX_URL="https://download.pytorch.org/whl/cu129"
 readonly TE_VERSION="2.17.1"
 readonly TRANSFORMERS_VERSION="4.57.1"
-readonly PADDLE_INDEX_URL="https://www.paddlepaddle.org.cn/packages/stable/cu130/"
-readonly NIGHTLY_WHL_BASE="https://paddle-whl.bj.bcebos.com/nightly/cu130"
+readonly PADDLE_INDEX_URL="https://www.paddlepaddle.org.cn/packages/stable/cu129/"
+readonly NIGHTLY_WHL_BASE="https://paddle-whl.bj.bcebos.com/nightly/cu129"
 # readonly PADDLE_VERSION="xx"
 # PaddleFleet will install default paddle"
 readonly PADDLEFLEET_WHEEL="${PADDLEFLEET_WHEEL_PATH:-${NIGHTLY_WHL_BASE}/paddlefleet/paddlefleet-0.4.0.dev20260807+d01517879a3-py3-none-any.whl}"
@@ -141,14 +141,14 @@ setup_paddle_venv() {
         "setuptools>=66.1.0" pip wheel packaging "ninja==1.11.1.1" \
         "pybind11[global]>=2.13,<3" \
         "tensor-spec-worker"
-    uv pip install --python "${paddle_py}" "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" -i https://www.paddlepaddle.org.cn/packages/nightly/cu130/
+    uv pip install --python "${paddle_py}" "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/
 
     # PaddleFleet. --no-deps is intentionally dropped: the wheel's pinned
     # paddlepaddle-gpu dependency must be installed here, otherwise
     # venv/paddle/bin/paddlefleet-cli fails to import paddle at runtime.
     uv pip install --python "${paddle_py}" "${paddle_index[@]}" \
         --force-reinstall \
-        --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ \
+        --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ \
         "${PADDLEFLEET_WHEEL}"
     # (
     #     cd ./PaddleFleet
@@ -160,7 +160,7 @@ setup_paddle_venv() {
 
     # paddlefleet_ops
     UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --python "${paddle_py}" --force-reinstall \
-    --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ \
+    --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ \
         "${PADDLEFLEET_OPS_WHEEL}"
     # uv pip install --python "${paddle_py}" -v --no-build-isolation \
     #     -e ./PaddleFleet/packages/paddlefleet_ops
