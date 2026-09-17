@@ -16,32 +16,39 @@
 
 ``Ernie4_5Tokenizer`` is produced by ``warp_tokenizer(hf.LlamaTokenizer)``,
 i.e. a dynamic subclass mixing ``PaddleTokenizerMixin`` into HuggingFace's
-SentencePiece-backed ``LlamaTokenizer``. These tests build a *real* small
-SentencePiece model locally (no network / no hub download, CPU only) and
-exercise the data-layer contracts of the wrapped tokenizer: special-token
+``LlamaTokenizer``. On the pinned ``transformers>=5.0`` line ``LlamaTokenizer``
+is a fast ``tokenizers``-backed BPE model (``TokenizersBackend``) constructed
+from an in-memory ``vocab`` + ``merges`` pair -- it no longer wraps a
+SentencePiece ``.model`` file. These tests therefore build a *real* small BPE
+tokenizer locally with the ``tokenizers`` library (no network / no hub
+download, CPU only) and feed its ``vocab``/``merges`` into the wrapped
+tokenizer, then exercise the data-layer contracts of the wrapper: special-token
 ids, vocab mapping, truncation, right padding + attention mask, save/reload
 round-trip, streaming ``decode_token`` and the PaddleFleet-specific
 ``apply_chat_template`` default.
 
-Independent oracle: a raw ``sentencepiece.SentencePieceProcessor`` loaded
-from the same model file is used to check vocab id mapping, so the reference
-does not go through the code under test.
+Independent oracle: the raw ``tokenizers.Tokenizer`` BPE that produced the
+vocab/merges is used to check tokenization and vocab id mapping, so the
+reference never goes through the code under test.
 """
 
+import json
 import os
 import tempfile
 import unittest
 
-import sentencepiece as spm
 import transformers as hf
+from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
 from paddlefleet.transformers.ernie4_5.tokenizer import Ernie4_5Tokenizer
 from paddlefleet.transformers.tokenizer_utils import PaddleTokenizerMixin
 
-# Fixed special-token layout; ids are pinned in the SentencePiece model so
-# expected values below are independent of the tokenizer implementation.
+# Fixed special-token layout; ids are pinned as the first four BPE special
+# tokens so expected values below are independent of the wrapper.
 UNK_ID, BOS_ID, EOS_ID, PAD_ID = 0, 1, 2, 3
 UNK_PIECE, BOS_PIECE, EOS_PIECE, PAD_PIECE = "<unk>", "<s>", "</s>", "<pad>"
+# SentencePiece-style word-boundary marker used by the Metaspace pre-tokenizer.
+_SPACE = "\u2581"
 
 _TRAIN_LINES = [
     "hello world this is a paddle tokenizer test",
@@ -54,33 +61,41 @@ _TRAIN_LINES = [
 ]
 
 
-def _build_spm_model(directory):
-    """Train a tiny byte-fallback SentencePiece model into ``directory``.
+def _build_bpe(directory):
+    """Train a tiny Metaspace BPE with the ``tokenizers`` library.
 
-    ``byte_fallback=True`` guarantees loss-less decode round-trips for the
-    ASCII text used here. Returns the path to the ``.model`` file.
+    Returns ``(bpe, vocab, merges)`` where ``bpe`` is the raw
+    ``tokenizers.Tokenizer`` (used below as an independent oracle) and
+    ``vocab``/``merges`` are the exact pair consumed by the ``transformers``
+    fast ``LlamaTokenizer`` constructor. The four special tokens are declared
+    first so they occupy the pinned ids 0..3.
     """
-    corpus = os.path.join(directory, "corpus.txt")
-    with open(corpus, "w", encoding="utf-8") as f:
-        f.write("\n".join(_TRAIN_LINES * 60))
-    prefix = os.path.join(directory, "spm")
-    spm.SentencePieceTrainer.train(
-        input=corpus,
-        model_prefix=prefix,
-        vocab_size=400,
-        model_type="bpe",
-        character_coverage=1.0,
-        byte_fallback=True,
-        unk_id=UNK_ID,
-        bos_id=BOS_ID,
-        eos_id=EOS_ID,
-        pad_id=PAD_ID,
-        unk_piece=UNK_PIECE,
-        bos_piece=BOS_PIECE,
-        eos_piece=EOS_PIECE,
-        pad_piece=PAD_PIECE,
+    bpe = Tokenizer(models.BPE(unk_token=UNK_PIECE))
+    bpe.pre_tokenizer = pre_tokenizers.Metaspace(
+        replacement=_SPACE, prepend_scheme="always", split=False
     )
-    return prefix + ".model"
+    bpe.decoder = decoders.Metaspace(
+        replacement=_SPACE, prepend_scheme="always", split=False
+    )
+    trainer = trainers.BpeTrainer(
+        vocab_size=400,
+        special_tokens=[UNK_PIECE, BOS_PIECE, EOS_PIECE, PAD_PIECE],
+        show_progress=False,
+    )
+    bpe.train_from_iterator(
+        [line for line in _TRAIN_LINES for _ in range(60)], trainer=trainer
+    )
+    saved = os.path.join(directory, "bpe.json")
+    bpe.save(saved)
+    vocab = bpe.get_vocab()
+    raw_merges = json.load(open(saved, encoding="utf-8"))["model"]["merges"]
+    # tokenizers may serialize merges as ["a", "b"] pairs or "a b" strings;
+    # the transformers constructor wants a list of (left, right) tuples.
+    merges = [
+        tuple(m) if isinstance(m, (list, tuple)) else tuple(m.split(" "))
+        for m in raw_merges
+    ]
+    return bpe, vocab, merges
 
 
 class TestErnie4_5TokenizerConstruction(unittest.TestCase):
@@ -95,27 +110,30 @@ class TestErnie4_5TokenizerConstruction(unittest.TestCase):
         self.assertLess(
             mro.index(PaddleTokenizerMixin), mro.index(hf.LlamaTokenizer)
         )
-        # The wrapper adopts the HF class name; save_pretrained keys its extra
-        # vocab-saving branch off exactly this name.
+        # The wrapper adopts the HF class name.
         self.assertEqual(Ernie4_5Tokenizer.__name__, "LlamaTokenizer")
         # decode_token is contributed by the mixin, not the HF base.
         self.assertTrue(hasattr(Ernie4_5Tokenizer, "decode_token"))
 
 
 class TestErnie4_5TokenizerBehavior(unittest.TestCase):
-    """Data-layer behavior on a real, locally-built SentencePiece model."""
+    """Data-layer behavior on a real, locally-built BPE tokenizer."""
 
     @classmethod
     def setUpClass(cls):
         cls._dir = tempfile.mkdtemp(prefix="ernie45_tok_")
-        cls.model_file = _build_spm_model(cls._dir)
-        cls.sp = spm.SentencePieceProcessor(model_file=cls.model_file)
+        cls.bpe, cls.vocab, cls.merges = _build_bpe(cls._dir)
+        # PaddleFleet trains with right padding, which is not the HF fast
+        # default ('left'); set it explicitly so the padding contract below is
+        # exercised as production configures it.
         cls.tokenizer = Ernie4_5Tokenizer(
-            vocab_file=cls.model_file,
+            vocab=cls.vocab,
+            merges=cls.merges,
             unk_token=UNK_PIECE,
             bos_token=BOS_PIECE,
             eos_token=EOS_PIECE,
             pad_token=PAD_PIECE,
+            padding_side="right",
         )
 
     @classmethod
@@ -135,7 +153,7 @@ class TestErnie4_5TokenizerBehavior(unittest.TestCase):
         self.assertEqual(tok.convert_ids_to_tokens(EOS_ID), EOS_PIECE)
         self.assertEqual(tok.convert_ids_to_tokens(PAD_ID), PAD_PIECE)
 
-    def test_vocab_mapping_matches_raw_sentencepiece(self):
+    def test_vocab_mapping_matches_raw_bpe(self):
         tok = self.tokenizer
         text = "hello world padding banana"
         pieces = tok.tokenize(text)
@@ -144,9 +162,13 @@ class TestErnie4_5TokenizerBehavior(unittest.TestCase):
         self.assertGreater(len(pieces), 3)
         ids = tok.convert_tokens_to_ids(pieces)
         self.assertGreater(len(set(ids)), 1)
-        # Independent oracle: raw SentencePiece piece->id, not the wrapper.
-        expected = [self.sp.piece_to_id(p) for p in pieces]
+        # Independent oracle: raw tokenizers BPE piece->id, not the wrapper.
+        expected = [self.bpe.token_to_id(p) for p in pieces]
         self.assertEqual(ids, expected)
+        # The oracle's own tokenization must also agree end-to-end.
+        oracle = self.bpe.encode(text, add_special_tokens=False)
+        self.assertEqual(pieces, oracle.tokens)
+        self.assertEqual(ids, oracle.ids)
         # Round-trip id -> piece recovers the original pieces exactly.
         self.assertEqual(tok.convert_ids_to_tokens(ids), pieces)
         # An out-of-vocabulary piece must fall back to the unk id.
@@ -158,21 +180,23 @@ class TestErnie4_5TokenizerBehavior(unittest.TestCase):
         with_special = tok(text)["input_ids"]
         without_special = tok(text, add_special_tokens=False)["input_ids"]
         # Derive the expected decorated ids from the tokenizer's *own*
-        # add_bos_token / add_eos_token flags rather than hard-coding the HF
-        # LlamaTokenizer historical default (add_bos=True); that default has
-        # varied across transformers versions, so pinning it makes the test
-        # brittle. Whatever the flags report, the full encoding must equal the
-        # no-special encoding wrapped by exactly those markers.
+        # add_bos_token / add_eos_token flags rather than hard-coding a base
+        # default; that default has varied across transformers versions, so
+        # pinning it makes the test brittle. Whatever the flags report, the
+        # full encoding must equal the no-special encoding wrapped by exactly
+        # those markers.
         expected = list(without_special)
-        if tok.add_bos_token:
+        if getattr(tok, "add_bos_token", False):
             expected = [BOS_ID, *expected]
-        if tok.add_eos_token:
+        if getattr(tok, "add_eos_token", False):
             expected = [*expected, EOS_ID]
         self.assertEqual(with_special, expected)
         # The no-special payload is a contiguous interior slice of the full
         # encoding at the position implied by the leading-bos flag.
-        start = 1 if tok.add_bos_token else 0
-        end = len(with_special) - (1 if tok.add_eos_token else 0)
+        start = 1 if getattr(tok, "add_bos_token", False) else 0
+        end = len(with_special) - (
+            1 if getattr(tok, "add_eos_token", False) else 0
+        )
         self.assertEqual(with_special[start:end], without_special)
 
     def test_truncation_keeps_leading_prefix(self):
@@ -204,18 +228,15 @@ class TestErnie4_5TokenizerBehavior(unittest.TestCase):
         text = "hello world padding banana apple"
         ids = tok(text, add_special_tokens=False)["input_ids"]
         self.assertGreater(len(ids), 0)
-        # Round-trip at the id level rather than asserting an exact decoded
-        # string. decode(skip_special_tokens=True) collapses to '' on some
-        # transformers versions for this SentencePiece build, so keep the
-        # special tokens on decode and prove losslessness by re-encoding the
-        # decoded text and requiring identical ids. byte_fallback makes this
-        # piece->text->piece mapping stable for the ASCII input.
+        # Prove losslessness by re-encoding the decoded text and requiring
+        # identical ids; the trained Metaspace BPE makes this piece->text->piece
+        # mapping stable for the ASCII input.
         decoded = tok.decode(ids, skip_special_tokens=False)
         reencoded = tok(decoded, add_special_tokens=False)["input_ids"]
         self.assertEqual(reencoded, ids)
-        # The BOS piece is present in the full decode (special tokens kept).
+        # When the tokenizer prepends BOS, it must appear in the full decode.
         with_bos = tok(text)["input_ids"]
-        if tok.add_bos_token:
+        if getattr(tok, "add_bos_token", False):
             self.assertIn(
                 BOS_PIECE, tok.decode(with_bos, skip_special_tokens=False)
             )
@@ -242,9 +263,9 @@ class TestErnie4_5TokenizerBehavior(unittest.TestCase):
         save_dir = tempfile.mkdtemp(prefix="ernie45_tok_save_")
         try:
             tok.save_pretrained(save_dir)
-            # The mixin's LlamaTokenizer branch must persist the vocab model.
+            # The fast tokenizer persists its vocab/merges inside tokenizer.json.
             self.assertTrue(
-                os.path.isfile(os.path.join(save_dir, "tokenizer.model"))
+                os.path.isfile(os.path.join(save_dir, "tokenizer.json"))
             )
             reloaded = Ernie4_5Tokenizer.from_pretrained(save_dir)
             text = "hello world padding banana"
@@ -294,6 +315,7 @@ class TestErnie4_5TokenizerBehavior(unittest.TestCase):
         tok = self.tokenizer
         text = "hello world padding"
         list_ids = tok(text)["input_ids"]
+        self.assertGreater(len(list_ids), 0)
         enc = tok(text, return_tensors="pd")
         # The mixin converts a 1-D id list into a batched [1, seq] paddle tensor
         # while leaving the underlying ids unchanged.

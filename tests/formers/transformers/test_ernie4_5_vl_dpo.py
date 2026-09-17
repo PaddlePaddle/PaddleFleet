@@ -200,14 +200,25 @@ class TestErnieDPOLossFormulas(unittest.TestCase):
     def test_label_smoothing_blends_both_terms(self):
         ls = 0.2
         crit = _make_criterion("sigmoid", beta=_BETA, label_smoothing=ls)
-        logits = (_PC - _PR) - (_RC - _RR)
+        # Use an ASYMMETRIC logits fixture: the default _PC/_PR/_RC/_RR give
+        # logits {0, -0.4, 0.4}, a set symmetric under negation, so the smoothed
+        # and unsmoothed means coincide and the "must differ" check below would
+        # be vacuous. Shifting policy-chosen on one coordinate breaks that
+        # symmetry (logits -> {0.6, -0.4, 0.4}) so smoothing genuinely moves the
+        # mean loss.
+        pc = _PC + np.array([0.6, 0.0, 0.0], dtype=np.float64)
+        logits = (pc - _PR) - (_RC - _RR)
         per = (
             -_log_sigmoid(_BETA * logits) * (1 - ls)
             - _log_sigmoid(-_BETA * logits) * ls
         )
-        self.assertAlmostEqual(self._call(crit), float(np.mean(per)), places=6)
+        self.assertAlmostEqual(
+            self._call(crit, pc=pc), float(np.mean(per)), places=6
+        )
         base = _make_criterion("sigmoid", beta=_BETA, label_smoothing=0.0)
-        self.assertNotAlmostEqual(self._call(crit), self._call(base), places=6)
+        self.assertNotAlmostEqual(
+            self._call(crit, pc=pc), self._call(base, pc=pc), places=6
+        )
 
     def test_hinge_matches_relu_margin(self):
         crit = _make_criterion("hinge", beta=_BETA)
@@ -338,10 +349,16 @@ class TestErnieDPOLossInvariants(unittest.TestCase):
 
     def test_chosen_rejected_swap_flips_logits_sign(self):
         crit = _make_criterion("sigmoid", beta=_BETA)
-        base = self._loss(crit, _PC, _PR, _RC, _RR)
+        # ASYMMETRIC fixture: the default logits {0, -0.4, 0.4} are symmetric
+        # under negation, so a chosen/rejected swap (which negates the logits)
+        # leaves the mean loss unchanged and the "must differ" check would be
+        # vacuous. Shift policy-chosen on one coordinate so the swap actually
+        # changes the loss (logits {0.6, -0.4, 0.4} -> {-0.6, 0.4, -0.4}).
+        pc = _PC + np.array([0.6, 0.0, 0.0], dtype=np.float64)
+        base = self._loss(crit, pc, _PR, _RC, _RR)
         # Swapping chosen<->rejected on both sides negates the logits.
-        swapped = self._loss(crit, _PR, _PC, _RR, _RC)
-        logits = (_PC - _PR) - (_RC - _RR)
+        swapped = self._loss(crit, _PR, pc, _RR, _RC)
+        logits = (pc - _PR) - (_RC - _RR)
         expected_swapped = float(np.mean(_neg_log_sigmoid(_BETA * (-logits))))
         self.assertAlmostEqual(swapped, expected_swapped, places=6)
         self.assertNotAlmostEqual(base, swapped, places=6)

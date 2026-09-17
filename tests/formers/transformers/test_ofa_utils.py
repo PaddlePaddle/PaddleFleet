@@ -388,8 +388,18 @@ class TestMhaOfaForward(unittest.TestCase):
         # them; compare to the independent reference and confirm it changes the
         # output vs. the unmasked case.
         mha, x = self._setup()
+        # Independently of the function under test, find which key position
+        # carries the most attention mass under the unmasked softmax. The large
+        # fixed projection weights make the softmax nearly one-hot on a single
+        # dominant key, so blocking an arbitrary position (e.g. 0) can be a
+        # no-op; blocking the *dominant* key is guaranteed to move the output.
+        q, k, _ = mha._prepare_qkv(x, x, x)
+        product = paddle.matmul(q * (mha.head_dim**-0.5), k, transpose_y=True)
+        weights = F.softmax(product)  # [batch, heads, seq_q, seq_k]
+        dominant_key = int(np.argmax(weights.sum(axis=[0, 1, 2]).numpy()))
+
         attn_mask = paddle.zeros([2, 2, 3, 3], dtype="float32")
-        attn_mask[:, :, :, 0] = -1e9  # block attending to key position 0
+        attn_mask[:, :, :, dominant_key] = -1e9  # block the dominant key
         out = mha_ofa_forward(mha, x, x, x, attn_mask=[attn_mask, None])
         ref = _ref_attention(mha, x, x, x, attn_mask=attn_mask)
         np.testing.assert_allclose(

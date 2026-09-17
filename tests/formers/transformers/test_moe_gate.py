@@ -273,23 +273,22 @@ class TestZLoss(unittest.TestCase):
         np.testing.assert_allclose(float(out), expected, atol=1e-6)
 
 
-class TestTop1GatingKnownBug(unittest.TestCase):
-    """top1gating's no-drop branch is broken; assert the correct contract.
+class TestTop1GatingNoDrop(unittest.TestCase):
+    """top1gating's no-drop branch derives capacity from the per-expert load.
 
-    In ``top1gating`` with ``drop_tokens=False`` (the default when no expert
-    capacity factor is set), moe_gate.py line 460 executes:
+    With ``drop_tokens=False`` (the default, since ``moe_expert_capacity_factor``
+    defaults to 0.0) ``top1gating`` sets
 
-        capacity = int(min(new_capacity, paddle.tensor(mask1.size(0))))
+        new_capacity = max(exp_counts)
+        capacity     = int(min(new_capacity, <#tokens>))
 
-    ``paddle.tensor`` is a submodule (not callable) and ``Tensor.size`` in
-    Paddle is an int property (torch-style ``.size(0)`` is invalid), so this
-    line raises before any gating result is produced. We assert the CORRECT
-    behavior (a valid positive capacity bounded by the token count) and mark
-    the case as an expected failure so the bug is not silently masked. The
-    production code is intentionally left unmodified.
+    Independent oracle for the fixed logits below: argmax routes token0 to
+    expert0 and token1 to expert1, so the one-hot assignment gives
+    ``exp_counts == [1, 1, 0, 0]``, ``max(exp_counts) == 1`` and, since that is
+    the smaller operand against the 2-token count, ``capacity == 1``. This is
+    hand-derived, not read back from the routine under test.
     """
 
-    @unittest.expectedFailure
     def test_top1gating_no_drop_capacity(self):
         gate = _make_gate(num_experts=4, use_rts=False)
         logits = paddle.to_tensor(
@@ -298,10 +297,13 @@ class TestTop1GatingKnownBug(unittest.TestCase):
         capacity, combine, dispatch, exp_counts, l_aux, l_zloss = (
             gate.top1gating(logits)
         )
-        # Correct contract: capacity is a positive int not exceeding #tokens.
+        # capacity is a plain python int equal to the max per-expert load (1).
         self.assertIsInstance(capacity, int)
-        self.assertGreater(capacity, 0)
-        self.assertLessEqual(capacity, logits.shape[0])
+        self.assertEqual(capacity, 1)
+        # Each of the two tokens lands on its own expert; the rest are empty.
+        np.testing.assert_array_equal(
+            exp_counts.numpy(), [1.0, 1.0, 0.0, 0.0]
+        )
 
 
 class TestMixinIsBase(unittest.TestCase):
