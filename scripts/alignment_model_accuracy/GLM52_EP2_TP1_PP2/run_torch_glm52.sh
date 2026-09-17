@@ -18,7 +18,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-VENV_ROOT="${GLM52_VENV_ROOT:-${WORKSPACE_DIR}/venv}"
+VENV_ROOT="${GLM52_VENV_ROOT:-${SCRIPT_DIR}/venv}"
+TORCH_VENV="${GLM52_TORCH_VENV:-${VENV_ROOT}/torch}"
 MODEL_DIR="${GLM52_MODEL_DIR:-/home/.cache/PaddleFormers/GLM-5.2-BF16-minimal}"
 TOKENIZER_DIR="${GLM52_TOKENIZER_DIR:-${MODEL_DIR}}"
 DATA_DIR="${GLM52_DATA_DIR:-/home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP}"
@@ -27,7 +28,7 @@ RUN_DIR="${SCRIPT_DIR}/results/${RUN_TAG}/torch"
 
 for required in "${MODEL_DIR}/config.json" \
     "${TOKENIZER_DIR}/tokenizer.json" "${DATA_DIR}/alignment_torch.jsonl" \
-    "${VENV_ROOT}/torch/bin/activate"; do
+    "${TORCH_VENV}/bin/activate"; do
     [[ -f "${required}" ]] || { echo "missing GLM52 prerequisite: ${required}" >&2; exit 1; }
 done
 if [[ ! -f "${MODEL_DIR}/model.safetensors" && ! -f "${MODEL_DIR}/model.safetensors.index.json" ]]; then
@@ -37,16 +38,16 @@ fi
 [[ ! -e "${RUN_DIR}" ]] || { echo "run directory already exists: ${RUN_DIR}" >&2; exit 1; }
 mkdir -p "${RUN_DIR}"
 # shellcheck disable=SC1091
-source "${VENV_ROOT}/torch/bin/activate"
+source "${TORCH_VENV}/bin/activate"
 cd "${WORKSPACE_DIR}"
 
 unset RANK LOCAL_RANK LOCAL_WORLD_SIZE WORLD_SIZE
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3}"
 export NPROC_PER_NODE=4 NNODES=1 NODE_RANK=0 MASTER_ADDR=127.0.0.1
-# shellcheck disable=SC1091
-source "${SCRIPT_DIR}/_pick_master_port.sh"
+# Let torchrun own its free rendezvous port for the whole single-node launch.
+export PET_STANDALONE=1
 export CUBLAS_WORKSPACE_CONFIG=:4096:8 NCCL_ALGO=Ring
-export LD_LIBRARY_PATH="${VENV_ROOT}/torch/lib/python3.12/site-packages/nvidia/cudnn/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export LD_LIBRARY_PATH="${TORCH_VENV}/lib/python3.12/site-packages/nvidia/cudnn/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 export MODEL_REPRO_DISABLE_LIVE_XY_DUMP=1
 export MODEL_REPRO_RAW_LOSS_PATH="${RUN_DIR}/raw_loss.jsonl"
 export MODEL_REPRO_LOSS_PATH="${RUN_DIR}/loss.json"
@@ -59,7 +60,7 @@ export MODEL_REPRO_MODEL_ID=zai-org/GLM-5.2
 export MODEL_REPRO_MODEL_REVISION=b4734de4facf877f85769a911abafc5283eab3d9
 export MRK_INVOCATION_ID="${RUN_TAG}"
 
-"${VENV_ROOT}/torch/bin/megatron" sft "${SCRIPT_DIR}/glm52_torch.yaml" \
+"${TORCH_VENV}/bin/megatron" sft "${SCRIPT_DIR}/glm52_torch.yaml" \
     --model "${MODEL_DIR}" --tokenizer_name_or_path "${TOKENIZER_DIR}" \
     --dataset "${DATA_DIR}/alignment_torch.jsonl" --output_dir "${RUN_DIR}/trainer" \
     2>&1 | tee "${RUN_DIR}/run_torch.log"

@@ -7,32 +7,42 @@ subset: 3 dense layers, 1 MoE layer, 1 MTP layer and 16 experts.
 ## Prerequisites
 
 Use the consolidated GLM-5.2 implementation from PaddleFleet #1961.
-After the legacy cases finish, this case installs the existing Megatron
-`40456374` and Swift `baa4ba73` reference builds listed with SHA256 hashes in
-`reference_wheels.txt`. Shared latest wheels may omit their GLM52 interfaces.
-This does not edit either companion repository or publish shared packages.
-For a preconfigured environment, set `GLM52_VENV_ROOT` to its parent directory
-(`paddle/` and `torch/`), with these reference implementations, Transformers
-5.12.1, Torch DeepEP and fast-hadamard-transform installed. Explicit environments
-are used without installing dependencies.
+This case creates private `venv/paddle` and `venv/torch` environments below
+`GLM52_EP2_TP1_PP2`. It uses the current CI PaddleFleet and FleetOps wheel paths,
+Paddle `3.4.0.post20260907` with CUDA 12.9, Torch `2.12.1+cu129`, mcore-bridge
+`1.6.1`, and Transformers `5.12.1` on the Torch side. The reference Megatron
+`40456374` and Swift `baa4ba73` wheels are verified against `reference_wheels.txt`.
+The bridge version retains the CPU RoPE frequency initialization of the aligned
+baseline. The shared environments, installer and other model settings remain
+unchanged. GLM52 runs before legacy environment setup so an unrelated setup
+failure does not prevent its own precision check.
 
-The shared installer retains Transformers 4.57.1 for the existing MiniMax and
-GLM4.5 cases. MiniMax's checkpoint export uses model code incompatible with
-Transformers 5.12.1. After those cases finish, this final case upgrades the default
-Torch venv to 5.12.1 for GLM-5.2's `glm_moe_dsa` support. Running the shared suite
-again restores 4.57.1 during its initial setup. The default CI venv is disposable;
-use `GLM52_VENV_ROOT` for a preconfigured environment that must not be modified.
+CI supplies `PADDLEFLEET_WHEEL_PATH` and `PADDLEFLEET_OPS_WHEEL_PATH` from the
+current build. Both are required when creating the private Paddle environment.
+For preconfigured environments, set `GLM52_VENV_ROOT` to the parent of `paddle/`
+and `torch/`. `GLM52_TORCH_VENV` can select a separate Torch path. Explicit
+`GLM52_VENV_ROOT` skips dependency installation on both sides.
 
-The default CI case builds Torch DeepEP at
-`17cfb817bccec3a9c247013360cc550c2bac441e` and fast-hadamard-transform at
-`f134af63deb2df17e1171a9ec1ea4a7d8604d5ca` for DSA indexer rotation.
-It also installs `pynvml==13.0.1` for DeepEP's NVLink connectivity check.
-Hadamard kernels are built from source against the installed Torch rather than
-using the package's guessed prebuilt wheel. The Torch cu130 environment needs
-CUDA 13.0 even when the shared image has a 12.9 compiler. The case downloads
-checksum-pinned NVIDIA CUDA 13.0.2 compiler components into its run directory
-and uses the CUDA library headers shipped with Torch. This compiler environment
-applies only to the extension build subprocess.
+The case builds DeepEP `17cfb817bccec3a9c247013360cc550c2bac441e` and
+fast-hadamard-transform `f134af63deb2df17e1171a9ec1ea4a7d8604d5ca` against its
+own Torch installation, without reusing binary build caches. `deep_ep_cuda12.patch` retains the full NVSHMEM interface and omits only the
+CUDA13-specific optional NVLink-utilization scheduling hint on CUDA12. Bridge 1.6.1 requires TE import dependencies, so TE 2.17.1 is installed,
+while the accuracy configuration continues to disable TE computation.
+
+The build uses CUDA 12.9 from the image when available, otherwise checksum-pinned
+NVIDIA CUDA 12.9.1 components under the case environment. Compiler variables stay
+in the build subprocess; no system CUDA or driver installation occurs. Both
+environment setup scripts run `uv pip check`.
+
+Paddle declares cuBLAS `12.9.0.13`, while the aligned reference uses
+`12.9.1.4`. The Paddle installer first checks the unmodified dependency set,
+then explicitly installs `nvidia-cublas-cu12==12.9.1.4` in its private environment.
+Paddle preloads this package directly, so changing `LD_LIBRARY_PATH` alone does
+not select the required runtime. The final dependency check retains and reports
+this one known exact-pin conflict in `venv/paddle/glm52-dependency-check.log`;
+any other incompatibility fails setup. Package metadata is not rewritten.
+This override is limited to this accuracy case and is not a general Paddle
+compatibility claim.
 
 The default model cache is
 `/home/.cache/PaddleFormers/GLM-5.2-BF16-minimal`.
@@ -61,7 +71,7 @@ Data reuses the existing MinimaxV2.5_EP2 cache:
 bash scripts/alignment_model_accuracy/GLM52_EP2_TP1_PP2/run_alignment.sh
 ```
 
-The shared runner invokes this case after its existing cases. Existing case
+The shared runner invokes this case before legacy environment setup. Existing case
 scripts, loss comparison and cleanup remain unchanged. GLM52 retains its own
 logs, raw loss, environment records and checkpoints under
 `GLM52_EP2_TP1_PP2/results/<ALIGNMENT_RUN_TAG>/`, including failed runs.

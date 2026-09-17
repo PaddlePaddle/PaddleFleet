@@ -1,12 +1,26 @@
 #!/usr/bin/env bash
 # Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
-# Sourced only by the GLM52 case. Keep compiler provisioning inside its run.
+# Sourced only by the GLM52 extension build subprocess.
 set -euo pipefail
-GLM52_CUDA_ROOT="${RUN_DIR}/cuda-13.0.2"
+if [[ -n "${CUDA_HOME:-}" && -x "${CUDA_HOME}/bin/nvcc" ]] && \
+    "${CUDA_HOME}/bin/nvcc" --version | grep -q 'release 12.9,'; then
+    export PATH="${CUDA_HOME}/bin:${PATH}"
+    return
+fi
+if command -v nvcc >/dev/null && nvcc --version | grep -q 'release 12.9,'; then
+    CUDA_HOME="$(dirname -- "$(dirname -- "$(readlink -f "$(command -v nvcc)")")")"
+    export CUDA_HOME
+    return
+fi
+: "${GLM52_CUDA_ROOT:?GLM52_CUDA_ROOT must be inside the case environment}"
+if [[ -f "${GLM52_CUDA_ROOT}/.components-complete" ]]; then
+    export CUDA_HOME="${GLM52_CUDA_ROOT}"
+    export PATH="${CUDA_HOME}/bin:${PATH}"
+    return
+fi
 mkdir -p "${GLM52_CUDA_ROOT}"
-# NVIDIA CUDA 13.0.2 redistrib manifest, linux-x86_64. Components are verified
-# before extraction; this does not install a driver or change the system CUDA.
-# https://developer.download.nvidia.com/compute/cuda/redist/redistrib_13.0.2.json
+# NVIDIA CUDA 12.9.1 redistrib, linux-x86_64; no driver or system installation.
+# https://developer.download.nvidia.com/compute/cuda/redist/redistrib_12.9.1.json
 while read -r component version checksum; do
     archive="${GLM52_CUDA_ROOT}/${component}.tar.xz"
     curl --fail --location --retry 3 --retry-all-errors \
@@ -15,14 +29,13 @@ while read -r component version checksum; do
     printf '%s  %s\n' "${checksum}" "${archive}" | sha256sum --check -
     tar -xJf "${archive}" --strip-components=1 -C "${GLM52_CUDA_ROOT}"
 done <<'COMPONENTS'
-cuda_nvcc 13.0.88 48e35be3cfbf4b4fbc16828eaec8a7048ee789403049dc409f7b643d6259cf7a
-cuda_crt 13.0.88 5a3279a049ffc1cdb951c44cb95206acfdde9e9ae5e87825fc18d7e4a6878bb0
-cuda_cudart 13.0.96 25b8071951baba827be1580b841d363464f6ee6c39f48d33a81646f90cc95ed1
-cuda_cccl 13.0.85 ed845eae8c1767706b6ee91e40c608a03f6f633551a849b63f7346d32d73ee60
-cuda_profiler_api 13.0.85 dc233d88a5cafa095b197e6246b4c468a4581c128da8f951d67e063cdd6bca4c
-cuda_nvtx 13.0.85 ed150e6fb1b50663ff068cccee3c5e2ca581c3b939b321656afbc9193671137d
-libnvvm 13.0.88 17ef1665b63670887eeba7d908da5669fa8c66bb73b5b4c1367f49929c086353
+cuda_nvcc 12.9.86 7a1a5b652e5ef85c82b721d10672fc9a2dbaab44e9bd3c65a69517bf53998c35
+cuda_cudart 12.9.79 1f6ad42d4f530b24bfa35894ccf6b7209d2354f59101fd62ec4a6192a184ce99
+cuda_cccl 12.9.27 8b1a5095669e94f2f9afd7715533314d418179e9452be61e2fde4c82a3e542aa
+cuda_profiler_api 12.9.79 8c50636bfb97e9420905aa795b9fa6e3ad0b30ec6a6c8b0b8db519beb9241ce6
+cuda_nvtx 12.9.79 819bc39192955e6ba2067de39b85f30e157de462945e54b12bfdeda429d793fb
 COMPONENTS
+touch "${GLM52_CUDA_ROOT}/.components-complete"
 export CUDA_HOME="${GLM52_CUDA_ROOT}"
 export PATH="${CUDA_HOME}/bin:${PATH}"
 "${CUDA_HOME}/bin/nvcc" --version

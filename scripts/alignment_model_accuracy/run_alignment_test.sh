@@ -45,17 +45,17 @@ run_case() {
     rm -rf logs
 }
 
+# GLM52 owns both environments and runs independently of legacy setup.
+if ! bash ./GLM52_EP2_TP1_PP2/run_alignment.sh; then
+    failed_cases+=("GLM52_EP2_TP1_PP2")
+fi
+
 echo "==================== 统一配置环境 ===================="
 bash setup_venvs.sh
 
 for case_line in "${CASES[@]}"; do
     run_case ${case_line}
 done
-
-# GLM52 keeps its native loss comparison and result retention inside its case.
-if ! bash ./GLM52_EP2_TP1_PP2/run_alignment.sh; then
-    failed_cases+=("GLM52_EP2_TP1_PP2")
-fi
 
 echo
 if [ "${#failed_cases[@]}" -eq 0 ]; then

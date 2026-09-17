@@ -18,7 +18,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-VENV_ROOT="${GLM52_VENV_ROOT:-${WORKSPACE_DIR}/venv}"
+VENV_ROOT="${GLM52_VENV_ROOT:-${SCRIPT_DIR}/venv}"
 MODEL_DIR="${GLM52_MODEL_DIR:-/home/.cache/PaddleFormers/GLM-5.2-BF16-minimal}"
 TOKENIZER_DIR="${GLM52_TOKENIZER_DIR:-${MODEL_DIR}}"
 DATA_DIR="${GLM52_DATA_DIR:-/home/.cache/PaddleFormers/MiniMax-V2.5-bf16_2EP}"
