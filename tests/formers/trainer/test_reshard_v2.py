@@ -250,17 +250,14 @@ class TestMergeTensorsMultiple(unittest.TestCase):
     """``merge_tensors`` with several 1-D shards must concatenate them in order
     before truncating and reshaping."""
 
-    @unittest.expectedFailure
     def test_multi_shard_concatenates_in_order(self):
-        """KNOWN PRODUCTION BUG: the multi-shard branch calls
-        ``paddle.cat(x=..., axis=...)``. Paddle's concatenation entrypoint is
-        ``paddle.concat``; ``paddle.cat`` is not a valid Paddle API and does not
-        accept the ``x=``/``axis=`` keywords, so this path raises at runtime.
+        """Multiple 1-D shards are joined head to tail, then truncated and
+        reshaped to the target shape.
 
-        The assertion below states the *correct* expectation (shards joined head
-        to tail, then reshaped). It is marked expectedFailure to document the
-        bug without editing production code; an unexpected pass means the
-        production call was fixed and this marker should be removed."""
+        s0 = [1, 2, 3] and s1 = [4, 5, 6] concatenate to [1, 2, 3, 4, 5, 6];
+        reshaping to [2, 3] yields [[1, 2, 3], [4, 5, 6]]. The expected value is
+        hand-derived from the concatenation contract, not from the function
+        under test."""
         s0 = paddle.to_tensor([1.0, 2.0, 3.0], dtype="float32")
         s1 = paddle.to_tensor([4.0, 5.0, 6.0], dtype="float32")
         out = merge_tensors("k", [s0, s1], [2, 3])

@@ -33,7 +33,47 @@ from tests.formers.trainer.trainer_utils import (
 )
 
 
-class TestWandbCallback(unittest.TestCase):
+class _SingleCardGpuEnv(unittest.TestCase):
+    """Replicate the launcher-provided single-card GPU environment.
+
+    ``TrainingArguments(bf16=True)`` runs ``__post_init__`` which probes
+    ``paddle.device.get_device_capability()`` (via the ``is_sm100`` check). On
+    the H20/A100 CI runner the launcher exports ``FLAGS_selected_gpus`` and pins
+    a card, but a bare pytest process leaves the current device as CPU, so the
+    capability probe calls ``get_device_properties(Place(cpu))`` and raises
+    ``ValueError``. Pin an explicit single card as the launcher would (and
+    restore afterwards). These constructions are GPU-only paths, so skip
+    honestly on a CPU-only build rather than faking a pass.
+    """
+
+    def setUp(self):
+        import paddle
+
+        if (
+            not paddle.is_compiled_with_cuda()
+            or paddle.device.cuda.device_count() == 0
+        ):
+            self.skipTest(
+                "TrainingArguments(bf16=True) probes GPU device capability; "
+                "this build has no usable CUDA device"
+            )
+        self._orig_device = paddle.get_device()
+        self._orig_selected_gpus = os.environ.get("FLAGS_selected_gpus")
+        os.environ["FLAGS_selected_gpus"] = "0"
+        paddle.set_device("gpu:0")
+        self.addCleanup(self._restore_gpu_env)
+
+    def _restore_gpu_env(self):
+        import paddle
+
+        paddle.set_device(self._orig_device)
+        if self._orig_selected_gpus is None:
+            os.environ.pop("FLAGS_selected_gpus", None)
+        else:
+            os.environ["FLAGS_selected_gpus"] = self._orig_selected_gpus
+
+
+class TestWandbCallback(_SingleCardGpuEnv):
     def test_wandbcallback(self):
         output_dir = tempfile.mkdtemp()
         args = TrainingArguments(
@@ -83,7 +123,7 @@ class TestWandbCallback(unittest.TestCase):
         shutil.rmtree(output_dir)
 
 
-class TestSwanlabCallback(unittest.TestCase):
+class TestSwanlabCallback(_SingleCardGpuEnv):
     def test_swanlabcallback(self):
         output_dir = tempfile.mkdtemp()
         args = TrainingArguments(
@@ -120,7 +160,7 @@ class TestSwanlabCallback(unittest.TestCase):
         shutil.rmtree(output_dir)
 
 
-class TestTensorboardCallback(unittest.TestCase):
+class TestTensorboardCallback(_SingleCardGpuEnv):
     def test_tbcallback(self):
         output_dir = tempfile.mkdtemp()
         args = TrainingArguments(
@@ -169,7 +209,7 @@ class TestTensorboardCallback(unittest.TestCase):
         shutil.rmtree(output_dir)
 
 
-class TestVisualDLCallback(unittest.TestCase):
+class TestVisualDLCallback(_SingleCardGpuEnv):
     def test_vdlcallback(self):
         output_dir = tempfile.mkdtemp()
         args = TrainingArguments(

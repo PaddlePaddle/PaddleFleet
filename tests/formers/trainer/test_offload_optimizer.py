@@ -344,7 +344,11 @@ class HackOffloadWrapperTest(unittest.TestCase):
         # Lifecycle: reload before op, then move back to the original place.
         self.assertEqual(_ids(spy.reloaded), _ids([sync_var]))
         self.assertEqual(_ids(spy.offloaded), _ids([sync_var]))
-        self.assertTrue(spy.offload_places[0].is_cpu_place())
+        # The wrapper captures origin_place = sync_var.place before the op and
+        # restores exactly that place afterwards. That place is the tensor's own
+        # device (CPUPlace on a CPU build, CUDAPlace on GPU CI), so assert it
+        # equals sync_var.place rather than hard-coding CPU.
+        self.assertEqual(str(spy.offload_places[0]), str(sync_var.place))
 
     def test_insert_sync_eb5_skips_move_back(self):
         self._snapshot_hack_targets()

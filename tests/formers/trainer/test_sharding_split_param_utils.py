@@ -147,7 +147,11 @@ class TestReshapeParams(unittest.TestCase):
         }
         reshape_params(state_dict, {"w": "w_s"}, {}, {})
         self.assertEqual(list(state_dict["w/beta1_pow_acc_0"].shape), [1])
-        self.assertEqual(state_dict["w/beta1_pow_acc_0"].tolist(), [0.81])
+        # 0.81 has no exact float32 representation, so .tolist() yields the
+        # float32-rounded value; assert closeness rather than exact fp equality.
+        self.assertAlmostEqual(
+            state_dict["w/beta1_pow_acc_0"].tolist()[0], 0.81, places=6
+        )
 
     def test_ownership_swap_changes_content_not_shape(self):
         # Two params, same shape, different content; swapping the owned slice
@@ -252,7 +256,11 @@ class TestMergeSplitedParam(unittest.TestCase):
             is_master_weights=True,
         )
         self.assertEqual(list(result["beta1_pow_acc_0"].shape), [1])
-        self.assertEqual(result["beta1_pow_acc_0"].tolist(), [0.81])
+        # 0.81 has no exact float32 representation, so .tolist() yields the
+        # float32-rounded value; assert closeness rather than exact fp equality.
+        self.assertAlmostEqual(
+            result["beta1_pow_acc_0"].tolist()[0], 0.81, places=6
+        )
 
     def test_nonmaster_path_uses_generate_base_static_name(self):
         # Non-master keys resolve their static name via generate_base_static_name;

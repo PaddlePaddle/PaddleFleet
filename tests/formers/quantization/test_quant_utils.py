@@ -227,6 +227,8 @@ class TestReplaceWithQuantizationLinearGPU(unittest.TestCase):
 
     @unittest.skipUnless(_cuda_available(), _NO_CUDA_REASON)
     def test_matching_module_replaced(self):
+        import paddle
+
         qu = _load_utils()
         from paddlefleet.quantization.quantization_linear import (
             QuantizationLinear,
@@ -234,7 +236,13 @@ class TestReplaceWithQuantizationLinearGPU(unittest.TestCase):
 
         model = _build_linear_model()
         cfg = _load_config_cls()(weight_quantize_algo="weight_only_int8")
-        qu.replace_with_quantization_linear(model, cfg)
+        # The real loader replaces modules inside paddle.LazyGuard() (via
+        # model_utils.from_pretrained -> ContextManagers([no_init_weights,
+        # LazyGuard])). Outside LazyGuard the int8 create_parameter eagerly runs
+        # the default XavierUniform initializer, whose uniform kernel is not
+        # registered for int8. Replicate the production context here.
+        with paddle.LazyGuard():
+            qu.replace_with_quantization_linear(model, cfg)
         self.assertIsInstance(model.linear, QuantizationLinear)
 
 
@@ -368,13 +376,11 @@ class TestConvertWeightQuantizeDequantizeRoundTripGPU(unittest.TestCase):
         qu = _load_utils()
         cfg = _load_config_cls()(weight_quantize_algo="weight_only_int8")
 
-        # Distinct values with a clear per-tensor maximum magnitude.
-        original = np.array(
-            [
-                [0.5, -1.0, 2.0, -4.0],
-                [1.5, -0.25, 3.25, -2.75],
-            ],
-            dtype=np.float32,
+        # weight_quantize requires the weight's first (input) dim to be
+        # divisible by 64, so use a [64, 4] linear weight. linspace gives
+        # distinct values with a clear per-tensor maximum magnitude of 4.0.
+        original = np.linspace(-4.0, 4.0, num=64 * 4, dtype=np.float32).reshape(
+            64, 4
         )
         weight = paddle.to_tensor(original, dtype="float16")
         state_dict = {"linear.weight": weight}

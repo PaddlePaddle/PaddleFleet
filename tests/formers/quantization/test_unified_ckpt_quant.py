@@ -145,7 +145,11 @@ class TestQuantUnifiedOptimizerO1(unittest.TestCase):
         }
         result = quant_unified_optimizer(state_dict, "optimizer_weight", "O1")
         self.assertEqual(result[beta_key].dtype, np.float32)
-        np.testing.assert_array_equal(result[beta_key], [0.9])
+        # passed through unchanged: compare against the float32 input value, not
+        # the float64 literal 0.9 (which differs by ~2e-8 after float32 casting).
+        np.testing.assert_array_equal(
+            result[beta_key], np.array([0.9], dtype=np.float32)
+        )
         self.assertNotIn(beta_key + SYMMETRY_QUANT_SCALE, result)
 
 

@@ -292,9 +292,9 @@ class TestDequantWeightNumeric(unittest.TestCase):
     def test_dequant_matches_float_weight_within_step(self):
         paddle.seed(7)
         in_features, out_features = 128, 32
-        # weight_quantize wants an [in, out] weight (first dim divisible by 64)
-        # and returns the transposed [out, in] int8 payload; dequant_weight then
-        # reconstructs that [out, in] layout, i.e. w.T. Keep w as [in, out].
+        # weight_quantize wants an [in, out] weight (first dim divisible by 64);
+        # weight_dequantize is its inverse and reconstructs the SAME [in, out]
+        # orientation, so dq is compared directly against the original w.
         w = paddle.randn([in_features, out_features], dtype="float32")
         w_np = w.numpy()
 
@@ -308,20 +308,19 @@ class TestDequantWeightNumeric(unittest.TestCase):
             dtype="float16",
             weight_scale=w_scale,
             quant_state=None,
-            input_shape=[out_features, in_features],
+            input_shape=[in_features, out_features],
         )
         self.assertEqual(dq.dtype, paddle.float16)
-        self.assertEqual(dq.shape, [out_features, in_features])
+        self.assertEqual(dq.shape, [in_features, out_features])
 
         dq_np = dq.astype("float32").numpy()
-        # Independent reference is the ORIGINAL float weight transposed into the
-        # [out, in] layout the dequant path reconstructs; each element must sit
-        # within half a quant step (max|W|/127 over the input axis) plus fp16
-        # slack.
-        w_ref = w_np.T  # [out, in]
-        step = _quant_step_from_weight(w_ref)  # [out]
-        allowed = (step[:, None] / 2.0) + 3e-3 + 1e-2 * np.abs(w_ref)
-        diff = np.abs(dq_np - w_ref)
+        # Independent reference is the ORIGINAL float weight; each element must
+        # sit within half a quant step (max|W|/127 over the input axis, i.e. per
+        # output channel) plus fp16 slack. step is per output channel so it
+        # broadcasts along the [in, out] weight's output axis.
+        step = _quant_step_from_weight(w_np.T)  # [out]
+        allowed = (step[None, :] / 2.0) + 3e-3 + 1e-2 * np.abs(w_np)
+        diff = np.abs(dq_np - w_np)
         self.assertTrue(
             np.all(diff <= allowed),
             f"max excess={np.max(diff - allowed):.4g}",
