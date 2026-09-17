@@ -57,63 +57,89 @@ def wait(ops):
         task.wait()
 
 
-class PrependPrevWindow(PyLayer):
-    """Prepend the previous CP rank's last ``window`` rows; rank 0 gets zeros.
+class NeighbourWindow(PyLayer):
+    """Borrow ``window`` rows from the adjacent rank; the edge rank gets zeros.
 
-    Only ``window`` rows cross the wire, versus ``s_local`` for an all-gather.
-    Backward is the mirror: the prefix gradient goes back to ``rank - 1`` and
-    the one arriving from ``rank + 1`` is added to this rank's tail.
+    ``side="prev"`` prepends rank-1's last rows, ``side="next"`` appends
+    rank+1's first rows. Only ``window`` rows cross the wire, versus ``s_local``
+    for an all-gather. Backward is the mirror: the borrowed rows' gradient goes
+    back to their owner and is added to the rows it lent.
     """
 
     @staticmethod
-    def forward(ctx, x, window, group):
-        ctx.window, ctx.group = window, group
-        r, peers = group.rank, group.ranks
-        prefix = paddle.zeros([x.shape[0], window, x.shape[2]], dtype=x.dtype)
+    def forward(ctx, x, window, group, side):
+        ctx.window, ctx.group, ctx.side = window, group, side
+        prev = side == "prev"
+        r, peers, nranks = group.rank, group.ranks, group.nranks
+        src, dst = (r - 1, r + 1) if prev else (r + 1, r - 1)
+        pad = paddle.zeros([x.shape[0], window, x.shape[2]], dtype=x.dtype)
+        lent = x[:, -window:, :] if prev else x[:, :window, :]
         ops = []
-        if r > 0:
-            ops.append(dist.P2POp(dist.irecv, prefix, peers[r - 1], group))
-        if r < group.nranks - 1:
-            tail = x[:, -window:, :].contiguous()
-            ops.append(dist.P2POp(dist.isend, tail, peers[r + 1], group))
+        if 0 <= src < nranks:
+            ops.append(dist.P2POp(dist.irecv, pad, peers[src], group))
+        if 0 <= dst < nranks:
+            ops.append(
+                dist.P2POp(dist.isend, lent.contiguous(), peers[dst], group)
+            )
         wait(ops)
-        return paddle.concat([prefix, x], axis=1)
+        return paddle.concat([pad, x] if prev else [x, pad], axis=1)
 
     @staticmethod
     def backward(ctx, grad):
-        window, group = ctx.window, ctx.group
-        r, peers = group.rank, group.ranks
-        grad_x = grad[:, window:, :].clone()  # clone: grad must stay untouched
-        tail_grad = paddle.zeros_like(grad[:, :window, :])
+        window, group, prev = ctx.window, ctx.group, ctx.side == "prev"
+        r, peers, nranks = group.rank, group.ranks, group.nranks
+        src, dst = (r + 1, r - 1) if prev else (r - 1, r + 1)
+        # clone: ``grad`` must stay untouched for the other consumers
+        grad_x = (grad[:, window:, :] if prev else grad[:, :-window, :]).clone()
+        borrowed = grad[:, :window, :] if prev else grad[:, -window:, :]
+        lent_grad = paddle.zeros_like(borrowed)
         ops = []
-        if r < group.nranks - 1:
-            ops.append(dist.P2POp(dist.irecv, tail_grad, peers[r + 1], group))
-        if r > 0:
-            prefix_grad = grad[:, :window, :].contiguous()
-            ops.append(dist.P2POp(dist.isend, prefix_grad, peers[r - 1], group))
+        if 0 <= src < nranks:
+            ops.append(dist.P2POp(dist.irecv, lent_grad, peers[src], group))
+        if 0 <= dst < nranks:
+            ops.append(
+                dist.P2POp(dist.isend, borrowed.contiguous(), peers[dst], group)
+            )
         wait(ops)
-        grad_x[:, -window:, :] += tail_grad
+        if prev:
+            grad_x[:, -window:, :] += lent_grad
+        else:
+            grad_x[:, :window, :] += lent_grad
         return grad_x
+
+
+def _neighbour_window(x: Tensor, window: int, group, side: str) -> Tensor:
+    if window <= 0:
+        return x
+    if window > x.shape[1]:
+        raise ValueError(
+            f"{side}-window ({window}) exceeds the local sequence length "
+            f"({x.shape[1]}): a single hop only reaches the adjacent rank, so "
+            "the window may not span more than one CP shard"
+        )
+    if group is None or group.nranks <= 1:
+        raise ValueError(
+            f"{side}-window requires a context-parallel group with nranks > 1, "
+            f"got {group!r}"
+        )
+    return NeighbourWindow.apply(x, window, group, side)
 
 
 def prepend_prev_window(x: Tensor, window: int, group) -> Tensor:
     """``[b, s, d]`` -> ``[b, window + s, d]``, prefixed by the previous rank.
 
-    Row 0 of the result has global position ``rank * s - window``. A single hop
-    only reaches ``rank - 1``, so ``window`` must not exceed ``s``.
+    Row 0 of the result has global position ``rank * s - window``.
     """
-    if window <= 0:
-        return x
-    if window > x.shape[1]:
-        raise ValueError(
-            f"prepend_prev_window window ({window}) exceeds the local sequence "
-            f"length ({x.shape[1]}): a single hop only reaches rank - 1, so the "
-            "window may not span more than one CP shard"
-        )
-    if group is None or group.nranks <= 1:
-        prefix = paddle.zeros([x.shape[0], window, x.shape[2]], dtype=x.dtype)
-        return paddle.concat([prefix, x], axis=1)
-    return PrependPrevWindow.apply(x, window, group)
+    return _neighbour_window(x, window, group, "prev")
+
+
+def append_next_window(x: Tensor, window: int, group) -> Tensor:
+    """``[b, s, d]`` -> ``[b, s + window, d]``, suffixed by the next rank.
+
+    Row ``i`` of the result has global position ``rank * s + i``, so a consumer
+    holding global indices only has to subtract ``rank * s``.
+    """
+    return _neighbour_window(x, window, group, "next")
 
 
 # ===========================================================================

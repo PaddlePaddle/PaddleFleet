@@ -1,8 +1,10 @@
 # 扩展 AI Review 评审规则
 
-`ai-review` 将规则统一放在 `references/` 目录：
+`ai-review` 的实体在 `skills/ai-review/`，将规则统一放在同目录的 `references/` 中。`.agents/skills/ai-review` 和 `.claude/skills/ai-review` 均为指向实体的相对软链接；编辑规则只需修改一份文件。
 
 - `references/base-rules.md`：适用于所有 PaddleFleet 评审的基础规则。
+- `references/unit-test-rules.md`：仓库模块主表直接列出开源数据流、Trainer、training_args、CLI 等关键模块；每个大模块包含无卡、单卡、多卡测试要求，以及测试目标、用例设计和隔离方式。
+- `references/unit-test-antipatterns.md`：合并原九个模块的反模式，按“实现改坏后测试仍会通过”的失效机制归为 13 类并附类型目录，包含反例代码、漏检原因和修正写法；入口为 `references/unit-test-rules.md` 各模块的反模式链接。
 - `references/*.md`：面向特定模块、技术或风险场景的扩展规则。
 
 加载 skill 时会读取该目录下全部 Markdown 文件，再根据文件声明的适用路径和触发条件决定是否应用。扩展规则按目录自动发现，不需要修改 `SKILL.md` 或维护额外注册表。
@@ -44,12 +46,12 @@
 
 ```bash
 python "${CODEX_HOME:-$HOME/.codex}/skills/.system/skill-creator/scripts/quick_validate.py" \
-  .agents/skills/ai-review
+  skills/ai-review
 
 pre-commit run --files \
-  .agents/skills/ai-review/SKILL.md \
-  .agents/skills/ai-review/README.md \
-  .agents/skills/ai-review/references/<rule-name>.md
+  skills/ai-review/SKILL.md \
+  skills/ai-review/README.md \
+  skills/ai-review/references/<rule-name>.md
 ```
 
 提交前用一个匹配适用范围的真实 diff 试评审，确认扩展规则会被应用；再用一个无关 diff 验证它不会被误用。

@@ -25,6 +25,7 @@ jobs:
       group: APPROVAL
     outputs:
       packages_changed: ${{ steps.check.outputs.packages_changed }}
+      ops_source_changed: ${{ steps.check.outputs.ops_source_changed }}
     steps:
       - name: Cleanup
         run: |
@@ -38,23 +39,26 @@ jobs:
         run: |
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             echo "packages_changed=true" >> $GITHUB_OUTPUT
+            echo "ops_source_changed=true" >> $GITHUB_OUTPUT
           elif [[ "${{ github.event.created }}" == "true" ]]; then
             # Newly created branch (e.g. release/**): force build ops
             echo "packages_changed=true" >> $GITHUB_OUTPUT
+            echo "ops_source_changed=true" >> $GITHUB_OUTPUT
+          elif git diff --name-only HEAD~1 HEAD -- packages/ | grep -q .; then
+            echo "packages_changed=true" >> $GITHUB_OUTPUT
+            echo "ops_source_changed=true" >> $GITHUB_OUTPUT
+          elif git diff --name-only HEAD~1 HEAD -- version.txt | grep -q .; then
+            echo "packages_changed=true" >> $GITHUB_OUTPUT
+            echo "ops_source_changed=false" >> $GITHUB_OUTPUT
           else
-            # version.txt counts as an ops change: build_backend.py derives the
-            # ops wheel version from it, so a bump there must republish ops.
-            if git diff --name-only HEAD~1 HEAD -- packages/ version.txt | grep -q .; then
-              echo "packages_changed=true" >> $GITHUB_OUTPUT
-            else
-              echo "packages_changed=false" >> $GITHUB_OUTPUT
-            fi
+            echo "packages_changed=false" >> $GITHUB_OUTPUT
+            echo "ops_source_changed=false" >> $GITHUB_OUTPUT
           fi
 
   upload-pr-ops:
     name: Upload PR ops whl
     needs: check-packages-changes
-    if: needs.check-packages-changes.outputs.packages_changed == 'true'
+    if: needs.check-packages-changes.outputs.ops_source_changed == 'true'
     runs-on:
       group: APPROVAL
     env:
@@ -189,6 +193,7 @@ jobs:
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           export UV_PYTHON=${{ matrix.python_version }}
           source /root/proxy
+          set -e
           git reset --hard ${{ github.sha }}
           uv cache clean paddlepaddle-gpu
           git submodule update --init --recursive
@@ -199,8 +204,10 @@ jobs:
           fi
           export IS_NVIDIA=True
           uv build --wheel --package paddlefleet --out-dir dist --clear -v
-          pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
           rm dist/paddlefleet-*.whl
+          # Compiling ops needs paddle only, not the rest of the fleet dep tree.
+          PADDLE_REQ=$(grep -oE "paddlepaddle-gpu==[0-9a-zA-Z.+]+" pyproject.toml | head -1)
+          pip install "${PADDLE_REQ}" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
           pip install packaging "setuptools>=66.1.0" wheel "ninja==1.11.1.1" "pybind11[global]>=2.13,<3" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/
           if [[ ${{ matrix.cuda.bos_CUDA }} == "cu129" ]]; then
             pip install "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
@@ -219,6 +226,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
+          set -e
           wget --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
@@ -240,7 +248,7 @@ jobs:
             fi
             export AK=paddle
             export SK=paddle
-            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}/paddle-release
+            python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}
             # Only refresh latest/ if this commit is the newest commit that touched an ops
             # build input on the branch -- packages/ or the root version.txt, whose value
             # build_backend.py bakes into the wheel version -- so a slower older build
@@ -258,7 +266,7 @@ jobs:
             done
             if [[ -z "${newest_ops_commit}" || "${newest_ops_commit}" == "${COMMIT_ID}" ]]; then
               mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-              python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}/paddle-release
+              python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}
             else
               echo "Skip latest/ upload: ${COMMIT_ID} is not the newest ops commit on ${BRANCH} (newest: ${newest_ops_commit})"
             fi
@@ -274,158 +282,6 @@ jobs:
           path: dist/paddlefleet_ops-paddle-release-*.whl.name
           if-no-files-found: error
           retention-days: 1
-
-      - name: Cleanup
-        if: ${{ always() }}
-        run: |
-          set +e
-          docker exec -t ${{ env.container_name }} /bin/bash -c 'bash ci/clean_uv_cache.sh; rm -rf * .[^.]*'
-          docker rm -f ${{ env.container_name }}
-
-  publish-ops-wheel-paddle-dev:
-    name: PR merge update ops on paddle-dev (${{ matrix.cuda.CUDA_VERSION }}, python${{ matrix.python_version }})
-    needs: clone
-    if: github.repository == 'PaddlePaddle/PaddleFleet'
-    runs-on:
-      group: GZ_BD-CPU
-    strategy:
-      fail-fast: false
-      matrix:
-        python_version: ["3.10", "3.11", "3.12", "3.13"]
-        cuda:
-          - {CUDA_VERSION: CUDA12.9, IMAGE_TAG: cuda12.9-cudnn9.9-trt10.5-gcc11, bos_CUDA: cu129, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
-          - {CUDA_VERSION: CUDA13.0, IMAGE_TAG: cuda13.0-cudnn9.13-trt10.13-gcc11, bos_CUDA: cu130, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
-          - {CUDA_VERSION: CUDA13.2, IMAGE_TAG: cuda13.2-cudnn9.20-trt10.16-gcc11, bos_CUDA: cu132, CUDA_ARCH_LIST: "8.0;9.0;10.0;10.3"}
-    env:
-      TASK: PR-PaddleFleet-ops-${{ matrix.cuda.CUDA_VERSION }}-${{ matrix.python_version }}
-      PIP_CACHE_DIR: /home/.cache/pip
-      CACHE_DIR: /home/.cache
-      CCACHE_DIR: "/home/data/shared/.ccache/l1" # L1 cache on machine shared dir
-      CCACHE_SECONDARY_STORAGE: "file:///home/data/cfs/.ccache/l2" # L2 cache on cfs
-      CCACHE_MAXSIZE: 50G
-      CCACHE_LIMIT_MULTIPLE: 0.8
-      UV_HTTP_TIMEOUT: 600
-      no_proxy: ".bcebos.com,bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn"
-    steps:
-      - name: Check docker image and run container
-        run: |
-          docker_image="ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle_manylinux_devel:${{ matrix.cuda.IMAGE_TAG }}"
-          docker pull $docker_image
-          container_name=${TASK}-${{ matrix.python_version }}-$(date +%Y%m%d-%H%M%S)
-          echo "container_name=${container_name}" >> ${{ github.env }}
-          docker run -d -t --name ${container_name} \
-            -v "/home/data/cfs:/home/data/cfs" \
-            -v "/home/data/cfs/.cache:/home/.cache" \
-            -v "/home/data/shared:/home/data/shared" \
-            -v ${{ github.workspace }}/../../..:/root \
-            -v ${{ github.workspace }}/../../../proxy:/root/proxy \
-            -v ${{ github.workspace }}:/workspace \
-            -e no_proxy \
-            -e CACHE_DIR \
-            -e PIP_CACHE_DIR \
-            -e CCACHE_DIR \
-            -e CCACHE_SECONDARY_STORAGE \
-            -e CCACHE_MAXSIZE \
-            -e CCACHE_LIMIT_MULTIPLE \
-            -e UV_HTTP_TIMEOUT \
-            -e PADDLE_CUDA_ARCH_LIST="${{ matrix.cuda.CUDA_ARCH_LIST }}" \
-            -e PR_ID \
-            -e COMMIT_ID \
-            -e BRANCH \
-            -e AK=${{ secrets.BOS_CREDENTIAL_AK }} \
-            -e SK=${{ secrets.BOS_CREDENTIAL_SK }} \
-            -e GITHUB_TOKEN=${{ secrets.GITHUB_TOKEN }} \
-            -e GITHUB_REPO_NAME=${{ github.repository }} \
-            -w /workspace --network=host $docker_image
-
-      - name: Download PaddleFleet
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xc '
-          rm -rf * .[^.]*
-          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
-          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
-          source /root/proxy
-          set -e
-          wget --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
-          echo "Extracting PaddleFleet.tar.gz"
-          tar -xf PaddleFleet.tar.gz --strip-components=1
-          rm PaddleFleet.tar.gz
-          git config --global --add safe.directory /workspace
-          git submodule foreach --recursive "git config --global --add safe.directory \$toplevel/\$sm_path"
-          sed -i "s#packages/nightly/cu129#packages/nightly/${{ matrix.cuda.bos_CUDA }}#g" pyproject.toml
-          cat pyproject.toml
-          mkdir -p /root/.cache/pip
-          pip cache dir
-          pip install --upgrade pip
-          pip install uv
-          python -m pip install bce-python-sdk==0.8.74
-          '
-
-      - name: Build wheel
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xc '
-          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
-          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
-          export UV_PYTHON=${{ matrix.python_version }}
-          source /root/proxy
-          git reset --hard ${{ github.sha }}
-          uv cache clean paddlepaddle-gpu
-          git submodule update --init --recursive
-          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
-            TAG_NAME="${{ github.ref_name }}"
-            VERSION="${TAG_NAME#v}"
-            export PADDLEFLEET_VERSION=$VERSION
-          fi
-          export IS_NVIDIA=True
-          python -m pip install --pre paddlepaddle-gpu -i https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
-          pip install packaging "setuptools>=66.1.0" wheel "ninja==1.11.1.1" "pybind11[global]>=2.13,<3" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/
-          if [[ ${{ matrix.cuda.bos_CUDA }} == "cu129" ]]; then
-            pip install "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/
-          elif [[ ${{ matrix.cuda.bos_CUDA }} == "cu130" || ${{ matrix.cuda.bos_CUDA }} == "cu132" ]]; then
-            pip install "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/
-          elif [[ ${{ matrix.cuda.bos_CUDA }} == "cu132" ]]; then
-            pip install "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu132/
-          else
-            pip install "nvidia-nvshmem-cu13>=3.3.9,<3.5"
-          fi
-          uv build --wheel --package paddlefleet-ops --out-dir dist --no-build-isolation -v
-          '
-
-      - name: Upload wheel
-        run: |
-          docker exec -t ${{ env.container_name }} /bin/bash -xc '
-          export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
-          export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
-          wget --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
-          mkdir bos
-          tar -xf bos_new.tar.gz -C bos
-          cd dist
-          PY_VERSION="${{ matrix.python_version }}"
-          PY_VERSION_SHORT="${PY_VERSION//./}"
-          export AK=paddle
-          export SK=paddle
-          python ../bos/BosClient.py paddlefleet_ops-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}/${{ matrix.cuda.bos_CUDA }}/paddle-develop
-          # Only refresh latest/ if this commit is the newest commit that touched an ops
-          # build input on the branch -- packages/ or the root version.txt, whose value
-          # build_backend.py bakes into the wheel version.
-          newest_ops_commit=""
-          newest_ops_date=""
-          for ops_path in packages version.txt; do
-            ops_json=$( source /root/proxy; curl -s -L -H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/${GITHUB_REPO_NAME}/commits?sha=${BRANCH}&path=${ops_path}&per_page=1" ) || true
-            ops_path_commit=$( echo "${ops_json}" | grep -oE "\"sha\": *\"[0-9a-f]{40}\"" | head -1 | grep -oE "[0-9a-f]{40}" ) || true
-            ops_path_date=$( echo "${ops_json}" | grep -oE "[0-9-]{10}T[0-9:]{8}Z" | sort -r | head -1 ) || true
-            if [[ -n "${ops_path_commit}" && "${ops_path_date}" > "${newest_ops_date}" ]]; then
-              newest_ops_commit="${ops_path_commit}"
-              newest_ops_date="${ops_path_date}"
-            fi
-          done
-          if [[ -z "${newest_ops_commit}" || "${newest_ops_commit}" == "${COMMIT_ID}" ]]; then
-            mv paddlefleet_ops-*.whl paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl
-            python ../bos/BosClient.py paddlefleet_ops-0.0.0-cp${PY_VERSION_SHORT}-cp${PY_VERSION_SHORT}-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest/${{ matrix.cuda.bos_CUDA }}/paddle-develop
-          else
-            echo "Skip latest/ upload: ${COMMIT_ID} is not the newest ops commit on ${BRANCH} (newest: ${newest_ops_commit})"
-          fi
-          '
 
       - name: Cleanup
         if: ${{ always() }}
@@ -500,6 +356,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
           source /root/proxy
+          set -e
           wget --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
           tar -xf PaddleFleet.tar.gz --strip-components=1
@@ -525,7 +382,9 @@ jobs:
           git reset --hard ${{ github.sha }}
           uv cache clean paddlepaddle-gpu
           uv build --wheel -v
-          python -m pip install --break-system-packages dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
+          # Compiling ops needs paddle only, not the rest of the fleet dep tree.
+          PADDLE_REQ=$(grep -oE "paddlepaddle-gpu==[0-9a-zA-Z.+]+" pyproject.toml | head -1)
+          python -m pip install --break-system-packages "${PADDLE_REQ}" --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${{ matrix.cuda.bos_CUDA }}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${{ matrix.cuda.bos_CUDA }}/
           git submodule update --init --recursive
           git submodule foreach --recursive "git config --global --add safe.directory \$toplevel/\$sm_path"
           if [[ "${{ github.event_name }}" == "push" && "${{ github.ref_type }}" == "tag" ]]; then
@@ -545,6 +404,7 @@ jobs:
       - name: Upload wheel
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
+          set -e
           wget --no-proxy https://xly-devops.bj.bcebos.com/home/bos_new.tar.gz --no-check-certificate
           mkdir bos
           tar -xf bos_new.tar.gz -C bos
@@ -593,7 +453,7 @@ jobs:
 
   upload-to-paddletest:
     name: Upload ops wheel to paddletest (${{ matrix.flavor.label }}, ${{ matrix.flavor.bos_CUDA }}, py${{ matrix.flavor.python_version }})
-    needs: [check-packages-changes, publish-ops-wheel, publish-ops-wheel-paddle-dev, publish-ops-wheel-arm]
+    needs: [check-packages-changes, publish-ops-wheel, publish-ops-wheel-arm]
     if: >
       always() &&
       needs.check-packages-changes.outputs.packages_changed == 'true' &&

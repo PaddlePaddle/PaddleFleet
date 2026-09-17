@@ -1050,6 +1050,14 @@ class TransformerConfig(ModelParallelConfig):
     "dualchunk_allgather": balanced front+rear chunk splitting (default).
     "contiguous_allgather": simple rank-order contiguous slicing.
     "contiguous_a2a".
+    An optional "_overlap"/"_nonoverlap" suffix selects `flashmask_cp_overlap`; it is
+    stripped from this field during post-init.
+    """
+
+    flashmask_cp_overlap: bool = False
+    """Whether context parallel FlashMask attention overlaps the KV
+    communication inside the attention kernel. Normally set through the
+    "_overlap" suffix of `cp_balance_mode`.
     """
 
     linear_cp_mode: str = "chunkwise"
@@ -1724,6 +1732,13 @@ class TransformerConfig(ModelParallelConfig):
     csa_dense_mode: bool = False
     """If True, skip CSAIndexer for CSA layers (1 < ratio < 128) and attend to all
     compressed positions.
+    """
+
+    cp_compress_p2p: bool = False
+    """If True, the CSA/HCA compressor pools each group on the CP rank owning its
+    start via a one-hop P2P window instead of an all-gather of the whole projected
+    sequence. Only takes effect for non-overlapping (ratio 128) layers under CP;
+    off falls back to the all-gather baseline, bit-for-bit.
     """
 
     indexer_init_from_scratch: bool | None = None
@@ -3446,6 +3461,16 @@ class TransformerConfig(ModelParallelConfig):
                 )
             _warnings.warn(f"[MULTIMAX-CONFIG] multimax_modules={_multimax}")
 
+        # Split the optional overlap suffix off the layout name, so that every
+        # cp_balance_mode comparison keeps matching the plain layout. Configs
+        # written before the suffix existed carry no suffix and stay
+        # non-overlap.
+        for _suffix, _overlap in (("_overlap", True), ("_nonoverlap", False)):
+            if self.cp_balance_mode.endswith(_suffix):
+                self.cp_balance_mode = self.cp_balance_mode[: -len(_suffix)]
+                self.flashmask_cp_overlap = _overlap
+                break
+
         valid_cp_balance_modes = {
             "dualchunk_allgather",
             "contiguous_allgather",
@@ -3669,3 +3694,11 @@ class TransformerConfig(ModelParallelConfig):
                 f"{self.flash_attn_fa3_backend!r}"
             )
         set_fa3_backend(self.flash_attn_fa3_backend)
+        if self.flashmask_cp_overlap and self.cp_balance_mode not in {
+            "dualchunk_allgather",
+            "contiguous_allgather",
+        }:
+            raise ValueError(
+                "Overlapped context parallel attention only supports "
+                f"cp_balance_mode='dualchunk_allgather' and 'contiguous_allgather', got {self.cp_balance_mode!r}."
+            )
