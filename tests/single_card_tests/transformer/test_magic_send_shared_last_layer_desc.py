@@ -28,7 +28,7 @@ landing on the same rank (see the co-location note in
 from __future__ import annotations
 
 import unittest
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 from paddle import nn
 from paddle.distributed.fleet.meta_parallel import LayerDesc, SharedLayerDesc
@@ -74,14 +74,19 @@ def _make_config(**overrides):
 def _layer_descs(num_mtp=1, **config_overrides):
     """Call get_layer_desc_list without building a real GPTModel.
 
-    The method only touches ``self.config`` and ``self.add_sequential_layer``,
-    so a stub carrying those two is enough and keeps this a single-card test.
+    The method only touches ``self.config``, ``self.add_sequential_layer`` and
+    ``self._model_name_prefix``, so a stub carrying those three is enough and
+    keeps this a single-card test. The real ``_model_name_prefix`` is bound to
+    the stub so the layer name prefix stays the production one.
     """
     fake_self = SimpleNamespace(
         config=_make_config(**config_overrides),
         add_sequential_layer=lambda layers, desc, name_prefix="": layers.append(
             {"layer": desc, "name_prefix": name_prefix}
         ),
+    )
+    fake_self._model_name_prefix = MethodType(
+        GPTModel._model_name_prefix, fake_self
     )
     return GPTModel.get_layer_desc_list(
         fake_self, _make_spec(num_mtp=num_mtp), tie_word_embeddings=False

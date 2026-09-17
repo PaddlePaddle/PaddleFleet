@@ -31,6 +31,11 @@ if TYPE_CHECKING:
 from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_parallel import ScheduleChunk
 
+from paddlefleet.models.gpt.aoa_generator import (
+    build_aoa_context,
+    gen_whole_model_aoa,
+    gen_whole_model_inv_aoa,
+)
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 from paddlefleet.models.gpt.lm_head import (
     GPTLMHead,
@@ -299,13 +304,21 @@ class GPTModel(PipelineLayer):
                 gpu_param = param.cuda()
                 gpu_param._share_buffer_to(param)
 
-    def get_layer_desc_list(self, spec, tie_word_embeddings):
-        layers = []
+    def _model_name_prefix(self) -> str:
+        """The model single-name root prefix (no trailing dot).
+
+        Shared by :meth:`get_layer_desc_list`, which names the pipeline layers
+        with it, and by ``build_aoa_context``, so pipeline naming and AOA name
+        resolution never diverge.
+        """
         model_type = getattr(self.config, "model_type", "")
         if "qwen3_vl" in model_type or "qwen3_5" in model_type:
-            name_prefix = "model.language_model"
-        else:
-            name_prefix = "model"
+            return "model.language_model"
+        return "model"
+
+    def get_layer_desc_list(self, spec, tie_word_embeddings):
+        layers = []
+        name_prefix = self._model_name_prefix()
         if tie_word_embeddings:
             self.add_sequential_layer(
                 layers,
@@ -1230,3 +1243,36 @@ class GPTModel(PipelineLayer):
                 paddle.distributed.all_reduce(
                     grad.contiguous(), group=self._mtp_embed_global_group
                 )
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # AOA modular generation: whole-model entries
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def gen_aoa_statements(self, config=None):
+        """Whole-model entry: checkpoint -> model (forward) AOA statements.
+
+        Builds the read-only context (so consumers never construct it) and hands
+        off to the modular generator, from ``config`` when given and from
+        ``self.config`` otherwise.
+
+        The signature deliberately does not accept the ``Layer`` recursion
+        protocol's ``structured_name_prefix`` / ``aoa_name_scope``: this is a
+        whole-model boundary, so a container that recursed into it raises
+        ``TypeError`` instead of silently producing partial statements.
+        """
+        ctx = build_aoa_context(
+            self, config if config is not None else self.config
+        )
+        return gen_whole_model_aoa(self, ctx)
+
+    def gen_inv_aoa_statements(self, config=None):
+        """Whole-model entry: model -> checkpoint (inverse) AOA statements.
+
+        The independent mirror of :meth:`gen_aoa_statements`: it builds its own
+        context and never derives the inverse from the checkpoint->model
+        statements.
+        """
+        ctx = build_aoa_context(
+            self, config if config is not None else self.config
+        )
+        return gen_whole_model_inv_aoa(self, ctx)
