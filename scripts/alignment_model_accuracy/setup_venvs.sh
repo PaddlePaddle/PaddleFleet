@@ -141,14 +141,14 @@ setup_paddle_venv() {
         "setuptools>=66.1.0" pip wheel packaging "ninja==1.11.1.1" \
         "pybind11[global]>=2.13,<3" \
         "tensor-spec-worker"
-    uv pip install --python "${paddle_py}" "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" -i https://www.paddlepaddle.org.cn/packages/nightly/cu129/
+    uv pip install --python "${paddle_py}" "paddle-nvidia-nvshmem-cu12>=3.3.9,<3.5" -i https://www.paddlepaddle.org.cn/packages/nightly/cu130/
 
     # PaddleFleet. --no-deps is intentionally dropped: the wheel's pinned
     # paddlepaddle-gpu dependency must be installed here, otherwise
     # venv/paddle/bin/paddlefleet-cli fails to import paddle at runtime.
     uv pip install --python "${paddle_py}" "${paddle_index[@]}" \
         --force-reinstall \
-        --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ \
+        --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu130/ \
         "${PADDLEFLEET_WHEEL}"
     # (
     #     cd ./PaddleFleet
@@ -160,10 +160,25 @@ setup_paddle_venv() {
 
     # paddlefleet_ops
     UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --python "${paddle_py}" --force-reinstall \
-    --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ \
+    --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ \
         "${PADDLEFLEET_OPS_WHEEL}"
     # uv pip install --python "${paddle_py}" -v --no-build-isolation \
     #     -e ./PaddleFleet/packages/paddlefleet_ops
+
+    # The cu130 and cu130 indexes host wheels with identical names and versions
+    # but different contents, so a wrong pick is only detectable here.
+    local paddle_cuda
+    paddle_cuda="$("${paddle_py}" -c 'import paddle; print(paddle.version.cuda())')"
+    echo "[setup_venvs] paddle cuda: ${paddle_cuda}"
+    if [[ ${paddle_cuda} != 13* ]]; then
+        echo "[setup_venvs] error: expected a cu13 build, got cuda ${paddle_cuda}" >&2
+        exit 1
+    fi
+
+    # Nothing depends on the cu12 set anymore; drop it so two CUDA stacks
+    # never coexist in the same venv.
+    uv pip freeze --python "${paddle_py}" | sed -n 's/^\(.*-cu12\)==.*/\1/p' |
+        xargs -r uv pip uninstall --python "${paddle_py}"
 }
 
 print_installed_versions() {
