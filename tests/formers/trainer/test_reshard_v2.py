@@ -46,13 +46,18 @@ explicitly skipped with that reason rather than simulated (see
 ``TestDistributedReshardBoundary``).
 """
 
-import os
 import unittest
 
 import numpy as np
 
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
-os.environ.setdefault("FLAGS_selected_gpus", "")
+# NOTE: do NOT plant empty-string ``FLAGS_selected_gpus``/``CUDA_VISIBLE_DEVICES``
+# here. This module is imported at collection time into a persistent xdist
+# worker that also runs GPU tests. ``paddle.distributed.ParallelEnv()`` reads
+# ``int(os.getenv("FLAGS_selected_gpus", "0")[0])`` on every construction, so an
+# empty string set process-wide makes ``int("")`` raise for *sibling* tests
+# (e.g. any ``tensor.to("cuda")`` path) even though this file only needs CPU.
+# ``paddle.set_device("cpu")`` below is sufficient to keep this module's own
+# tensor-plumbing tests on CPU without mutating the shared environment.
 
 try:
     import paddle

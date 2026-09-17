@@ -376,12 +376,13 @@ class TestConvertWeightQuantizeDequantizeRoundTripGPU(unittest.TestCase):
         qu = _load_utils()
         cfg = _load_config_cls()(weight_quantize_algo="weight_only_int8")
 
-        # weight_quantize requires the weight's first (input) dim to be
-        # divisible by 64, so use a [64, 4] linear weight. linspace gives
-        # distinct values with a clear per-tensor maximum magnitude of 4.0.
-        original = np.linspace(-4.0, 4.0, num=64 * 4, dtype=np.float32).reshape(
-            64, 4
-        )
+        # weight_quantize's kernel requires the weight's first dim divisible by
+        # 64 and its second dim divisible by 16, so use a [64, 32] linear
+        # weight. linspace gives distinct values with a clear per-tensor maximum
+        # magnitude of 4.0.
+        original = np.linspace(
+            -4.0, 4.0, num=64 * 32, dtype=np.float32
+        ).reshape(64, 32)
         weight = paddle.to_tensor(original, dtype="float16")
         state_dict = {"linear.weight": weight}
 
