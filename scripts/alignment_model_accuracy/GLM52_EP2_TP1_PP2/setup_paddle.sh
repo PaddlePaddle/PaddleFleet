@@ -2,6 +2,12 @@
 # Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# `uv` may only be reachable via the shared installer's UV_BIN_DIR
+# (/home/.local/bin), which setup_venvs.sh exports inside its own process; GLM52
+# can run before it. Make `uv` resolvable here without relying on that export.
+if ! command -v uv >/dev/null 2>&1; then
+    export PATH="${UV_BIN_DIR:-/home/.local/bin}:${PATH}"
+fi
 PADDLE_VENV="${1:-${SCRIPT_DIR}/venv/paddle}"
 if [[ "$(realpath -m "${PADDLE_VENV}")" == "$(realpath -m "${SCRIPT_DIR}/../venv/paddle")" ]]; then
     echo "GLM52 setup must not modify the shared Paddle environment" >&2
