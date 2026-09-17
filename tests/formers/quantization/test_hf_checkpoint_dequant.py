@@ -241,7 +241,11 @@ class TestQuanDescriptorKeyMapping(unittest.TestCase):
                     FP8_WEIGHT: ((2, 4), "uint8"),
                     FP8_SCALE: ((1, 2), "uint8"),
                     MXFP4_WEIGHT: ((2, 2), "uint8"),
-                    MXFP4_SCALE: ((2, 1), "uint8"),
+                    # physical (2, 2) -> logical (2, 4); block_shape [2] groups
+                    # along the last (packed) axis, so the scale grid is
+                    # (2, ceil(4/2)) = (2, 2). A (2, 1) scale would imply a
+                    # block size of 4 and is rejected by _infer_block_axes.
+                    MXFP4_SCALE: ((2, 2), "uint8"),
                     NORM_WEIGHT: ((4,), "bfloat16"),
                 }
             ),

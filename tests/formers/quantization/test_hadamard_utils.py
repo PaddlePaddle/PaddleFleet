@@ -252,14 +252,21 @@ class TestApplyHadamardMatmul(unittest.TestCase):
 
         self.assertIn(4, infohub.hadamard)
         self.assertIn(8, infohub.hadamard)
+        # The inputs are 2-D ([1, n]) so the reference matmul must keep that
+        # leading axis; a bare 1-D arange would produce a shape-(n,) reference
+        # that mismatches the shape-(1, n) production output.
         np.testing.assert_allclose(
             out4.numpy(),
-            (np.arange(1, 5) @ sylvester_hadamard(4)).astype("float32"),
+            (np.arange(1, 5).reshape([1, 4]) @ sylvester_hadamard(4)).astype(
+                "float32"
+            ),
             atol=1e-4,
         )
         np.testing.assert_allclose(
             out8.numpy(),
-            (np.arange(1, 9) @ sylvester_hadamard(8)).astype("float32"),
+            (np.arange(1, 9).reshape([1, 8]) @ sylvester_hadamard(8)).astype(
+                "float32"
+            ),
             atol=1e-4,
         )
 

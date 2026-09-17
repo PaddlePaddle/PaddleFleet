@@ -246,9 +246,16 @@ class TestCalAbsMinMaxChannel(unittest.TestCase):
     def test_zero_channel_replaced_with_eps(self):
         inputs = np.array([[0.0, 2.0], [0.0, 5.0]], np.float32)
         maxs, mins = cal_abs_min_max_channel(inputs, quant_axis=1)
-        # column 0 is all zeros -> both max and min become eps=1e-8.
-        np.testing.assert_allclose(maxs, [1e-8, 5.0], rtol=0, atol=0)
-        np.testing.assert_allclose(mins, [1e-8, 2.0], rtol=0, atol=0)
+        # column 0 is all zeros -> both max and min become eps=1e-8. The output
+        # is float32, so compare against a float32 reference: 1e-8 rounded to
+        # float32 differs from the float64 literal by ~6e-17, which an exact
+        # (atol=0) comparison against a Python float would spuriously reject.
+        np.testing.assert_allclose(
+            maxs, np.array([1e-8, 5.0], dtype=np.float32), rtol=0, atol=0
+        )
+        np.testing.assert_allclose(
+            mins, np.array([1e-8, 2.0], dtype=np.float32), rtol=0, atol=0
+        )
 
 
 class TestCalAbsMaxChannel(unittest.TestCase):
@@ -262,7 +269,11 @@ class TestCalAbsMaxChannel(unittest.TestCase):
     def test_zero_channel_replaced_with_eps(self):
         inputs = np.array([[0.0, -7.0], [0.0, 3.0]], np.float32)
         result = cal_abs_max_channel(inputs, quant_axis=1)
-        np.testing.assert_allclose(result, [1e-8, 7.0], rtol=0, atol=0)
+        # column 0 is all zeros -> abs max becomes eps=1e-8. Compare against a
+        # float32 reference so the float32 rounding of 1e-8 is not rejected.
+        np.testing.assert_allclose(
+            result, np.array([1e-8, 7.0], dtype=np.float32), rtol=0, atol=0
+        )
 
 
 class TestQdqWeightSymmetric(unittest.TestCase):
@@ -304,9 +315,16 @@ class TestAsymmetryQdqWeight(unittest.TestCase):
 
     def test_quant_min_max_and_content(self):
         quant_x, mins, maxs = asymmetry_qdq_weight(self._x(), quant_bit=8)
-        np.testing.assert_array_equal(mins, [0.0, -255.0])
-        np.testing.assert_array_equal(maxs, [255.0, 0.0])
-        # (x-min)/255*255 = (x-min):
+        # asymmetry_qdq_weight derives (max, min) via cal_abs_min_max_channel,
+        # which replaces an exactly-zero channel extreme with eps=1e-8. col0's
+        # min (0.0) and col1's max (0.0) are therefore reported as 1e-8, not 0.
+        np.testing.assert_allclose(
+            mins, np.array([1e-8, -255.0], dtype=np.float32), rtol=0, atol=0
+        )
+        np.testing.assert_allclose(
+            maxs, np.array([255.0, 1e-8], dtype=np.float32), rtol=0, atol=0
+        )
+        # (x-min)/255*255 = (x-min); the ~1e-8 eps offset rounds away:
         expected = np.array([[0, 0], [100, 100], [255, 255]], dtype=np.uint8)
         self.assertEqual(quant_x.dtype, np.uint8)
         np.testing.assert_array_equal(quant_x, expected)
