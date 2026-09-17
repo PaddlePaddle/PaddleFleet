@@ -606,6 +606,10 @@ class GPTEmbedding(FleetLayer):
                                 decoder_input,
                                 axis=1,
                                 mode=self.config.cp_balance_mode,
+                                # Embedding output: under per-token loss its backward
+                                # all-gather puts cp duplicate grads on embed_tokens;
+                                # divide them out (E175). No-op unless per-token is on.
+                                scale_grad_by_cp=True,
                             )
                         if (
                             self.config.gpt_model_use_experimental_version
@@ -654,6 +658,9 @@ class GPTEmbedding(FleetLayer):
                                 inputs_embeds,
                                 axis=1,
                                 mode=self.config.cp_balance_mode,
+                                # Embedding output (E175): divide out cp-duplicate
+                                # embed grads under per-token; no-op otherwise.
+                                scale_grad_by_cp=True,
                             )
 
                         if self.sequence_parallel:
@@ -690,6 +697,9 @@ class GPTEmbedding(FleetLayer):
                                         inputs_embeds_mtp,
                                         axis=1,
                                         mode=self.config.cp_balance_mode,
+                                        # Embedding output (E175): divide out cp-duplicate
+                                        # embed grads under per-token; no-op otherwise.
+                                        scale_grad_by_cp=True,
                                     )
                                 )
 
@@ -761,7 +771,10 @@ class GPTEmbedding(FleetLayer):
                     "generation."
                 )
                 decoder_input = ContextParallelScatterOp.apply(
-                    decoder_input, axis=1, mode=self.config.cp_balance_mode
+                    decoder_input, axis=1, mode=self.config.cp_balance_mode,
+                    # Embedding output, plain no-MTP path (E175): divide out
+                    # cp-duplicate embed grads under per-token; no-op otherwise.
+                    scale_grad_by_cp=True,
                 )
 
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
