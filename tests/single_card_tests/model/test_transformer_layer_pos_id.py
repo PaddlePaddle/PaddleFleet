@@ -154,6 +154,39 @@ class TestTransformerLayerMTPPositionIds(unittest.TestCase):
         # untouched: neither sliced nor re-concatenated
         self.assertIs(rst["position_ids"], position_ids)
 
+    def test_magic_metadata_bypasses_forward_impl_and_round_trips(self):
+        config = _make_config(
+            num_nextn_predict_layers=0,
+            enable_mtp_magic_send=False,
+            use_erndata=True,
+        )
+        layer = _make_layer(config)
+        captured = {}
+
+        def _forward_impl(hidden_states, **kwargs):
+            captured.update(kwargs)
+            return hidden_states
+
+        object.__setattr__(layer, "_forward_impl", _forward_impl)
+        hidden_states = paddle.randn([1, SEQ, HIDDEN])
+        full_ids = paddle.arange(SEQ, dtype="int64").reshape([1, SEQ])
+        cu = paddle.to_tensor([0, SEQ], dtype="int32")
+        with patch(
+            "paddlefleet.transformer.transformer_layer.has_recovered",
+            return_value=True,
+        ):
+            rst = layer.forward(
+                {
+                    "hidden_states": hidden_states,
+                    "mtp_full_input_ids": full_ids,
+                    "cu_seqlens_q": cu,
+                }
+            )
+        self.assertNotIn("mtp_full_input_ids", captured)
+        self.assertIn("cu_seqlens_q", captured)
+        self.assertIs(rst["mtp_full_input_ids"], full_ids)
+        self.assertIs(rst["cu_seqlens_q"], cu)
+
 
 if __name__ == "__main__":
     unittest.main()

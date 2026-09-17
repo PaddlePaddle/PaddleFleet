@@ -2286,35 +2286,33 @@ class TransformerConfig(ModelParallelConfig):
                 )
 
         if self.use_erndata and self.num_nextn_predict_layers > 0:
-            # erndata + MTP selects the packed-doc (MCore 8c4df6b07) contract.
-            if self.enable_mtp_magic_send:
-                # Refused by design, not for lack of implementation. erndata
-                # already puts full-length input_ids and cu_seqlens_q into
-                # preproc_output and no backbone layer consumes them (
-                # transformer_layer only re-slices input_ids when it is longer
-                # than the backbone sequence, which never happens for length-L
-                # erndata tensors), so they reach the MTP layer intact without
-                # magic send.
-                #
-                # What the flag would still add is its other half: a second
-                # *trainable* vocab table (`mtp_embed`) on the MTP stage, tied to
-                # the stage-0 embedding logically but physically replicated
-                # whenever stage 0 is a different rank -- exactly the PP>1 case
-                # the flag exists for. That costs V*H in weights, the same in
-                # gradients and 3x in fp32 master+m+v (only the optimizer state
-                # is sharded) to shrink the hidden-state P2P payload from (K+1)x
-                # to 1x, traffic overlap_p2p_comm already hides. Keep the default
-                # batch-axis carrier, which already supports any PP depth here.
+            # erndata + MTP selects the packed-doc contract. With magic send the
+            # backbone carries only its 1x hidden state while full input ids and
+            # cu_seqlens_q travel as explicit pipeline metadata; each MTP stage
+            # re-embeds and rolls locally. The generic magic-send constraints
+            # above (notably PP > 1) still apply.
+            if self.enable_mtp_magic_send and not self.variable_seq_lengths:
                 raise ValueError(
-                    "use_erndata=True with MTP does not need (and does not "
-                    "support) enable_mtp_magic_send=True. erndata already "
-                    "delivers full-length input_ids and cu_seqlens_q to the MTP "
-                    "stage through the pipeline dict, so magic send would only "
-                    "add a replicated trainable vocab table on that stage in "
-                    "order to shrink a P2P payload that overlap_p2p_comm "
-                    "already hides. Set enable_mtp_magic_send=False; the "
-                    "default batch-axis MTP carrier works at any "
-                    "pipeline_model_parallel_size."
+                    "use_erndata=True with enable_mtp_magic_send=True requires "
+                    "variable_seq_lengths=True because packed cu_seqlens_q metadata "
+                    "can have a different shape in each microbatch."
+                )
+            if self.enable_mtp_magic_send and self.hidden_dropout_prob != 0.0:
+                raise ValueError(
+                    "use_erndata=True with enable_mtp_magic_send=True requires "
+                    "hidden_dropout_prob=0.0: the MTP stage cannot reproduce the "
+                    "stage-0 embedding dropout mask exactly across PP ranks."
+                )
+            if (
+                self.enable_mtp_magic_send
+                and getattr(self, "position_embedding_type", "rope")
+                == "learned_absolute"
+            ):
+                raise ValueError(
+                    "use_erndata=True with enable_mtp_magic_send=True does not "
+                    "support position_embedding_type='learned_absolute': the MTP "
+                    "stage owns only the token mtp_embed table and cannot reproduce "
+                    "GPTEmbedding's learned position embeddings. Use rope or none."
                 )
             if self.experimental_dataflow:
                 # experimental_dataflow specifically produces

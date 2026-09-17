@@ -40,6 +40,7 @@ import paddle
 from paddlefleet.transformer.multi_token_prediction import (
     MultiTokenPredictionLayer,
     build_startend_row_indices_from_cu_seqlens,
+    roll_tensor,
 )
 
 
@@ -347,6 +348,167 @@ def _make_mask_layer(
 
     layer._proj_and_transformer_layer = _stub_proj
     return layer, recorded
+
+
+class TestErndataMagicSend(unittest.TestCase):
+    def _make_layer(self, K: int, depth: int, *, magic_send: bool = True):
+        layer = MultiTokenPredictionLayer.__new__(MultiTokenPredictionLayer)
+        cfg = MagicMock()
+        cfg.use_erndata = True
+        cfg.enable_mtp_magic_send = magic_send
+        cfg.num_nextn_predict_layers = K
+        cfg.gpt_model_use_experimental_version = False
+        cfg.sequence_parallel = False
+        cfg.tensor_model_parallel_size = 1
+        cfg.expert_model_parallel_size = 1
+        cfg.pad_token_id = 0
+        cfg.cp_balance_mode = "dualchunk_allgather"
+        layer.config = cfg
+        layer.layer_number = depth
+        layer.sequence_parallel = False
+        layer.mhc_enabled = False
+        object.__setattr__(layer, "mtp_embed", paddle.nn.Embedding(16, 1))
+        layer.mtp_embed.weight.set_value(
+            paddle.arange(16, dtype="float32").reshape([16, 1])
+        )
+        recorded = {}
+
+        def _stub_proj(hidden_states, decoder_input, **kwargs):
+            recorded["hidden"] = hidden_states
+            recorded["decoder"] = decoder_input
+            recorded["kwargs"] = kwargs
+            return hidden_states + 1
+
+        layer._proj_and_transformer_layer = _stub_proj
+        return layer, recorded
+
+    def test_multidepth_grows_carrier_and_rolls_float_embedding(self) -> None:
+        K, B, S = 2, 1, 6
+        ids = paddle.to_tensor([[1, 2, 3, 4, 5, 6]], dtype="int64")
+        cu = paddle.to_tensor([0, 3, 6], dtype="int32")
+        args = {
+            "hidden_states": paddle.zeros([B, S, 1]),
+            "mtp_full_input_ids": ids,
+            "cu_seqlens_q": cu,
+            "context": None,
+        }
+        l0, rec0 = self._make_layer(K, 0)
+        l1, rec1 = self._make_layer(K, 1)
+        out0 = l0._forward_megatron_style(args)
+        self.assertIn("mtp_full_input_ids", out0)
+        self.assertIs(out0["mtp_full_input_ids"], ids)
+        self.assertIs(out0["cu_seqlens_q"], cu)
+        self.assertNotIn("mtp_full_input_ids", rec0["kwargs"])
+        self.assertEqual(list(out0["hidden_states"].shape), [2 * B, S, 1])
+        self.assertEqual(
+            rec0["decoder"].squeeze(-1).numpy().tolist(),
+            [[2.0, 3.0, 0.0, 5.0, 6.0, 0.0]],
+        )
+        out1 = l1._forward_megatron_style(out0)
+        self.assertEqual(list(out1["hidden_states"].shape), [3 * B, S, 1])
+        self.assertNotIn("mtp_full_input_ids", out1)
+        self.assertIs(out1["cu_seqlens_q"], cu)
+        self.assertEqual(
+            rec1["decoder"].squeeze(-1).numpy().tolist(),
+            [[3.0, 0.0, 0.0, 6.0, 0.0, 0.0]],
+        )
+        self.assertTrue(paddle.equal_all(rec1["hidden"], rec0["hidden"] + 1))
+
+    def test_ep_padding_is_zeroed_before_packed_roll(self) -> None:
+        layer, _ = self._make_layer(1, 0)
+        layer.config.expert_model_parallel_size = 2
+        layer.config.tensor_model_parallel_size = 1
+        layer.mtp_embed.weight.set_value(paddle.ones_like(layer.mtp_embed.weight))
+        ids = paddle.to_tensor([[1, 0, 2, 3, 4, 5]], dtype="int64")
+        cu = paddle.to_tensor([0, 3, 6], dtype="int32")
+        decoder = layer._prepare_erndata_magic_decoder_input(ids, cu)
+        self.assertEqual(
+            decoder.squeeze(-1).numpy().tolist(),
+            [[0.0, 1.0, 0.0, 1.0, 1.0, 0.0]],
+        )
+
+    def test_experimental_version_padding_is_zeroed_before_roll(self) -> None:
+        layer, _ = self._make_layer(1, 0)
+        layer.config.expert_model_parallel_size = 1
+        layer.config.tensor_model_parallel_size = 1
+        layer.config.gpt_model_use_experimental_version = True
+        layer.mtp_embed.weight.set_value(paddle.ones_like(layer.mtp_embed.weight))
+        ids = paddle.to_tensor([[1, 0, 2, 3, 4, 5]], dtype="int64")
+        cu = paddle.to_tensor([0, 3, 6], dtype="int32")
+        decoder = layer._prepare_erndata_magic_decoder_input(ids, cu)
+        self.assertEqual(
+            decoder.squeeze(-1).numpy().tolist(),
+            [[0.0, 1.0, 0.0, 1.0, 1.0, 0.0]],
+        )
+
+    def test_fp32_residual_connection_promotes_decoder_input(self) -> None:
+        layer, _ = self._make_layer(1, 0)
+        layer.config.fp32_residual_connection = True
+        object.__setattr__(
+            layer, "mtp_embed", paddle.nn.Embedding(16, 1, dtype="float16")
+        )
+        ids = paddle.to_tensor([[1, 2, 3, 4, 5, 6]], dtype="int64")
+        cu = paddle.to_tensor([0, 3, 6], dtype="int32")
+        decoder = layer._prepare_erndata_magic_decoder_input(ids, cu)
+        self.assertEqual(decoder.dtype, paddle.float32)
+
+    def test_magic_and_nonmagic_decoder_embeddings_match_k1_and_k2(self) -> None:
+        """Identical tables yield identical packed decoder embeddings.
+
+        This directly compares the magic path's local re-embedding with the
+        ordinary path's precomputed float-embedding carrier.  It covers K=1 and
+        both cumulative depths of K=2, including zero-filled document tails.
+        """
+        B, S = 1, 6
+        ids = paddle.to_tensor([[1, 2, 3, 4, 5, 6]], dtype="int64")
+        cu = paddle.to_tensor([0, 3, 6], dtype="int32")
+        weight = paddle.arange(16, dtype="float32").reshape([16, 1])
+        base = paddle.nn.functional.embedding(ids, weight)
+
+        for K in (1, 2):
+            ordinary_chunks = [base]
+            rolled = base
+            for _ in range(K):
+                rolled, _ = roll_tensor(
+                    rolled, shifts=-1, dims=1, cu_seqlens_q=cu
+                )
+                ordinary_chunks.append(rolled)
+
+            ordinary_args = {
+                "hidden_states": paddle.concat(ordinary_chunks),
+                "cu_seqlens_q": cu,
+                "context": None,
+            }
+            magic_args = {
+                "hidden_states": base,
+                "mtp_full_input_ids": ids,
+                "cu_seqlens_q": cu,
+                "context": None,
+            }
+            for depth in range(K):
+                ordinary, ordinary_rec = self._make_layer(
+                    K, depth, magic_send=False
+                )
+                magic, magic_rec = self._make_layer(K, depth)
+                magic.mtp_embed.weight.set_value(ordinary.mtp_embed.weight)
+
+                ordinary_args = ordinary._forward_megatron_style(ordinary_args)
+                magic_args = magic._forward_megatron_style(magic_args)
+
+                self.assertTrue(
+                    paddle.equal_all(
+                        magic_rec["decoder"], ordinary_rec["decoder"]
+                    )
+                )
+                doc_tails = magic_rec["decoder"][:, [2, 5], :]
+                self.assertTrue(
+                    paddle.equal_all(
+                        doc_tails, paddle.zeros_like(doc_tails)
+                    )
+                )
+
+            self.assertIs(magic_args["cu_seqlens_q"], cu)
+            self.assertNotIn("mtp_full_input_ids", magic_args)
 
 
 class TestMaskFallbackWithoutInputIds(unittest.TestCase):

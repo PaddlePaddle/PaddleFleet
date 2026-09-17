@@ -11,7 +11,8 @@ historical ernie5 L+K layout. Guards checked here:
   1. Default is False.
   2. The removed `mtp_num_layers` alias is rejected as a constructor kwarg
      (TypeError) and, via ``from_config``, whenever it is non-zero.
-  3. use_erndata + MTP is incompatible with enable_mtp_magic_send.
+  3. use_erndata + MTP supports enable_mtp_magic_send while retaining the
+     generic magic-send PP>1 constraint.
   4. use_erndata + MTP is incompatible with experimental_dataflow.
   5. use_erndata without MTP (K == 0) trips none of the guards — the packed-doc
      forward is only reachable through the MTP layer.
@@ -39,6 +40,7 @@ from __future__ import annotations
 import unittest
 from types import SimpleNamespace
 
+from paddlefleet.models.gpt.gpt_config import GPTConfig
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
@@ -131,21 +133,49 @@ class TestUseErndataValidation(unittest.TestCase):
             "mtp_num_layers", TransformerConfig.renamed_config_keys
         )
 
-    def test_erndata_incompat_with_magic_send(self) -> None:
-        # enable_mtp_magic_send also requires PP>1 (checked earlier in
-        # __post_init__), so we build a config that would pass that check.
-        #
-        # Assert on the flag name alone, not the prose: the reasoning for the
-        # rejection lives in the comment above the guard, and pinning it here
-        # would make every rewording a CI failure.
-        with self.assertRaisesRegex(ValueError, r"enable_mtp_magic_send"):
+    def test_erndata_accepts_magic_send(self) -> None:
+        cfg = TransformerConfig(
+            **self._base_kwargs(
+                use_erndata=True,
+                num_nextn_predict_layers=1,
+                enable_mtp_magic_send=True,
+                pipeline_model_parallel_size=2,
+                variable_seq_lengths=True,
+            )
+        )
+        self.assertTrue(cfg.use_erndata)
+        self.assertTrue(cfg.enable_mtp_magic_send)
+
+    def test_erndata_magic_send_requires_variable_sequences(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"variable_seq_lengths=True"):
             TransformerConfig(
-                **self._base_kwargs(
-                    use_erndata=True,
-                    num_nextn_predict_layers=1,
-                    enable_mtp_magic_send=True,
-                    pipeline_model_parallel_size=2,
-                )
+                use_erndata=True,
+                num_nextn_predict_layers=1,
+                enable_mtp_magic_send=True,
+                pipeline_model_parallel_size=2,
+                variable_seq_lengths=False,
+            )
+
+    def test_erndata_magic_send_rejects_embedding_dropout(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"hidden_dropout_prob=0.0"):
+            TransformerConfig(
+                use_erndata=True,
+                num_nextn_predict_layers=1,
+                enable_mtp_magic_send=True,
+                pipeline_model_parallel_size=2,
+                variable_seq_lengths=True,
+                hidden_dropout_prob=0.1,
+            )
+
+    def test_erndata_magic_send_rejects_learned_absolute_position(self) -> None:
+        with self.assertRaisesRegex(ValueError, r"learned_absolute"):
+            GPTConfig(
+                use_erndata=True,
+                num_nextn_predict_layers=1,
+                enable_mtp_magic_send=True,
+                pipeline_model_parallel_size=2,
+                variable_seq_lengths=True,
+                position_embedding_type="learned_absolute",
             )
 
     def test_erndata_incompat_with_experimental_dataflow(self) -> None:

@@ -1114,18 +1114,14 @@ class GPTModel(PipelineLayer):
                 )
         else:
             # Intermediate stage: participate in broadcast with a dummy buffer
-            divisor = (
-                getattr(self.config, "make_vocab_size_divisible_by", 1) or 1
-            )
+            # Match VocabParallelEmbedding exactly: it partitions the configured
+            # vocabulary directly and does not apply make_vocab_size_divisible_by.
             tp = self.config.tensor_model_parallel_size
-            padded_vocab = int(
-                (
-                    (self.config.vocab_size + (divisor * tp) - 1)
-                    // (divisor * tp)
-                )
-                * (divisor * tp)
+            assert self.config.vocab_size % tp == 0, (
+                f"vocab_size={self.config.vocab_size} must be divisible by "
+                f"tensor_model_parallel_size={tp}"
             )
-            local_vocab = padded_vocab // tp
+            local_vocab = self.config.vocab_size // tp
             dtype = (
                 self.config.params_dtype
                 if hasattr(self.config, "params_dtype")
@@ -1176,22 +1172,38 @@ class GPTModel(PipelineLayer):
         """
         import paddle
         import paddle.distributed
+        from paddle import framework
+        from paddle.framework import core
 
-        # Get mtp_embed grad id to skip it in the pairwise loop below
+        def _attached_grad(param):
+            if not framework.in_dynamic_mode():
+                return param._grad_ivar()
+            if hasattr(param, "main_grad"):
+                if param.main_grad is None:
+                    param.main_grad = core.eager.Tensor(
+                        value=paddle.zeros_like(param, dtype="float32").value(),
+                        place=param.place,
+                        name="main_grad@" + param.name,
+                    )
+                return param.main_grad
+            if param.grad is None:
+                param.grad = core.eager.Tensor(
+                    value=paddle.zeros_like(param).value(),
+                    place=param.place,
+                    name="grad@" + param.name,
+                )
+            return param.grad
+
         mtp_embed_weight = None
         if hasattr(self, "_mtp_embed_global_group"):
             mtp_embed_weight = self._get_mtp_embed_primary_weight()
-        mtp_embed_grad_id = None
-        if mtp_embed_weight is not None:
-            g = (
-                mtp_embed_weight.main_grad
-                if hasattr(mtp_embed_weight, "main_grad")
-                else mtp_embed_weight.grad
-            )
-            if g is not None:
-                mtp_embed_grad_id = id(g)
+        mtp_embed_param_id = (
+            id(mtp_embed_weight) if mtp_embed_weight is not None else None
+        )
+        reduced_param_groups = set()
 
-        # Pairwise allreduce for other shared layers (skip mtp_embed)
+        # Pairwise allreduce for other shared layers (skip mtp_embed by Parameter
+        # identity, and reduce aliases once per communication group).
         for key, comm in self.shared_comm.items():
             for weight_attr in comm["weight_attr"]:
                 obj = getattr(comm["layer"], weight_attr)
@@ -1199,21 +1211,19 @@ class GPTModel(PipelineLayer):
                     [("", obj)] if isinstance(obj, paddle.Tensor) else list(obj)
                 )
                 for _, param in params:
-                    grad = (
-                        param.main_grad
-                        if hasattr(param, "main_grad")
-                        else param.grad
-                    )
-                    if grad is None:
-                        continue
+                    param_id = id(param)
+                    param_group_key = (param_id, id(comm["group"]))
                     if (
-                        mtp_embed_grad_id is not None
-                        and id(grad) == mtp_embed_grad_id
+                        param_id == mtp_embed_param_id
+                        or param_group_key in reduced_param_groups
                     ):
                         continue
-                    paddle.distributed.all_reduce(
-                        grad.contiguous(), group=comm["group"]
-                    )
+                    grad = _attached_grad(param)
+                    with paddle.framework.no_grad():
+                        paddle.distributed.all_reduce(
+                            grad.contiguous(), group=comm["group"]
+                        )
+                    reduced_param_groups.add(param_group_key)
 
         # mtp_embed: allreduce within dedicated sub-group
         if (
@@ -1221,12 +1231,8 @@ class GPTModel(PipelineLayer):
             and hasattr(self, "_mtp_embed_global_group")
             and self._mtp_embed_global_group is not None
         ):
-            grad = (
-                mtp_embed_weight.main_grad
-                if hasattr(mtp_embed_weight, "main_grad")
-                else mtp_embed_weight.grad
-            )
-            if grad is not None:
+            grad = _attached_grad(mtp_embed_weight)
+            with paddle.framework.no_grad():
                 paddle.distributed.all_reduce(
                     grad.contiguous(), group=self._mtp_embed_global_group
                 )
