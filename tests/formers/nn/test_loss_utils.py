@@ -262,6 +262,20 @@ class TestLossImpl(unittest.TestCase):
 class TestCalcLmHeadLogits(unittest.TestCase):
     """calc_lm_head_logits with tp_size==1 reduces to hidden @ weight.T (+bias)."""
 
+    @staticmethod
+    def _weight_param(np_values):
+        # A real lm-head weight is an EagerParamBase that exposes
+        # ``is_distributed``; parallel_matmul reads ``logit_weights.is_distributed``
+        # (tensor_parallel_utils.py:79). A plain ``paddle.arange`` tensor lacks
+        # that attribute, so build a genuine single-card parameter
+        # (is_distributed == False) to exercise the tp_size==1 path as in
+        # production, rather than a bare eager tensor.
+        return paddle.create_parameter(
+            shape=list(np_values.shape),
+            dtype="float32",
+            default_initializer=paddle.nn.initializer.Assign(np_values),
+        )
+
     def _config(self, **kw):
         return SimpleNamespace(
             sequence_parallel=kw.get("sequence_parallel", False),
@@ -274,8 +288,8 @@ class TestCalcLmHeadLogits(unittest.TestCase):
         hidden = (
             paddle.arange(2 * 3 * 4, dtype="float32").reshape([2, 3, 4]) * 0.01
         )
-        weight = (
-            paddle.arange(5 * 4, dtype="float32").reshape([5, 4]) * 0.02
+        weight = self._weight_param(
+            np.arange(5 * 4, dtype="float32").reshape([5, 4]) * 0.02
         )  # [vocab, h]
         logits = calc_lm_head_logits(self._config(), hidden, weight, None)
         # parallel_matmul uses transpose_y=True: logits = hidden @ weight.T.
@@ -289,7 +303,9 @@ class TestCalcLmHeadLogits(unittest.TestCase):
         hidden = (
             paddle.arange(1 * 2 * 4, dtype="float32").reshape([1, 2, 4]) * 0.1
         )
-        weight = paddle.arange(3 * 4, dtype="float32").reshape([3, 4]) * 0.05
+        weight = self._weight_param(
+            np.arange(3 * 4, dtype="float32").reshape([3, 4]) * 0.05
+        )
         bias = paddle.to_tensor([10.0, 20.0, 30.0], dtype="float32")
         with_bias = calc_lm_head_logits(self._config(), hidden, weight, bias)
         without_bias = calc_lm_head_logits(self._config(), hidden, weight, None)

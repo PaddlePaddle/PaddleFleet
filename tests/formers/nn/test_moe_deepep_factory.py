@@ -135,14 +135,12 @@ class TestQuickAccessMoEFactory(unittest.TestCase):
         self.assertEqual(layer.num_experts, 6)
         self.assertEqual(len(layer.experts), 6)
 
-    def test_num_experts_per_tok_moe_k_fallback_is_dead(self):
-        # REAL-BEHAVIOR / latent bug: the factory tries
+    def test_num_experts_per_tok_moe_k_fallback_is_used(self):
+        # REAL-BEHAVIOR: the factory resolves
         #   config.get("num_experts_per_tok", config.get("moe_k", -1))
-        # intending moe_k as a fallback. But `num_experts_per_tok` is a predefined
-        # PretrainedConfig attribute (LlmMetaConfig default None), so .get() returns
-        # that existing None and the moe_k default is NEVER consulted. Result: passing
-        # only moe_k yields num_experts_per_tok=None, not moe_k. Asserting the actual
-        # behavior locks this quirk; see report for the intended (moe_k) value.
+        # Here ``num_experts_per_tok`` is absent from the config and is not a
+        # populated attribute, so .get() falls through to the moe_k fallback,
+        # yielding moe_k (3). Asserting the actual resolved value.
         config = PretrainedConfig(
             hidden_size=64,
             moe_intermediate_size=32,
@@ -151,7 +149,7 @@ class TestQuickAccessMoEFactory(unittest.TestCase):
             moe_k=3,
         )
         layer = _create(config)
-        self.assertIsNone(layer.num_experts_per_tok)
+        self.assertEqual(layer.num_experts_per_tok, 3)
 
     def test_num_shared_experts_value_and_shared_expert_sizing(self):
         layer = _create(_make_config(n_shared_experts=2))

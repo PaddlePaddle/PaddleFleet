@@ -33,6 +33,7 @@ Two facts about the production code shape these tests:
     behavioral assertion is made on it here.
 """
 
+import os
 import unittest
 
 import numpy as np
@@ -150,16 +151,29 @@ class TestRMSNorm(unittest.TestCase):
             self.skipTest(
                 "fused_rms_norm_ext is a GPU kernel; not executable on CPU"
             )
-        paddle.set_device("gpu")
-        norm = RMSNorm(_make_config(fuse_rms_norm=True), hidden_size=_HID)
-        _set_param(norm.weight, _W)
-        out = norm(paddle.to_tensor(_X)).numpy()
-        np.testing.assert_allclose(
-            out,
-            _rms_norm_reference(_X, _W, norm.variance_epsilon),
-            rtol=1e-3,
-            atol=1e-3,
-        )
+        # A launcher/fleet exports FLAGS_selected_gpus when it selects a card;
+        # the CI runner leaves it as an empty string, so set_device("gpu")
+        # (via ParallelEnv -> int(FLAGS_selected_gpus[0])) would raise. Pin an
+        # explicit single card as a launcher would, and restore afterwards.
+        orig_selected = os.environ.get("FLAGS_selected_gpus")
+        os.environ["FLAGS_selected_gpus"] = "0"
+        try:
+            paddle.set_device("gpu:0")
+            norm = RMSNorm(_make_config(fuse_rms_norm=True), hidden_size=_HID)
+            _set_param(norm.weight, _W)
+            out = norm(paddle.to_tensor(_X)).numpy()
+            np.testing.assert_allclose(
+                out,
+                _rms_norm_reference(_X, _W, norm.variance_epsilon),
+                rtol=1e-3,
+                atol=1e-3,
+            )
+        finally:
+            if orig_selected is None:
+                os.environ.pop("FLAGS_selected_gpus", None)
+            else:
+                os.environ["FLAGS_selected_gpus"] = orig_selected
+            paddle.set_device("cpu")
 
 
 class TestLayerNorm(unittest.TestCase):
@@ -191,15 +205,25 @@ class TestLayerNorm(unittest.TestCase):
         self.assertGreater(np.abs(expected - plain).max(), 1e-2)
 
     def test_eps_is_consumed(self):
-        x = paddle.to_tensor(_X)
-        big = LayerNorm(_make_config(), hidden_size=_HID, norm_eps=5.0)
-        small = LayerNorm(_make_config(), hidden_size=_HID, norm_eps=1e-5)
+        # paddle's LayerNorm op restricts epsilon to [0.0, 0.001] (unlike the
+        # manual RMSNorm path, a large eps like 5.0 is rejected outright). Prove
+        # eps is consumed within the valid range using a near-constant input
+        # whose variance is far below eps: there the +eps term dominates the
+        # denominator, so a max-range eps and a negligible eps produce
+        # materially different normalized outputs.
+        x_np = np.array(
+            [[1.0, 1.0001, 1.0, 1.0001], [2.0, 2.0002, 2.0, 2.0002]],
+            dtype=np.float32,
+        )
+        x = paddle.to_tensor(x_np)
+        big = LayerNorm(_make_config(), hidden_size=_HID, norm_eps=5e-4)
+        small = LayerNorm(_make_config(), hidden_size=_HID, norm_eps=1e-8)
         out_big = big(x).numpy()
         np.testing.assert_allclose(
             out_big,
-            _layer_norm_reference(_X, np.ones(_HID), np.zeros(_HID), 5.0),
-            rtol=1e-5,
-            atol=1e-5,
+            _layer_norm_reference(x_np, np.ones(_HID), np.zeros(_HID), 5e-4),
+            rtol=1e-3,
+            atol=1e-4,
         )
         self.assertGreater(np.abs(out_big - small(x).numpy()).max(), 1e-2)
 
