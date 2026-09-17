@@ -1117,10 +1117,11 @@ class GPTModel(PipelineLayer):
             # Match VocabParallelEmbedding exactly: it partitions the configured
             # vocabulary directly and does not apply make_vocab_size_divisible_by.
             tp = self.config.tensor_model_parallel_size
-            assert self.config.vocab_size % tp == 0, (
-                f"vocab_size={self.config.vocab_size} must be divisible by "
-                f"tensor_model_parallel_size={tp}"
-            )
+            if self.config.vocab_size % tp != 0:
+                raise ValueError(
+                    f"vocab_size={self.config.vocab_size} must be divisible by "
+                    f"tensor_model_parallel_size={tp}"
+                )
             local_vocab = self.config.vocab_size // tp
             dtype = (
                 self.config.params_dtype
@@ -1177,7 +1178,13 @@ class GPTModel(PipelineLayer):
 
         def _attached_grad(param):
             if not framework.in_dynamic_mode():
-                return param._grad_ivar()
+                grad = param._grad_ivar()
+                if grad is None:
+                    raise RuntimeError(
+                        f"The static-graph shared parameter {param.name} has no "
+                        "gradient to all-reduce."
+                    )
+                return grad
             if hasattr(param, "main_grad"):
                 if param.main_grad is None:
                     param.main_grad = core.eager.Tensor(

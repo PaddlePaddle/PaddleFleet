@@ -976,9 +976,8 @@ class MultiTokenPredictionLayer(FleetLayer):
                 reduce_scatter_embeddings=False,
                 config=no_init_cfg,
             )
-            if (
-                self.config.context_parallel_size > 1
-                and not getattr(config, "use_erndata", False)
+            if self.config.context_parallel_size > 1 and not getattr(
+                config, "use_erndata", False
             ):
                 from paddlefleet.context_parallel_utils import (
                     mark_context_parallel_parameter_disable_scale_grad,

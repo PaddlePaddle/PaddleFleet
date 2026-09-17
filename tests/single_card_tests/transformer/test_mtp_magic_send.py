@@ -111,7 +111,7 @@ class _FakeMTPSpec:
         self.transformer_layer = tl
 
 
-def _build_mtp_layer(config, layer_number=0):
+def _build_mtp_layer(config, layer_number=0, *, replace_mtp_embed=True):
     from paddlefleet.transformer.multi_token_prediction import (
         MultiTokenPredictionLayer,
     )
@@ -147,7 +147,7 @@ def _build_mtp_layer(config, layer_number=0):
     if hasattr(layer, "norm") and layer.norm is not None:
         layer.norm = _FakeNorm()
     layer.transformer_layer = _FakeTransformerLayer()
-    if layer.mtp_embed is not None:
+    if layer.mtp_embed is not None and replace_mtp_embed:
         layer.mtp_embed = nn.Embedding(config.vocab_size, config.hidden_size)
     return layer
 
@@ -521,7 +521,8 @@ class TestMTPLayerForward(unittest.TestCase):
                 use_erndata=True,
                 variable_seq_lengths=True,
                 context_parallel_size=2,
-            )
+            ),
+            replace_mtp_embed=False,
         )
         self.assertFalse(
             getattr(
@@ -1323,6 +1324,23 @@ class TestGPTModelMTPMethods(unittest.TestCase):
             list(bcast2.call_args.args[0].shape),
             [1000, model2.config.hidden_size],
         )
+
+    def test_synchronize_weight_rejects_nondivisible_vocab(self):
+        model, _ = self._make_model(num_mtp=0)
+        model.run_function = []
+        model.config.vocab_size = 1001
+        model.config.tensor_model_parallel_size = 2
+        hcg = MagicMock()
+        hcg.get_rank_from_stage.return_value = 0
+        hcg.get_pipe_parallel_group.return_value = MagicMock()
+        with (
+            patch(
+                "paddlefleet.models.gpt.gpt_model.fleet.get_hybrid_communicate_group",
+                return_value=hcg,
+            ),
+            self.assertRaisesRegex(ValueError, "must be divisible"),
+        ):
+            model._synchronize_mtp_embed_weight()
 
     def test_mark_shared_flags(self):
         model, layers = self._make_model(num_mtp=1)

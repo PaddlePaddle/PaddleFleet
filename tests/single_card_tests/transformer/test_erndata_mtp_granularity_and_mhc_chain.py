@@ -154,7 +154,9 @@ _CHUNK_MARK = 10.0
 _BLOCK_DELTA = 1.0
 
 
-def _make_mhc_layer(K: int, layer_number: int, n: int, h: int):
+def _make_mhc_layer(
+    K: int, layer_number: int, n: int, h: int, *, magic_send: bool = False
+):
     """Real MultiTokenPredictionLayer with stubbed block + postprocess.
 
     ``__new__`` avoids fleet init; only the fields ``_forward_megatron_style``
@@ -163,15 +165,24 @@ def _make_mhc_layer(K: int, layer_number: int, n: int, h: int):
     layer = MultiTokenPredictionLayer.__new__(MultiTokenPredictionLayer)
     cfg = MagicMock()
     cfg.use_erndata = True
-    cfg.enable_mtp_magic_send = False
+    cfg.enable_mtp_magic_send = magic_send
     cfg.num_nextn_predict_layers = K
     cfg.gpt_model_use_experimental_version = False
     cfg.sequence_parallel = False
+    cfg.tensor_model_parallel_size = 1
+    cfg.expert_model_parallel_size = 1
+    cfg.gpt_model_use_experimental_version = False
+    cfg.fp32_residual_connection = False
+    cfg.pad_token_id = 0
+    cfg.cp_balance_mode = "dualchunk_allgather"
     cfg.num_residual_streams = n
     cfg.hidden_size = h
     layer.config = cfg
     layer.layer_number = layer_number
     layer.mhc_enabled = True
+    layer.sequence_parallel = False
+    if magic_send:
+        object.__setattr__(layer, "mtp_embed", paddle.nn.Embedding(32, h))
 
     recorded = {}
 
@@ -257,6 +268,40 @@ class TestErndataMhcMultiDepthChain(unittest.TestCase):
         # The carrier stays width-uniform across all K+1 slots.
         self.assertEqual(list(out1["hidden_states"].shape), [(K + 1) * B, S, h])
         self.assertNotIn("decoder_input", out1)
+
+    def test_magic_send_chains_multistream_and_grows_uniform_carrier(
+        self,
+    ) -> None:
+        K, B, S, n, h = self.K, self.B, self.S, self.n, self.h
+        ids = paddle.to_tensor([[1, 2, 3, 4]], dtype="int64")
+        cu = paddle.to_tensor([0, 2, 4], dtype="int32")
+        args = self._initial_args()
+        # Magic transport starts with the bare backbone carrier; decoder
+        # embeddings are rebuilt locally at each MTP depth.
+        args["hidden_states"] = args["hidden_states"][:B]
+        args["mtp_full_input_ids"] = ids
+        args["cu_seqlens_q"] = cu
+
+        l0, rec0 = _make_mhc_layer(K, 0, n, h, magic_send=True)
+        l1, rec1 = _make_mhc_layer(K, 1, n, h, magic_send=True)
+        l1.mtp_embed.weight.set_value(l0.mtp_embed.weight)
+
+        out0 = l0.forward(args)
+        self.assertEqual(list(out0["hidden_states"].shape), [2 * B, S, h])
+        self.assertIn("mhc_multistream", out0)
+        self.assertIn("mtp_full_input_ids", out0)
+        self.assertEqual(float(rec0["hidden_in"].numpy()[0, 0, 0]), _CHUNK_MARK)
+
+        out1 = l1.forward(out0)
+        self.assertEqual(list(out1["hidden_states"].shape), [(K + 1) * B, S, h])
+        self.assertNotIn("mhc_multistream", out1)
+        self.assertNotIn("mtp_full_input_ids", out1)
+        self.assertEqual(
+            float(rec1["hidden_in"].numpy()[0, 0, 0]),
+            _CHUNK_MARK + _BLOCK_DELTA,
+        )
+        for slot in paddle.split(out1["hidden_states"], K + 1):
+            self.assertEqual(list(slot.shape), [B, S, h])
 
     def test_carrier_slots_hold_contracted_outputs(self) -> None:
         """Each depth writes its contracted output into carrier slot k+1."""
@@ -418,7 +463,9 @@ class TestErndataMagicSend(unittest.TestCase):
         layer, _ = self._make_layer(1, 0)
         layer.config.expert_model_parallel_size = 2
         layer.config.tensor_model_parallel_size = 1
-        layer.mtp_embed.weight.set_value(paddle.ones_like(layer.mtp_embed.weight))
+        layer.mtp_embed.weight.set_value(
+            paddle.ones_like(layer.mtp_embed.weight)
+        )
         ids = paddle.to_tensor([[1, 0, 2, 3, 4, 5]], dtype="int64")
         cu = paddle.to_tensor([0, 3, 6], dtype="int32")
         decoder = layer._prepare_erndata_magic_decoder_input(ids, cu)
@@ -432,7 +479,9 @@ class TestErndataMagicSend(unittest.TestCase):
         layer.config.expert_model_parallel_size = 1
         layer.config.tensor_model_parallel_size = 1
         layer.config.gpt_model_use_experimental_version = True
-        layer.mtp_embed.weight.set_value(paddle.ones_like(layer.mtp_embed.weight))
+        layer.mtp_embed.weight.set_value(
+            paddle.ones_like(layer.mtp_embed.weight)
+        )
         ids = paddle.to_tensor([[1, 0, 2, 3, 4, 5]], dtype="int64")
         cu = paddle.to_tensor([0, 3, 6], dtype="int32")
         decoder = layer._prepare_erndata_magic_decoder_input(ids, cu)
@@ -452,7 +501,9 @@ class TestErndataMagicSend(unittest.TestCase):
         decoder = layer._prepare_erndata_magic_decoder_input(ids, cu)
         self.assertEqual(decoder.dtype, paddle.float32)
 
-    def test_magic_and_nonmagic_decoder_embeddings_match_k1_and_k2(self) -> None:
+    def test_magic_and_nonmagic_decoder_embeddings_match_k1_and_k2(
+        self,
+    ) -> None:
         """Identical tables yield identical packed decoder embeddings.
 
         This directly compares the magic path's local re-embedding with the
@@ -502,9 +553,7 @@ class TestErndataMagicSend(unittest.TestCase):
                 )
                 doc_tails = magic_rec["decoder"][:, [2, 5], :]
                 self.assertTrue(
-                    paddle.equal_all(
-                        doc_tails, paddle.zeros_like(doc_tails)
-                    )
+                    paddle.equal_all(doc_tails, paddle.zeros_like(doc_tails))
                 )
 
             self.assertIs(magic_args["cu_seqlens_q"], cu)

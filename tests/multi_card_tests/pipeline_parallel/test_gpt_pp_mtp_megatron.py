@@ -170,9 +170,7 @@ def run_pp(seed, batch_size, seq_len, vocab_size, cu_seqlens_list):
     local_has_mtp_embed = any(
         layer.mtp_embed is not None for layer in local_mtp_layers
     )
-    has_mtp_embed = paddle.to_tensor(
-        [int(local_has_mtp_embed)], dtype="int32"
-    )
+    has_mtp_embed = paddle.to_tensor([int(local_has_mtp_embed)], dtype="int32")
     paddle.distributed.all_reduce(has_mtp_embed)
     assert int(has_mtp_embed.item()) > 0, "magic send did not build mtp_embed"
     if local_has_mtp_embed:
@@ -262,7 +260,9 @@ class TestPPMTPMegatron(unittest.TestCase):
             for k, v in tracker.items():
                 assert np.isfinite(float(v)), f"MTP loss {k}={v} must be finite"
         else:
-            assert not tracker, "non-loss PP stage unexpectedly recorded MTP loss"
+            assert not tracker, (
+                "non-loss PP stage unexpectedly recorded MTP loss"
+            )
 
 
 if __name__ == "__main__":

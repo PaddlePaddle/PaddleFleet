@@ -39,7 +39,6 @@ import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet
 
-import paddlefleet
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
 
@@ -134,7 +133,9 @@ def _grad_for(param):
 
 class TestErndataMagicSendCPWeightSync(unittest.TestCase):
     def _assert_pp_copies_equal(self, weight, phase):
-        pipe_group = fleet.get_hybrid_communicate_group().get_pipe_parallel_group()
+        pipe_group = (
+            fleet.get_hybrid_communicate_group().get_pipe_parallel_group()
+        )
         copies = []
         dist.all_gather(copies, weight.detach(), group=pipe_group)
         self.assertEqual(len(copies), PP_SIZE)
@@ -188,7 +189,9 @@ class TestErndataMagicSendCPWeightSync(unittest.TestCase):
 
             # Mirror Trainer.hybrid_parallel_scale_param_grad.  This is the exact
             # operation whose asymmetric marker caused the reviewed CP bug.
-            if not getattr(weight, "context_parallel_disable_scale_grad", False):
+            if not getattr(
+                weight, "context_parallel_disable_scale_grad", False
+            ):
                 with paddle.no_grad():
                     grad.scale_(CP_SIZE)
 
