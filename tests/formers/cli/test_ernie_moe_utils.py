@@ -234,7 +234,29 @@ class TestTopkToPermutedIndices(unittest.TestCase):
     ``[0, 1, 1, 0, 2, 1]`` -- token0 chose experts {0,1}, token1 chose {1,0},
     token2 chose {2,1}. ``_restrict_nonzero`` returns matching flat positions in
     ascending order; expectations are derived by hand from that.
+
+    Both tests below route through ``paddle.tensor.search._restrict_nonzero``
+    (moe_utils.py:78 and :101), whose ``restrict_nonzero`` kernel is registered
+    for GPU only -- on a CPU build it raises ``RuntimeError`` because the kernel
+    is not registered for CPU. That is a legitimate GPU-only kernel, NOT a
+    production defect, so these tests are guarded to require a real GPU and to
+    run on ``gpu:0``; the surrounding CPU-only tests in this file are left
+    unguarded. The paddle-not-installed skip is preserved by the class-level
+    ``skipUnless`` above.
     """
+
+    def setUp(self):
+        if (
+            not paddle.is_compiled_with_cuda()
+            or paddle.device.cuda.device_count() == 0
+        ):
+            self.skipTest(
+                "restrict_nonzero kernel is GPU-only (not registered for CPU); "
+                "requires a CUDA-enabled paddle build with at least one GPU"
+            )
+        original_device = paddle.get_device()
+        self.addCleanup(paddle.set_device, original_device)
+        paddle.set_device("gpu:0")
 
     def test_single_expert_positions_and_token_map(self):
         routemap = paddle.to_tensor([[0, 1], [1, 0], [2, 1]], dtype="int64")

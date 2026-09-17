@@ -12,6 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+
+# Four-directions p2p requires this env var: paddle's topology reads the
+# ``_use_four_directions`` flag at HybridCommunicateGroup creation time (during
+# fleet init below), so it must be set at import time -- before initialize_fleet
+# runs -- exactly as a real four-directions p2p launcher would set it.
+os.environ["PADDLE_USE_FOUR_DIRECTIONS_P2P"] = "True"
+
 import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet

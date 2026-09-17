@@ -21,6 +21,12 @@ import os
 # exactly the code path these tests exercise on a real 2-stage pipeline.
 os.environ["PADDLE_P2P_SYNC_SEND"] = "1"
 
+# Four-directions p2p requires this env var: paddle's topology reads the
+# ``_use_four_directions`` flag at HybridCommunicateGroup creation time (during
+# initialize_fleet below), so it must be set at import time -- before fleet init
+# runs -- exactly as a real four-directions p2p launcher would set it.
+os.environ["PADDLE_USE_FOUR_DIRECTIONS_P2P"] = "True"
+
 import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet

@@ -24,6 +24,14 @@ module under test. A reversed direction, a wrong peer, or a dropped
 element changes the exact received values and fails the comparison.
 """
 
+import os
+
+# Four-directions p2p requires this env var: paddle's topology reads the
+# ``_use_four_directions`` flag at HybridCommunicateGroup creation time (during
+# fleet.init below), so it must be set at import time -- before fleet.init runs
+# -- exactly as a real four-directions p2p launcher would set it.
+os.environ["PADDLE_USE_FOUR_DIRECTIONS_P2P"] = "True"
+
 import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet

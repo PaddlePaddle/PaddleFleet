@@ -288,23 +288,48 @@ class TestCreatePretrainedDatasetAssembly(_WorkflowTestBase):
 class TestPreTrainingArgumentsPostInit(_WorkflowTestBase):
     """The autotuner_benchmark config-normalization decision."""
 
-    def test_autotuner_benchmark_forces_short_run_profile(self):
+    def setUp(self):
+        super().setUp()
+        # Constructing PreTrainingArguments runs __post_init__, which on a
+        # CUDA-compiled Paddle (a) probes paddle_device.get_device_capability()
+        # on the *current* place (training_args.py:2061 -- a CPU place raises
+        # ValueError) and (b) drives initialize_fleet() -> fleet.init() ->
+        # ParallelEnv(), which reads int(FLAGS_selected_gpus[0])
+        # (training_args.py:3201). A launcher/fleet normally selects a GPU place
+        # and exports FLAGS_selected_gpus; the CI runner leaves the latter as an
+        # empty string. Replicate the launcher-provided environment here. These
+        # are GPU-only paths, so skip honestly on a CPU-only build.
         import paddle
 
-        # bf16=True routes PreTrainingArguments.__post_init__ through the CUDA
-        # branch that probes paddle_device.get_device_capability() on the
-        # *current* device (training_args.py). That probe needs a real GPU place
-        # selected -- a CPU place raises ValueError -- so pin gpu:0 for the
-        # duration (skip on CPU-only builds). This is orthogonal to the
-        # autotuner_benchmark normalization the test actually asserts.
-        if not paddle.is_compiled_with_cuda():
+        if (
+            not paddle.is_compiled_with_cuda()
+            or paddle.device.cuda.device_count() == 0
+        ):
             self.skipTest(
-                "bf16 __post_init__ probes GPU device capability; "
-                "this build has no CUDA support"
+                "PreTrainingArguments.__post_init__ probes GPU device "
+                "capability and initializes a single-card fleet; this build "
+                "has no usable CUDA device"
             )
-        orig_device = paddle.get_device()
+        self._orig_device = paddle.get_device()
+        self._orig_selected_gpus = os.environ.get("FLAGS_selected_gpus")
+        os.environ["FLAGS_selected_gpus"] = "0"
         paddle.set_device("gpu:0")
-        self.addCleanup(paddle.set_device, orig_device)
+        self.addCleanup(self._restore_gpu_env)
+
+    def _restore_gpu_env(self):
+        import paddle
+
+        paddle.set_device(self._orig_device)
+        if self._orig_selected_gpus is None:
+            os.environ.pop("FLAGS_selected_gpus", None)
+        else:
+            os.environ["FLAGS_selected_gpus"] = self._orig_selected_gpus
+
+    def test_autotuner_benchmark_forces_short_run_profile(self):
+        # bf16=True keeps the __post_init__ path identical to the production
+        # benchmark configuration; the GPU place / FLAGS_selected_gpus setup it
+        # needs is provided by setUp. This is orthogonal to the
+        # autotuner_benchmark normalization the test actually asserts.
         with tempfile.TemporaryDirectory() as tmp:
             args = PreTrainingArguments(
                 output_dir=tmp, autotuner_benchmark=True, bf16=True
