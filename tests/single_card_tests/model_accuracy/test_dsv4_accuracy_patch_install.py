@@ -287,17 +287,23 @@ class TestImportTorchMegatronBranch(unittest.TestCase):
         while self._fake_path in sys.path:
             sys.path.remove(self._fake_path)
 
-    def test_inserts_megatron_path_and_returns_torch(self):
+    def test_inserts_megatron_path_before_importing_torch(self):
         while self._fake_path in sys.path:
             sys.path.remove(self._fake_path)
         acp._MEGATRON_SITE_PACKAGES = self._fake_path
         acp._TORCH = None
 
-        torch = acp._import_torch()
+        # The megatron site-packages path is prepended before the ``import
+        # torch`` attempt, so this branch is covered whether or not torch is
+        # importable in the current environment (CI has no torch).
+        try:
+            torch = acp._import_torch()
+        except ImportError:
+            torch = None
 
-        self.assertIsNotNone(torch)
-        self.assertIn(self._fake_path, sys.path)
         self.assertEqual(sys.path[0], self._fake_path)
+        if torch is not None:
+            self.assertIs(torch, acp._TORCH)
 
 
 if __name__ == "__main__":
