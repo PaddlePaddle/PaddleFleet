@@ -976,7 +976,10 @@ class MultiTokenPredictionLayer(FleetLayer):
                 reduce_scatter_embeddings=False,
                 config=no_init_cfg,
             )
-            if self.config.context_parallel_size > 1:
+            if (
+                self.config.context_parallel_size > 1
+                and not getattr(config, "use_erndata", False)
+            ):
                 from paddlefleet.context_parallel_utils import (
                     mark_context_parallel_parameter_disable_scale_grad,
                 )
@@ -984,6 +987,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                 mark_context_parallel_parameter_disable_scale_grad(
                     self.mtp_embed
                 )
+            # Erndata keeps default CP scaling on both the stage-0 embedding and
+            # this physical copy. Disabling it only here would make their shared
+            # gradient contributions use different scales before PP all-reduce.
 
             if not getattr(config, "use_erndata", False):
                 from paddlefleet.models.gpt.mtp_embedding_layer import (

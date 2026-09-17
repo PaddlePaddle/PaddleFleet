@@ -515,6 +515,22 @@ class TestMTPLayerForward(unittest.TestCase):
         self.assertIsNotNone(layer.mtp_embed)
         self.assertFalse(hasattr(layer, "magic_key"))
 
+    def test_erndata_keeps_default_context_parallel_grad_scaling(self):
+        layer = _build_mtp_layer(
+            _cfg(
+                use_erndata=True,
+                variable_seq_lengths=True,
+                context_parallel_size=2,
+            )
+        )
+        self.assertFalse(
+            getattr(
+                layer.mtp_embed.weight,
+                "context_parallel_disable_scale_grad",
+                False,
+            )
+        )
+
     def test_basic_forward(self):
         """Shape, keys, stop_gradient, and rotary passthrough."""
         layer = _build_mtp_layer(_cfg())
