@@ -516,18 +516,16 @@ class CompatibleEmbeddingIndexBackward(paddle.autograd.PyLayer):
 def te_matmul(grad_output: Tensor, weight: Tensor) -> Tensor:
     torch = _import_torch()
     from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
-    from transformer_engine.pytorch.module.base import get_workspace
 
     grad_output_torch = _to_torch(grad_output)
     weight_oi_torch = _to_torch(weight.t())
-    # TE 2.x (verified on 2.6.0.post1 and the pinned 2.17.1) requires
-    # ``workspace`` as the third positional argument; mirror TransformerEngine's
-    # own dgrad GEMM in ``_Linear.backward`` and hand it the cached cuBLAS
-    # workspace.
+    # TE 2.17.1's ``general_gemm`` manages the cuBLAS workspace internally
+    # (see ``get_cublas_workspace`` in ``cpp_extensions.gemm``); it does NOT
+    # take ``workspace`` as a positional argument. Mirror TransformerEngine's
+    # own dgrad GEMM in ``_Linear.backward`` and let it allocate the workspace.
     grad_input_torch, *_ = general_gemm(
         weight_oi_torch,
         grad_output_torch,
-        get_workspace(),
         out_dtype=torch.bfloat16,
         layout="NN",
         grad=True,

@@ -230,16 +230,31 @@ class TestCompatibleEmbeddingIndexBackward(unittest.TestCase):
 
 
 class TestTeMatmul(unittest.TestCase):
-    """``te_matmul`` needs transformer_engine's general_gemm."""
+    """``te_matmul`` is the DSV4 tensor-parallel dgrad replay.
 
-    def test_te_matmul_requires_transformer_engine(self):
+    It must call TransformerEngine's ``general_gemm`` with the required
+    ``workspace`` positional argument and reproduce the plain-dgrad shape
+    (``grad_output @ weight.t()``). This regression pins the workspace fix and
+    runs wherever ``transformer_engine`` is installed.
+    """
+
+    def test_te_matmul_dgrad_runs_and_matches_reference_shape(self):
         try:
             import transformer_engine  # noqa: F401
         except Exception as exc:
             self.skipTest(f"transformer_engine not importable: {exc!r}")
-        grad_output = paddle.randn([4, 8], dtype="bfloat16")
-        weight = paddle.randn([8, 4], dtype="bfloat16")
+        # weight is [in, out]; grad_output is [tokens, out]. The non-DSV4 dgrad
+        # is ``grad_output @ weight.t()`` -> [tokens, in], which te_matmul must
+        # reproduce. This line previously raised
+        # ``TypeError: general_gemm() missing 1 required positional argument:
+        # 'workspace'``.
+        weight = paddle.randn([8, 16], dtype="bfloat16")
+        grad_output = paddle.randn([4, 16], dtype="bfloat16")
+        reference = grad_output.matmul(weight.t())
+
         out = acp.te_matmul(grad_output, weight)
+
+        self.assertEqual(list(out.shape), list(reference.shape))
         self.assertTrue(bool(paddle.isfinite(out.cast("float32")).all()))
 
 
@@ -875,7 +890,6 @@ class TestLinearSeqfirstWgradElseBranches(unittest.TestCase):
         )
 
 
-# APPEND_MARKER_GROUP_B
 class TestResolveFixedTrainingFilesManifestBranches(unittest.TestCase):
     """Manifest mismatch ``continue`` paths (970/972/974) and break (978)."""
 
@@ -949,7 +963,6 @@ class TestResolveFixedTrainingFilesManifestBranches(unittest.TestCase):
                 acp._resolve_fixed_training_files(d, 0, 0, 0, 4)
 
 
-# APPEND_MARKER_GROUP_B
 class TestLoadFixedTrainingDataRaises(unittest.TestCase):
     """``load_fixed_training_data`` rejects >2D and shape-mismatched arrays."""
 
