@@ -116,8 +116,12 @@ class TunerBehaviorTest(unittest.TestCase):
     ):
         """Build the 5-tuple ``get_train_args`` returns.
 
-        Each bundle is a distinct object so dispatch tests can assert argument
-        identity and order, not just that a runner was called.
+        Order matches the production contract exactly (parser.py:307-313 and
+        the ``_training_function`` unpack at tuner.py:45):
+        ``(model_args, data_args, preprocess_args, generating_args,
+        finetuning_args)``. Each bundle is a distinct, tag-labelled object so
+        dispatch tests can assert argument identity and order -- not merely
+        that a runner was called.
         """
         model_args = types.SimpleNamespace(stage=stage)
         data_args = types.SimpleNamespace(
@@ -131,9 +135,9 @@ class TunerBehaviorTest(unittest.TestCase):
         return (
             model_args,
             data_args,
+            preprocess_args,
             generating_args,
             finetuning_args,
-            preprocess_args,
         )
 
     # ------------------------------------------------------------------
@@ -155,7 +159,7 @@ class TunerBehaviorTest(unittest.TestCase):
     # ------------------------------------------------------------------
     def test_sft_stage_forwards_all_five_args_in_order(self):
         args_tuple = self._make_args("SFT", dataset_type="pretrain")
-        model_args, data_args, gen, ft, pre = args_tuple
+        model_args, data_args, pre, gen, ft = args_tuple
         config = {"args": object()}
         with (
             mock.patch.object(
@@ -182,7 +186,7 @@ class TunerBehaviorTest(unittest.TestCase):
 
     def test_dpo_stage_forwards_four_args_without_preprocess(self):
         args_tuple = self._make_args("DPO", dataset_type="pretrain")
-        model_args, data_args, gen, ft, pre = args_tuple
+        model_args, data_args, pre, gen, ft = args_tuple
         with (
             mock.patch.object(
                 self.tuner, "get_train_args", return_value=args_tuple
@@ -207,7 +211,7 @@ class TunerBehaviorTest(unittest.TestCase):
 
     def test_auto_parallel_stage_forwards_four_args(self):
         args_tuple = self._make_args("auto-parallel", dataset_type="pretrain")
-        model_args, data_args, gen, ft, _pre = args_tuple
+        model_args, data_args, _pre, gen, ft = args_tuple
         with (
             mock.patch.object(
                 self.tuner, "get_train_args", return_value=args_tuple
@@ -278,7 +282,7 @@ class TunerBehaviorTest(unittest.TestCase):
             train_path=None,
             eval_path=None,
         )
-        model_args, data_args, gen, ft, _pre = args_tuple
+        model_args, data_args, _pre, gen, ft = args_tuple
         dsv3_mod = sys.modules["paddlefleet.cli.train.deepseek_v3_pretrain"]
         with mock.patch.object(
             self.tuner, "get_train_args", return_value=args_tuple
