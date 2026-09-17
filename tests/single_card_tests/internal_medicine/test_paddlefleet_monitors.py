@@ -2274,7 +2274,9 @@ class PaddleQKKernelComputeTest(unittest.TestCase):
             )
         reassembled_max = shards[0]["max_per_head"]
         for shard in shards[1:]:
-            reassembled_max = paddle.maximum(reassembled_max, shard["max_per_head"])
+            reassembled_max = paddle.maximum(
+                reassembled_max, shard["max_per_head"]
+            )
         self.assertTrue(
             paddle.allclose(
                 full["max_per_head"], reassembled_max, atol=1e-4, rtol=1e-4
