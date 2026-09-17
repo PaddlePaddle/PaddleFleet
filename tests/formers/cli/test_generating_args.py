@@ -156,9 +156,16 @@ class TestGeneratingArgumentsThroughParser(unittest.TestCase):
         self.assertIs(
             self._parse(["--enable_thinking", "false"]).enable_thinking, False
         )
-        # There must be no auto-generated negative complement for a False default.
-        with self.assertRaises(SystemExit):
+        # There must be no auto-generated negative complement for a False
+        # default, so "--no_enable_thinking" is never wired to a flag and stays
+        # unconsumed. ``_parse`` uses ``return_remaining_strings=False``, so the
+        # custom parser rejects the leftover token by raising ``ValueError``
+        # (not ``SystemExit``); see ``common_parse`` in
+        # src/paddlefleet/trainer/argparser.py (around line 295), which raises
+        # "Some specified arguments are not used by the PdArgumentParser: [...]".
+        with self.assertRaises(ValueError) as ctx:
             self._parse(["--no_enable_thinking"])
+        self.assertIn("not used", str(ctx.exception))
 
     def test_combined_flags_are_consumed_independently(self):
         """A mixed invocation must set each field from its own token."""

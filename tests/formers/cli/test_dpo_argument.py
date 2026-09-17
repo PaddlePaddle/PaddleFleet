@@ -183,6 +183,11 @@ class DPOTrainingArgumentsBehaviorTest(unittest.TestCase):
 
     def _build(self, **kwargs):
         kwargs.setdefault("output_dir", self.output_dir)
+        # amp_master_grad defaults to True and requires bf16/fp16, which the
+        # H20 launcher enables; default bf16 on so every constructed instance
+        # has a valid amp config. setdefault lets a test override if needed;
+        # none of these tests assert bf16/amp state.
+        kwargs.setdefault("bf16", True)
         return DPOTrainingArguments(**kwargs)
 
     def test_dpo_specific_field_defaults(self):

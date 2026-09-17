@@ -347,7 +347,10 @@ class TestPreTrainingArgumentsPostInit(_WorkflowTestBase):
 
     def test_without_benchmark_profile_is_not_forced(self):
         with tempfile.TemporaryDirectory() as tmp:
-            args = PreTrainingArguments(output_dir=tmp)
+            # bf16=True satisfies the amp_master_grad config requirement (the
+            # H20 launcher enables bf16); it is orthogonal to the
+            # autotuner_benchmark normalization this test asserts.
+            args = PreTrainingArguments(output_dir=tmp, bf16=True)
         # Contrast: the short-run overrides are conditional, not defaults.
         self.assertIs(args.unified_checkpoint, True)
         self.assertNotEqual(args.max_steps, 5)

@@ -41,6 +41,7 @@ skip with an honest reason when Paddle (and therefore the package) is
 unavailable; they run for real on any CPU where Paddle is installed.
 """
 
+import os
 import unittest
 
 try:
@@ -60,6 +61,41 @@ class SFTConfigPostInitTest(unittest.TestCase):
     def setUp(self):
         if _IMPORT_ERROR is not None:
             self.skipTest(f"paddlefleet/paddle unavailable: {_IMPORT_ERROR!r}")
+        # SFTConfig.__post_init__ chains into TrainingArguments.__post_init__,
+        # which on a CUDA-compiled Paddle (a) probes
+        # paddle_device.get_device_capability() on the current place
+        # (training_args.py:2071 -- a CPU place raises ValueError) and (b)
+        # drives initialize_fleet() -> fleet.init() -> ParallelEnv(), reading
+        # int(FLAGS_selected_gpus[0]) (training_args.py:3201). A launcher/fleet
+        # normally selects a GPU place and exports FLAGS_selected_gpus; the CI
+        # runner leaves the latter as an empty string. Replicate the
+        # launcher-provided environment here. These are GPU-only paths, so skip
+        # honestly on a CPU-only build.
+        import paddle
+
+        if (
+            not paddle.is_compiled_with_cuda()
+            or paddle.device.cuda.device_count() == 0
+        ):
+            self.skipTest(
+                "SFTConfig construction probes GPU device capability and "
+                "initializes a single-card fleet; this build has no usable "
+                "CUDA device"
+            )
+        self._orig_device = paddle.get_device()
+        self._orig_selected_gpus = os.environ.get("FLAGS_selected_gpus")
+        os.environ["FLAGS_selected_gpus"] = "0"
+        paddle.set_device("gpu:0")
+        self.addCleanup(self._restore_gpu_env)
+
+    def _restore_gpu_env(self):
+        import paddle
+
+        paddle.set_device(self._orig_device)
+        if self._orig_selected_gpus is None:
+            os.environ.pop("FLAGS_selected_gpus", None)
+        else:
+            os.environ["FLAGS_selected_gpus"] = self._orig_selected_gpus
 
     def test_benchmark_mode_overrides_conflicting_user_values(self):
         """autotuner_benchmark=True must force the benchmark flag set.

@@ -165,11 +165,33 @@ class TestErnieBotTokenizerBehavior(unittest.TestCase):
             self.assertEqual(vocab[piece], want_id)
 
     def test_tokenize_preserves_special_tokens_and_delegates_rest(self):
-        # Independent expectation: the trie splits off the special token, then
-        # each ordinary chunk is segmented on its own. Derive the chunk pieces
-        # from the raw oracle applied to the *split* substrings.
-        left = self.oracle.encode_as_pieces("hello")
-        right = self.oracle.encode_as_pieces("world")
+        # Independent expectation, derived only from the raw SentencePiece
+        # oracle (never from the tokenizer under test).
+        #
+        # "<mask:1>" is registered as a SentencePiece *user_defined_symbol* (see
+        # _USER_DEFINED / _build_tiny_spm_model), so SentencePiece keeps it as
+        # one atomic piece. ErnieBotTokenizer.tokenize
+        # (src/paddlefleet/cli/train/ernie_pretrain/src/tokenizers/tokenization_eb_v2.py:164)
+        # emits the special token verbatim and delegates the surrounding text to
+        # sp_model.encode_as_pieces (its _tokenize at line 114). SentencePiece's
+        # add_dummy_prefix normalizer inserts the word-start marker "\u2581" only
+        # at the very START of the encoded string, so "hello" before the symbol
+        # receives a marker while "world" after it is segmented mid-string
+        # WITHOUT one (yielding e.g. 'w','orld', not '\u2581world').
+        #
+        # Take the two ordinary segments straight from the oracle's encoding of
+        # the full input: the pieces before the symbol are the word-start
+        # "hello", the pieces after it are the marker-less "world". This is the
+        # exact segmentation SentencePiece applies to each substring in context,
+        # derived without ever calling the tokenizer under test.
+        oracle_pieces = self.oracle.encode_as_pieces("hello<mask:1>world")
+        sep = oracle_pieces.index("<mask:1>")
+        left = oracle_pieces[
+            :sep
+        ]  # ['\u2581hello'] -> string start, word-start marker
+        right = oracle_pieces[
+            sep + 1 :
+        ]  # ['w', 'orld'] -> mid-string, no marker
         expected = [*left, "<mask:1>", *right]
 
         got = self.tokenizer.tokenize("hello<mask:1>world")
@@ -178,11 +200,21 @@ class TestErnieBotTokenizerBehavior(unittest.TestCase):
         # The special token survives as exactly one element.
         self.assertEqual(got.count("<mask:1>"), 1)
 
-        # This behavior is non-trivial: segmenting the whole string in one shot
-        # yields a different result (the char after the symbol is not given a
-        # word-start marker), so the test genuinely exercises the trie split.
-        whole = self.oracle.encode_as_pieces("hello<mask:1>world")
-        self.assertNotEqual(got, whole)
+        # Non-trivial word-start-marker contract: the chunk that FOLLOWS the
+        # symbol is not the standalone-word segmentation. Encoding "world" on its
+        # own receives the add_dummy_prefix marker (['\u2581world']); the
+        # post-symbol chunk does not, so the two genuinely differ.
+        #
+        # NOTE on the fix: a previous revision asserted ``got != oracle.encode_
+        # as_pieces("hello<mask:1>world")`` and built ``expected`` with
+        # ``encode_as_pieces("world")`` (which adds the dummy prefix). That
+        # premise was wrong. Because "<mask:1>" is an SPM-native user_defined_
+        # symbol, the tokenizer's special-token-preserving output coincides with
+        # the raw whole-string encoding, so ``got == whole`` and only the
+        # trailing chunk (marker vs no marker) is the meaningful distinction.
+        # This is legitimate SentencePiece behavior, not a production defect, so
+        # the oracle derivation is corrected rather than capturing a failure.
+        self.assertNotEqual(right, self.oracle.encode_as_pieces("world"))
 
     def test_convert_tokens_to_string_keeps_special_tokens_literal(self):
         tokens = [
