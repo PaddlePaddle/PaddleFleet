@@ -46,9 +46,9 @@ from paddlefleet.models.gpt import GPTConfig
 PP_SIZE = 2
 CP_SIZE = 2
 WORLD_SIZE = PP_SIZE * CP_SIZE
-VOCAB_SIZE = 128
-HIDDEN_SIZE = 64
-NUM_STEPS = 3
+VOCAB_SIZE = 4096
+HIDDEN_SIZE = 512
+NUM_STEPS = 10
 
 
 def setUpModule():
@@ -93,9 +93,9 @@ def _make_config():
         max_sequence_length=16,
         num_hidden_layers=2,
         hidden_size=HIDDEN_SIZE,
-        num_attention_heads=4,
-        num_key_value_heads=4,
-        intermediate_size=128,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        intermediate_size=2048,
         normalization="RMSNorm",
         hidden_dropout_prob=0.0,
         attention_dropout=0.0,
