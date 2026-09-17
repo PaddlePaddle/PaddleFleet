@@ -301,9 +301,7 @@ class TestTop1GatingNoDrop(unittest.TestCase):
         self.assertIsInstance(capacity, int)
         self.assertEqual(capacity, 1)
         # Each of the two tokens lands on its own expert; the rest are empty.
-        np.testing.assert_array_equal(
-            exp_counts.numpy(), [1.0, 1.0, 0.0, 0.0]
-        )
+        np.testing.assert_array_equal(exp_counts.numpy(), [1.0, 1.0, 0.0, 0.0])
 
 
 class TestMixinIsBase(unittest.TestCase):
