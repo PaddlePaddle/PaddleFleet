@@ -300,8 +300,7 @@ class TestBiasSwiGLUBackwardDispatch(_CPUFixture):
         bias = paddle.to_tensor(_BIAS_ROW, dtype="float32")
         # ``bias`` is a trainable parameter in real use; it must require grad so
         # the PyLayer backward (which returns a grad for BOTH forward inputs)
-        # is allowed to hand back a non-None bias gradient. Leaving it as a
-        # stop-gradient leaf makes paddle reject the returned bias grad.
+        # is allowed to hand back a non-None bias gradient.
         bias.stop_gradient = False
         g_up = paddle.to_tensor(_GUP_ROWS, dtype="float32")
         with (
@@ -309,7 +308,12 @@ class TestBiasSwiGLUBackwardDispatch(_CPUFixture):
             self._spy("swiglu_back_eager") as eager,
         ):
             out = BiasSwiGLUFunction.apply(x, bias, False, False, None, True)
-            (grad_x,) = paddle.grad([out], [x], grad_outputs=[g_up])
+            # ``BiasSwiGLUFunction.backward`` returns a grad for BOTH forward
+            # inputs (``return tmp, tmp``). Differentiating only ``x`` prunes the
+            # bias position, so paddle expects None there and rejects the real
+            # grad the PyLayer hands back. Request grads for both inputs so both
+            # backward outputs are consumed; only ``grad_x`` is asserted below.
+            grad_x, _ = paddle.grad([out], [x, bias], grad_outputs=[g_up])
         eager.assert_called_once()
         self.assertFalse(fused.called)
         args = eager.call_args.args
@@ -331,8 +335,7 @@ class TestBiasSwiGLUBackwardDispatch(_CPUFixture):
         bias = paddle.to_tensor(_BIAS_ROW, dtype="float32")
         # ``bias`` is a trainable parameter in real use; it must require grad so
         # the PyLayer backward (which returns a grad for BOTH forward inputs)
-        # is allowed to hand back a non-None bias gradient. Leaving it as a
-        # stop-gradient leaf makes paddle reject the returned bias grad.
+        # is allowed to hand back a non-None bias gradient.
         bias.stop_gradient = False
         g_up = paddle.to_tensor(_GUP_ROWS, dtype="float32")
         with (
@@ -340,7 +343,12 @@ class TestBiasSwiGLUBackwardDispatch(_CPUFixture):
             self._spy("swiglu_back_eager") as eager,
         ):
             out = BiasSwiGLUFunction.apply(x, bias, False, False, None, False)
-            (grad_x,) = paddle.grad([out], [x], grad_outputs=[g_up])
+            # ``BiasSwiGLUFunction.backward`` returns a grad for BOTH forward
+            # inputs (``return tmp, tmp``). Differentiating only ``x`` prunes the
+            # bias position, so paddle expects None there and rejects the real
+            # grad the PyLayer hands back. Request grads for both inputs so both
+            # backward outputs are consumed; only ``grad_x`` is asserted below.
+            grad_x, _ = paddle.grad([out], [x, bias], grad_outputs=[g_up])
         fused.assert_called_once()
         self.assertFalse(eager.called)
         args = fused.call_args.args

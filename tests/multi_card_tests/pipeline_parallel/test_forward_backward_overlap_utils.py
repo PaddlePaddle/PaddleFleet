@@ -38,6 +38,7 @@ import numpy as np
 import paddle
 import paddle.distributed as dist
 from paddle.distributed import fleet
+from paddle.distributed.fleet.recompute import custom_state_manager
 
 from paddlefleet.pipeline_parallel.pp_utils.forward_backward_overlap_utils import (
     FakeClone,
@@ -237,19 +238,36 @@ def test_schedule_node_recompute_forward_backward():
     w, w_np, x, x_np = _local_linear_inputs()
     node = ScheduleNode(_matmul_fwd(w), name="lin_rc")
 
-    # first_forward runs under no_grad and snapshots RNG/AMP state; the second
-    # forward recomputes under a real dygraph guard. The recomputed numbers
-    # must still match the independent numpy reference.
-    node.first_forward(x)
-    out = node.forward(x)
-    np.testing.assert_allclose(out.numpy(), x_np @ w_np, rtol=1e-5, atol=1e-5)
+    # ScheduleNode.first_forward snapshots a "custom" recompute state via
+    # custom_state_manager.custom_get_state_func, which is None until fleet
+    # registers it. Provide the documented no-op default (identical to the
+    # fallback in tensor_parallel/random.py) so the real recompute path runs;
+    # restore the prior hooks afterward. This configures a real global
+    # collaborator, it does not mock ScheduleNode.
+    _orig_get = custom_state_manager.custom_get_state_func
+    _orig_set = custom_state_manager.custom_set_state_func
+    if _orig_get is None:
+        custom_state_manager.custom_get_state_func = lambda *a, **k: None
+        custom_state_manager.custom_set_state_func = lambda *a, **k: None
+    try:
+        # first_forward runs under no_grad and snapshots RNG/AMP state; the
+        # second forward recomputes under a real dygraph guard. The recomputed
+        # numbers must still match the independent numpy reference.
+        node.first_forward(x)
+        out = node.forward(x)
+        np.testing.assert_allclose(
+            out.numpy(), x_np @ w_np, rtol=1e-5, atol=1e-5
+        )
 
-    g_np = np.arange(4, dtype="float32").reshape(2, 2) + 1.0
-    grad = node.backward(paddle.to_tensor(g_np).cuda())
-    assert len(grad) == 1
-    np.testing.assert_allclose(
-        grad[0].numpy(), g_np @ w_np.T, rtol=1e-5, atol=1e-5
-    )
+        g_np = np.arange(4, dtype="float32").reshape(2, 2) + 1.0
+        grad = node.backward(paddle.to_tensor(g_np).cuda())
+        assert len(grad) == 1
+        np.testing.assert_allclose(
+            grad[0].numpy(), g_np @ w_np.T, rtol=1e-5, atol=1e-5
+        )
+    finally:
+        custom_state_manager.custom_get_state_func = _orig_get
+        custom_state_manager.custom_set_state_func = _orig_set
 
 
 def test_schedule_chunk_local_chain():

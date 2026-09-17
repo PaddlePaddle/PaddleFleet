@@ -167,7 +167,10 @@ class _GpuRestrictNonzeroBase(unittest.TestCase):
             )
         self.paddle = paddle
         self._orig_device = paddle.get_device()
-        paddle.set_device("gpu")
+        # "gpu:0" pins CUDAPlace(0) directly; the bare "gpu" resolves the id via
+        # paddle.distributed.ParallelEnv, which raises ValueError on runners
+        # where FLAGS_selected_gpus is empty.
+        paddle.set_device("gpu:0")
 
     def tearDown(self):
         if getattr(self, "paddle", None) is not None:

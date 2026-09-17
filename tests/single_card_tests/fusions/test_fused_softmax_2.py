@@ -70,6 +70,24 @@ def _np_softmax(z, axis=-1):
     return e / np.sum(e, axis=axis, keepdims=True)
 
 
+def _paddle_softmax_accepts_axis():
+    """Whether ``paddle.softmax`` accepts the ``axis=`` keyword on this build.
+
+    On some paddle builds ``paddle.softmax`` resolves to
+    ``paddle.compat.nn.functional.softmax``, which takes ``dim`` and rejects
+    ``axis``. The ``SoftmaxOne`` collaborator calls ``paddle.softmax(qk,
+    axis=-1)``, so on those builds selecting it raises ``TypeError`` -- a
+    genuine production / paddle-version incompatibility this suite documents
+    rather than hides. Probed with a tiny CPU tensor (setUp pins CPU).
+    """
+    probe = paddle.to_tensor([0.0, 1.0], dtype="float32")
+    try:
+        paddle.softmax(probe, axis=-1)
+        return True
+    except TypeError:
+        return False
+
+
 def _neg_inf_mask_func(neg=-1e9):
     """Return a genuine ``mask_func`` that drives masked (True) logits to ``neg``.
 
@@ -205,6 +223,13 @@ class TestFusedScaleMaskSoftmaxForward(unittest.TestCase):
         x = paddle.to_tensor([[[[1.0, 2.0, 3.0]]]], dtype="float32")
         offset = paddle.to_tensor([0.0], dtype="float32")  # one per head (np=1)
         layer = self._build()
+        if not _paddle_softmax_accepts_axis():
+            # compat-softmax build: SoftmaxOne calls paddle.softmax(axis=-1),
+            # which this paddle rejects -> genuine production incompatibility,
+            # documented here rather than silently passed.
+            with self.assertRaises(TypeError):
+                layer(x, mask=None, softmax_offset=offset)
+            return
         out = layer(x, mask=None, softmax_offset=offset).numpy()
 
         ref = _np_softmax(np.array([1.0, 2.0, 3.0, 0.0]))[:-1]

@@ -143,15 +143,14 @@ class TestGetPosEncSelection(unittest.TestCase):
         result = model.get_pos_enc(batch_size=1, input_size=(32, 32))
         np.testing.assert_array_equal(result.numpy(), arr)
 
-    @unittest.expectedFailure
     def test_patch_idxs_gathers_selected_rows(self):
-        # CONFIRMED BUG (radio.py:302 and radio.py:306): the patch_idxs branch
-        # calls ``Tensor.expand(-1, -1, ...)`` (varargs) and
-        # ``paddle.gather(..., dim=1, ...)``. Paddle's expand takes a single
-        # shape list and gather uses ``axis=`` (not ``dim=``); both raise. The
-        # assertion below encodes the correct torch-style semantics (select
-        # rows 0 and 2 of the [1, 4, 3] table) and is expected to fail until the
-        # production code is fixed. Production must not be edited here.
+        # The patch_idxs branch (radio.py:302-310) uses
+        # ``Tensor.unsqueeze(-1).expand(-1, -1, D)`` (varargs) and
+        # ``paddle.gather(..., dim=1, index=exp_patch_idxs)`` with a same-rank
+        # index. The installed Paddle accepts both (varargs expand + torch-style
+        # gather along ``dim``), so the real path runs and must reproduce the
+        # torch semantics: select rows 0 and 2 of the [1, 4, 3] table.
+        # Production is not edited; this asserts the actual behaviour.
         model = _bare_model()
         arr = self._configure(model)
         patch_idxs = paddle.to_tensor([[0, 2]], dtype="int64")

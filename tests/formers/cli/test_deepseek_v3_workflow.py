@@ -124,8 +124,8 @@ class TestGetTrainDataFile(_WorkflowTestBase):
                 open(os.path.join(tmp, name), "w").close()
             result = get_train_data_file(types.SimpleNamespace(input_dir=tmp))
 
-        # Two index files -> six entries (weight, prefix) x2.
-        self.assertEqual(len(result), 6)
+        # Two index files -> four entries (weight, prefix) x2.
+        self.assertEqual(len(result), 4)
         weights = result[0::2]
         prefixes = sorted(result[1::2])
         self.assertEqual(weights, [1.0, 1.0])
@@ -289,6 +289,22 @@ class TestPreTrainingArgumentsPostInit(_WorkflowTestBase):
     """The autotuner_benchmark config-normalization decision."""
 
     def test_autotuner_benchmark_forces_short_run_profile(self):
+        import paddle
+
+        # bf16=True routes PreTrainingArguments.__post_init__ through the CUDA
+        # branch that probes paddle_device.get_device_capability() on the
+        # *current* device (training_args.py). That probe needs a real GPU place
+        # selected -- a CPU place raises ValueError -- so pin gpu:0 for the
+        # duration (skip on CPU-only builds). This is orthogonal to the
+        # autotuner_benchmark normalization the test actually asserts.
+        if not paddle.is_compiled_with_cuda():
+            self.skipTest(
+                "bf16 __post_init__ probes GPU device capability; "
+                "this build has no CUDA support"
+            )
+        orig_device = paddle.get_device()
+        paddle.set_device("gpu:0")
+        self.addCleanup(paddle.set_device, orig_device)
         with tempfile.TemporaryDirectory() as tmp:
             args = PreTrainingArguments(
                 output_dir=tmp, autotuner_benchmark=True, bf16=True

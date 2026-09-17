@@ -142,7 +142,11 @@ class _MoeUtilsTestBase(unittest.TestCase):
                 "_restrict_nonzero; this build has no CUDA support"
             )
         orig_device = paddle.get_device()
-        paddle.set_device("gpu")
+        # Use an explicit device index ("gpu:0") rather than the bare "gpu":
+        # the latter resolves the id through paddle.distributed.ParallelEnv,
+        # which reads FLAGS_selected_gpus and raises ValueError on runners
+        # where that env var is empty. "gpu:0" pins CUDAPlace(0) directly.
+        paddle.set_device("gpu:0")
         self.addCleanup(paddle.set_device, orig_device)
 
 
