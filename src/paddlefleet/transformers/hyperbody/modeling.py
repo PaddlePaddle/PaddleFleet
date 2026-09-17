@@ -838,19 +838,6 @@ class HyperBodyUnifiedModel(PipelineLayer):
 # View builders + top-level builder                                        #
 # ======================================================================= #
 def _build_decoder_view(config: HyperBodyConfig):
-    """Materialize the decoder GPTConfig view (bare-named fields) + multimodal.
-
-    LOSS-EQUIVALENCE MERGE: ``HyperBodyDecoderModelProvider.from_config`` consumes
-    ``namespace.__dict__`` directly (``register_attributes`` iterates it). Under
-    the nested config the top-level ``__dict__`` no longer carries the decoder
-    geometry (it lives in ``config.decoder_config``), so we reconstruct the exact
-    field set the previous flat config fed the provider: ``{top-level globals}``
-    (the routed llm_meta + fusion/parallelism/token-id switches, minus the two
-    sub-config OBJECTS) overlaid with ``{decoder_config geometry}`` pulled via the
-    explicit :data:`DECODER_VIEW_KEYS` allowlist. Geometry wins on key collisions,
-    so the merged namespace == the old flat config's decoder-relevant ``__dict__``
-    and the materialized view (hence loss) is bit-identical.
-    """
     import types
 
     merged = {
@@ -861,6 +848,11 @@ def _build_decoder_view(config: HyperBodyConfig):
     dec = config.decoder_config
     for key in DECODER_VIEW_KEYS:
         merged[key] = dec.__dict__[key]
+    # 4de472f9: first_k_dense_replace 置位时给 provider 传 moe_layer_freq=1(int),
+    # 让 __post_init__ 生成 [0]+[1]*(L-1) 的 dense-first 布局(first_k 与 list
+    # moe_layer_freq 不能并存)。否则 layer0 会是 MoE 而非 dense, 与真 ernielite 架构不符。
+    if merged.get("first_k_dense_replace"):
+        merged["moe_layer_freq"] = 1
     namespace = types.SimpleNamespace(**merged)
 
     view = HyperBodyDecoderModelProvider.from_config(namespace)
