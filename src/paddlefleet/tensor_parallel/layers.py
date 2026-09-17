@@ -26,6 +26,7 @@ import paddle
 import paddle.distributed as dist
 import paddle.nn.functional as F
 from paddle.distributed.communication.reduce_scatter import _reduce_scatter_base
+from paddle.distributed.flex_checkpoint.aoa.generation import resolve_names
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
@@ -1454,6 +1455,75 @@ def linear_with_grad_accumulation_and_async_allreduce(
 linear_with_grad_accumulation_and_async_allreduce.warned = False
 
 
+def gen_linear_aoa_statements(
+    layer, ctx, *, structured_name_prefix="", aoa_name_scope=None
+):
+    """Checkpoint->model generator for the Linear family.
+
+    Weight carries a ``^T`` transpose; bias and any persistable buffer use
+    identity, and an identity whose two names already match is omitted --
+    ``AOAEngine`` fills any destination key that no statement produced from the
+    same-named source. This is a plain module-level helper (not a base class) so
+    ``Linear`` / ``ColumnParallelLinear`` / ``RowParallelLinear`` share one
+    implementation without introducing a common ``LinearBase``. The transpose is
+    unconditional, so an owner whose embedded ``paddle.nn.Linear`` leaf may or
+    may not be transposed in the checkpoint (e.g.
+    ``HyperConnectionModule.mapping_proj``) emits that leaf inline instead of
+    calling this helper. The inverse direction has an independent helper and is
+    never derived from this one.
+    """
+    statements = []
+    local_state_dict = layer.state_dict(
+        structured_name_prefix="", include_sublayers=False
+    )
+    for name in local_state_dict:
+        checkpoint_name, model_name = resolve_names(
+            name,
+            ctx.checkpoint_name_prefix,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            ctx.checkpoint_name_mapping,
+            aoa_name_scope=aoa_name_scope,
+            model_name_prefix=ctx.model_name_prefix,
+        )
+        if name == "weight":
+            statements.append(f"{checkpoint_name}^T -> {model_name}")
+        elif checkpoint_name != model_name:
+            statements.append(f"{checkpoint_name} -> {model_name}")
+    return statements
+
+
+def gen_linear_inv_aoa_statements(
+    layer, ctx, *, structured_name_prefix="", aoa_name_scope=None
+):
+    """Inverse (model -> checkpoint) generator for the Linear family.
+
+    Mirror of :func:`gen_linear_aoa_statements` for the opposite direction:
+    weight is transposed back (``^T`` stays on the source side) and bias /
+    buffers use identity. Fully independent of the checkpoint->model helper,
+    never derived from its output text.
+    """
+    statements = []
+    local_state_dict = layer.state_dict(
+        structured_name_prefix="", include_sublayers=False
+    )
+    for name in local_state_dict:
+        checkpoint_name, model_name = resolve_names(
+            name,
+            ctx.checkpoint_name_prefix,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            ctx.checkpoint_name_mapping,
+            aoa_name_scope=aoa_name_scope,
+            model_name_prefix=ctx.model_name_prefix,
+        )
+        if name == "weight":
+            statements.append(f"{model_name}^T -> {checkpoint_name}")
+        elif checkpoint_name != model_name:
+            statements.append(f"{model_name} -> {checkpoint_name}")
+    return statements
+
+
 class Linear(paddle.nn.Layer):
     """Linear layer with no tensor parallelism (weight duplicated across TP ranks).
 
@@ -1764,6 +1834,37 @@ class Linear(paddle.nn.Layer):
         state_dict = self.state_dict(structured_name_prefix="")
         return build_sharded_state_dict(
             state_dict, None, structured_name_prefix
+        )
+
+    def gen_aoa_statements(
+        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+    ):
+        """Checkpoint->model AOA for this Linear.
+
+        Weight is transposed (``^T``); bias / persistable buffers use identity;
+        a dtype cast suffix is appended when the model rules match.
+        """
+        return gen_linear_aoa_statements(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            aoa_name_scope=aoa_name_scope,
+        )
+
+    def gen_inv_aoa_statements(
+        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+    ):
+        """Inverse (model -> checkpoint) AOA for this Linear.
+
+        Independently generated, not derived from the checkpoint->model text:
+        weight is transposed back, bias / buffers use identity, dtype cast
+        endpoints are swapped.
+        """
+        return gen_linear_inv_aoa_statements(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            aoa_name_scope=aoa_name_scope,
         )
 
     def set_extra_state(self, state):
@@ -2294,6 +2395,37 @@ class ColumnParallelLinear(paddle.nn.Layer):
             state_dict, shard_rules, structured_name_prefix
         )
 
+    def gen_aoa_statements(
+        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+    ):
+        """Checkpoint->model AOA for this Linear.
+
+        Weight is transposed (``^T``); bias / persistable buffers use identity;
+        a dtype cast suffix is appended when the model rules match.
+        """
+        return gen_linear_aoa_statements(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            aoa_name_scope=aoa_name_scope,
+        )
+
+    def gen_inv_aoa_statements(
+        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+    ):
+        """Inverse (model -> checkpoint) AOA for this Linear.
+
+        Independently generated, not derived from the checkpoint->model text:
+        weight is transposed back, bias / buffers use identity, dtype cast
+        endpoints are swapped.
+        """
+        return gen_linear_inv_aoa_statements(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            aoa_name_scope=aoa_name_scope,
+        )
+
     def set_extra_state(self, state):
         """Extra state is ignored"""
 
@@ -2610,6 +2742,37 @@ class RowParallelLinear(paddle.nn.Layer):
         shard_rules = None if self.world_size == 1 else {"weight": 0}
         return build_sharded_state_dict(
             state_dict, shard_rules, structured_name_prefix
+        )
+
+    def gen_aoa_statements(
+        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+    ):
+        """Checkpoint->model AOA for this Linear.
+
+        Weight is transposed (``^T``); bias / persistable buffers use identity;
+        a dtype cast suffix is appended when the model rules match.
+        """
+        return gen_linear_aoa_statements(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            aoa_name_scope=aoa_name_scope,
+        )
+
+    def gen_inv_aoa_statements(
+        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+    ):
+        """Inverse (model -> checkpoint) AOA for this Linear.
+
+        Independently generated, not derived from the checkpoint->model text:
+        weight is transposed back, bias / buffers use identity, dtype cast
+        endpoints are swapped.
+        """
+        return gen_linear_inv_aoa_statements(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            aoa_name_scope=aoa_name_scope,
         )
 
     def set_extra_state(self, state):
