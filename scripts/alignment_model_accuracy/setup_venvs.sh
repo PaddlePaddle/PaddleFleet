@@ -160,7 +160,7 @@ setup_paddle_venv() {
 
     # paddlefleet_ops
     UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --python "${paddle_py}" --force-reinstall \
-    --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu130/ \
+    --extra-index-url https://www.paddlepaddle.org.cn/packages/nightly/cu129/ \
         "${PADDLEFLEET_OPS_WHEEL}"
     # uv pip install --python "${paddle_py}" -v --no-build-isolation \
     #     -e ./PaddleFleet/packages/paddlefleet_ops
