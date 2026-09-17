@@ -27,6 +27,7 @@ Environment note (see unit-test-rules.md, 计算优化):
   the CORRECT dequantized-matmul contract there; running it requires single-card.
 """
 
+import os
 import types
 import unittest
 
@@ -147,8 +148,11 @@ class TestQuantizeSimulatedForward(unittest.TestCase):
         cfg = _Config(scale_epsilon=EPS)
         fixed_scale = paddle.to_tensor([0.01], dtype="float32")
         fixed_scale.stop_gradient = True
-        x_np = np.array([[2.0, -3.0, 0.005, -0.004]], dtype=np.float32)
-        # x / 0.01 = [200, -300, 0.5, -0.4] -> clip to [127, -128, 1, 0]
+        x_np = np.array([[2.0, -3.0, 0.006, -0.004]], dtype=np.float32)
+        # x / 0.01 = [200, -300, 0.6, -0.4] -> clip to [127, -128, 1, 0].
+        # 0.006 (not 0.005) is used on purpose: 0.005/0.01 == 0.5 is an exact
+        # rounding tie where paddle.round (half-to-even -> 0) and numpy
+        # round-half-away (-> 1) disagree; 0.6 rounds to 1 under both.
         q_ref = np.clip(_round_half_away(x_np / 0.01), -128, 127).astype(
             np.int8
         )
@@ -357,7 +361,28 @@ class TestInt8Forward(unittest.TestCase):
     """Real ``int8_forward`` vs independent dequantized-matmul reference."""
 
     def setUp(self):
-        paddle.set_device("gpu")
+        # int8_forward runs on a real GPU. A launcher/fleet exports
+        # FLAGS_selected_gpus when it selects a card; the CI runner leaves it
+        # as an empty string, so paddle.set_device("gpu") (via ParallelEnv ->
+        # int(FLAGS_selected_gpus[0])) would raise ValueError. Pin an explicit
+        # single card as a launcher would, and restore afterwards. Skip
+        # honestly on a CUDA build that has no usable device.
+        if paddle.device.cuda.device_count() == 0:
+            self.skipTest(
+                "int8_forward needs a usable CUDA device; this build has none"
+            )
+        self._orig_device = paddle.get_device()
+        self._orig_selected_gpus = os.environ.get("FLAGS_selected_gpus")
+        os.environ["FLAGS_selected_gpus"] = "0"
+        paddle.set_device("gpu:0")
+        self.addCleanup(self._restore_gpu_env)
+
+    def _restore_gpu_env(self):
+        paddle.set_device(self._orig_device)
+        if self._orig_selected_gpus is None:
+            os.environ.pop("FLAGS_selected_gpus", None)
+        else:
+            os.environ["FLAGS_selected_gpus"] = self._orig_selected_gpus
 
     def test_forward_matches_quantized_matmul(self):
         cfg = _Config(scale_epsilon=EPS, apply_hadamard=False)

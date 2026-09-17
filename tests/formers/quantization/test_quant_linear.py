@@ -104,19 +104,27 @@ def _weight_only_config():
 class TestQuantizationLinearConstruction(unittest.TestCase):
     """QuantizationLinear.__init__ must size parameters from the real config.
 
-    Runs on CPU: create_parameter only allocates storage, no quant kernel is
-    invoked. This exercises the genuine constructor (never mocked) and checks
-    the shape-derivation logic that distinguishes int8 from int4 packing.
+    Runs on CPU. Construction is wrapped in ``paddle.LazyGuard()`` because that
+    is exactly how the real loader builds these layers
+    (``model_utils.from_pretrained`` -> ``ContextManagers([no_init_weights,
+    LazyGuard]) -> replace_with_quantization_linear``). Outside LazyGuard the
+    ``create_parameter(dtype="int8")`` call eagerly runs Paddle's default
+    XavierUniform initializer, whose ``uniform`` kernel is not registered for
+    int8 and raises at construction time -- a path production never takes. Under
+    LazyGuard the parameter metadata (shape/dtype) is still materialized, so the
+    shape-derivation logic that distinguishes int8 from int4 packing is
+    exercised genuinely (the constructor is never mocked).
     """
 
     def test_int8_parameter_layout(self):
-        layer = QuantizationLinear(
-            in_features=8,
-            out_features=4,
-            quantization_config=_weight_only_config(),
-            weight_quantize_algo="weight_only_int8",
-            dtype="float16",
-        )
+        with paddle.LazyGuard():
+            layer = QuantizationLinear(
+                in_features=8,
+                out_features=4,
+                quantization_config=_weight_only_config(),
+                weight_quantize_algo="weight_only_int8",
+                dtype="float16",
+            )
         # int8 weight is stored transposed as [out, in].
         self.assertEqual(layer.quant_weight.shape, [4, 8])
         self.assertEqual(layer.quant_weight.dtype, paddle.int8)
@@ -139,13 +147,14 @@ class TestQuantizationLinearConstruction(unittest.TestCase):
         config = QuantizationConfig(
             weight_quantize_algo="weight_only_int4", group_size=-1
         )
-        layer = QuantizationLinear(
-            in_features=8,
-            out_features=4,
-            quantization_config=config,
-            weight_quantize_algo="weight_only_int4",
-            dtype="float16",
-        )
+        with paddle.LazyGuard():
+            layer = QuantizationLinear(
+                in_features=8,
+                out_features=4,
+                quantization_config=config,
+                weight_quantize_algo="weight_only_int4",
+                dtype="float16",
+            )
         # int4 packs two values into one int8 -> first dim is out // 2.
         self.assertEqual(layer.quant_weight.shape, [2, 8])
         self.assertEqual(layer.quant_weight.dtype, paddle.int8)
@@ -154,14 +163,15 @@ class TestQuantizationLinearConstruction(unittest.TestCase):
         self.assertEqual(layer.quant_weight_bit, 4)
 
     def test_bias_attr_false_disables_bias(self):
-        layer = QuantizationLinear(
-            in_features=8,
-            out_features=4,
-            quantization_config=_weight_only_config(),
-            weight_quantize_algo="weight_only_int8",
-            dtype="float16",
-            bias_attr=False,
-        )
+        with paddle.LazyGuard():
+            layer = QuantizationLinear(
+                in_features=8,
+                out_features=4,
+                quantization_config=_weight_only_config(),
+                weight_quantize_algo="weight_only_int8",
+                dtype="float16",
+                bias_attr=False,
+            )
         self.assertIsNone(layer.bias)
 
     def test_groupwise_weightonly_is_rejected(self):
@@ -171,13 +181,14 @@ class TestQuantizationLinearConstruction(unittest.TestCase):
             weight_quantize_algo="weight_only_int8", group_size=64
         )
         with self.assertRaises(NotImplementedError):
-            QuantizationLinear(
-                in_features=8,
-                out_features=4,
-                quantization_config=config,
-                weight_quantize_algo="weight_only_int8",
-                dtype="float16",
-            )
+            with paddle.LazyGuard():
+                QuantizationLinear(
+                    in_features=8,
+                    out_features=4,
+                    quantization_config=config,
+                    weight_quantize_algo="weight_only_int8",
+                    dtype="float16",
+                )
 
     def test_unknown_algo_is_rejected(self):
         config = _weight_only_config()
@@ -215,7 +226,11 @@ class TestQuantWeightForwardNumeric(unittest.TestCase):
     def _run(self, with_bias):
         paddle.seed(2024)
         in_features, out_features, tokens = 128, 64, 8
-        w = paddle.randn([out_features, in_features], dtype="float32")
+        # weight_quantize consumes an [in, out] weight (its first dim must be
+        # divisible by 64) and returns the transposed [out, in] int8 payload
+        # that weight_only_linear expects; keep w in that [in, out] layout so
+        # the whole pipeline reconstructs y = x @ w.
+        w = paddle.randn([in_features, out_features], dtype="float32")
         x = paddle.randn([tokens, in_features], dtype="float32")
         bias = (
             paddle.randn([out_features], dtype="float32") if with_bias else None
@@ -226,7 +241,7 @@ class TestQuantWeightForwardNumeric(unittest.TestCase):
         bias_np = bias.numpy() if with_bias else 0.0
 
         # Independent reference: full-precision matmul (hand-computed in fp32).
-        ref = x_np @ w_np.T + bias_np  # [tokens, out]
+        ref = x_np @ w_np + bias_np  # [tokens, out]
 
         # Prepare the quantized weight with the Paddle utility (NOT the code
         # under test) so the kernel receives its expected packed layout.
@@ -247,7 +262,9 @@ class TestQuantWeightForwardNumeric(unittest.TestCase):
         )
         actual = out.astype("float32").numpy()
 
-        step = _quant_step_from_weight(w_np)
+        # step is per output channel: max over the input axis of the [in, out]
+        # weight, i.e. axis=1 of its [out, in] transpose.
+        step = _quant_step_from_weight(w_np.T)
         bound = _forward_error_bound(x_np, step)
         allowed = bound + 2e-2 * np.abs(ref) + 5e-3
 
@@ -275,7 +292,10 @@ class TestDequantWeightNumeric(unittest.TestCase):
     def test_dequant_matches_float_weight_within_step(self):
         paddle.seed(7)
         in_features, out_features = 128, 32
-        w = paddle.randn([out_features, in_features], dtype="float32")
+        # weight_quantize wants an [in, out] weight (first dim divisible by 64)
+        # and returns the transposed [out, in] int8 payload; dequant_weight then
+        # reconstructs that [out, in] layout, i.e. w.T. Keep w as [in, out].
+        w = paddle.randn([in_features, out_features], dtype="float32")
         w_np = w.numpy()
 
         q_weight, w_scale = paddle.nn.quant.weight_quantize(
@@ -294,12 +314,14 @@ class TestDequantWeightNumeric(unittest.TestCase):
         self.assertEqual(dq.shape, [out_features, in_features])
 
         dq_np = dq.astype("float32").numpy()
-        step = _quant_step_from_weight(w_np)  # [out]
-        # Reference is the ORIGINAL float weight (independent of Paddle's
-        # dequant path); each element must sit within half a quant step plus
-        # fp16 slack.
-        allowed = (step[:, None] / 2.0) + 3e-3 + 1e-2 * np.abs(w_np)
-        diff = np.abs(dq_np - w_np)
+        # Independent reference is the ORIGINAL float weight transposed into the
+        # [out, in] layout the dequant path reconstructs; each element must sit
+        # within half a quant step (max|W|/127 over the input axis) plus fp16
+        # slack.
+        w_ref = w_np.T  # [out, in]
+        step = _quant_step_from_weight(w_ref)  # [out]
+        allowed = (step[:, None] / 2.0) + 3e-3 + 1e-2 * np.abs(w_ref)
+        diff = np.abs(dq_np - w_ref)
         self.assertTrue(
             np.all(diff <= allowed),
             f"max excess={np.max(diff - allowed):.4g}",
@@ -313,20 +335,28 @@ class TestQuantizationLinearForwardEndToEnd(unittest.TestCase):
     def test_layer_forward_within_quant_bound(self):
         paddle.seed(123)
         in_features, out_features, tokens = 128, 64, 4
-        w = paddle.randn([out_features, in_features], dtype="float32")
+        # weight_quantize wants an [in, out] weight (first dim divisible by 64);
+        # its transposed [out, in] payload matches layer.quant_weight's [out, in]
+        # shape, and the layer reconstructs y = x @ w for this [in, out] w.
+        w = paddle.randn([in_features, out_features], dtype="float32")
         x = paddle.randn([tokens, in_features], dtype="float32")
 
         w_np = w.numpy()
         x_np = x.numpy()
 
-        layer = QuantizationLinear(
-            in_features=in_features,
-            out_features=out_features,
-            quantization_config=_weight_only_config(),
-            weight_quantize_algo="weight_only_int8",
-            dtype="float16",
-            bias_attr=False,
-        )
+        # Built under LazyGuard exactly as the real loader does; otherwise the
+        # int8 create_parameter eagerly runs XavierUniform, whose uniform kernel
+        # is not registered for int8. set_value then materializes the lazy param
+        # just like checkpoint loading.
+        with paddle.LazyGuard():
+            layer = QuantizationLinear(
+                in_features=in_features,
+                out_features=out_features,
+                quantization_config=_weight_only_config(),
+                weight_quantize_algo="weight_only_int8",
+                dtype="float16",
+                bias_attr=False,
+            )
         q_weight, w_scale = paddle.nn.quant.weight_quantize(
             w.cast("float16"), algo="weight_only_int8"
         )
@@ -337,8 +367,8 @@ class TestQuantizationLinearForwardEndToEnd(unittest.TestCase):
             out = layer(x.cast("float16"))
         actual = out.astype("float32").numpy()
 
-        ref = x_np @ w_np.T  # no bias
-        step = _quant_step_from_weight(w_np)
+        ref = x_np @ w_np  # no bias; w is [in, out] so y = x @ w
+        step = _quant_step_from_weight(w_np.T)
         allowed = _forward_error_bound(x_np, step) + 2e-2 * np.abs(ref) + 5e-3
 
         diff = np.abs(actual - ref)
