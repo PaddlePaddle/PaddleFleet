@@ -1582,6 +1582,13 @@ class TransformerConfig(ModelParallelConfig):
     compressed positions.
     """
 
+    cp_compress_p2p: bool = False
+    """If True, the CSA/HCA compressor pools each group on the CP rank owning its
+    start via a one-hop P2P window instead of an all-gather of the whole projected
+    sequence. Only takes effect for non-overlapping (ratio 128) layers under CP;
+    off falls back to the all-gather baseline, bit-for-bit.
+    """
+
     indexer_init_from_scratch: bool | None = None
     """Whether the Indexer weights are initialized instead of loaded.
 
