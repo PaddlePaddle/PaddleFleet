@@ -34,10 +34,8 @@ do_eval: false
 per_device_eval_batch_size: 1
 per_device_train_batch_size: 1
 num_train_epochs: 1
-# 单 step md5 对齐：只校验首个 step 的前向 loss md5。
-# 多 step 后 kv_b_proj in_grad / k_pos_emb 反向的实现差异会累积进 loss，
-# 会被严格 md5 判为不一致（详见 README「判定口径」）。
-max_steps: 1
+# 10 step 全程逐位对齐：每个 step 的 per_token_loss md5 两侧一致
+max_steps: 10
 eval_iters: 10000
 eval_steps: 10000
 evaluation_strategy: steps
@@ -81,6 +79,9 @@ moe_router_load_balancing_type: seq_aux_loss
 router_aux_loss_coef: 1.0e-4
 moe_router_force_load_balancing: false
 moe_deep_gemm: false
+
+# DSA - indexer loss 两侧必须同为 0，否则 loss 口径不一致
+dsa_indexer_loss_coeff: 0.0
 
 # 精度对齐锚点：打印 per_token_loss / final_loss 的 md5，供 compare_loss.py 逐 step 比对
 use_accuracy_compatible: true

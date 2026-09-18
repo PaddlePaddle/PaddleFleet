@@ -87,7 +87,7 @@ ARGS=(
     ### finetuning
     --seed 42
     --finetune True
-    --train_iters 1
+    --train_iters 10
     --logging_steps 1
     --eval_iters 0
     --output_dir "${TORCH_LOG_DIR}/trainer"
@@ -109,7 +109,7 @@ ARGS=(
     --moe_enable_deepep False
 
     ### DSA
-    --dsa_indexer_loss_coeff 0.01
+    --dsa_indexer_loss_coeff 0.0
 
     ### overlap
     --overlap_grad_reduce False
