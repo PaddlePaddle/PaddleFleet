@@ -23,7 +23,7 @@ cd "${SCRIPT_DIR}"
 CASES=(
     "MinimaxV2.5_EP2 ./MinimaxV2.5_EP2/run_paddle_minimax.sh ./MinimaxV2.5_EP2/run_torch_minimax.sh"
     "GLM45Air_EP2 ./GLM45Air_EP2/run_paddle_glm45.sh ./GLM45Air_EP2/run_torch_glm45.sh"
-    "GLM5_SingleCard ./GLM5_SingleCard/run_paddle_glm5.sh ./GLM5_SingleCard/run_torch_glm5.sh"
+    "GLM5 ./GLM5/run_paddle_glm5.sh ./GLM5/run_torch_glm5.sh"
     # "transformer ./paddlepaddle_transformer/run_paddle_minimax.sh ./pytorch_transformer/run_torch_minimax.sh"
 )
 

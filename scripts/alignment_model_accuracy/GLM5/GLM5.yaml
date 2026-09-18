@@ -58,12 +58,15 @@ adam_beta2: 0.95
 # 单卡单 step 不做裁剪，避免两侧 clip 实现差异污染 loss
 max_grad_norm: 0.0
 
-# performance - 单卡 TP=1 / EP=1 / PP=1 与 MG 对齐
+# performance - TP=1 / EP=1 / PP=1 + sharding stage1 degree2，与 MG 侧 DP2 + distributed optimizer 对应
 tensor_model_parallel_size: 1
 pipeline_model_parallel_size: 1
 sequence_parallel: false
 use_expert_parallel: false
 expert_model_parallel_size: 1
+# sharding - 2 卡 ZeRO-1（优化器状态分片），对侧 MG 为 --use_distributed_optimizer True
+sharding: stage1
+sharding_parallel_size: 2
 # 关重计算，避免重算路径引入非确定性
 recompute_granularity: none
 fp32_residual_connection: false

@@ -16,8 +16,8 @@
 
 set -euo pipefail
 
-# GLM-5 (PaddleFormers + PaddleFleet) 单机单卡精度对齐用例 —— paddle 侧
-# 对标 GLM45Air_EP2/run_paddle_glm45.sh，并行度改为 TP=1/EP=1/PP=1（单卡）
+# GLM-5 (PaddleFormers + PaddleFleet) 单机 2 卡精度对齐用例 —— paddle 侧
+# 对标 GLM45Air_EP2/run_paddle_glm45.sh；TP=1/EP=1/PP=1 + sharding stage1 degree2
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
@@ -34,8 +34,6 @@ unset PADDLE_ELASTIC_TIMEOUT
 unset PADDLE_TRAINER_ENDPOINTS
 unset DISTRIBUTED_TRAINER_ENDPOINTS
 unset PADDLE_CURRENT_ENDPOINT
-unset PADDLE_TRAINERS_NUM
-unset PADDLE_TRAINER_ID
 unset FLAGS_START_PORT
 unset MASTER_ADDR
 unset MASTER_PORT
@@ -47,18 +45,17 @@ unset NPROC_PER_NODE
 unset LOCAL_RANK
 unset LOCAL_WORLD_SIZE
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
+export CUDA_VISIBLE_DEVICES=0,1
 export MASTER_ADDR="127.0.0.1"
-# 端口按用例错开：Minimax 29501 / GLM45Air 29503 / GLM5_SingleCard 29507
 export MASTER_PORT="${MASTER_PORT:-29507}"
 
-# 单卡：TP=1 / EP=1 / PP=1
+# sharding stage1 degree2: 单机 2 卡
 export NNODES="1"
 export RANK="0"
 export NODE_RANK="0"
-export NPROC_PER_NODE="1"
-export WORLD_SIZE="1"
-export LOCAL_WORLD_SIZE="1"
+export NPROC_PER_NODE="2"
+export WORLD_SIZE="2"
+export LOCAL_WORLD_SIZE="2"
 
 export FLAGS_use_accuracy_compatible_kernel="1"
 export USE_ACCURACY_COMPATIBLE="1"

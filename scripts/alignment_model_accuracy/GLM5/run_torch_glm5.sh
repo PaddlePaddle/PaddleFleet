@@ -16,35 +16,27 @@
 
 set -euo pipefail
 
-# GLM-5 (ms-swift + Megatron-LM) 单机单卡精度对齐用例 —— torch 侧
-# 对标 GLM45Air_EP2/run_torch_glm45.sh，并行度改为 TP=1/EP=1/PP=1（单卡）
+# GLM-5 (ms-swift + Megatron-LM) 单机 2 卡精度对齐用例 —— torch 侧
+# 对标 GLM45Air_EP2/run_torch_glm45.sh；对应 paddle 侧 sharding stage1 degree2
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-
-# 资产路径（可用环境变量覆盖；默认放在框架统一缓存目录）
-GLM5_MODEL="${GLM5_MODEL:-/home/.cache/PaddleFormers/GLM-5-bf16_1Card}"
-GLM5_DATASET="${GLM5_DATASET:-/home/.cache/PaddleFormers/GLM-5-bf16_1Card/alignment_torch.jsonl}"
 
 # ---- 环境 ----
 # shellcheck disable=SC1091
 source "${WORKSPACE_DIR}/venv/torch/bin/activate"
 cd "${WORKSPACE_DIR}"
 
-export GLM5_MEGATRON_LM_PATH="${GLM5_MEGATRON_LM_PATH:-${WORKSPACE_DIR}/Megatron-LM}"
-export MEGATRON_LM_PATH="${GLM5_MEGATRON_LM_PATH}"
+export MEGATRON_LM_PATH="${WORKSPACE_DIR}/Megatron-LM"
 
-# 单卡：TP=1 / EP=1 / PP=1
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
-export NPROC_PER_NODE=1
+# sharding stage1 degree2 对侧: 单机 2 卡 DP2 + distributed optimizer
+export CUDA_VISIBLE_DEVICES=0,1
+export NPROC_PER_NODE=2
 export NNODES="${NNODES:-1}"
 export NODE_RANK="${NODE_RANK:-0}"
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
-# 端口按用例错开：Minimax 29500 / GLM45Air 29502 / KimiK2 29504 / GLM5 29506
 export MASTER_PORT="${MASTER_PORT:-29506}"
 
-export FLAGS_use_accuracy_compatible_kernel=1
-export USE_ACCURACY_COMPATIBLE=1
 export CUBLAS_WORKSPACE_CONFIG=":4096:8"
 # 本机 NVLS multicast 内存注册失败（CUDA error 401），NCCL init 会直接崩：
 #   "Failed to bind NVLink SHARP (NVLS) Multicast memory ... Disable NVLS (NCCL_NVLS_ENABLE=0)"
@@ -53,6 +45,10 @@ export TORCHDYNAMO_DISABLE=1
 export PYTORCH_ALLOC_CONF='expandable_segments:True'
 # TF32 会让 dense GEMM 与 paddle 侧对不上
 export NVIDIA_TF32_OVERRIDE=0
+
+# ---- 精度对齐 Flag ----
+export FLAGS_use_accuracy_compatible_kernel=1
+export USE_ACCURACY_COMPATIBLE=1
 
 # ---- 精度对齐：逐层输出 md5（默认关闭，排查时按需打开）----
 export ENABLE_SAVE_HOOK="${ENABLE_SAVE_HOOK:-0}"
@@ -69,13 +65,14 @@ mkdir -p "${TORCH_LOG_DIR}" "${MG_TENSOR_DEBUG_DIR}"
 # ------- 训练参数（与 paddle 侧 GLM5.yaml 逐项对齐）-----
 ARGS=(
     ### model
-    --model "${GLM5_MODEL}"
+    --model /home/.cache/PaddleFormers/GLM-5-bf16_1Card
 
     ### data
-    --dataset "${GLM5_DATASET}"
+    --dataset /home/.cache/PaddleFormers/GLM-5-bf16_1Card/alignment_torch.jsonl
     --max_length 8192
     --packing False
     --padding_free False
+    --truncation_strategy right
     --split_dataset_ratio 0
     --template dummy
     --template_backend swift
@@ -125,7 +122,7 @@ ARGS=(
     --cross_entropy_loss_fusion False
     --calculate_per_token_loss False
     --micro_batch_size 1
-    --global_batch_size 1
+    --global_batch_size 2
 
     ### optimizer
     --optimizer adam
@@ -139,7 +136,7 @@ ARGS=(
     --clip_grad 0.0
     --optimizer_cpu_offload False
     --use_precision_aware_optimizer False
-    --use_distributed_optimizer False
+    --use_distributed_optimizer True
     --accumulate_allreduce_grads_in_fp32 True
 
     --use_accuracy_compatible True
