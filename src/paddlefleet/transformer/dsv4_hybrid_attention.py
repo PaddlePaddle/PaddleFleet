@@ -728,15 +728,17 @@ class DSv4HybridAttention(Attention):
         else:
             per_type_rope_type = None
 
-        # Per-layer RoPE (potentially different base for compressed layers)
-        rope_base = getattr(config, "rotary_base", 10000)
+        # Per-layer RoPE (potentially different base for compressed layers).
+        # B2: rope_theta is the single base field (rotary_base is a deprecated
+        # alias forwarded in TransformerConfig.__post_init__).
+        rope_theta = config.rope_theta
         if compress_ratio > 1:
             # Every shipped model_config.json writes csa_compress_rotary_base as
             # a *string* ("160000.0"). pretrain.py coerces numeric strings
             # before building the config, but any path that calls from_config
             # directly (unit tests, offline inference, tooling) would reach
             # YarnRotaryEmbedding's math.log() with a str and raise TypeError.
-            rope_base = float(config.csa_compress_rotary_base)
+            rope_theta = float(config.csa_compress_rotary_base)
 
         # Resolve the RoPE variant for this layer. Historically compressed
         # layers (compress_ratio > 1, i.e. HCA/CSA) always used YaRN while
@@ -747,27 +749,28 @@ class DSv4HybridAttention(Attention):
         resolved_rope_type = per_type_rope_type or default_rope_type
 
         if resolved_rope_type == "yarn":
+            # B6: read config fields directly (defaults live in
+            # TransformerConfig). Module-level getattr fallbacks are banned by
+            # ci/rules/no-config-getattr-fallback.yml — they silently masked
+            # misspelled fields.
             self.rotary_pos_emb = YarnRotaryEmbedding(
                 self.qk_pos_emb_head_dim,
-                rotary_base=rope_base,
-                scaling_factor=getattr(config, "rotary_scaling_factor", 40),
-                original_max_position_embeddings=getattr(
-                    config, "original_max_position_embeddings", 4096
-                ),
-                beta_fast=getattr(config, "beta_fast", 32),
-                beta_slow=getattr(config, "beta_slow", 1),
-                mscale=getattr(config, "mscale", 1.0),
-                mscale_all_dim=getattr(config, "mscale_all_dim", 0.0),
-                yarn_rope_fusion=getattr(
-                    config, "dsv4_yarn_rope_fusion", False
-                ),
+                rotary_base=rope_theta,
+                scaling_factor=config.rotary_scaling_factor,
+                original_max_position_embeddings=config.original_max_position_embeddings,
+                beta_fast=config.beta_fast,
+                beta_slow=config.beta_slow,
+                mscale=config.mscale,
+                mscale_all_dim=config.mscale_all_dim,
+                yarn_rope_fusion=config.dsv4_yarn_rope_fusion,
             )
         else:
             self.rotary_pos_emb = RotaryEmbedding(
                 self.qk_pos_emb_head_dim,
-                rotary_percent=getattr(config, "rotary_percent", 1.0),
-                rotary_base=rope_base,
-                rotary_embed_cache=getattr(config, "rotary_embed_cache", False),
+                rotary_percent=config.rotary_percent,
+                rotary_base=rope_theta,
+                rotary_embed_cache=config.rotary_embed_cache,
+                use_accuracy_compatible=config.use_accuracy_compatible,
             )
 
         self.core_attention = build_spec_layer(

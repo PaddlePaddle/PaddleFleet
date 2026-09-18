@@ -375,20 +375,16 @@ class DSAIndexer(paddle.nn.Layer):
         if config.rope_type == "rope":
             self.rotary_pos_emb = RotaryEmbedding(
                 self.rope_head_dim,
-                rotary_percent=1.0,
-                rotary_interleaved=getattr(
-                    config, "dsa_indexer_rotary_interleaved", False
-                ),
+                rotary_percent=config.rotary_percent,
+                rotary_interleaved=config.dsa_indexer_rotary_interleaved,
                 rotary_base=config.rope_theta,
                 cp_group=pg_collection.cp,
-                rotary_embed_cache=getattr(config, "rotary_embed_cache", False),
+                rotary_embed_cache=config.rotary_embed_cache,
             )
         elif config.rope_type == "yarn":
             self.rotary_pos_emb = YarnRotaryEmbedding(
                 self.rope_head_dim,
-                rotary_interleaved=getattr(
-                    config, "dsa_indexer_rotary_interleaved", False
-                ),
+                rotary_interleaved=config.dsa_indexer_rotary_interleaved,
                 rotary_base=config.rope_theta,
                 scaling_factor=config.rotary_scaling_factor,
                 original_max_position_embeddings=config.original_max_position_embeddings,

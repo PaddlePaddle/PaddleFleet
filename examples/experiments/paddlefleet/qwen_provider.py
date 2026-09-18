@@ -55,7 +55,7 @@ class Qwen3MoEModelProvider(GPTModelProvider):
 
     # Rope
     position_embedding_type: str = "rope"
-    rotary_base: float = 1000000.0
+    rope_theta: float = 1000000.0
 
     # MoE specific parameters
     n_routed_experts: int = 128

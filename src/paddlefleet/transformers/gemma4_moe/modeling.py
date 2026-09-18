@@ -89,7 +89,7 @@ class Gemma4MoeModelProvider(GPTModelProvider):
     scoring_func: str = "sigmoid"
 
     # RoPE
-    rotary_base: float = 10000
+    rope_theta: float = 10000
     sliding_window_rope_base: float = 10000.0
     full_attention_rope_base: float = 1000000.0
     global_rotary_percent: float = 0.25
@@ -203,7 +203,7 @@ class Gemma4MoeModelProvider(GPTModelProvider):
             max_sequence_length=self.max_sequence_length,
             position_embedding_type=self.position_embedding_type,
             rotary_percent=self.rotary_percent,
-            rotary_base=self.rotary_base,
+            rotary_base=self.rope_theta,
             swa_rotary_base=getattr(self, "swa_rope_theta", None),
             rope_scaling=self.rope_scaling,
             parallel_output=self.parallel_output,

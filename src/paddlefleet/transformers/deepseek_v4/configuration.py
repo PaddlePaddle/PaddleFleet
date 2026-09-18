@@ -103,6 +103,7 @@ class DeepseekV4Config(PretrainedConfig):
         "compress_ratios": "csa_compress_ratios",
         "num_hash_layers": "moe_n_hash_layers",
         "compress_rope_theta": "csa_compress_rotary_base",
+        "rotary_base": "rope_theta",  # deprecated alias kept for old checkpoints
         "sliding_window": "csa_window_size",
         "hc_mult": "num_residual_streams",
         "hc_sinkhorn_iters": "mhc_sinkhorn_iterations",
@@ -178,7 +179,6 @@ class DeepseekV4Config(PretrainedConfig):
         rope_type="yarn",
         rotary_scaling_factor=16,
         original_max_position_embeddings=65536,
-        rotary_base=10000,
         # === Parallelism (overridden at runtime) ===
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=1,
@@ -284,7 +284,6 @@ class DeepseekV4Config(PretrainedConfig):
         self.rope_type = rope_type
         self.rotary_scaling_factor = rotary_scaling_factor
         self.original_max_position_embeddings = original_max_position_embeddings
-        self.rotary_base = rotary_base
 
         # Parallelism
         self.tensor_model_parallel_size = tensor_model_parallel_size
