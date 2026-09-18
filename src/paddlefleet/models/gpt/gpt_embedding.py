@@ -955,6 +955,7 @@ class GPTEmbedding(FleetLayer):
         if (
             getattr(self.config, "use_erndata", False)
             and self.config.enable_mtp_magic_send
+            and self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
             and not self.config.mtp_load_weight_only
         ):

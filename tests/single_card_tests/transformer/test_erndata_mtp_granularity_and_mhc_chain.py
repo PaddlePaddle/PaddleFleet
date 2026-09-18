@@ -33,7 +33,7 @@ Two contracts that end-to-end smoke can only surface as opaque shape errors
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import paddle
 
@@ -500,6 +500,87 @@ class TestErndataMagicSend(unittest.TestCase):
         cu = paddle.to_tensor([0, 3, 6], dtype="int32")
         decoder = layer._prepare_erndata_magic_decoder_input(ids, cu)
         self.assertEqual(decoder.dtype, paddle.float32)
+
+    def test_missing_cu_seqlens_is_rejected(self) -> None:
+        """Without boundaries the roll would leak across documents.
+
+        A missing ``cu_seqlens_q`` must fail loudly rather than silently
+        degrade to a single-sequence roll, which trains each document's last
+        token to predict the next document's first token.
+        """
+        layer, _ = self._make_layer(1, 0)
+        ids = paddle.to_tensor([[1, 2, 3, 4, 5, 6]], dtype="int64")
+        with self.assertRaisesRegex(RuntimeError, "cu_seqlens_q"):
+            layer._prepare_erndata_magic_decoder_input(ids, None)
+
+    def test_cp_slice_follows_cp_balance_mode_after_the_full_roll(self) -> None:
+        """Under CP each rank keeps only its own zigzag chunks.
+
+        The roll runs on the full sequence (so document tails are zeroed
+        globally) and the layout-aware slice happens afterwards. Slicing first
+        would shift tokens across chunk boundaries that the rank does not own.
+        """
+        ids = paddle.to_tensor([[1, 2, 3, 4, 5, 6, 7, 8]], dtype="int64")
+        cu = paddle.to_tensor([0, 4, 8], dtype="int32")
+        # full rolled sequence: [2, 3, 4, 0, 6, 7, 8, 0]
+        # dualchunk zigzag over cp_size=2: rank0 owns [0,1]+[6,7],
+        # rank1 owns [2,3]+[4,5]
+        expected = {0: [2.0, 3.0, 8.0, 0.0], 1: [4.0, 0.0, 6.0, 7.0]}
+        for cp_rank, want in expected.items():
+            with self.subTest(cp_rank=cp_rank):
+                layer, _ = self._make_layer(1, 0)
+                with (
+                    patch(
+                        "paddlefleet.transformer.multi_token_prediction."
+                        "get_context_parallel_world_size",
+                        return_value=2,
+                    ),
+                    patch(
+                        "paddlefleet.transformer.multi_token_prediction."
+                        "get_context_parallel_rank",
+                        return_value=cp_rank,
+                    ),
+                ):
+                    decoder = layer._prepare_erndata_magic_decoder_input(
+                        ids, cu
+                    )
+                self.assertEqual(list(decoder.shape), [1, 4, 1])
+                self.assertEqual(decoder.squeeze(-1).numpy().tolist(), [want])
+
+    def test_sequence_parallel_scatters_axis_zero_without_interleaving(
+        self,
+    ) -> None:
+        """SP scatter must see canonical ``[S, B, H]``, not ``[B, S, H]``.
+
+        ``ScatterOp`` partitions axis 0 of the flattened tensor, so scattering
+        a ``[B, S, H]`` layout would hand rank 0 whole samples instead of the
+        first sequence shard of every sample.
+        """
+        layer, _ = self._make_layer(1, 0)
+        layer.sequence_parallel = True
+        ids = paddle.to_tensor([[1, 2, 3, 4], [5, 6, 7, 8]], dtype="int64")
+        cu = paddle.to_tensor([0, 2, 4], dtype="int32")
+        # per-sample rolled: [[2, 0, 4, 0], [6, 0, 8, 0]]
+        seen = {}
+
+        class _HalfScatter:
+            @staticmethod
+            def apply(tensor):
+                seen["shape"] = list(tensor.shape)
+                return tensor[: tensor.shape[0] // 2]
+
+        with patch(
+            "paddlefleet.transformer.multi_token_prediction.ScatterOp",
+            _HalfScatter,
+        ):
+            decoder = layer._prepare_erndata_magic_decoder_input(ids, cu)
+
+        # flattened [S*B, H], i.e. seq-major so the split lands on the seq axis
+        self.assertEqual(seen["shape"], [4 * 2, 1])
+        self.assertEqual(list(decoder.shape), [2, 2, 1])
+        self.assertEqual(
+            decoder.squeeze(-1).numpy().tolist(), [[2.0, 6.0], [0.0, 0.0]]
+        )
 
     def test_magic_and_nonmagic_decoder_embeddings_match_k1_and_k2(
         self,

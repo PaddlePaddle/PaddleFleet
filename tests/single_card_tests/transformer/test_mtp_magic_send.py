@@ -1476,6 +1476,54 @@ class TestGPTModelMTPMethods(unittest.TestCase):
             paddle.equal_all(weight.main_grad, paddle.full_like(weight, 3))
         )
 
+    def _static_shared_comm(self, model, grad):
+        """Register one static-graph parameter under a non-Tensor weight_attr.
+
+        ``weight_attr`` may hold either a bare Tensor or an iterable of
+        ``(name, param)`` pairs; the pair form is what exercises the loop.
+        """
+
+        class _StaticParam:
+            name = "shared_static_w"
+
+            def _grad_ivar(self):
+                return grad
+
+        owner = MagicMock()
+        owner.p = [("w", _StaticParam())]
+        model.shared_comm = {
+            "x": {"weight_attr": ["p"], "layer": owner, "group": MagicMock()}
+        }
+
+    def test_allreduce_static_graph_reads_grad_ivar(self):
+        """Static graph has no ``main_grad``/``.grad``; use ``_grad_ivar()``.
+
+        Touching ``param.main_grad`` or allocating a zero grad would fail
+        outside dygraph, so the static branch must be taken first.
+        """
+        model, _ = self._make_model(num_mtp=0)
+        model._mtp_embed_global_group = None
+        grad = paddle.ones([4])
+        self._static_shared_comm(model, grad)
+        with (
+            patch("paddle.framework.in_dynamic_mode", return_value=False),
+            patch("paddle.distributed.all_reduce") as all_reduce,
+        ):
+            model.allreduce_shared_weight_gradients()
+        all_reduce.assert_called_once()
+
+    def test_allreduce_static_graph_without_grad_raises(self):
+        """A missing static grad names the parameter instead of a TypeError."""
+        model, _ = self._make_model(num_mtp=0)
+        model._mtp_embed_global_group = None
+        self._static_shared_comm(model, None)
+        with (
+            patch("paddle.framework.in_dynamic_mode", return_value=False),
+            patch("paddle.distributed.all_reduce"),
+            self.assertRaisesRegex(RuntimeError, "shared_static_w"),
+        ):
+            model.allreduce_shared_weight_gradients()
+
     def test_edge_cases_no_layers(self):
         model, _ = self._make_model(num_mtp=0)
         model.run_function = []
