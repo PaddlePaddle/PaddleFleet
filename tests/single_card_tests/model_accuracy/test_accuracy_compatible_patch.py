@@ -15,7 +15,7 @@
 """Paddle-only helpers of the DSV4 accuracy-compatible patch module.
 
 ``accuracy_compatible_patch`` holds the Megatron/Torch-aligned replay paths
-that ``FLAGS_use_dsv4_accuracy`` switches on. The Torch-backed kernels need a
+that ``TransformerConfig.use_dsv4_accuracy`` switches on. The Torch-backed kernels need a
 Torch build in the environment, but the trainer/data plumbing, the pure-Paddle
 PyLayers and the flag/install gating are all exercisable on a single card, so
 they are pinned here.
@@ -33,25 +33,40 @@ import numpy as np
 import paddle
 
 from paddlefleet import accuracy_compatible_patch as acp
+from paddlefleet.utils import (
+    set_dsv4_accuracy_compatible,
+    use_dsv4_accuracy_compatible,
+)
 
 
 class TestFlagGating(unittest.TestCase):
-    def test_enabled_only_for_explicit_one(self):
-        for value, expected in (("1", True), ("0", False), ("true", False)):
-            with patch.dict(os.environ, {"FLAGS_use_dsv4_accuracy": value}):
-                self.assertIs(acp._accuracy_compatible_enabled(), expected)
+    def setUp(self):
+        self._saved_flag = use_dsv4_accuracy_compatible()
+
+    def tearDown(self):
+        set_dsv4_accuracy_compatible(self._saved_flag)
+
+    def test_enabled_follows_the_runtime_switch(self):
+        # The switch is a bool written by ``TransformerConfig.__post_init__``;
+        # the environment is deliberately no longer consulted.
+        for value in (True, False):
+            set_dsv4_accuracy_compatible(value)
+            self.assertIs(acp._accuracy_compatible_enabled(), value)
+
+    def test_environment_no_longer_enables_the_replay(self):
+        set_dsv4_accuracy_compatible(False)
+        with patch.dict(os.environ, {"FLAGS_use_dsv4_accuracy": "1"}):
+            self.assertFalse(acp._accuracy_compatible_enabled())
 
     def test_install_is_a_no_op_when_flag_is_off(self):
-        with (
-            patch.dict(os.environ, {"FLAGS_use_dsv4_accuracy": "0"}),
-            patch.object(acp, "_install_fusion_patch") as fusion,
-        ):
+        set_dsv4_accuracy_compatible(False)
+        with patch.object(acp, "_install_fusion_patch") as fusion:
             self.assertFalse(acp.install_accuracy_compatible_paddle_patches())
         fusion.assert_not_called()
 
     def test_install_runs_every_patch_once(self):
+        set_dsv4_accuracy_compatible(True)
         with (
-            patch.dict(os.environ, {"FLAGS_use_dsv4_accuracy": "1"}),
             patch.object(acp, "_PADDLE_RUNTIME_PATCHED", False),
             patch.object(acp, "_install_fusion_patch") as fusion,
             patch.object(acp, "_install_sharding_shape_patch") as sharding,

@@ -1,9 +1,9 @@
 ### data
 train_dataset_type: erniekit
 eval_dataset_type: erniekit
-train_dataset_path: /root/paddlejob/share-storage/gpfs/system-public/liuhao63/Fleet_Former_cice/models/PaddleFleet/DSV4_Model_Accuracy//data/train.jsonl
+train_dataset_path: /root/paddlejob/share-storage/gpfs/system-public/liuhao63/Fleet_Former_cice/models/PaddleFleet/DSV4_Model_Accuracy/data/train.jsonl
 train_dataset_prob: "1.0"
-eval_dataset_path: /root/paddlejob/share-storage/gpfs/system-public/liuhao63/Fleet_Former_cice/models/PaddleFleet/DSV4_Model_Accuracy//data/train.jsonl
+eval_dataset_path: /root/paddlejob/share-storage/gpfs/system-public/liuhao63/Fleet_Former_cice/models/PaddleFleet/DSV4_Model_Accuracy/data/train.jsonl
 eval_dataset_prob: "1.0"
 packing: false
 truncate_packing: false
@@ -16,9 +16,10 @@ dataloader_shuffle: false
 use_template: false
 
 ### model
-model_name_or_path: /root/paddlejob/share-storage/gpfs/system-public/liuhao63/Fleet_Former_cice/models/PaddleFleet/DSV4_Model_Accuracy//fleet_checkpoint
+model_name_or_path: /root/paddlejob/share-storage/gpfs/system-public/liuhao63/Fleet_Former_cice/models/PaddleFleet/DSV4_Model_Accuracy/fleet_checkpoint
 _attn_implementation: eager
 use_accuracy_compatible: true
+use_dsv4_accuracy: true
 
 ### finetuning
 stage: PT

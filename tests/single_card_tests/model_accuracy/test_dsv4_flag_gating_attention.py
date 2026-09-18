@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``FLAGS_use_dsv4_accuracy`` must gate every DSV4 attention replay call site.
+"""``TransformerConfig.use_dsv4_accuracy`` must gate every DSV4 attention replay call site.
 
-The flag defaults to 0. With it off the attention numeric paths have to stay
-exactly where they were before the DSV4 replay landed - the DSA indexer, the
+The field defaults to False. With it off the attention numeric paths have to
+stay exactly where they were before the DSV4 replay landed - the DSA indexer, the
 DSv4 hybrid attention output projection / qkv ordering, and the CSA sparse
 attention kernels all have a "historical" path and a "replay" path, and the
-flag is the only thing allowed to switch between them. Other alignment targets
-run with ``use_accuracy_compatible=True`` but *without* this flag, so a DSV4
+switch is the only thing allowed to pick between them. Other alignment targets
+run with ``use_accuracy_compatible=True`` but *without* this switch, so a DSV4
 branch that keys off the older switches would silently move their loss curve.
 
 Each test below pins one attention call site on both sides of the flag with an

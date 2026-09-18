@@ -12,15 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``FLAGS_use_dsv4_accuracy`` must gate every DSV4 replay call site.
+"""``TransformerConfig.use_dsv4_accuracy`` must gate every DSV4 replay call site.
 
-The flag defaults to 0, and with it off the numeric paths have to stay exactly
-where they were before the DSV4 replay landed - other alignment targets (for
-example the MinimaxV2.5 and GLM45Air cases) run with
+The field defaults to False, and with it off the numeric paths have to stay
+exactly where they were before the DSV4 replay landed - other alignment targets
+(for example the MinimaxV2.5 and GLM45Air cases) run with
 ``use_accuracy_compatible=True`` and ``FLAGS_use_accuracy_compatible_kernel=1``
-but without this flag, so a DSV4 branch that keys off the older switches
+but without this switch, so a DSV4 branch that keys off the older switches
 silently changes their loss curve. Each test below pins one call site on both
-sides of the flag.
+sides of the switch.
 """
 
 from __future__ import annotations
@@ -435,8 +435,8 @@ class TestCollateFixedDataGating(unittest.TestCase):
 
     ``collate_fn`` has two fixed-token sources: the DSV4 ``load_fixed_training_data``
     replay and the historical ``np.load`` of ``tokens_*.npy`` / ``labels_*.npy``.
-    ``FLAGS_use_dsv4_accuracy`` picks between them, so with the flag off the replay
-    loader must never run and the historical ``.npy`` path must produce the batch.
+    ``TransformerConfig.use_dsv4_accuracy`` picks between them, so with the switch off the
+    replay loader must never run and the historical ``.npy`` path must produce the batch.
     """
 
     def _run_with_fixed_path(self, enabled, fixed_data):

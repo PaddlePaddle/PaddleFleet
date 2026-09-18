@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``FLAGS_use_dsv4_accuracy`` must gate the model-side DSV4 replay call sites.
+"""``TransformerConfig.use_dsv4_accuracy`` must gate the model-side DSV4 replay call sites.
 
-Model-layer companion to ``test_dsv4_accuracy_flag_gating.py``. The same flag
+Model-layer companion to ``test_dsv4_accuracy_flag_gating.py``. The same switch
 also toggles numeric / structural branches inside the loss (``LanguageLoss``),
 the LM head (``GPTLMHead``), the GPT embedding (``GPTEmbedding``) and the
 DeepSeek-V4 HF->PF weight-conversion generator

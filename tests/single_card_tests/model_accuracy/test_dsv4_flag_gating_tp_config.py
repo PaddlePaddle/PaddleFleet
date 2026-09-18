@@ -12,11 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``FLAGS_use_dsv4_accuracy`` must gate the TP linear + AOA-config call sites.
+"""``TransformerConfig.use_dsv4_accuracy`` must gate the TP linear + AOA-config call sites.
 
 Companion to ``test_dsv4_accuracy_flag_gating.py`` (which pins the MoE / SwiGLU
 / scheduler / collate sites). This file covers the remaining single-card
-reachable sites where the flag swaps a numeric kernel or a weight-conversion
+reachable sites where the switch swaps a numeric kernel or a weight-conversion
 rule:
 
 * ``tensor_parallel.layers.LinearWithFrozenWeight.backward`` - the dgrad GEMM

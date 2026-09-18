@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``FLAGS_use_dsv4_accuracy`` must gate every DSV4 replay site in the mHC
+"""``TransformerConfig.use_dsv4_accuracy`` must gate every DSV4 replay site in the mHC
 hyper-connection stack (and the MTP contraction that reuses it).
 
-The flag defaults to 0. With it off the mHC numeric paths have to stay exactly
-where they were before the DSV4 replay landed: the historical Sinkhorn
+The field defaults to False. With it off the mHC numeric paths have to stay
+exactly where they were before the DSV4 replay landed: the historical Sinkhorn
 normalization, the FP32 mapping-projection parameters, the native recompute
 backward, the ``compute_h`` epsilon, the un-transposed ``H_res`` layout and the
-reference learned output contraction. Turning the flag on swaps each of those
+reference learned output contraction. Turning the switch on swaps each of those
 for its Megatron-aligned DSV4 twin. Every test below pins one
 ``hyper_connection.py`` call site on both sides of the flag with an observable
 effect - a different dtype, a different epsilon, a different code path

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``FLAGS_use_dsv4_accuracy`` must gate the MoE dispatch/expert call sites.
+"""``TransformerConfig.use_dsv4_accuracy`` must gate the MoE dispatch/expert call sites.
 
 The flag defaults to 0, and with it off the numeric paths have to stay exactly
 where they were before the DSV4 replay landed - other alignment targets run
@@ -349,7 +349,7 @@ class _StopForward(Exception):
 class TestMoeForwardSequenceFirstInputTranspose(unittest.TestCase):
     """``MoELayer.forward`` sequence-first input transpose (lines 1878-1882).
 
-    Only ``FLAGS_use_dsv4_accuracy`` and ``use_accuracy_compatible`` together (on
+    Only ``TransformerConfig.use_dsv4_accuracy`` and ``use_accuracy_compatible`` together (on
     a rank-3 input) flip the MoE into the Torch "sequence-first" layout, moving
     the sequence axis to the front of ``hidden_states``/``input_ids``/``residual``
     before routing. The transpose sits at the very top of ``forward`` -- ahead of

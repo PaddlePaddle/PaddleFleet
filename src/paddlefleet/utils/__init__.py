@@ -50,6 +50,7 @@ _FLEET_UTILS_NAMES = (
     "make_viewless_tensor",
     "deprecate_inference_params",
     "use_dsv4_accuracy_compatible",
+    "set_dsv4_accuracy_compatible",
 )
 
 import_structure = {
@@ -169,18 +170,6 @@ def device_guard(device="cpu", dev_id=0):
         yield
     finally:
         paddle.set_device(origin_device)
-
-
-# Install before PaddleFormers constructs the Stage1 optimizer. Latest
-# PaddleFleet no longer necessarily calls a DSV4-specific module constructor
-# before optimizer setup, so a forward-time lazy install would be too late for
-# slice-shape bookkeeping.
-if os.environ.get("FLAGS_use_dsv4_accuracy", "0") == "1":
-    from paddlefleet.accuracy_compatible_patch import (
-        install_accuracy_compatible_paddle_patches,
-    )
-
-    install_accuracy_compatible_paddle_patches()
 
 
 if TYPE_CHECKING:

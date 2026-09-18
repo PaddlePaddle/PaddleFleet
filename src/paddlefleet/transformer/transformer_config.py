@@ -1959,6 +1959,16 @@ class TransformerConfig(ModelParallelConfig):
     ``paddlefleet.accuracy_target.targets_hf`` only where the two references
     require different arithmetic. Normalized in ``__post_init__``."""
 
+    use_dsv4_accuracy: bool = False
+    """Enable the DSV4 accuracy-compatible replay paths.
+
+    Distinct from ``use_accuracy_compatible``: other alignment targets (for
+    example MinimaxV2.5 and GLM45Air) run with ``use_accuracy_compatible`` set
+    but without this switch, so a DSV4-only numeric path must key off this
+    field. ``__post_init__`` publishes it to the single runtime read point
+    ``paddlefleet.utils.use_dsv4_accuracy_compatible`` and installs the Paddle
+    runtime patches when enabled."""
+
     moe_topk_fusion: bool = False
     """If True, use Triton fused MoE TopK kernel for expert selection."""
 
@@ -2122,6 +2132,25 @@ class TransformerConfig(ModelParallelConfig):
             )
         else:
             setattr(self, key, value)
+            if key == "use_dsv4_accuracy" and value:
+                # Publish as soon as the switch lands on the config, not only in
+                # ``__post_init__``. A checkpoint ``config.json`` carrying
+                # ``"use_dsv4_accuracy": true`` reaches the config through this
+                # attribute copy, which runs at ``AutoConfig.from_pretrained``
+                # time -- i.e. before ``from_pretrained`` converts the weights.
+                # The DSV4 AOA conversion picks the mHC parameter dtype from
+                # ``use_dsv4_accuracy_compatible()``
+                # (``deepseek_v4/modeling.py:544``), so if the switch were still
+                # off here, ``mapping_proj.weight`` would be materialized FP32
+                # while the forward takes the BF16 replay matmul -> operand dtype
+                # mismatch at step 0. Turn-on only; both writers are idempotent.
+                from paddlefleet.accuracy_compatible_patch import (
+                    install_accuracy_compatible_paddle_patches,
+                )
+                from paddlefleet.utils import set_dsv4_accuracy_compatible
+
+                set_dsv4_accuracy_compatible(True)
+                install_accuracy_compatible_paddle_patches()
 
     def get(self, key: str, default=None):
         return getattr(self, key, default)
@@ -2140,6 +2169,27 @@ class TransformerConfig(ModelParallelConfig):
         self.use_accuracy_compatible = normalize_accuracy_target(
             self.use_accuracy_compatible
         )
+        # Publish the DSV4 replay switch to its single runtime read point and
+        # install the Paddle runtime patches, so the slice-shape bookkeeping is
+        # in place before the Stage1 optimizer is built.
+        #
+        # Turn-on only, never reset: config objects are constructed many times
+        # per run (sub-configs, ``text_config``, per-stage pipeline copies), and
+        # those extras carry the ``False`` default. Publishing ``False`` from
+        # here would silently switch the replay off *after*
+        # ``LlmMetaConfig.set_llm_config`` turned it on but *before* the layers
+        # are built, so e.g. the mHC ``mapping_proj`` would be created in FP32
+        # while the forward still took the BF16 replay matmul -- an operand
+        # dtype mismatch at step 0. ``set_llm_config`` is the authoritative
+        # writer for both directions; it runs once, before model construction.
+        if self.use_dsv4_accuracy:
+            from paddlefleet.accuracy_compatible_patch import (
+                install_accuracy_compatible_paddle_patches,
+            )
+            from paddlefleet.utils import set_dsv4_accuracy_compatible
+
+            set_dsv4_accuracy_compatible(True)
+            install_accuracy_compatible_paddle_patches()
         # Normalize the indexer loss coefficient: None (e.g. from a HuggingFace
         # config.json ``"indexer_loss_coeff": null`` or explicit config) means
         # "disabled" and collapses to 0.0, so this config object never exposes

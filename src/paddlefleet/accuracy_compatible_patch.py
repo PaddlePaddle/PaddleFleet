@@ -58,7 +58,13 @@ _PADDLE_RUNTIME_PATCHED = False
 
 
 def _accuracy_compatible_enabled() -> bool:
-    return os.environ.get("FLAGS_use_dsv4_accuracy", "0") == "1"
+    # Delegates to the single runtime read point, which
+    # ``TransformerConfig.__post_init__`` drives from the ``use_dsv4_accuracy``
+    # config field. Imported lazily to avoid an import cycle with
+    # ``paddlefleet.utils``.
+    from paddlefleet.utils import use_dsv4_accuracy_compatible
+
+    return use_dsv4_accuracy_compatible()
 
 
 def _group_indices(parameters, group_size, helper):
@@ -228,6 +234,11 @@ def _install_sharding_shape_patch():
 def _install_adamw_patch():
     from paddle.optimizer import AdamW
 
+    from paddlefleet.utils import (
+        set_dsv4_accuracy_compatible,
+        use_dsv4_accuracy_compatible,
+    )
+
     original = AdamW._append_optimize_op
     if getattr(original, "_fleet_accuracy_compatible", False):
         return
@@ -247,17 +258,14 @@ def _install_adamw_patch():
             tuple(param.shape),
         )
         apply_decay = self._apply_decay_param_fun
-        old_flag = os.environ.get("FLAGS_use_dsv4_accuracy")
+        old_flag = use_dsv4_accuracy_compatible()
         self._apply_decay_param_fun = lambda _name: len(original_shape) != 1
-        os.environ["FLAGS_use_dsv4_accuracy"] = "0"
+        set_dsv4_accuracy_compatible(False)
         try:
             return original(self, block, param_and_grad)
         finally:
             self._apply_decay_param_fun = apply_decay
-            if old_flag is None:
-                os.environ.pop("FLAGS_use_dsv4_accuracy", None)
-            else:
-                os.environ["FLAGS_use_dsv4_accuracy"] = old_flag
+            set_dsv4_accuracy_compatible(old_flag)
 
     append_optimize_op._fleet_accuracy_compatible = True
     AdamW._append_optimize_op = append_optimize_op
@@ -673,9 +681,15 @@ def _hc_mapping_wgrad(
 ) -> Tensor:
     torch = _import_torch()
 
+    # The forward matmul runs in the activation dtype (bf16) while the
+    # mapping_proj master weight stays in params_dtype (fp32). Only the weight
+    # dtype selects the wgrad dtype here (its value does not enter dW), so cast
+    # it to the activation dtype to keep the torch matmul operands aligned; the
+    # accumulator upcasts the result to fp32.
+    weight_cast = weight.astype(x_seqfirst.dtype)
     x_t = _to_torch(x_seqfirst).detach().requires_grad_(True)
     grad_t = _to_torch(grad_seqfirst).detach()
-    weight_oi_t = _to_torch(weight.t()).detach().requires_grad_(True)
+    weight_oi_t = _to_torch(weight_cast.t()).detach().requires_grad_(True)
     with torch.enable_grad():
         proj_t = torch.matmul(x_t, weight_oi_t.t())
         proj_t.backward(grad_t)
@@ -751,7 +765,12 @@ def compatible_projection_and_norm(
     # Match Megatron clean path: torch.matmul(x, weight.t()). Paddle
     # nn.Linear uses a different BF16 cuBLAS path for this shape and drifts
     # before the first HC BDA.
-    proj_2d = paddle.matmul(x_2d, weight.t(), transpose_y=True)
+    # The mapping_proj master weight lives in params_dtype (fp32 by default),
+    # while the activations are bf16. Cast a bf16 view for the matmul so both
+    # operands share a dtype; the original fp32 weight is still handed to the
+    # seqfirst wgrad hook for fp32 gradient accumulation.
+    weight_cast = weight.astype(x_2d.dtype)
+    proj_2d = paddle.matmul(x_2d, weight_cast.t(), transpose_y=True)
     _register_hc_mapping_seqfirst_wgrad_hook(proj_2d, x, weight)
     proj = proj_2d.reshape([*x.shape[:-1], weight.shape[-1]])
     r = r.reshape([*x.shape[:-1], 1])

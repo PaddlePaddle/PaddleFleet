@@ -232,10 +232,14 @@ class TestCompatibleEmbeddingIndexBackward(unittest.TestCase):
 class TestTeMatmul(unittest.TestCase):
     """``te_matmul`` is the DSV4 tensor-parallel dgrad replay.
 
-    It must call TransformerEngine's ``general_gemm`` with the required
-    ``workspace`` positional argument and reproduce the plain-dgrad shape
-    (``grad_output @ weight.t()``). This regression pins the workspace fix and
-    runs wherever ``transformer_engine`` is installed.
+    On the pinned TransformerEngine 2.17.1, ``general_gemm`` takes no
+    ``workspace`` parameter -- it allocates one internally via
+    ``get_cublas_workspace`` -- so only ``A``/``B`` are passed positionally.
+    (TE 2.6.x did require ``workspace`` as the third positional argument; do not
+    re-add it while 2.17.1 is the target.) This regression pins that the call
+    binds correctly and reproduces the plain-dgrad shape
+    (``grad_output @ weight.t()``); it runs wherever ``transformer_engine`` is
+    installed.
     """
 
     def test_te_matmul_dgrad_runs_and_matches_reference_shape(self):
@@ -245,9 +249,7 @@ class TestTeMatmul(unittest.TestCase):
             self.skipTest(f"transformer_engine not importable: {exc!r}")
         # weight is [in, out]; grad_output is [tokens, out]. The non-DSV4 dgrad
         # is ``grad_output @ weight.t()`` -> [tokens, in], which te_matmul must
-        # reproduce. This line previously raised
-        # ``TypeError: general_gemm() missing 1 required positional argument:
-        # 'workspace'``.
+        # reproduce.
         weight = paddle.randn([8, 16], dtype="bfloat16")
         grad_output = paddle.randn([4, 16], dtype="bfloat16")
         reference = grad_output.matmul(weight.t())

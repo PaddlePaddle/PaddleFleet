@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``FLAGS_use_dsv4_accuracy`` must gate every DSV4 replay call site in ``trainer/``.
+"""``TransformerConfig.use_dsv4_accuracy`` must gate every DSV4 replay call site in ``trainer/``.
 
 This companion to ``test_dsv4_accuracy_flag_gating.py`` (which pins the model /
 kernel / dataset call sites, including the ``trainer_utils`` cosine-schedule

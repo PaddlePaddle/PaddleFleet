@@ -39,6 +39,12 @@ from unittest.mock import patch
 import paddle
 
 from paddlefleet import accuracy_compatible_patch as acp
+from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.transformers.configuration_utils import LlmMetaConfig
+from paddlefleet.utils import (
+    set_dsv4_accuracy_compatible,
+    use_dsv4_accuracy_compatible,
+)
 
 
 def setUpModule():
@@ -233,28 +239,26 @@ class TestInstallAdamwPatch(unittest.TestCase):
 
 
 class TestInstallAccuracyCompatiblePaddlePatches(unittest.TestCase):
-    """The install entry point gates on the flag and runs each installer once.
+    """The install entry point gates on the switch and runs each installer once.
 
-    Also covers ``_accuracy_compatible_enabled`` (line 61).
+    Also covers ``_accuracy_compatible_enabled``, which now delegates to the
+    ``paddlefleet.utils`` switch instead of reading the environment.
     """
 
     def setUp(self):
-        self._saved_flag = os.environ.get("FLAGS_use_dsv4_accuracy")
+        self._saved_flag = use_dsv4_accuracy_compatible()
         self._saved_patched = acp._PADDLE_RUNTIME_PATCHED
 
     def tearDown(self):
         acp._PADDLE_RUNTIME_PATCHED = self._saved_patched
-        if self._saved_flag is None:
-            os.environ.pop("FLAGS_use_dsv4_accuracy", None)
-        else:
-            os.environ["FLAGS_use_dsv4_accuracy"] = self._saved_flag
+        set_dsv4_accuracy_compatible(self._saved_flag)
 
     def test_disabled_path_returns_false(self):
-        os.environ.pop("FLAGS_use_dsv4_accuracy", None)
+        set_dsv4_accuracy_compatible(False)
         self.assertFalse(acp.install_accuracy_compatible_paddle_patches())
 
     def test_enabled_path_runs_each_installer_once(self):
-        os.environ["FLAGS_use_dsv4_accuracy"] = "1"
+        set_dsv4_accuracy_compatible(True)
         acp._PADDLE_RUNTIME_PATCHED = False
 
         # Spy on the installers so globals are not re-mutated here.
@@ -304,6 +308,111 @@ class TestImportTorchMegatronBranch(unittest.TestCase):
         self.assertEqual(sys.path[0], self._fake_path)
         if torch is not None:
             self.assertIs(torch, acp._TORCH)
+
+
+class TestDsv4AccuracySwitchIsConfigDriven(unittest.TestCase):
+    """The DSV4 switch is a settable runtime value driven by ``TransformerConfig``.
+
+    ``FLAGS_use_dsv4_accuracy`` used to be read from the environment at import
+    time. It is now the ``TransformerConfig.use_dsv4_accuracy`` field, published
+    to the single read point ``use_dsv4_accuracy_compatible()`` by
+    ``__post_init__``, which also installs the Paddle runtime patches. These
+    tests pin the field -> switch -> install wiring and that the environment is
+    no longer consulted.
+    """
+
+    def setUp(self):
+        self._saved_flag = use_dsv4_accuracy_compatible()
+        self._saved_patched = acp._PADDLE_RUNTIME_PATCHED
+
+    def tearDown(self):
+        acp._PADDLE_RUNTIME_PATCHED = self._saved_patched
+        set_dsv4_accuracy_compatible(self._saved_flag)
+
+    def test_setter_round_trip_and_bool_coercion(self):
+        set_dsv4_accuracy_compatible(True)
+        self.assertTrue(use_dsv4_accuracy_compatible())
+        set_dsv4_accuracy_compatible(False)
+        self.assertFalse(use_dsv4_accuracy_compatible())
+        set_dsv4_accuracy_compatible(1)
+        self.assertIs(use_dsv4_accuracy_compatible(), True)
+
+    def test_default_config_never_resets_an_enabled_switch(self):
+        # Turn-on only: sub-configs / text_config / per-stage pipeline copies are
+        # constructed with the ``False`` default long after the args funnel
+        # enabled the replay. If those reset the switch, layers get built on the
+        # non-replay dtype contract (FP32 mHC ``mapping_proj``) while the forward
+        # still takes the BF16 replay matmul -> operand dtype mismatch at step 0.
+        set_dsv4_accuracy_compatible(True)
+        with patch.object(
+            acp, "install_accuracy_compatible_paddle_patches"
+        ) as install:
+            TransformerConfig()
+
+        self.assertTrue(use_dsv4_accuracy_compatible())
+        install.assert_not_called()
+
+    def test_default_config_leaves_a_disabled_switch_off(self):
+        set_dsv4_accuracy_compatible(False)
+        with patch.object(
+            acp, "install_accuracy_compatible_paddle_patches"
+        ) as install:
+            TransformerConfig()
+
+        self.assertFalse(use_dsv4_accuracy_compatible())
+        install.assert_not_called()
+
+    def test_config_field_enables_the_switch_and_installs_patches(self):
+        set_dsv4_accuracy_compatible(False)
+        with patch.object(
+            acp, "install_accuracy_compatible_paddle_patches"
+        ) as install:
+            TransformerConfig(use_dsv4_accuracy=True)
+
+        self.assertTrue(use_dsv4_accuracy_compatible())
+        install.assert_called_once()
+
+    def test_args_funnel_is_authoritative_in_both_directions(self):
+        # ``LlmMetaConfig.set_llm_config`` is the single args -> config funnel and
+        # runs before the model is built, so it must publish the switch itself:
+        # ``__post_init__`` already ran with the ``False`` default by then, so a
+        # plain ``setattr`` would leave the YAML value invisible to every
+        # ``use_dsv4_accuracy_compatible()`` consumer.
+        cfg = TransformerConfig()
+
+        set_dsv4_accuracy_compatible(False)
+        with patch.object(
+            acp, "install_accuracy_compatible_paddle_patches"
+        ) as install:
+            LlmMetaConfig.set_llm_config(
+                cfg, SimpleNamespace(use_dsv4_accuracy=True)
+            )
+        self.assertTrue(cfg.use_dsv4_accuracy)
+        self.assertTrue(use_dsv4_accuracy_compatible())
+        install.assert_called_once()
+
+        with patch.object(
+            acp, "install_accuracy_compatible_paddle_patches"
+        ) as install:
+            LlmMetaConfig.set_llm_config(
+                cfg, SimpleNamespace(use_dsv4_accuracy=False)
+            )
+        self.assertFalse(cfg.use_dsv4_accuracy)
+        self.assertFalse(use_dsv4_accuracy_compatible())
+        install.assert_not_called()
+
+    def test_environment_variable_no_longer_enables_the_switch(self):
+        set_dsv4_accuracy_compatible(False)
+        with (
+            patch.dict(os.environ, {"FLAGS_use_dsv4_accuracy": "1"}),
+            patch.object(
+                acp, "install_accuracy_compatible_paddle_patches"
+            ) as install,
+        ):
+            TransformerConfig()
+
+        self.assertFalse(use_dsv4_accuracy_compatible())
+        install.assert_not_called()
 
 
 if __name__ == "__main__":

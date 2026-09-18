@@ -742,6 +742,15 @@ class LlmMetaConfig:
             "values are truthy, so existing bool checks keep working.",
         ),
         (
+            "use_dsv4_accuracy",
+            bool,
+            False,
+            "Enable the DSV4 accuracy-compatible replay paths. Distinct from "
+            "use_accuracy_compatible: other alignment targets (MinimaxV2.5, GLM45Air) run "
+            "with that switch but without this one. TransformerConfig.__post_init__ "
+            "publishes it to the runtime switch and installs the Paddle runtime patches.",
+        ),
+        (
             "experimental_dataflow",
             bool,
             False,
@@ -837,6 +846,26 @@ class LlmMetaConfig:
                 # real ``False`` and also keeps a serialized config.json holding
                 # a JSON ``false`` rather than baking the string into it.
                 value = normalize_accuracy_target(value)
+            elif key == "use_dsv4_accuracy":
+                # ``TransformerConfig.__post_init__`` has already run by the time
+                # this funnel writes the field, so a plain ``setattr`` would
+                # leave the runtime switch untouched: a YAML
+                # ``use_dsv4_accuracy: true`` would set the config field while
+                # every ``use_dsv4_accuracy_compatible()`` consumer still saw
+                # False and the replay stayed silently off. Publish it (and
+                # install the Paddle runtime patches, which happens before the
+                # Stage1 optimizer is built) here as well. Both writers are
+                # idempotent.
+                from paddlefleet.utils import set_dsv4_accuracy_compatible
+
+                value = bool(value)
+                set_dsv4_accuracy_compatible(value)
+                if value:
+                    from paddlefleet.accuracy_compatible_patch import (
+                        install_accuracy_compatible_paddle_patches,
+                    )
+
+                    install_accuracy_compatible_paddle_patches()
             setattr(config, key, value)
 
 

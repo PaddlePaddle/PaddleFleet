@@ -36,8 +36,8 @@ export LD_LIBRARY_PATH="${NVSHMEM_LIB_DIR}:${LD_LIBRARY_PATH:-}"
 export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
 export TRAININGJOB_REPLICA_NAME=skip
 export FLAGS_use_accuracy_compatible_kernel=1
-# New DSV4-only gate: the repo-native accuracy paths keep reading the flag above.
-export FLAGS_use_dsv4_accuracy=1
+# The DSV4-only gate is a config field now (``use_dsv4_accuracy`` in the YAML),
+# not an environment variable.
 export FLAGS_use_deterministic_algorithm="${FLAGS_use_deterministic_algorithm:-1}"
 export FLAGS_cudnn_deterministic="${FLAGS_cudnn_deterministic:-1}"
 
