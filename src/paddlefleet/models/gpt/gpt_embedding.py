@@ -147,6 +147,11 @@ class GPTEmbedding(FleetLayer):
                     rotary_interleaved=config.rotary_interleaved,
                     rotary_base=swa_rotary_base,
                     rope_scaling=rope_scaling,
+                    # Same target as the full-attention table above: the two must
+                    # not disagree about whether AMP O2 may truncate ``inv_freq``.
+                    use_accuracy_compatible=getattr(
+                        config, "use_accuracy_compatible", False
+                    ),
                 )
 
     @property

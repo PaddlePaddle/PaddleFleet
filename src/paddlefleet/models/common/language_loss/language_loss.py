@@ -16,6 +16,7 @@
 import functools
 import hashlib
 import os
+from contextvars import ContextVar
 
 import numpy as np
 import paddle
@@ -43,6 +44,10 @@ from paddlefleet.recompute_utils import module_needs_recompute
 from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
+
+# A replay must not notify either the original observer or one installed by a
+# later micro-batch. Context-local state also keeps nested calls isolated.
+_token_loss_replaying = ContextVar("token_loss_replaying", default=False)
 
 
 def _loss_md5_enabled() -> bool:
@@ -201,6 +206,19 @@ def subbatch(
 
 
 class LanguageLoss(FleetLayer):
+    """Language loss with an optional ``_eval_token_loss_hook(loss, labels)``.
+
+    The observer receives unreduced CE before masking/normalization, in the
+    same token layout as the accompanying labels. It runs for the main head
+    and each CE-based MTP head (not the distillation objective), including
+    all-masked inputs. Selective ``loss_fn`` backward recomputation does not
+    notify again. Direct ``forward_impl`` calls each notify independently.
+
+    Observers must not mutate the tensors; detach any values retained for
+    metrics. Return values are ignored and observer exceptions propagate.
+    Head selection/aggregation belongs to the caller.
+    """
+
     # Class-level tracker for MTP loss, read by trainer for logging.
     mtp_loss_tracker: dict[str, float] = {}
 
@@ -308,6 +326,9 @@ class LanguageLoss(FleetLayer):
                     labels, axis=1, mode=self.config.cp_balance_mode
                 )
 
+            observer = getattr(self, "_eval_token_loss_hook", None)
+            if observer is not None and not _token_loss_replaying.get():
+                observer(loss, labels)
             lossmask = labels != self.ignored_index
             if (~lossmask).all():
                 return paddle.mean(loss) * 0.0
@@ -384,6 +405,9 @@ class LanguageLoss(FleetLayer):
                 flush=True,
             )
 
+        observer = getattr(self, "_eval_token_loss_hook", None)
+        if observer is not None and not _token_loss_replaying.get():
+            observer(loss, labels)
         lossmask = labels != self.ignored_index
         if (~lossmask).all():
             loss = paddle.mean(loss) * 0.0
@@ -510,7 +534,24 @@ class LanguageLoss(FleetLayer):
                 labels, axis=1, mode=self.config.cp_balance_mode
             )
         if module_needs_recompute("loss_fn", None, self.config):
-            return recompute(self.forward_impl, logits, labels)
+            # One lifetime per CE invocation, not a flag on the shared layer:
+            # several heads/micro-batches may await backward simultaneously.
+            # Do not retain token losses or their autograd graphs in the closure.
+            forward_active = True
+
+            def loss_forward(logits, labels):
+                token = _token_loss_replaying.set(
+                    _token_loss_replaying.get() or not forward_active
+                )
+                try:
+                    return self.forward_impl(logits, labels)
+                finally:
+                    _token_loss_replaying.reset(token)
+
+            try:
+                return recompute(loss_forward, logits, labels)
+            finally:
+                forward_active = False
         return self.forward_impl(logits, labels)
 
     def _megatron_label_for_depth(self, labels_ori, depth):
@@ -758,6 +799,21 @@ class LanguageLoss(FleetLayer):
                                 axis=1,
                                 mode=self.config.cp_balance_mode,
                             )
+
+                        # Fused CE already notified inside _forward and returned
+                        # a scalar. Only the direct, unreduced CE path needs this
+                        # notification; callers may choose to consume main only.
+                        if self.config.fused_linear_ce_loss_chunk <= 0:
+                            observer = getattr(
+                                self, "_eval_token_loss_hook", None
+                            )
+                            if (
+                                observer is not None
+                                and not _token_loss_replaying.get()
+                            ):
+                                observer(
+                                    loss_matrix_cur_depth, labels_cur_depth
+                                )
 
                         lossmask_cur_depth = (
                             labels_cur_depth != self.ignored_index
