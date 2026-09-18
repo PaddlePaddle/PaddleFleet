@@ -24,15 +24,14 @@ import random
 import numpy as np
 import paddle
 from paddle.distributed.fleet.layers.mpu.random import get_rng_state_tracker
-from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
-    RecomputeStore,
-)
 from paddle.distributed.fleet.recompute.recompute import (
     custom_state_manager,
     detach_variable,
     switch_rng_state_tracker,
 )
 from paddle.framework import core
+
+from paddlefleet.accuracy_compatible_patch import RecomputeStore
 
 from ..parallel_state import (
     get_expert_model_parallel_rank,

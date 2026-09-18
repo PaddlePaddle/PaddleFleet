@@ -41,6 +41,7 @@ from paddlefleet.models.common.embeddings.rope_utils import (
 )
 from paddlefleet.transformer import FleetLayer
 from paddlefleet.transformer.dw_overlap import deferrable_linear
+from paddlefleet.utils import use_dsv4_accuracy_compatible
 
 _ACCURACY_COMPATIBLE_KERNEL: bool = (
     os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
@@ -1653,7 +1654,8 @@ class Compressor(nn.Layer):
                 else 0.02
             ),
         )
-        self._cast_to_low_precision = False
+        if not use_dsv4_accuracy_compatible():
+            self._cast_to_low_precision = False
 
         self.norm = build_spec_layer(
             sublayers_spec.norm,
@@ -2484,7 +2486,8 @@ class CompressedSparseAttention(FleetLayer):
             dtype="float32",
             default_initializer=nn.initializer.Constant(0.0),
         )
-        self._cast_to_low_precision = False
+        if not use_dsv4_accuracy_compatible():
+            self._cast_to_low_precision = False
 
         # Conditionally build Compressor (ratio > 1)
         if self.compress_ratio > 1:
@@ -2582,6 +2585,8 @@ class CompressedSparseAttention(FleetLayer):
         indexer_backend = getattr(
             self.config, "csa_indexer_backend", "tilelang"
         )
+        if use_dsv4_accuracy_compatible():
+            indexer_backend = "unfused"
         # The indexer loss path is only active during the grad-enabled forward.
         # Full recompute runs the first forward under no_grad; that pass should
         # only materialize main-attention indices. The backend branch remains
@@ -3459,6 +3464,8 @@ class CompressedSparseAttention(FleetLayer):
                 indexer_backend = getattr(
                     self.config, "csa_indexer_backend", "tilelang"
                 )
+                if use_dsv4_accuracy_compatible():
+                    indexer_backend = "unfused"
                 use_tilelang_indexer = indexer_backend == "tilelang"
                 use_cudnn_indexer = indexer_backend == "cudnn"
                 # coeff == 0 disables the indexer-loss path entirely (matching
@@ -3768,6 +3775,8 @@ class CompressedSparseAttention(FleetLayer):
         sparse_attn_backend = getattr(
             self.config, "csa_sparse_attn_backend", "tilelang"
         )
+        if use_dsv4_accuracy_compatible():
+            sparse_attn_backend = "unfused"
         # Compact once per batch via the shared docmask-metadata cache -- but
         # ONLY for layers with no indexer (``self.indexer is None``: HCA /
         # attend-to-all). Their ``topk_idxs = concat([window, compressed])`` is

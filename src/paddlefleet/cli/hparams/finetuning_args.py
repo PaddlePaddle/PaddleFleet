@@ -443,6 +443,20 @@ class FinetuningArguments(
         },
     )
 
+    use_dsv4_accuracy: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Enable the DSV4 accuracy-compatible replay paths. Distinct from "
+                "use_accuracy_compatible: the other alignment targets (MinimaxV2.5, "
+                "GLM45Air) run with that switch but without this one. Forwarded to "
+                "TransformerConfig.use_dsv4_accuracy, whose __post_init__ publishes it "
+                "to the runtime switch read by use_dsv4_accuracy_compatible() and "
+                "installs the Paddle runtime patches."
+            )
+        },
+    )
+
     def __post_init__(self):
         if (
             self.internal_medicine_monitors

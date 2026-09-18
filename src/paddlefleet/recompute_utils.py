@@ -19,9 +19,12 @@ import os
 from itertools import chain
 
 import paddle
-from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
+
+from paddlefleet.accuracy_compatible_patch import (
+    HAS_RECOMPUTE_STORE,
     RecomputeStore,
 )
+from paddlefleet.utils import use_dsv4_accuracy_compatible
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +40,11 @@ def install_recompute_p2p_overlap(config):
     constructor.
     """
     enabled = bool(getattr(config, "p2p_overlap_recompute", False))
+    if enabled and use_dsv4_accuracy_compatible() and not HAS_RECOMPUTE_STORE:
+        raise RuntimeError(
+            "p2p_overlap_recompute requires a Paddle runtime with "
+            "RecomputeStore support"
+        )
     if enabled and config.recompute_granularity != "selective":
         raise ValueError(
             "p2p_overlap_recompute needs recompute_granularity='selective', "

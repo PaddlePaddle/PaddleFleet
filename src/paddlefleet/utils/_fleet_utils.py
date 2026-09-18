@@ -32,6 +32,14 @@ import paddle
 from paddlefleet import parallel_state
 from paddlefleet.context_parallel_utils import ContextParallelScatterOp
 
+# Runtime state behind ``use_dsv4_accuracy_compatible()`` -- the single read
+# point for the DSV4 accuracy-compatible switch. Written only by
+# ``set_dsv4_accuracy_compatible()``, which ``TransformerConfig.__post_init__``
+# drives from the ``use_dsv4_accuracy`` config field. Deliberately NOT read from
+# the environment: a switch that changes numerics and communication paths must
+# be declared as a config field and go through config review.
+_USE_DSV4_ACCURACY = False
+
 try:
     from packaging.version import Version as PkgVersion
 
@@ -568,3 +576,25 @@ def deprecate_inference_params(inference_context, inference_params):
         )
         return inference_params
     return inference_context
+
+
+def use_dsv4_accuracy_compatible():
+    """Whether the accuracy-compatible (Megatron/Torch-aligned) paths are on.
+
+    Driven by the ``TransformerConfig.use_dsv4_accuracy`` field through
+    :func:`set_dsv4_accuracy_compatible`; defaults to off so the original
+    numeric paths are used.
+    """
+    return _USE_DSV4_ACCURACY
+
+
+def set_dsv4_accuracy_compatible(enabled: bool) -> None:
+    """Set the DSV4 accuracy-compatible switch.
+
+    The only writer of the switch state. ``TransformerConfig.__post_init__``
+    calls this from the ``use_dsv4_accuracy`` config field; the AdamW
+    compatibility patch also uses it to disable the replay re-entrantly while
+    delegating to the original optimizer op.
+    """
+    global _USE_DSV4_ACCURACY
+    _USE_DSV4_ACCURACY = bool(enabled)

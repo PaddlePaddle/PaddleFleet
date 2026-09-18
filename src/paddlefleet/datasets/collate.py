@@ -22,6 +22,7 @@ import paddle
 from scipy.linalg import block_diag
 
 from paddlefleet.peft.lora import LoRAModel
+from paddlefleet.utils import use_dsv4_accuracy_compatible
 
 from .SFTDataset import Sequence
 
@@ -614,8 +615,20 @@ def collate_fn(
             len(item.token_ids) for sequence in batch for item in sequence
         )
     fixed_tokens_path = os.environ.get("LOAD_FIXED_DATA_PATH")
+    fixed_data = None
     fixed_tokens = None
-    if fixed_tokens_path:
+    if fixed_tokens_path and use_dsv4_accuracy_compatible():
+        from paddlefleet.accuracy_compatible_patch import (
+            load_fixed_training_data,
+        )
+
+        fixed_data = load_fixed_training_data(
+            training_args, mtp_depth, calc_padding_size
+        )
+        if fixed_data is not None:
+            max_seq_len = fixed_data.max_seq_len
+            fixed_tokens = True
+    elif fixed_tokens_path:
         rank = (
             paddle.distributed.get_rank()
             if paddle.distributed.is_initialized()
@@ -643,8 +656,22 @@ def collate_fn(
         max_seq_len - mtp_depth if use_mtp_attention_flexible else max_seq_len
     )
 
-    for batch_sequence in batch:
-        if fixed_tokens is not None:
+    if fixed_data is not None:
+        from paddlefleet.accuracy_compatible_patch import (
+            fixed_data_iter,
+            fixed_data_sample,
+        )
+
+        batch_iter = fixed_data_iter(fixed_data, batch)
+    else:
+        batch_iter = batch
+
+    for batch_sequence in batch_iter:
+        if fixed_data is not None:
+            original_position_ids, token_ids, labels, position_ids = (
+                fixed_data_sample(fixed_data, len(return_list))
+            )
+        elif fixed_tokens is not None:
             original_position_ids = [fixed_position_ids]
             token_ids = [fixed_input_ids]
             labels = [fixed_labels]
@@ -768,8 +795,12 @@ def collate_fn(
             rank = paddle.distributed.get_rank()
         except Exception:
             rank = 0
-        main_input = np.asarray([fixed_input_ids], dtype=np.int64)
-        main_labels = np.asarray([fixed_labels], dtype=np.int64)
+        if fixed_data is not None:
+            main_input = np.asarray(input_dict["input_ids"], dtype=np.int64)
+            main_labels = np.asarray(input_dict["labels"], dtype=np.int64)
+        else:
+            main_input = np.asarray([fixed_input_ids], dtype=np.int64)
+            main_labels = np.asarray([fixed_labels], dtype=np.int64)
         print(
             f"[LOAD_FIXED_DATA_PATH] loaded from {fixed_tokens_path}",
             flush=True,
