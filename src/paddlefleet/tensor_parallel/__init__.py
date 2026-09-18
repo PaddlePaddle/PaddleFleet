@@ -24,9 +24,12 @@ from .layers import (
 )
 from .random import (
     RecomputeWithoutOutput,
+    RecomputeWithoutOutputManager,
     checkpoint,
+    finalize_mhc_recompute_block,
     get_cuda_rng_tracker,
     get_expert_parallel_rng_tracker_name,
+    get_mhc_recompute_manager,
     model_parallel_cuda_manual_seed,
 )
 
@@ -44,4 +47,7 @@ __all__ = [
     "model_parallel_cuda_manual_seed",
     "get_expert_parallel_rng_tracker_name",
     "RecomputeWithoutOutput",
+    "RecomputeWithoutOutputManager",
+    "get_mhc_recompute_manager",
+    "finalize_mhc_recompute_block",
 ]

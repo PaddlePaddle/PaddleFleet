@@ -1243,6 +1243,17 @@ class TransformerConfig(ModelParallelConfig):
     uniform doubly-stochastic matrix: every sub-layer reads and writes an
     averaged mixture of the n residual streams from step 0."""
 
+    mhc_recompute_layer_num: int | None = None
+    """Layers per mHC recompute block, or one whole pipeline chunk when ``None``.
+
+    A block never crosses a pipeline stage and replays in forward order from a
+    hook on its final residual state. Must be positive when set.
+
+    Sizes every block uniformly. To place them by hand, give
+    ``recompute_modules['mhc_block']`` a nested layer list (e.g.
+    ``[[3, 4, 5], [9, 10]]``) and leave this unset; layers outside every block
+    then do no mHC recompute."""
+
     ####################
     # miscellaneous
     ####################
