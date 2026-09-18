@@ -285,7 +285,9 @@ class TestAddProfilerStepDecisions(unittest.TestCase):
         add_profiler_step(opts)
 
         prof = _FakeProfiler.instances[0]
-        self.assertEqual(prof.events, ["start", "step", "stop", "summary"])
+        self.assertEqual(
+            prof.events, ["start", "step", "step", "stop", "summary"]
+        )
         self.mock_exit.assert_called_once_with(0)
 
     def test_options_are_parsed_once_and_cached(self):

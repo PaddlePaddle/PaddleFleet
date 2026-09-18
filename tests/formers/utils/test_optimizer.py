@@ -555,15 +555,26 @@ def _clone_state(state):
 class TestAdamWCustomStateRestore(unittest.TestCase):
     """End-to-end resume through the real ``optimizer.step`` (CPU/fp32).
 
-    The gradient is held constant and independent of the parameters, so the
-    trajectory is driven purely by the optimizer state (moments / beta powers).
-    A restored *new* optimizer must reproduce the continuous trajectory, while a
-    fresh optimizer that only inherits the weights must diverge -- i.e. checking
-    the weights alone would not prove the state was restored.
+    The loss is quadratic in the parameters, so the gradient changes every step
+    and the trajectory genuinely depends on the accumulated optimizer state
+    (moments / beta powers), not just the current weights. A restored *new*
+    optimizer must reproduce the continuous trajectory, while a fresh optimizer
+    that only inherits the weights must diverge -- i.e. checking the weights
+    alone would not prove the state was restored.
+
+    A constant (parameter-independent) gradient would make this test vacuous:
+    with a fixed gradient g the bias-corrected AdamW moments collapse to
+    m_hat = g and v_hat = g^2 at *every* step, so the update is history-free and
+    a fresh optimizer would reproduce the resumed step -- the negative control
+    could never fail. The quadratic loss avoids that degeneracy.
     """
 
     def _fixed_grad_step(self, linear, opt):
-        loss = (linear.weight * self.cw).sum() + (linear.bias * self.cb).sum()
+        # Quadratic loss -> gradient (w * cw, b * cb) varies with the parameters,
+        # so the optimizer moments carry real history across steps.
+        loss = (0.5 * linear.weight.square() * self.cw).sum() + (
+            0.5 * linear.bias.square() * self.cb
+        ).sum()
         loss.backward()
         opt.step()
         opt.clear_grad()
@@ -581,7 +592,7 @@ class TestAdamWCustomStateRestore(unittest.TestCase):
         init_b = linear.bias.detach().clone()
 
         # Reference: three continuous steps with one optimizer instance.
-        ref_opt = _make_custom_optimizer(linear.parameters())
+        ref_opt = _make_custom_optimizer(linear.parameters(), learning_rate=0.3)
         for _ in range(3):
             self._fixed_grad_step(linear, ref_opt)
         ref_w = linear.weight.numpy().copy()
@@ -590,7 +601,7 @@ class TestAdamWCustomStateRestore(unittest.TestCase):
         # Interrupted: reset params, run 2 steps, snapshot optimizer state.
         linear.weight.set_value(init_w)
         linear.bias.set_value(init_b)
-        opt2 = _make_custom_optimizer(linear.parameters())
+        opt2 = _make_custom_optimizer(linear.parameters(), learning_rate=0.3)
         for _ in range(2):
             self._fixed_grad_step(linear, opt2)
         saved_state = _clone_state(opt2.state_dict())
@@ -598,7 +609,7 @@ class TestAdamWCustomStateRestore(unittest.TestCase):
         b_at2 = linear.bias.detach().clone()
 
         # Resume into a brand new optimizer instance, then take the 3rd step.
-        opt3 = _make_custom_optimizer(linear.parameters())
+        opt3 = _make_custom_optimizer(linear.parameters(), learning_rate=0.3)
         opt3.set_state_dict(saved_state)
         self._fixed_grad_step(linear, opt3)
         np.testing.assert_allclose(
@@ -613,7 +624,9 @@ class TestAdamWCustomStateRestore(unittest.TestCase):
         # proving the moment/step state genuinely participated in the resume.
         linear.weight.set_value(w_at2)
         linear.bias.set_value(b_at2)
-        fresh_opt = _make_custom_optimizer(linear.parameters())
+        fresh_opt = _make_custom_optimizer(
+            linear.parameters(), learning_rate=0.3
+        )
         self._fixed_grad_step(linear, fresh_opt)
         self.assertFalse(
             np.allclose(linear.weight.numpy(), ref_w, rtol=1e-4, atol=1e-5),

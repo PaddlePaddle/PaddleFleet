@@ -296,9 +296,11 @@ class TestKaimingInit(_StatMixin, unittest.TestCase):
         paddle.seed(SEED)
 
     def test_kaiming_uniform_default(self):
-        # default: mode=fan_in, nonlinearity=leaky_relu (a=0 -> slope 0.01).
+        # default: mode=fan_in, nonlinearity=leaky_relu, a=0. The production
+        # _calculate_gain passes a=0 as the negative_slope, so the slope is 0
+        # (not the 0.01 leaky default) and gain = sqrt(2 / (1 + 0**2)) = sqrt(2).
         fan_in = 400
-        gain = math.sqrt(2.0 / (1.0 + 0.0001))
+        gain = math.sqrt(2.0)
         std_target = gain / math.sqrt(fan_in)
         k = math.sqrt(3.0) * std_target
         out = kaiming_uniform_(paddle.zeros([256, 400]))

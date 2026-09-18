@@ -59,7 +59,12 @@ def param(_pin_gpu_device):
 
 
 def _step(opt, param):
-    (param * 2.0).sum().backward()
+    # Force grad on: a sibling test earlier on the same (single) xdist worker
+    # can leave the dygraph tracer grad-disabled (an unrestored no_grad /
+    # set_grad_enabled(False)); backward() would then produce no gradient and
+    # opt.step() silently no-ops (no master weights, no update, no triton call).
+    with paddle.enable_grad():
+        (param * 2.0).sum().backward()
     opt.step()
     opt.clear_grad()
 
