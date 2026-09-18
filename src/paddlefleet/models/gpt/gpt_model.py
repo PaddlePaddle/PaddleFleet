@@ -1173,18 +1173,17 @@ class GPTModel(PipelineLayer):
         """
         import paddle
         import paddle.distributed
-        from paddle import framework
         from paddle.framework import core
 
         def _attached_grad(param):
-            if not framework.in_dynamic_mode():
-                grad = param._grad_ivar()
-                if grad is None:
-                    raise RuntimeError(
-                        f"The static-graph shared parameter {param.name} has no "
-                        "gradient to all-reduce."
-                    )
-                return grad
+            """Return the grad buffer to reduce, allocating a zero one if absent.
+
+            Dygraph-only, like the whole PP backward path this is called from.
+            The base class also carries a non-dygraph branch, but it is fluid-era
+            dead code (it drives ``_dygraph_tracer().trace_op``), and raising
+            there instead of reducing a zero buffer would desynchronize the PP
+            group's collectives into a hang.
+            """
             if hasattr(param, "main_grad"):
                 if param.main_grad is None:
                     param.main_grad = core.eager.Tensor(
