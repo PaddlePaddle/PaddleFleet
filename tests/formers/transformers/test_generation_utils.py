@@ -989,6 +989,19 @@ class TinyRandomGenerationTest(unittest.TestCase):
             )
 
     def test_min_new_tokens(self):
+        # tiny-random-llama uses the fused RMS-norm op (fused_rms_norm_ext),
+        # which is a GPU-only kernel and raises NotFound on a CPU-only box.
+        # Skip where there is no GPU rather than assert against an op that
+        # cannot run; run on the accelerator device when one is present.
+        if not (
+            paddle.device.is_compiled_with_cuda()
+            and paddle.device.cuda.device_count() > 0
+        ):
+            self.skipTest(
+                "fused_rms_norm_ext is a GPU-only kernel; tiny-random-llama "
+                "generation cannot run on a CPU-only machine."
+            )
+        paddle.set_device("gpu")
         article = (
             """Justin Timberlake and Jessica Biel, welcome to parenthood."""
         )

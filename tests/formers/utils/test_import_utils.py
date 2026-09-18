@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import sys
 import unittest
 
 from paddlefleet.utils import install_package, uninstall_package
@@ -20,6 +21,19 @@ from ..testing_utils import skip_for_none_ce_case
 
 
 class ImportUntilsTest(unittest.TestCase):
+    def setUp(self):
+        # uninstall_package("paddlefleet") below purges every "paddlefleet.*"
+        # entry from sys.modules. Without restoring them, later tests (e.g.
+        # test_tools) that bound paddlefleet symbols at collection time become
+        # decoupled from the re-imported module, so mock.patch no longer affects
+        # the code under test. Snapshot and restore to contain the purge.
+        self._saved_modules = dict(sys.modules)
+        self._saved_path = list(sys.path)
+
+    def tearDown(self):
+        sys.modules.update(self._saved_modules)
+        sys.path[:] = self._saved_path
+
     @skip_for_none_ce_case
     def test_install_specific_package(self):
         install_package("loguru", "0.6.0")
