@@ -22,6 +22,7 @@ import paddle
 from paddle import framework
 from paddle.autograd import PyLayer
 from paddle.distributed.communication.group import Group
+import paddlefleet_ops
 from paddlefleet_ops import (
     is_deep_ep_available,
     is_hybrid_ep_available,
@@ -49,17 +50,33 @@ if is_hybrid_ep_available():
 else:
     HAVE_HYBRID_EP = False
 
-if is_sonic_moe_available():
-    HAVE_SONIC_MOE = True
+# SonicMoE's fp8 quantizer is imported on demand via _load_sonic_symbols();
+# importing it at module load would pull in sonicmoe + quack for every run.
+# HAVE_SONIC_MOE mirrors availability (a hardware/toolchain check, no import).
+HAVE_SONIC_MOE = is_sonic_moe_available()
+quantize_activation_blockscaled_fast = None
+_sonic_symbols_loaded = False
+
+
+def _load_sonic_symbols():
+    global _sonic_symbols_loaded, quantize_activation_blockscaled_fast
+    global _SONIC_PACK_SCALE_WORDS_AVAILABLE
+    if _sonic_symbols_loaded:
+        return
+    paddlefleet_ops.load_sonic_moe()
     try:
         from paddlefleet_ops.sonicmoe.quack_utils import (
-            quantize_activation_blockscaled_fast,
+            quantize_activation_blockscaled_fast as _q,
         )
+
+        quantize_activation_blockscaled_fast = _q
     except ImportError:
         quantize_activation_blockscaled_fast = None
-else:
-    quantize_activation_blockscaled_fast = None
-    HAVE_SONIC_MOE = False
+    _SONIC_PACK_SCALE_WORDS_AVAILABLE = _supports_sonic_scale_word_packing(
+        quantize_activation_blockscaled_fast
+    )
+    _sonic_symbols_loaded = True
+
 
 _buffer = None
 _hybrid_ep_buffer = None
@@ -228,6 +245,7 @@ def _unpack_sonic_fp8_scale_from_deepep(
 
 
 def _sonicmoe_quantize(x):
+    _load_sonic_symbols()
     if _SONIC_PACK_SCALE_WORDS_AVAILABLE:
         fp8, scale = quantize_activation_blockscaled_fast(
             x,

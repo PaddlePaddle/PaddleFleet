@@ -34,6 +34,7 @@ from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 if paddlefleet_ops.is_sonic_moe_available():
+    paddlefleet_ops.load_sonic_moe()  # sonicmoe is imported on demand
     from paddlefleet_ops.sonicmoe.functional import clear_all_fp8_weight_caches
 
 

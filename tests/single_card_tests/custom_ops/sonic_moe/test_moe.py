@@ -15,6 +15,9 @@
 import unittest
 
 import paddle
+import paddlefleet_ops
+
+paddlefleet_ops.load_sonic_moe()  # sonicmoe is imported on demand
 from paddlefleet_ops.sonicmoe import KernelBackendMoE, MoE, enable_quack_gemm
 from paddlefleet_ops.sonicmoe.enums import ActivationType
 from parameterized import parameterized

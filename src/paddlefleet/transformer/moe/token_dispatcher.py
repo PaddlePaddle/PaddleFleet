@@ -36,8 +36,26 @@ from .fused_a2a import (
     get_hybrid_ep_buffer,
     hybrid_ep_combine,
     hybrid_ep_dispatch,
-    quantize_activation_blockscaled_fast,
 )
+from . import fused_a2a as _fused_a2a
+
+# SonicMoE's fp8 quantizer is resolved on demand (it lives in fused_a2a and is
+# itself imported lazily there). MoELayer.__init__ preloads it before any
+# dispatch runs.
+quantize_activation_blockscaled_fast = None
+_sonic_symbols_loaded = False
+
+
+def _load_sonic_symbols():
+    global _sonic_symbols_loaded, quantize_activation_blockscaled_fast
+    if _sonic_symbols_loaded:
+        return
+    _fused_a2a._load_sonic_symbols()
+    quantize_activation_blockscaled_fast = (
+        _fused_a2a.quantize_activation_blockscaled_fast
+    )
+    _sonic_symbols_loaded = True
+
 from .moe_utils import (
     AllGatherGroupOp,
     ReduceScatterGroupOp,
@@ -1405,6 +1423,7 @@ def _quantize_and_pack_fp8(x):
     lives within a single token's hidden vector, so packing along axis 1
     before the gather yields the same per-rank bytes as gathering separately.
     """
+    _load_sonic_symbols()
     if quantize_activation_blockscaled_fast is None:
         raise RuntimeError(
             "Cannot find quantize_activation_blockscaled_fast, "

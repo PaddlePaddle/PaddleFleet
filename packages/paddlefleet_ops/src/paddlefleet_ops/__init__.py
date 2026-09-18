@@ -332,6 +332,41 @@ def _safe_load_ecosystem_lib(
             ) from e
 
 
+_SONIC_MOE_LOADED = False
+
+SONIC_MOE_NOT_LOADED = (
+    "paddlefleet_ops.sonicmoe has not been loaded yet. It is imported on "
+    "demand (sonicmoe + quack + the CuTe DSL type system cost seconds of import "
+    "time and are only reachable behind `using_sonic_moe`).\n"
+    "Call `paddlefleet_ops.load_sonic_moe()` once you know SonicMoE is in use, "
+    "then import paddlefleet_ops.sonicmoe... as usual. paddlefleet's MoELayer "
+    "does this in its constructor."
+)
+
+
+def load_sonic_moe():
+    """Import the sonicmoe ecosystem library. Idempotent.
+
+    Must run before any `import paddlefleet_ops.sonicmoe...`; until then that
+    import is blocked (SONIC_MOE_NOT_LOADED) so it cannot fall through to the
+    path finders and execute a second copy out of the vendored directory.
+    """
+    global _SONIC_MOE_LOADED
+    if _SONIC_MOE_LOADED:
+        return globals()["sonicmoe"]
+    if not is_sonic_moe_available():
+        raise RuntimeError(blocked_import_messages["paddlefleet_ops.sonicmoe"])
+    with paddle.use_compat_guard(
+        enable=True, scope={"sonicmoe", "quack", "triton"}, silent=True
+    ):
+        _safe_load_ecosystem_lib("sonicmoe", ops_dir, globals(), ["quack"])
+    # sonicmoe is now in this namespace and in sys.modules, so plain
+    # `import paddlefleet_ops.sonicmoe...` resolves from here on.
+    blocked_import_messages.pop("paddlefleet_ops.sonicmoe", None)
+    _SONIC_MOE_LOADED = True
+    return globals()["sonicmoe"]
+
+
 import_custom_ops(
     package="paddlefleet_ops._extensions",
     module_name=".ops",
@@ -381,10 +416,13 @@ if paddle.is_compiled_with_cuda():
         blocked_import_messages["paddlefleet_ops.hybrid_ep"] = error
 
     if is_sonic_moe_available():
-        with paddle.use_compat_guard(
-            enable=True, scope={"sonicmoe", "quack", "triton"}, silent=True
-        ):
-            _safe_load_ecosystem_lib("sonicmoe", ops_dir, globals(), ["quack"])
+        # sonicmoe + quack (and with them the CuTe DSL type system) cost several
+        # seconds of import time but are only reachable behind `using_sonic_moe`.
+        # Defer the load to the first real use via load_sonic_moe(); until then
+        # block a bare `import paddlefleet_ops.sonicmoe...` so it cannot fall
+        # through to the path finders and execute a second, differently-wired
+        # copy out of the vendored directory (which would re-register ops).
+        blocked_import_messages["paddlefleet_ops.sonicmoe"] = SONIC_MOE_NOT_LOADED
     else:
         warning, error = _sonic_moe_requirement(
             "paddlefleet_ops.sonicmoe", hint=SONIC_MOE_HINT
