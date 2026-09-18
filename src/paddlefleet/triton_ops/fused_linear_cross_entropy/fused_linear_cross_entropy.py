@@ -431,6 +431,11 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
         ctx.has_multimax = multimax_ranges is not None
         ctx.weight_ref = weight
         ctx.weight_requires_grad = not weight.stop_gradient
+        # Only use the Megatron-style main_grad accumulation path in backward
+        # when this weight is genuinely managed by gradient-accumulation fusion.
+        ctx.use_main_grad_fusion = bool(
+            getattr(weight, "_gradient_accumulation_fusion", True)
+        )
         ctx.multimax_ranges_ref = multimax_ranges
         ctx.multimax_ts_ref = multimax_ts
         # Cache stop_gradient at forward time. multimax_requires_grad in the
@@ -483,7 +488,9 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
 
         if ctx.weight_requires_grad and grad_weight is not None:
             weight = ctx.weight_ref
-            if hasattr(weight, "main_grad"):
+            if getattr(ctx, "use_main_grad_fusion", True) and hasattr(
+                weight, "main_grad"
+            ):
                 if weight.main_grad is None:
                     weight.main_grad = paddle.zeros(
                         weight.shape, dtype=paddle.float32

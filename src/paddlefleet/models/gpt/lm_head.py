@@ -184,6 +184,12 @@ class GPTLMHead(ColumnParallelLinear):
                         is_expert=self.is_expert,
                     )
             self.weight.is_distributed = True if self.world_size > 1 else False
+            # Fused-CE PyLayer must only route grads through main_grad when
+            # gradient-accumulation fusion is actually enabled; a main_grad attr
+            # can otherwise be added by optimizer/sharding with fusion off.
+            self.weight._gradient_accumulation_fusion = bool(
+                getattr(self.config, "gradient_accumulation_fusion", False)
+            )
 
         # Multimax: learnable SegLU-style modulation on logits before softmax.
         # Names contain the "multimax" substring so the trainer's no-decay
