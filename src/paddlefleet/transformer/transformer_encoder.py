@@ -363,19 +363,25 @@ class TransformerEncoder(PipelineLayer):
             pp_to_single_mapping = {}
 
             state_dict_keys = list(super().state_dict().keys())
-            first_key = ""
-            for k in state_dict_keys:
-                if "shared_layers" not in k:
-                    first_key = k
-                    break
-            first_key = first_key.split(".")
-            # if use virtual pp_degree, the prefix is like 0.0.xxx
-            # else it will be like 0.xxx
+
+            # Whether the layers are chunked is a property of the model, not
+            # something the key shapes can tell: a chunk key is
+            # `{chunk_start}.{local_idx}.xxx`, but an ordinary PP
+            # `LayerDesc(nn.Sequential, ...)` also yields
+            # `{global_idx}.{sublayer_idx}.xxx`, and conversely the first key of
+            # a chunked stage may be a shared layer alias or a directly added
+            # layer, both of which keep a non digit second segment. Ask the
+            # pipeline layer itself; dualpipev chunks the layers as well.
             use_virtual_pp_degree = (
-                first_key[0].isdigit() and first_key[1].isdigit()
+                self._num_virtual_pipeline_stages > 1 or self._use_dualpipev
             )
 
             prefixes = self.get_sequential_name_prefixes()
+            shared_layer_names = {
+                layer.layer_name
+                for layer in self.layers
+                if isinstance(layer, SharedLayerDesc)
+            }
             for k in state_dict_keys:
                 name_splited = k.split(".")
                 if use_virtual_pp_degree:
@@ -386,13 +392,31 @@ class TransformerEncoder(PipelineLayer):
                             )
                             single_name = [prefixes[idx]]
                             single_name.extend(name_splited[2:])
-                        else:
-                            single_name = [prefixes[str(len(prefixes) - 1)]]
+                        elif name_splited[1] in shared_layer_names:
+                            # A SharedLayerDesc with `forward_func` is
+                            # registered on the chunk itself under VPP, so its
+                            # key is `{chunk_start}.{shared_name}.rest`. It
+                            # aliases the same parameter as
+                            # `shared_layers.{shared_name}.rest` and must
+                            # resolve to the same single card name.
+                            single_name = [
+                                self.get_shardlayer_prefix(name_splited)
+                            ]
                             single_name.extend(name_splited[2:])
-                            logger.warning(
-                                f"Please check! we treat this key as last layer, get {k}, \
-                                        set origin name as {'.'.join(single_name)}"
+                        else:
+                            # Layers directly added to the PipelineLayer under
+                            # VPP (e.g. lm_head) are named `{global_idx}.rest`
+                            # instead of `{chunk_start}.{local_idx}.rest`, so
+                            # the first segment is already the global index.
+                            # Resolve them per layer like the non-VPP branch,
+                            # otherwise every such key collapses onto the last
+                            # layer prefix, drops its submodule name and
+                            # collides with its siblings.
+                            idx = name_splited[0]
+                            single_name = (
+                                [] if prefixes[idx] == "" else [prefixes[idx]]
                             )
+                            single_name.extend(name_splited[1:])
                     elif name_splited[0] == "shared_layers":
                         single_name = [self.get_shardlayer_prefix(name_splited)]
                         single_name.extend(name_splited[2:])
@@ -461,14 +485,66 @@ class TransformerEncoder(PipelineLayer):
             "The pipeline stage must have parameters!"
         )
 
+        # Keys with no mapping entry are dropped. This is expected and not an
+        # error on its own: when a single card checkpoint is loaded, every
+        # other pipeline stage's keys arrive here too. What *is* an error is a
+        # parameter of this stage receiving no value, which is reported from
+        # ``missing_keys`` below.
+        unmapped_keys = []
         for k in list(state_dict.keys()):
             v = state_dict.pop(k)
             if k not in self._pipeline_name_mapping:
+                unmapped_keys.append(k)
                 continue
             state_dict[self._pipeline_name_mapping[k]] = v
+        if unmapped_keys:
+            logger.warning(
+                f"[pp-name-mapping] {len(unmapped_keys)} keys have no entry "
+                f"in _pipeline_name_mapping and were dropped. Keys owned by "
+                f"other pipeline stages land here too. First 20: "
+                f"{unmapped_keys[:20]}"
+            )
 
         ret = super().set_state_dict(state_dict, *args, **kwargs)
-        return ret
+        # `nn.Layer.set_state_dict` returns (missing_keys, unexpected_keys).
+        # Anything else means the parent does not report those two lists, so
+        # there is nothing to filter or warn about -- pass its value through
+        # unchanged rather than guessing.
+        if not (isinstance(ret, tuple) and len(ret) == 2):
+            return ret
+        missing_keys, unexpected_keys = ret
+
+        # Two physical keys can resolve to the same single card name and alias
+        # one Parameter, so only the winner of that collision is fed above and
+        # the loser shows up in ``missing_keys`` although its Parameter did get
+        # a value. Two known sources:
+        #   * `shared_layers.{name}.rest` vs `{chunk_start}.{name}.rest`
+        #     (`pp_layers.py:1167-1171`, a legitimate VPP alias pair);
+        #   * `{global_idx}.rest` from the duplicate *top level* registration of
+        #     a second same-named SharedLayerDesc (`pp_layers.py:1132` adds it
+        #     to the PipelineLayer instead of the chunk). That one is a Paddle
+        #     bug; Paddle PR 79678 guards it, but it is not in the runtime yet.
+        missing_shared_keys = self._check_shared_model_state()
+        filtered_missing_keys = []
+        for key in missing_keys:
+            if (
+                key in missing_shared_keys
+                and missing_shared_keys[key] not in missing_keys
+            ):
+                continue
+            filtered_missing_keys.append(key)
+        missing_keys = filtered_missing_keys
+
+        if missing_keys:
+            # The precise signal that a name mapping is broken: a parameter
+            # this stage owns received no value and keeps its initial one.
+            # Shared layer aliases are filtered out above.
+            logger.warning(
+                f"[pp-name-mapping] {len(missing_keys)} parameters of this "
+                f"pipeline stage got no value from the checkpoint and keep "
+                f"their initial values. First 20: {missing_keys[:20]}"
+            )
+        return missing_keys, unexpected_keys
 
     def _check_shared_model_state(self):
         if self._pipeline_name_mapping is None:
