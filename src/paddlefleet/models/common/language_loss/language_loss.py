@@ -274,6 +274,14 @@ class LanguageLoss(FleetLayer):
         self.use_subbatch = self.loss_subbatch_sequence_length > 0
 
     def forward_impl(self, logits: Tensor | tuple, labels: Tensor) -> Tensor:
+        if (
+            self.use_accuracy_compatible
+            and isinstance(labels, Tensor)
+            and labels.ndim >= 2
+            and labels.shape[-1] > 0
+        ):
+            labels = labels.clone()
+            labels[:, -1] = self.ignored_index
         # Fused linear + cross-entropy path: `logits` is actually a
         # (hidden_states, weight, bias) tuple emitted by GPTLMHead when
         # config.fused_linear_ce_loss_chunk > 0. Dispatch to the fused kernel
@@ -486,9 +494,7 @@ class LanguageLoss(FleetLayer):
             else:
                 if self.use_accuracy_compatible:
                     _flat = loss.cast(paddle.float32).reshape([-1]) * lossmask
-                    loss_sum = (
-                        _flat.cast(paddle.float64).sum().cast(paddle.float32)
-                    )
+                    loss_sum = _flat.cast(paddle.float64).sum()
                     _count = lossmask.sum()
                     import paddle.distributed as _pdist
 
@@ -503,10 +509,12 @@ class LanguageLoss(FleetLayer):
                         if _ep_group is not None
                         else 1
                     )
-                    _acc_sum = paddle.zeros([1], dtype=paddle.float32)
+                    _acc_sum = paddle.zeros([1], dtype=paddle.float64)
                     for _ in range(_ep_size):
                         _acc_sum = _acc_sum + loss_sum
-                    loss = _acc_sum[0] / (_count * _ep_size)
+                    loss = (
+                        _acc_sum[0] / (_count.cast(paddle.float64) * _ep_size)
+                    ).cast(paddle.float32)
                 else:
                     loss = paddle.sum(
                         loss.cast(paddle.float32).reshape([-1]) * lossmask

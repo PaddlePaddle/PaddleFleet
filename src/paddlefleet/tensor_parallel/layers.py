@@ -1264,9 +1264,28 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                                 grad_weight, columns, part_t.t()
                             )
                     else:
-                        grad_weight, _ = general_gemm(
-                            total_input.t(), grad_output
-                        )
+                        if (
+                            ctx.use_accuracy_compatible
+                            and grad_output.shape[-1] > 65536
+                        ):
+                            _ti = total_input.reshape(
+                                [-1, total_input.shape[-1]]
+                            ).astype("float64")
+                            _go = grad_output.reshape(
+                                [-1, grad_output.shape[-1]]
+                            ).astype("float64")
+                            _acc = paddle.zeros(
+                                [_ti.shape[1], _go.shape[1]], dtype="float64"
+                            )
+                            for _t in range(_ti.shape[0]):
+                                _acc += _ti[_t].unsqueeze(1) * _go[
+                                    _t
+                                ].unsqueeze(0)
+                            grad_weight = _acc.astype(ctx.input_dtype)
+                        else:
+                            grad_weight, _ = general_gemm(
+                                total_input.t(), grad_output
+                            )
                 elif inp_t_fp8 is not None:
                     # No bf16 input saved; dequantize the fp8 transposed
                     # activation (shape [K, M] = total_input.t()) for bf16 wgrad.
