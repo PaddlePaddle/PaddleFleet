@@ -552,6 +552,24 @@ def _clone_state(state):
     return copy.deepcopy(state)
 
 
+def _flatten_opt_tensors(state, prefix=""):
+    """Flatten an optimizer ``state_dict`` to ``{key: ndarray}`` of its tensors.
+
+    Non-tensor entries (e.g. the LR scheduler dict) are recursed into so nested
+    accumulator tensors are still captured; scalars are ignored.
+    """
+    out = {}
+    for k, v in state.items():
+        key = f"{prefix}{k}"
+        if isinstance(v, np.ndarray):
+            out[key] = v
+        elif hasattr(v, "numpy"):
+            out[key] = v.numpy()
+        elif isinstance(v, dict):
+            out.update(_flatten_opt_tensors(v, prefix=f"{key}/"))
+    return out
+
+
 class TestAdamWCustomStateRestore(unittest.TestCase):
     """End-to-end resume through the real ``optimizer.step`` (CPU/fp32).
 
@@ -562,13 +580,14 @@ class TestAdamWCustomStateRestore(unittest.TestCase):
     optimizer that only inherits the weights carries none of the step/beta-power
     state (negative control).
 
-    The negative control asserts on the restored *state* (beta-power
-    accumulator) rather than on the weights: AdamW's magnitude-normalized update
-    makes the weights after a single step nearly identical regardless of moment
-    history, so a weight-only difference would be too weak to prove restoration.
-    A constant (parameter-independent) gradient is avoided because it would make
-    the bias-corrected AdamW moments collapse to m_hat = g and v_hat = g^2 at
-    *every* step, rendering the trajectory history-free and the test vacuous.
+    The negative control asserts on the restored *state* (the optimizer
+    ``state_dict`` moment / beta-power tensors) rather than on the weights:
+    AdamW's magnitude-normalized update makes the weights after a single step
+    nearly identical regardless of moment history, so a weight-only difference
+    would be too weak to prove restoration. A constant (parameter-independent)
+    gradient is avoided because it would make the bias-corrected AdamW moments
+    collapse to m_hat = g and v_hat = g^2 at *every* step, rendering the
+    trajectory history-free and the test vacuous.
     """
 
     def _fixed_grad_step(self, linear, opt):
@@ -621,35 +640,40 @@ class TestAdamWCustomStateRestore(unittest.TestCase):
             linear.bias.numpy(), ref_b, rtol=1e-6, atol=1e-7
         )
 
-        # Snapshot the beta-power accumulator of the restored optimizer after
-        # its (3rd) step: because the step count was restored, it is three
-        # steps in (beta1_pow == beta1**3).
-        w = linear.weight
-        restored_beta1_pow = (
-            opt3._get_accumulator_master(opt3._beta1_pow_acc_str, w)
-            .numpy()
-            .copy()
-        )
+        # Snapshot the restored optimizer's *public* state (state_dict) after
+        # its (3rd) step. Because the step count was restored, its moment /
+        # beta-power accumulators are three steps in.
+        restored_state = _flatten_opt_tensors(opt3.state_dict())
 
         # Negative control: same weights, but a fresh (un-restored) optimizer.
         # AdamW's magnitude-normalized update makes the *weights* after a single
         # step nearly identical regardless of moment history, so a weight-only
         # comparison is too weak to prove restoration. Assert instead on the
-        # step/beta-power state the restore actually carried: a fresh optimizer
-        # is only one step in (beta1_pow == beta1), never beta1**3.
+        # optimizer state the restore actually carried: a fresh optimizer that
+        # takes a single step from the same weights holds different moment /
+        # beta-power accumulators than the resumed (3-step) optimizer.
         linear.weight.set_value(w_at2)
         linear.bias.set_value(b_at2)
         fresh_opt = _make_custom_optimizer(
             linear.parameters(), learning_rate=0.3
         )
         self._fixed_grad_step(linear, fresh_opt)
-        fresh_beta1_pow = fresh_opt._get_accumulator_master(
-            fresh_opt._beta1_pow_acc_str, linear.weight
-        ).numpy()
-        self.assertFalse(
-            np.allclose(restored_beta1_pow, fresh_beta1_pow),
-            "a fresh optimizer must not reproduce the restored step/beta "
-            "state (proving the optimizer state genuinely participated)",
+        fresh_state = _flatten_opt_tensors(fresh_opt.state_dict())
+
+        common = set(restored_state) & set(fresh_state)
+        self.assertTrue(
+            common, "optimizer state_dicts share no comparable tensors"
+        )
+        any_diff = any(
+            restored_state[k].shape != fresh_state[k].shape
+            or not np.allclose(restored_state[k], fresh_state[k])
+            for k in common
+        )
+        self.assertTrue(
+            any_diff,
+            "a fresh optimizer must not share the resumed optimizer's "
+            "moment/beta-power state (proving the state genuinely "
+            "participated in the resume)",
         )
 
 
