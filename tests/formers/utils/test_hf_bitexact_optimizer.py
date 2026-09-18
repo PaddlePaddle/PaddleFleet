@@ -36,8 +36,19 @@ def _make_opt(param, *, hf=True, lr=0.1):
     )
 
 
+@pytest.fixture(autouse=True)
+def _pin_gpu_device():
+    # GPU-only optimizer tests (bf16 AdamW + Triton bypass). Pin the default
+    # device to GPU so parameters are not created on Place(cpu) left behind
+    # by an earlier test on the same pytest-xdist worker; on CPU the bf16
+    # update rounds to a no-op (assert 1.0 != 1.0) and the Triton path is
+    # unavailable.
+    if paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0:
+        paddle.set_device("gpu")
+
+
 @pytest.fixture()
-def param():
+def param(_pin_gpu_device):
     p = paddle.create_parameter(
         [4],
         dtype="bfloat16",
