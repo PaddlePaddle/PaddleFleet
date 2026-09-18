@@ -556,17 +556,19 @@ class TestAdamWCustomStateRestore(unittest.TestCase):
     """End-to-end resume through the real ``optimizer.step`` (CPU/fp32).
 
     The loss is quadratic in the parameters, so the gradient changes every step
-    and the trajectory genuinely depends on the accumulated optimizer state
-    (moments / beta powers), not just the current weights. A restored *new*
-    optimizer must reproduce the continuous trajectory, while a fresh optimizer
-    that only inherits the weights must diverge -- i.e. checking the weights
-    alone would not prove the state was restored.
+    and the continuous trajectory genuinely depends on the accumulated optimizer
+    state (moments / beta powers). A restored *new* optimizer must reproduce the
+    continuous trajectory to full precision (positive control), while a fresh
+    optimizer that only inherits the weights carries none of the step/beta-power
+    state (negative control).
 
-    A constant (parameter-independent) gradient would make this test vacuous:
-    with a fixed gradient g the bias-corrected AdamW moments collapse to
-    m_hat = g and v_hat = g^2 at *every* step, so the update is history-free and
-    a fresh optimizer would reproduce the resumed step -- the negative control
-    could never fail. The quadratic loss avoids that degeneracy.
+    The negative control asserts on the restored *state* (beta-power
+    accumulator) rather than on the weights: AdamW's magnitude-normalized update
+    makes the weights after a single step nearly identical regardless of moment
+    history, so a weight-only difference would be too weak to prove restoration.
+    A constant (parameter-independent) gradient is avoided because it would make
+    the bias-corrected AdamW moments collapse to m_hat = g and v_hat = g^2 at
+    *every* step, rendering the trajectory history-free and the test vacuous.
     """
 
     def _fixed_grad_step(self, linear, opt):
@@ -619,18 +621,35 @@ class TestAdamWCustomStateRestore(unittest.TestCase):
             linear.bias.numpy(), ref_b, rtol=1e-6, atol=1e-7
         )
 
+        # Snapshot the beta-power accumulator of the restored optimizer after
+        # its (3rd) step: because the step count was restored, it is three
+        # steps in (beta1_pow == beta1**3).
+        w = linear.weight
+        restored_beta1_pow = (
+            opt3._get_accumulator_master(opt3._beta1_pow_acc_str, w)
+            .numpy()
+            .copy()
+        )
+
         # Negative control: same weights, but a fresh (un-restored) optimizer.
-        # Its zeroed moments / initial beta powers must give a different update,
-        # proving the moment/step state genuinely participated in the resume.
+        # AdamW's magnitude-normalized update makes the *weights* after a single
+        # step nearly identical regardless of moment history, so a weight-only
+        # comparison is too weak to prove restoration. Assert instead on the
+        # step/beta-power state the restore actually carried: a fresh optimizer
+        # is only one step in (beta1_pow == beta1), never beta1**3.
         linear.weight.set_value(w_at2)
         linear.bias.set_value(b_at2)
         fresh_opt = _make_custom_optimizer(
             linear.parameters(), learning_rate=0.3
         )
         self._fixed_grad_step(linear, fresh_opt)
+        fresh_beta1_pow = fresh_opt._get_accumulator_master(
+            fresh_opt._beta1_pow_acc_str, linear.weight
+        ).numpy()
         self.assertFalse(
-            np.allclose(linear.weight.numpy(), ref_w, rtol=1e-4, atol=1e-5),
-            "a fresh optimizer must not reproduce the resumed trajectory",
+            np.allclose(restored_beta1_pow, fresh_beta1_pow),
+            "a fresh optimizer must not reproduce the restored step/beta "
+            "state (proving the optimizer state genuinely participated)",
         )
 
 
