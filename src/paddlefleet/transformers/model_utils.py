@@ -51,6 +51,10 @@ from paddle.distributed.fleet.meta_parallel.parallel_layers import (
     PipelineLayer,
     SharedLayerDesc,
 )
+from paddle.incubate.tensor.manipulation import (
+    async_offload,
+    create_async_load,
+)
 from paddle.nn import Embedding, Layer
 
 # TODO(fangzeyang) Temporary fix and replace by paddle framework downloader later
@@ -4757,6 +4761,17 @@ def save_full_param(
     Saves model weights from an iterator into shards, supporting max shard size
     and a limited number of saver ranks.
 
+    On GPU each param is offloaded asynchronously: DMA-copied D2H into its own
+    pinned buffer, then once more than pinned_param_pool_capacity copies are
+    outstanding the oldest is waited on and moved to pageable host memory,
+    freeing its pinned buffer. Shards accumulate in pageable memory, so resident
+    pinned memory stays around pinned_param_pool_capacity tensors. The async
+    path only runs where async_offload's precondition holds -- a contiguous GPU
+    tensor under sync_copy_threshold_bytes with a real loader; everything else
+    (CPU-resident, non-contiguous, oversized, or non-GPU/custom-device builds)
+    falls back to a synchronous param.cpu() copy, which handles any place and
+    layout, so one huge tensor never needs an equally huge pinned buffer.
+
     Only ranks less than `num_saver_ranks` will perform disk I/O. All other ranks
     will iterate through the data to maintain synchronization but will not save.
     The parameter distribution logic is based on `num_saver_ranks`, ensuring all
@@ -4770,7 +4785,6 @@ def save_full_param(
         max_shard_size (str): The maximum size for each shard file, e.g., "500MB", "2GB".
         num_saver_ranks (int): The number of ranks (starting from 0) that will save files.
     """
-
     # 1. Non-saver ranks simply consume the iterator to stay in sync.
     if rank >= num_saver_ranks:
         logger.info(
@@ -4791,15 +4805,39 @@ def save_full_param(
 
     os.makedirs(save_dir, exist_ok=True)
 
+    # Max async D2H copies (each = one pinned buffer) kept outstanding.
+    pinned_param_pool_capacity = 4
+    # Params larger than this skip the pinned pool and copy synchronously.
+    sync_copy_threshold_bytes = 1 << 30  # 1 GiB
+    # create_async_load() returns None on custom-device builds; without a real
+    # loader every param takes the synchronous path below.
+    async_loader = (
+        create_async_load() if paddle.get_device().startswith("gpu") else None
+    )
+
     current_shard_state_dict = {}
     current_shard_size_bytes = 0
     sub_shard_index = 0
+    # Outstanding async offloads for the current shard:
+    # list of (task, pinned_dst, param_key, src_param).
+    pinned_param_pool = []
+
+    def pinned_to_cpu():
+        # Wait for the oldest outstanding D2H, copy it into pageable host
+        # memory, and drop the pinned buffer plus the GPU source tensor.
+        task, dst, key, _src = pinned_param_pool.pop(0)
+        task.cpu_wait()
+        current_shard_state_dict[key] = dst._copy_to(paddle.CPUPlace(), True)
+        del dst, task, _src
 
     def _save_current_shard():
         nonlocal \
             sub_shard_index, \
             current_shard_state_dict, \
             current_shard_size_bytes
+
+        while pinned_param_pool:
+            pinned_to_cpu()
         if not current_shard_state_dict:
             return
 
@@ -4829,8 +4867,8 @@ def save_full_param(
     total_size = 0
 
     for i, (param_key, param) in enumerate(itr):
-        param_size_bytes = param.numel() * param.element_size()
-        total_size += param_size_bytes.item()
+        param_size_bytes = param.size * param.itemsize
+        total_size += param_size_bytes
         if i % num_saver_ranks == rank:
             logger.info(
                 f"[Rank {rank}/{moe_sharding_world_size}] Assigned to store parameter {param_key}"
@@ -4840,8 +4878,25 @@ def save_full_param(
                 > max_shard_size_bytes
             ):
                 _save_current_shard()
-            # Move tensor to CPU since we only need to save it, not compute with it
-            current_shard_state_dict[param_key] = param.cpu()
+            # async_offload only does GPU -> GPUPinned and copies raw storage
+            # without a contiguity fix, so restrict it to a contiguous GPU
+            # tensor under the size cap with a real loader. Everything else
+            # (CPU-resident, non-contiguous, oversized, no loader) takes the
+            # universal synchronous param.cpu() path.
+            can_async_offload = (
+                async_loader is not None
+                and param_size_bytes <= sync_copy_threshold_bytes
+                and param.place.is_gpu_place()
+                and param.is_contiguous()
+            )
+            if not can_async_offload:
+                current_shard_state_dict[param_key] = param.cpu()
+            else:
+                # Async D2H into a private pinned buffer (drained by the pool).
+                dst, task = async_offload(param, async_loader)
+                pinned_param_pool.append((task, dst, param_key, param))
+                if len(pinned_param_pool) > pinned_param_pool_capacity:
+                    pinned_to_cpu()
             current_shard_size_bytes += param_size_bytes
 
             if current_shard_size_bytes >= max_shard_size_bytes:
