@@ -23,8 +23,8 @@ ids, vocab mapping, encode against an independent BPE derivation, truncation,
 right/left padding + attention mask, and save + reload round-trip content.
 
 Independence: expected ids and token sequences are derived by hand from the
-byte-level BPE algorithm and the vocab/merges files this test writes -- never
-by calling the tokenizer to build its own oracle.  Save/reload is verified by
+byte-level BPE algorithm and the vocab/merges this test defines -- never by
+calling the tokenizer to build its own oracle.  Save/reload is verified by
 loading a *new* tokenizer object (both via the constructor and via the
 production ``from_pretrained`` entry) and re-running behavior, not by
 inspecting the original object or merely checking that files exist.
@@ -69,8 +69,14 @@ except (ImportError, ModuleNotFoundError):  # pragma: no cover
 # --- Hand-derived minimal byte-level BPE vocab ------------------------------
 # All three base characters are printable ASCII, so under GPT2's
 # bytes_to_unicode they map to themselves and are addressable by their literal
-# string.  A single merge rule "a b" (rank 0) is the only merge, which makes
-# every encode result derivable by hand (see per-test comments).
+# string.  A single merge rule ("a", "b") (rank 0) is the only merge, which
+# makes every encode result derivable by hand (see per-test comments).
+#
+# On transformers>=5 ``GPT2Tokenizer`` is a ``tokenizers``-backed fast
+# tokenizer whose constructor takes an in-memory ``vocab`` dict and a
+# rank-ordered ``merges`` list of (left, right) pairs (not on-disk
+# ``vocab_file`` / ``merges_file`` paths).  The vocab pins every id, so the
+# special-token ids below are the independent oracle.
 _VOCAB = {
     "a": 0,
     "b": 1,
@@ -81,7 +87,7 @@ _VOCAB = {
     "</s>": 6,
     "<pad>": 7,
 }
-_MERGES = "#version: 0.2\na b\n"
+_MERGES = [("a", "b")]
 
 _A_ID, _B_ID, _C_ID, _AB_ID = 0, 1, 2, 3
 _UNK_ID, _BOS_ID, _EOS_ID, _PAD_ID = 4, 5, 6, 7
@@ -93,20 +99,10 @@ _VOCAB_SIZE = 8  # len(encoder), specials included in the vocab file
     f"Phi3 tokenizer deps unavailable (Paddle/transformers): {_IMPORT_ERROR}",
 )
 class Phi3TokenizerTest(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls):
-        cls.tmpdir = tempfile.mkdtemp()
-        cls.vocab_file = os.path.join(cls.tmpdir, "vocab.json")
-        cls.merges_file = os.path.join(cls.tmpdir, "merges.txt")
-        with open(cls.vocab_file, "w", encoding="utf-8") as f:
-            json.dump(_VOCAB, f)
-        with open(cls.merges_file, "w", encoding="utf-8") as f:
-            f.write(_MERGES)
-
-    def _make_tokenizer(self, vocab_file=None, merges_file=None):
+    def _make_tokenizer(self, vocab=None, merges=None):
         return Phi3Tokenizer(
-            vocab_file=vocab_file or self.vocab_file,
-            merges_file=merges_file or self.merges_file,
+            vocab=_VOCAB if vocab is None else vocab,
+            merges=_MERGES if merges is None else merges,
             unk_token="<unk>",
             bos_token="<s>",
             eos_token="</s>",
@@ -244,13 +240,19 @@ class Phi3TokenizerTest(unittest.TestCase):
         tok = self._make_tokenizer()
         with tempfile.TemporaryDirectory() as save_dir:
             tok.save_pretrained(save_dir)
-            saved_vocab = os.path.join(save_dir, "vocab.json")
-            saved_merges = os.path.join(save_dir, "merges.txt")
-            self.assertTrue(os.path.isfile(saved_vocab))
-            self.assertTrue(os.path.isfile(saved_merges))
-            # reload into a brand-new object from the saved assets.
+            # tf5 fast GPT2Tokenizer serializes to a single tokenizer.json
+            # holding the BPE model (vocab + merges).
+            saved_tokenizer = os.path.join(save_dir, "tokenizer.json")
+            self.assertTrue(os.path.isfile(saved_tokenizer))
+            with open(saved_tokenizer, encoding="utf-8") as f:
+                model = json.load(f)["model"]
+            # reconstruct a brand-new object from the saved BPE assets.
+            saved_vocab = model["vocab"]
+            saved_merges = [tuple(pair) for pair in model["merges"]]
+            self.assertEqual(saved_vocab, _VOCAB)
+            self.assertEqual(saved_merges, _MERGES)
             reloaded = self._make_tokenizer(
-                vocab_file=saved_vocab, merges_file=saved_merges
+                vocab=saved_vocab, merges=saved_merges
             )
             self.assertEqual(reloaded.vocab_size, _VOCAB_SIZE)
             self.assertEqual(
