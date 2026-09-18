@@ -50,6 +50,28 @@ from paddlefleet.transformer.transformer_config import TransformerConfig
 _token_loss_replaying = ContextVar("token_loss_replaying", default=False)
 
 
+# calculate_per_token_loss token accounting (E175/E176, loss_grad_normalization.md
+# 6.1). The loss module runs once per microbatch and cannot see the trainer's step
+# boundary, so it stashes the running count of THIS rank's shard non-padded label
+# tokens. Counted BEFORE the CP gather (per-shard), so an all-reduce-SUM over the
+# sharding group at the accumulation boundary yields the global token count with no
+# cp double-count. Module-level rather than a forward() return value so the loss
+# interface (and its many callers) stays unchanged. The trainer pops it per step.
+_PER_TOKEN_LOCAL_COUNT = [0]
+
+
+def accumulate_per_token_local_count(n):
+    """Add this microbatch's per-shard non-padded token count to the step total."""
+    _PER_TOKEN_LOCAL_COUNT[0] += int(n)
+
+
+def pop_per_token_local_count():
+    """Return the accumulated per-shard token count for the step and reset it."""
+    n = _PER_TOKEN_LOCAL_COUNT[0]
+    _PER_TOKEN_LOCAL_COUNT[0] = 0
+    return n
+
+
 def _loss_md5_enabled() -> bool:
     return os.environ.get("LOG_LOSS_MD5", "0") == "1"
 
@@ -318,6 +340,14 @@ class LanguageLoss(FleetLayer):
             # handling matches the non-fused path exactly.
             loss = loss_1d.reshape([B, S])
 
+            # Per-token loss: count THIS shard's non-padded tokens before the CP
+            # gather (labels here are the local shard), so the trainer's sharding
+            # all-reduce sums each token exactly once. See loss_grad_normalization.md 6.1.
+            if getattr(self.config, "calculate_per_token_loss", False):
+                accumulate_per_token_local_count(
+                    (labels != self.ignored_index).sum()
+                )
+
             if get_context_parallel_world_size() > 1:
                 loss = ContextParallelGatherOp.apply(
                     loss, axis=1, mode=self.config.cp_balance_mode
@@ -337,7 +367,11 @@ class LanguageLoss(FleetLayer):
             loss = paddle.sum(
                 loss.cast(paddle.float32).reshape([-1]) * lossmask
             )
-            loss = loss / lossmask.sum()
+            if not getattr(self.config, "calculate_per_token_loss", False):
+                # mean-of-means: local per-token mean here, the trainer averages
+                # over replicas/microbatches. Per-token instead keeps the raw sum
+                # and divides by the global token count once (trainer, step end).
+                loss = loss / lossmask.sum()
             return loss
 
         seq_len = logits.shape[1]
@@ -387,6 +421,12 @@ class LanguageLoss(FleetLayer):
             ):
                 logits = logits.reshape([labels.shape[0], -1, logits.shape[-1]])
             loss = self.loss_func(logits.cast("float32"), labels)
+
+        # Per-token loss: count this shard's non-padded tokens before the CP gather
+        # (labels here are the local shard) so the trainer's sharding all-reduce
+        # sums each token exactly once. See loss_grad_normalization.md 6.1.
+        if getattr(self.config, "calculate_per_token_loss", False):
+            accumulate_per_token_local_count((labels != self.ignored_index).sum())
 
         if get_context_parallel_world_size() > 1:
             loss = ContextParallelGatherOp.apply(
@@ -465,7 +505,15 @@ class LanguageLoss(FleetLayer):
             # EC-compat: line-wise loss (per-sample mean then average across samples)
             # EC's ErniemmPretrainingCriterion recomputes loss as line-wise when task_id
             # is present, which changes the value due to division by (count + 1e-6).
-            if self.config.gpt_model_use_experimental_version:
+            if getattr(self.config, "calculate_per_token_loss", False):
+                # Per-token: raw non-padded token loss sum; the single global-token
+                # denominator is applied later by the trainer (skip both the
+                # mean-of-means /lossmask.sum() and the EC line-wise reweighting,
+                # which are incompatible with a global-token objective).
+                loss = paddle.sum(
+                    loss.cast(paddle.float32).reshape([-1]) * lossmask
+                )
+            elif self.config.gpt_model_use_experimental_version:
                 if max(get_tensor_model_parallel_world_size(), 1) > 1:
                     loss = loss.squeeze(-1)
                 loss_2d = loss.cast(paddle.float32) * lossmask.reshape(
