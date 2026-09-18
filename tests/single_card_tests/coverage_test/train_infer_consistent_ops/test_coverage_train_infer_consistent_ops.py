@@ -174,16 +174,20 @@ class TestEnvSnapshot(ProbeEnvTestCase):
             ABLATION_LOAD_TENSOR_PATH=self.load_dir,
         )
         self.assertTrue(inspect_util._ENABLED)
-        # Empty entries from a trailing comma are dropped.
-        self.assertEqual(inspect_util._WHITELIST, frozenset({"a", "b"}))
-        self.assertEqual(inspect_util._BLACKLIST, frozenset({"c"}))
-        self.assertEqual(inspect_util._DUMP_SKIP_TAGS, frozenset({"d", "e"}))
+        # Each filter is parsed into (exact_frozenset, glob_tuple); these plain
+        # tags carry no glob metachar, so the glob tuple stays empty. Empty
+        # entries from a trailing comma are dropped.
+        self.assertEqual(inspect_util._WHITELIST, (frozenset({"a", "b"}), ()))
+        self.assertEqual(inspect_util._BLACKLIST, (frozenset({"c"}), ()))
+        self.assertEqual(
+            inspect_util._DUMP_SKIP_TAGS, (frozenset({"d", "e"}), ())
+        )
         self.assertEqual(inspect_util._SAVE_PATH, self.save_dir)
         self.assertEqual(inspect_util._LOAD_PATH, self.load_dir)
 
     def test_unset_variables_default_to_off(self):
         self.assertFalse(inspect_util._ENABLED)
-        self.assertEqual(inspect_util._WHITELIST, frozenset())
+        self.assertEqual(inspect_util._WHITELIST, inspect_util._EMPTY_FILTER)
         self.assertEqual(inspect_util._SAVE_PATH, "")
 
     def test_inspect_enabled_only_follows_the_snapshot(self):
