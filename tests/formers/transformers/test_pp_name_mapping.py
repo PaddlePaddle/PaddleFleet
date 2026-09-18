@@ -37,15 +37,6 @@ import paddle
 import paddle.nn as nn
 from paddle.distributed.fleet.meta_parallel import LayerDesc, SharedLayerDesc
 
-import sys as _s
-
-print("DBGPATH", _s.path[:6], file=_s.stderr)
-print(
-    "DBGPRE",
-    "paddlefleet" in _s.modules,
-    _s.modules.get("paddlefleet"),
-    file=_s.stderr,
-)
 from paddlefleet.transformers import model_utils
 from paddlefleet.transformers.model_utils import PipelinePretrainedModel
 

@@ -505,9 +505,14 @@ class TransformerEncoder(PipelineLayer):
                 f"{unmapped_keys[:20]}"
             )
 
-        missing_keys, unexpected_keys = super().set_state_dict(
-            state_dict, *args, **kwargs
-        )
+        ret = super().set_state_dict(state_dict, *args, **kwargs)
+        # `nn.Layer.set_state_dict` returns (missing_keys, unexpected_keys).
+        # Anything else means the parent does not report those two lists, so
+        # there is nothing to filter or warn about -- pass its value through
+        # unchanged rather than guessing.
+        if not (isinstance(ret, tuple) and len(ret) == 2):
+            return ret
+        missing_keys, unexpected_keys = ret
 
         # Two physical keys can resolve to the same single card name and alias
         # one Parameter, so only the winner of that collision is fed above and

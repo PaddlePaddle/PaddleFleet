@@ -60,6 +60,8 @@ class LightweightEncoder(TransformerEncoder):
         self._sequential_layers = []
         self._pipeline_name_mapping = None
         self.layers = []
+        self._num_virtual_pipeline_stages = 1
+        self._use_dualpipev = False
         self._stage_id = 0
         self._stage_for_index = 0
         self.loaded_state = None
@@ -238,6 +240,7 @@ class TestTransformerEncoderPipelineMappingNoMock(unittest.TestCase):
             ]
         )
         model.layers = [shared]
+        model._num_virtual_pipeline_stages = 2
         model._sequential_layers = [
             {"layer": shared, "name_prefix": "model.embed"},
             {"layer": object(), "name_prefix": "model.layers.1"},
@@ -249,7 +252,7 @@ class TestTransformerEncoderPipelineMappingNoMock(unittest.TestCase):
         self.assertEqual(
             mapping["model.embed.weight"], "shared_layers.embed.weight"
         )
-        self.assertEqual(mapping["model.layers.1.weight"], "0.tail.weight")
+        self.assertEqual(mapping["model.embed.tail.weight"], "0.tail.weight")
         self.assertEqual(mapping["plain.bias"], "plain.bias")
         self.assertEqual(
             model._pp_to_single_mapping["0.0.weight"], "model.embed.weight"
