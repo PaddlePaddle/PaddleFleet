@@ -489,8 +489,7 @@ class LanguageLoss(FleetLayer):
                     for _ in range(_ep_size):
                         _acc_sum = _acc_sum + loss_sum
                     loss = (
-                        _acc_sum[0]
-                        / (_count.cast(paddle.float64) * _ep_size)
+                        _acc_sum[0] / (_count.cast(paddle.float64) * _ep_size)
                     ).cast(paddle.float32)
                 else:
                     loss = paddle.sum(

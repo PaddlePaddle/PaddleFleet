@@ -305,7 +305,9 @@ class _AlignedHeadExpand(paddle.autograd.PyLayer):
         grad = grad_output.cast("float32")
         acc = paddle.slice(grad, axes=[axis], starts=[0], ends=[1])
         for i in range(1, ctx.num_heads):
-            acc = acc + paddle.slice(grad, axes=[axis], starts=[i], ends=[i + 1])
+            acc = acc + paddle.slice(
+                grad, axes=[axis], starts=[i], ends=[i + 1]
+            )
         return acc.cast(grad_output.dtype)
 
 
@@ -2491,7 +2493,10 @@ class MLASelfAttention(MultiLatentAttention):
                             )
                         else:
                             k_pos_emb = k_pos_emb.expand(
-                                -1, -1, self.num_attention_heads_per_partition, -1
+                                -1,
+                                -1,
+                                self.num_attention_heads_per_partition,
+                                -1,
                             )
                     else:
                         assert k_pos_emb.ndim == 3
