@@ -64,5 +64,11 @@ uv pip install --no-config --python "${TORCH_PYTHON}" \
         "${deep_ep_source}" \
         "fast_hadamard_transform @ git+https://github.com/Dao-AILab/fast-hadamard-transform.git@f134af63deb2df17e1171a9ec1ea4a7d8604d5ca"
 )
+# GLM52 bit-exact alignment requires BOTH frameworks to load the SAME cuBLAS
+# build as the aligned reference (12.9.1.4); see setup_paddle.sh. torch==2.12.1+cu129
+# already resolves nvidia-cublas-cu12 to 12.9.1.4, but pin it explicitly so a later
+# wheel repack cannot silently drift the reference off the aligned math runtime.
+uv pip install --no-config --python "${TORCH_PYTHON}" --no-deps \
+    --index-url https://pypi.org/simple/ "nvidia-cublas-cu12==12.9.1.4"
 uv pip check --python "${TORCH_PYTHON}"
 "${TORCH_PYTHON}" -c 'import importlib.metadata as m; print({p: m.version(p) for p in ("torch", "mcore-bridge", "megatron-core", "ms-swift", "transformers")})'
