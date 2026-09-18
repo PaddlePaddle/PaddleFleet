@@ -35,6 +35,7 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
 from paddlefleet import tensor_parallel
 from paddlefleet.context_parallel_utils import ContextParallelScatterOp
 from paddlefleet.parallel_state import (
+    get_context_parallel_rank,
     get_context_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -975,7 +976,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                 reduce_scatter_embeddings=False,
                 config=no_init_cfg,
             )
-            if self.config.context_parallel_size > 1:
+            if self.config.context_parallel_size > 1 and not getattr(
+                config, "use_erndata", False
+            ):
                 from paddlefleet.context_parallel_utils import (
                     mark_context_parallel_parameter_disable_scale_grad,
                 )
@@ -983,13 +986,17 @@ class MultiTokenPredictionLayer(FleetLayer):
                 mark_context_parallel_parameter_disable_scale_grad(
                     self.mtp_embed
                 )
+            # Erndata keeps default CP scaling on both the stage-0 embedding and
+            # this physical copy. Disabling it only here would make their shared
+            # gradient contributions use different scales before PP all-reduce.
 
-            from paddlefleet.models.gpt.mtp_embedding_layer import (
-                mtp_magic_instance,
-            )
+            if not getattr(config, "use_erndata", False):
+                from paddlefleet.models.gpt.mtp_embedding_layer import (
+                    mtp_magic_instance,
+                )
 
-            self.magic_key = f"mtp_layer_{self.layer_number}"
-            mtp_magic_instance.set_magic_count(self.magic_key, -1)
+                self.magic_key = f"mtp_layer_{self.layer_number}"
+                mtp_magic_instance.set_magic_count(self.magic_key, -1)
 
         self.offload_context = nullcontext()
 
@@ -1912,44 +1919,88 @@ class MultiTokenPredictionLayer(FleetLayer):
     # Packed-doc MTP forward (config.use_erndata is True).
     #
     # Contract vs. the historical ernie5 path:
-    #   * The data pipeline emits ONLY the main L-length tensors plus
-    #     cu_seqlens_q. It does NOT emit
-    #     mtp_startend_row_indices_all or mtp_hidden_inputs_mask_all,
-    #     and it does NOT append K MTP tokens to input_ids / labels.
-    #   * The shifted MTP embeddings for each depth are still prepared upstream
-    #     by GPTEmbedding, but using roll_tensor(cu_seqlens_q=...) — i.e.
-    #     per-doc left-shift with boundary zero-fill — rather than the L+K
-    #     index-slice used by ernie5. GPTEmbedding.forward has a mirrored
-    #     use_erndata branch that produces the same
-    #     ``hidden_states_concat`` shape (concatenation of the main slice and
-    #     K per-depth shifted slices), so the pipeline plumbing stays intact.
-    #   * The MTP LMHead / loss layer downstream is responsible for rolling
-    #     labels / loss_mask via roll_tensor before computing MTP loss (M2/M3
-    #     will exercise this end-to-end).
+    #   * The data pipeline emits only the main L-length tensors plus
+    #     cu_seqlens_q; no L+K token append or precomputed per-depth masks.
+    #   * With magic-send off, GPTEmbedding prepares the K packed-rolled
+    #     embeddings and carries K+1 slots through the backbone as before.
+    #   * With magic-send on, GPTEmbedding carries only the 1x backbone hidden
+    #     state plus explicit mtp_full_input_ids/cu_seqlens_q metadata. Each MTP
+    #     stage re-embeds the full IDs, packed-rolls to its depth, and then takes
+    #     the local CP/SP shard; the carrier grows by one output slot per depth.
+    #   * The MTP LMHead/loss keeps cu_seqlens_q to roll labels/loss masks with
+    #     the same packed-document boundaries.
     #
-    # Behaviour inside this method for a given self.layer_number (=depth k):
-    #   1. Split hidden_states_concat (shape [(K+1)*S, B, ...] under SP or
-    #      [B, (K+1)*S, ...] otherwise) into (K+1) chunks along the sequence
-    #      dim.
-    #   2. Take chunk[k] as hidden_states (previous stage's output at this
-    #      depth) and chunk[k+1] as decoder_input (upstream-computed shifted
-    #      embedding at this depth).
-    #   3. Run _proj_and_transformer_layer with:
-    #        - mtp_hidden_inputs_mask=None (no per-doc EOS-derived hidden
-    #          mask; per-doc boundary is expressed via packed_seq_params);
-    #        - attn_mask_startend_row_indices=<main mask> (packed attn still
-    #          consumes the main startend_row_indices — MTP layers inherit
-    #          the same doc boundaries because they share cu_seqlens_q).
-    #   4. Write the resulting hidden_states back into the chunk list at
-    #      position k+1 and re-concat. Return the updated dict_args so the
-    #      next MTP depth can consume its slice.
+    # In both transports, a depth consumes the previous depth's hidden state,
+    # runs _proj_and_transformer_layer with the shared packed attention mask,
+    # and appends or replaces the next carrier slot. Magic metadata is forwarded
+    # only while another MTP depth needs it and never reaches the LMHead.
     #
-    # Constraints: experimental_dataflow=False and enable_mtp_magic_send
-    # disabled (both enforced at TransformerConfig.__post_init__). Context
-    # parallelism is handled at the embedding / loss call sites via
-    # extract_local_cp_chunks (layout picked by config.cp_balance_mode) rather
-    # than inside roll_tensor.
+    # Constraints: experimental_dataflow=False. Context parallelism is handled
+    # via extract_local_cp_chunks (layout picked by config.cp_balance_mode)
+    # after the full-sequence packed roll rather than inside roll_tensor.
     # ------------------------------------------------------------------ #
+
+    def _prepare_erndata_magic_decoder_input(
+        self, full_input_ids, cu_seqlens_q
+    ):
+        """Re-embed full IDs, packed-roll to this depth, then CP/SP shard."""
+        if full_input_ids is None:
+            raise RuntimeError(
+                "use_erndata=True + enable_mtp_magic_send=True requires "
+                "mtp_full_input_ids in pipeline metadata."
+            )
+        if cu_seqlens_q is None:
+            raise RuntimeError(
+                "packed MTP magic send requires cu_seqlens_q in pipeline metadata."
+            )
+
+        decoder_input = self.mtp_embed(full_input_ids).astype(
+            self.mtp_embed.weight.dtype
+        )
+        if (
+            self.config.expert_model_parallel_size > 1
+            and self.config.tensor_model_parallel_size < 2
+            or self.config.gpt_model_use_experimental_version
+        ):
+            from paddlefleet.models.gpt.utils import fill_feature
+
+            pad_token_id = getattr(self.config, "pad_token_id", 0) or 0
+            decoder_input = fill_feature(
+                decoder_input, full_input_ids == pad_token_id, 0
+            )
+        if self.config.fp32_residual_connection:
+            decoder_input = decoder_input.float()
+        for _ in range(self.layer_number + 1):
+            decoder_input, _ = roll_tensor(
+                decoder_input,
+                shifts=-1,
+                dims=1,
+                cu_seqlens_q=cu_seqlens_q,
+            )
+
+        cp_size = get_context_parallel_world_size()
+        if cp_size > 1:
+            cp_rank = get_context_parallel_rank()
+            decoder_input = extract_local_cp_chunks(
+                decoder_input,
+                cp_rank,
+                cp_size,
+                axis=1,
+                mode=self.config.cp_balance_mode,
+            )
+
+        if self.sequence_parallel:
+            # ScatterOp partitions axis 0; transpose to canonical [S, B, H]
+            # first so batches are not interleaved when B > 1.
+            decoder_input = decoder_input.transpose([1, 0, 2]).contiguous()
+            _, batch_size, hidden_size = decoder_input.shape
+            decoder_input = ScatterOp.apply(
+                decoder_input.reshape([-1, hidden_size])
+            )
+            decoder_input = decoder_input.reshape(
+                [-1, batch_size, hidden_size]
+            ).contiguous()
+        return decoder_input
 
     def _forward_megatron_style(self, dict_args: dict) -> dict:
         # Cross-attention is still unsupported (identical constraint as
@@ -1963,17 +2014,16 @@ class MultiTokenPredictionLayer(FleetLayer):
                 "multi token prediction + cross attention is not yet supported "
                 "under use_erndata=True."
             )
-        if (
-            dict_args.get("mtp_input_embeds") is not None
-            or self.config.enable_mtp_magic_send
-        ):
-            # Config validation in TransformerConfig.__post_init__ should have
-            # caught this, but keep a hard guard here for defence in depth.
+        if dict_args.get("mtp_input_embeds") is not None:
             raise ValueError(
-                "use_erndata=True is incompatible with enable_mtp_magic_send."
+                "use_erndata=True does not accept precomputed mtp_input_embeds."
             )
 
         num_nextn = self.config.num_nextn_predict_layers
+        magic_send = self.config.enable_mtp_magic_send
+        mtp_full_input_ids = (
+            dict_args.pop("mtp_full_input_ids", None) if magic_send else None
+        )
 
         # mHC + erndata: the backbone contract layer has already handed over
         # the pre-contraction multi-stream backbone output through
@@ -1992,15 +2042,26 @@ class MultiTokenPredictionLayer(FleetLayer):
             mhc_chunks = paddle.split(mhc_multistream, num_nextn + 1)
 
         hidden_states_concat = dict_args["hidden_states"]
-        tensor_list = paddle.split(hidden_states_concat, num_nextn + 1)
+        if magic_send:
+            # Carrier grows one slot per depth: [main, depth0, ..., depth k-1].
+            # Decoder embeddings are rebuilt locally and never ride P2P.
+            tensor_list = paddle.split(
+                hidden_states_concat, self.layer_number + 1
+            )
+            decoder_input = self._prepare_erndata_magic_decoder_input(
+                mtp_full_input_ids,
+                dict_args.get("cu_seqlens_q"),
+            )
+        else:
+            tensor_list = paddle.split(hidden_states_concat, num_nextn + 1)
+            decoder_input = tensor_list[self.layer_number + 1]
 
         if mhc_chunks is not None:
             # Multi-stream input for the shared mHC block, [B, S, n*h].
             dict_args["hidden_states"] = mhc_chunks[self.layer_number]
         else:
-            # Use previous-stage slices for this depth.
             dict_args["hidden_states"] = tensor_list[self.layer_number]
-        dict_args["decoder_input"] = tensor_list[self.layer_number + 1]
+        dict_args["decoder_input"] = decoder_input
 
         # Drop any leftover ernie5-path fields from dict_args so
         # _proj_and_transformer_layer sees the Megatron contract: no per-depth
@@ -2085,10 +2146,16 @@ class MultiTokenPredictionLayer(FleetLayer):
             if self.layer_number < num_nextn - 1:
                 dict_args["mhc_multistream"] = paddle.concat(mhc_chunks)
 
-        # Store back into the pipeline concat tensor at slot k+1.
-        tensor_list[self.layer_number + 1] = hidden_states
+        # Store this depth in the growing carrier. Non-magic mode has a fixed
+        # K+1 carrier and overwrites its precomputed embedding slot instead.
+        if magic_send:
+            tensor_list.append(hidden_states)
+        else:
+            tensor_list[self.layer_number + 1] = hidden_states
         dict_args["hidden_states"] = paddle.concat(tensor_list)
         dict_args.pop("decoder_input", None)
+        if magic_send and self.layer_number < num_nextn - 1:
+            dict_args["mtp_full_input_ids"] = mtp_full_input_ids
         return dict_args
 
 

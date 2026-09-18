@@ -687,8 +687,7 @@ class TransformerLayer(nn.Layer):
         # this is only used to uniquely identify decode and non-decode cuda graph
         # runners in the cuda graph manager
         dict_args.pop("dynamic_inference_decode_only", None)
-        keys = tuple(dict_args.keys())
-        values = tuple(dict_args.values())
+        mtp_full_input_ids = dict_args.pop("mtp_full_input_ids", None)
 
         is_mtp = dict_args.pop("is_mtp", False)
         TransformerLayer._skip_mtp_probes = (
@@ -1033,6 +1032,8 @@ class TransformerLayer(nn.Layer):
         if context is not None:
             rst["context"] = context
         rst = {**dict_args, **rst}
+        if mtp_full_input_ids is not None:
+            rst["mtp_full_input_ids"] = mtp_full_input_ids
         return rst
 
     def _forward_impl(
@@ -2340,8 +2341,7 @@ class HySparseTransformerLayer(TransformerLayer):
         # this is only used to uniquely identify decode and non-decode cuda graph
         # runners in the cuda graph manager
         dict_args.pop("dynamic_inference_decode_only", None)
-        keys = tuple(dict_args.keys())
-        values = tuple(dict_args.values())
+        mtp_full_input_ids = dict_args.pop("mtp_full_input_ids", None)
 
         is_mtp = dict_args.pop("is_mtp", False)
         TransformerLayer._skip_mtp_probes = (
@@ -2415,6 +2415,8 @@ class HySparseTransformerLayer(TransformerLayer):
             rst["shared_key"] = shared_key
             rst["shared_block_indices"] = shared_block_indices
         rst = {**dict_args, **rst}
+        if mtp_full_input_ids is not None:
+            rst["mtp_full_input_ids"] = mtp_full_input_ids
         return rst
 
     def _forward_impl(

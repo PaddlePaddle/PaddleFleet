@@ -36,6 +36,11 @@ tests:
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_megatron.py]
     products:
       - num_gpus: 2
+  # PP2 + CP2 + Erndata magic-send: shared token embeddings must remain
+  # bit-identical through PP gradient reduction, CP scaling, and optimizer steps.
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_magic_cp_weight_sync.py]
+    products:
+      - num_gpus: 4
   # PP>1 + separate_mtp_headloss + megatron: GPTMTPLMHead stash + Main/MTP
   # LanguageLoss megatron label roll end-to-end (PP=4, VPP=1, TP=1, dense).
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_megatron_separate_headloss.py]
