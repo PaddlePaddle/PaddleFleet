@@ -22,6 +22,7 @@ import os
 from functools import partial
 from typing import TYPE_CHECKING
 
+# import nvtx
 import paddle
 import paddle.nn.functional as F
 from paddle import framework, nn
@@ -1573,6 +1574,7 @@ class TopKRouter(StandardMoERouter):
         self.layer_number = layer_number
         self._setup_hash_layer(layer_number, is_mtp_layer=is_mtp_layer)
 
+    # @nvtx.annotate(message="moe/gate_compute", color="yellow")
     def forward(self, input, input_ids=None, origin_input_ids=None):
         if len(input.shape) == 3:
             if not self.sequence_parallel:

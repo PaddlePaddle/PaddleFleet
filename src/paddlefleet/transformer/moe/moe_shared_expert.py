@@ -15,6 +15,7 @@
 
 from copy import deepcopy
 
+import nvtx
 import paddle
 import paddle.nn.functional as F
 
@@ -102,6 +103,7 @@ class StandardMLPSharedExpert(MLP):
             paddle.to_tensor(list(range(half, width)), dtype="int64"),
         ]
 
+    @nvtx.annotate(message="moe/shared_expert", color="red")
     def forward(
         self,
         hidden_states: paddle.Tensor,

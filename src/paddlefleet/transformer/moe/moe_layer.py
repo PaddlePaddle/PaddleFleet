@@ -1147,16 +1147,41 @@ class MoELayer(nn.Layer):
 
         Needs ``moe_allgather_gate_overlap``, EP>1 and the 'allgather'
         dispatcher, whose ``dispatch_preprocess`` is what consumes the handle.
-        'ringmoe' deliberately does not prefetch: the only thing it could hide
-        behind the gate is round 0's intra-node AllGather, and issuing that on
-        the comm stream ahead of time cost more in contention with the
-        inter-node shift than the gate was worth. Only the tokens can be
-        prefetched; the routing idx/weight AllGathers need the gate output.
+        'ringmoe' historically did not prefetch, since the only thing it can hide
+        behind the gate is round 0's intra-node AllGather and, before zero-SM,
+        issuing that early cost more in SM/comm contention than the gate was
+        worth. With the zero-SM (SM-free) intra AllGather that objection is gone,
+        so a ringmoe branch -- gated on the SAME ``moe_allgather_gate_overlap``
+        config flag as the allgather path -- now pre-issues round 0's token gather
+        here via ``pre_gate_token_ag``. Only the tokens can be prefetched; the
+        routing idx/weight AllGathers need the gate output.
 
         For latent MoE, ``fc1_latent_proj`` is hoisted here so the AllGather runs
         in latent space; ``_project_to_latent`` reuses it via
         ``self._latent_hidden``.
         """
+        if (
+            self.expert_model_parallel_size > 1
+            and self.moe_token_dispatcher_type == "ringmoe"
+            and self.moe_allgather_gate_overlap
+        ):
+            # RingMoE gate-overlap: hoist round 0's intra token AllGather onto the
+            # comm stream ahead of the gate. Mirrors the allgather branch below
+            # (reuse the latent projection via self._latent_hidden), but the
+            # handle is consumed as round 0's prefetch in _RingRoundsFold. Gated
+            # on the dispatcher flag so nothing changes when the opt-in is off.
+            if self.use_latent_moe:
+                self._latent_hidden = deferrable_linear_bare(
+                    self.config,
+                    "moe_latent_proj",
+                    self.fc1_latent_proj,
+                    hidden_states,
+                )
+                self.token_dispatcher.pre_gate_token_ag(self._latent_hidden)
+            else:
+                self._latent_hidden = None
+                self.token_dispatcher.pre_gate_token_ag(hidden_states)
+            return
         if not (
             self.expert_model_parallel_size > 1
             and self.moe_allgather_gate_overlap
