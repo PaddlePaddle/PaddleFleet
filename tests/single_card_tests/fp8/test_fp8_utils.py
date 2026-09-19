@@ -266,6 +266,90 @@ class TestIsFp8TensorCoverage(unittest.TestCase):
         self.assertFalse(is_fp8_tensor((t, t, t)))
 
 
+class TestIsFp8TensorTypeAndDtypeContract(unittest.TestCase):
+    """Behavioral gaps in is_fp8_tensor not covered above.
+
+    Pins the exact type/dtype contract: the container must be a `tuple`
+    of length 2, the first element must be float8_e4m3fn, and the scale
+    dtype must be exactly one of {float32, int32}. Expected results are
+    hand-derived by reading fp8/utils.py::is_fp8_tensor, not by invoking
+    the function to compute its own expected value.
+    """
+
+    def test_list_of_two_returns_false(self):
+        """A 2-element list is not a tuple -> the isinstance guard rejects it.
+
+        A list is the most likely near-miss for a tuple. is_fp8_tensor
+        short-circuits at `isinstance(x, tuple)`, so even structurally
+        plausible content in a list must return False. This is distinct
+        from the string/int/None cases already covered.
+        """
+        # float32 tensors only: exercises the isinstance branch on CPU,
+        # never reaching any fp8 dtype check.
+        t = paddle.zeros([2, 2], dtype="float32")
+        scale = paddle.ones([1], dtype="float32")
+        self.assertFalse(is_fp8_tensor([t, scale]))
+
+    def test_empty_tuple_returns_false(self):
+        """An empty tuple has len 0 -> rejected by the len(x) != 2 guard."""
+        self.assertFalse(is_fp8_tensor(()))
+
+    def test_non_fp8_tensor_dtype_returns_false(self):
+        """A valid 2-tuple whose tensor is float32 (not fp8) returns False.
+
+        The existing suite only feeds fp8 tensors as the first element, so
+        the tensor-dtype half of the final boolean is never exercised with
+        a non-fp8 tensor. Here `tensor.dtype != float8_e5m2` passes the
+        assertion, then `tensor.dtype == float8_e4m3fn` is False, so the
+        whole predicate is False regardless of the (valid) float32 scale.
+        CPU-observable: no fp8 cast required.
+        """
+        tensor = paddle.zeros([2, 3], dtype="float32")
+        scale = paddle.ones([1], dtype="float32")
+        self.assertFalse(is_fp8_tensor((tensor, scale)))
+
+    def test_bfloat16_tensor_returns_false(self):
+        """A bfloat16 first element (not fp8, not e5m2) returns False.
+
+        bfloat16 is the dominant compute dtype in this codebase and a
+        plausible mistaken first element. It passes the e5m2 assertion but
+        fails the `== float8_e4m3fn` check. CPU-observable.
+        """
+        tensor = paddle.zeros([2, 3], dtype="bfloat16")
+        scale = paddle.ones([1], dtype="float32")
+        self.assertFalse(is_fp8_tensor((tensor, scale)))
+
+    @_REQUIRE_GPU
+    def test_int64_scale_rejected(self):
+        """int64 scale is rejected: accepted integer scale is int32 only.
+
+        Complements test_int32_scale_accepted. The membership check is
+        `scale.dtype in (float32, int32)`; int64 is not a member, so an
+        otherwise-valid fp8 tensor with an int64 scale must return False.
+        This pins that UE8M0 packing specifically uses int32, not any
+        integer width.
+        """
+        fp8_t = paddle.randn([4, 4], dtype="float32").astype(
+            paddle.float8_e4m3fn
+        )
+        scale = paddle.ones([1], dtype=paddle.int64)
+        self.assertFalse(is_fp8_tensor((fp8_t, scale)))
+
+    @_REQUIRE_GPU
+    def test_bfloat16_scale_rejected(self):
+        """bfloat16 scale is rejected (only float32/int32 accepted).
+
+        Complements the existing float16-scale rejection with a distinct
+        dtype code. An fp8 tensor paired with a bfloat16 scale must return
+        False because bfloat16 is not in {float32, int32}.
+        """
+        fp8_t = paddle.randn([4, 4], dtype="float32").astype(
+            paddle.float8_e4m3fn
+        )
+        scale = paddle.ones([1], dtype="bfloat16")
+        self.assertFalse(is_fp8_tensor((fp8_t, scale)))
+
+
 # ============================================================================
 # Tests for transformer_layer.py (use_fp8, fp8_quant_weight, clear_fp8_quant_weight)
 # ============================================================================
