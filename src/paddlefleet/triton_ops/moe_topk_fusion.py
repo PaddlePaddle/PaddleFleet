@@ -529,7 +529,7 @@ def _bitwise_or(a, b):
 # [BLOCK_M, BLOCK_K, BLOCK_N] = [64, 16, 128] fp32 intermediate (`matches`).
 # That is 4 KB per thread, i.e. ~1024 registers where the hardware has 255, so
 # ptxas spills it to local memory -- and local memory is DRAM. Measured with
-# ncu on B30Z at tokens 8192 / experts 512 / topk 10:
+# ncu at tokens 8192 / experts 512 / topk 10:
 #   local-memory traffic 899 MB load + 908 MB store per launch,
 #   DRAM 1.49 GB per launch against 18.1 MB of semantically necessary bytes
 #   (82x), 387 us per launch.
