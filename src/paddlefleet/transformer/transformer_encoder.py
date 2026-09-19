@@ -167,11 +167,31 @@ class TransformerEncoder(PipelineLayer):
 
     def get_encoder_layer_desc_list(self, layers, spec, name_prefix):
         i = 0
+        empty_index = 0
+
+        def next_empty_layer_name():
+            """Name for the next EmptyLayer, advancing the right counter.
+
+            With ``aoa_modular`` empty layers live in their own
+            ``empty_layers.<i>`` namespace and do not consume a ``layers.<i>``
+            slot, so transformer layers start at ``layers.0``. Otherwise both
+            kinds share the ``i`` counter. Kept identical to the language
+            tower's rule in ``GPTModel.get_layer_desc_list`` so the two towers
+            never name layers differently.
+            """
+            nonlocal i, empty_index
+            if getattr(getattr(self, "config", None), "aoa_modular", False):
+                name = f"{name_prefix}.empty_layers.{empty_index}"
+            else:
+                name = f"{name_prefix}.layers.{i}"
+                i += 1
+            empty_index += 1
+            return name
+
         for head_empty_layer in spec.head_empty_layers:
             self.add_sequential_layer(
-                layers, LayerDesc(head_empty_layer), f"{name_prefix}.layers.{i}"
+                layers, LayerDesc(head_empty_layer), next_empty_layer_name()
             )
-            i += 1
         for transformer_layer_spec in spec.transformer_layers:
             self.add_sequential_layer(
                 layers,
@@ -181,9 +201,8 @@ class TransformerEncoder(PipelineLayer):
             i += 1
         for tail_empty_layer in spec.tail_empty_layers:
             self.add_sequential_layer(
-                layers, LayerDesc(tail_empty_layer), f"{name_prefix}.layers.{i}"
+                layers, LayerDesc(tail_empty_layer), next_empty_layer_name()
             )
-            i += 1
 
     def overlapped_forward_backward(
         self,
