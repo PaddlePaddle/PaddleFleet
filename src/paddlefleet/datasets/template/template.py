@@ -690,6 +690,10 @@ def get_template_and_fix_tokenizer(dataset_config) -> "Template":
 
         template = TEMPLATES[dataset_config["template"]]
 
+    template = deepcopy(template)
+    if dataset_config.get("enable_thinking") is not None:
+        template.enable_thinking = dataset_config["enable_thinking"]
+
     if dataset_config["tool_format"] is not None:
         default_slots = (
             ["{{content}}"]
@@ -1165,6 +1169,25 @@ register_template(
     template_class=GLM5ReasoningTemplate,
 )
 
+# GLM-5.2 emits a complete empty thought pair, unlike the GLM-5/4.7 closing-tag-only contract.
+register_template(
+    name="glm5_2",
+    format_user=StringFormatter(slots=["<|user|>{{content}}<|assistant|>"]),
+    format_assistant=StringFormatter(slots=["{{content}}"]),
+    format_system=StringFormatter(slots=["[gMASK]<sop><|system|>{{content}}"]),
+    format_function=FunctionFormatter(
+        slots=["{{content}}"], tool_format="glm_moe_dsa"
+    ),
+    format_observation=StringFormatter(
+        slots=["<|observation|>{{content}}<|assistant|>"]
+    ),
+    format_tools=ToolFormatter(tool_format="glm_moe_dsa"),
+    format_prefix=EmptyFormatter(slots=["[gMASK]<sop>"]),
+    suffix=["<|user|>"],
+    thought_words=("<think>", "</think>"),
+    template_class=ReasoningTemplate,
+)
+
 
 # copied from glm4 template
 register_template(
@@ -1408,7 +1431,9 @@ register_template(
             "{{content}}<|close|>response<|sep|><|close|>message<|sep|><|end_of_msg|>"
         ]
     ),
-    mm_plugin=get_mm_plugin(name="kimi_k3", image_token="<|media_pad|>"),
+    mm_plugin=get_mm_plugin(
+        name="kimi_k3", image_token="<|media_pad|>", expand_mm_tokens=False
+    ),
 )
 
 register_template(

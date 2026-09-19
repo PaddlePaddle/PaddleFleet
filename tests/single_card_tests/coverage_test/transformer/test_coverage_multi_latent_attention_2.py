@@ -47,6 +47,7 @@ class TestMLASelfAttentionBackwardDW(unittest.TestCase):
     def _make_mla_self_attn(self, q_lora_rank=None):
         """Create a MLASelfAttention with mocked internals."""
         config = MagicMock()
+        config.use_accuracy_compatible = False
         config.head_dim = 16
         config.num_attention_heads = 4
         config.num_key_value_heads = 4
@@ -248,6 +249,7 @@ class TestRecomputeQKVUpProjAndRope(unittest.TestCase):
             MLASelfAttention._is_cudagraph_active, layer
         )
         layer.config = _types.SimpleNamespace(
+            use_accuracy_compatible=False,
             q_lora_rank=None,
             hidden_size=hidden,
             kv_lora_rank=kv_lora,
@@ -539,6 +541,7 @@ class TestRecomputeQKVSelectiveBranches(unittest.TestCase):
 
         config = _types.SimpleNamespace(
             recompute_granularity=recompute_granularity,
+            use_accuracy_compatible=False,
             recompute_modules=recompute_modules,
             recompute_num_layers=recompute_num_layers,
             recompute_method=recompute_method,
@@ -851,6 +854,7 @@ class TestForwardDiscardOutputAndRegisterRecompute(unittest.TestCase):
         # Dense MLA: forward materializes the per-head K/V.
         instance.mqa_latent = False
         instance.config = MagicMock()
+        instance.config.use_accuracy_compatible = False
         instance.config.sequence_parallel = False
         instance.gated_attention = False
         instance.use_vha_postmix = False

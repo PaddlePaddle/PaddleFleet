@@ -978,6 +978,7 @@ class TestGemma4MoELayerForward(unittest.TestCase):
         layer = Gemma4MoELayer.__new__(Gemma4MoELayer)
         nn.Layer.__init__(layer)
 
+        layer.config = SimpleNamespace(use_accuracy_compatible=False)
         layer.expert_model_parallel_size = 1
         layer.sequence_parallel = False
         layer.layer_number = 0

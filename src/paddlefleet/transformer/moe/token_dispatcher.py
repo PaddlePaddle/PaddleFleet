@@ -50,7 +50,6 @@ from .moe_utils import (
     reduce_scatter_group,
     sort_chunks_by_idxs,
     unpermute,
-    use_accuracy_compatible_kernel,
 )
 from .moonep import (
     MoonEPWeightBridge,
@@ -1389,7 +1388,7 @@ class AllToAllTokenDispatcher(nn.Layer):
             self.routing_map,
             use_accuracy_compatible=self.use_accuracy_compatible,
         )
-        if use_accuracy_compatible_kernel():
+        if self.use_accuracy_compatible:
             num_routed_tokens = int(tokens_per_expert.sum().item())
             routing_map = self.routing_map.cast(paddle.bool).T.contiguous()
             flat_sorted = paddle.argsort(
@@ -1424,7 +1423,7 @@ class AllToAllTokenDispatcher(nn.Layer):
             in_split_sizes=self.input_split_sizes,
             group=self.moe_group,
         )
-        if use_accuracy_compatible_kernel():
+        if self.use_accuracy_compatible:
             # Match Megatron's all-to-all backward numerics by routing probs through a
             # 2D [tokens, 1] tensor, like hidden-state dispatch.
             global_input_probs_2d = _AllToAll.apply(
@@ -1462,7 +1461,7 @@ class AllToAllTokenDispatcher(nn.Layer):
                 self.num_global_tokens_per_local_expert.ravel(),
                 self.sort_input_by_local_experts,
             )
-            if use_accuracy_compatible_kernel():
+            if self.use_accuracy_compatible:
                 self.global_input_probs = _sort_chunks_like_tokens(
                     self.global_input_probs,
                     split_sizes_list,
@@ -1512,7 +1511,7 @@ class AllToAllTokenDispatcher(nn.Layer):
             permutated_local_input_tokens,
             self.reversed_local_input_permutation_mapping,
             restore_shape=self.reshaped_input_shape,
-            probs=(None if use_accuracy_compatible_kernel() else self.probs),
+            probs=(None if self.use_accuracy_compatible else self.probs),
             routing_map=self.routing_map,
             use_accuracy_compatible=self.use_accuracy_compatible,
         )

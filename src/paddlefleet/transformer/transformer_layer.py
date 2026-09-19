@@ -55,7 +55,7 @@ from paddlefleet.transformer.mlp import MLP
 from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.multi_latent_attention import MultiLatentAttention
 from paddlefleet.transformer.utils import profile
-from paddlefleet.utils import log_single_rank
+from paddlefleet.utils import get_pg_size, log_single_rank
 
 if is_deep_ep_available():
     if paddle.is_compiled_with_cuda():
@@ -1346,7 +1346,10 @@ class TransformerLayer(nn.Layer):
                 # hidden_states = attn_out
             else:
                 hidden_states = self.self_attn_bda(
-                    self.training, self.config.bias_dropout_fusion
+                    self.training,
+                    self.config.bias_dropout_fusion,
+                    use_accuracy_compatible=self.config.use_accuracy_compatible,
+                    tensor_parallel_size=get_pg_size(self.pg_collection.tp),
                 )(
                     attention_output_with_bias,
                     residual,
@@ -1377,7 +1380,10 @@ class TransformerLayer(nn.Layer):
         with paddle.enable_grad():
             residual.stop_gradient = False
             hidden_states = self.cross_attn_bda(
-                self.training, self.config.bias_dropout_fusion
+                self.training,
+                self.config.bias_dropout_fusion,
+                use_accuracy_compatible=self.config.use_accuracy_compatible,
+                tensor_parallel_size=get_pg_size(self.pg_collection.tp),
             )(attention_output_with_bias, residual, self.hidden_dropout_prob)
 
         # manually mark tensors that requires gradient in the first forward
@@ -1494,6 +1500,8 @@ class TransformerLayer(nn.Layer):
                 hidden_states = self.mlp_bda(
                     self.training,
                     self.config.bias_dropout_fusion,
+                    use_accuracy_compatible=self.config.use_accuracy_compatible,
+                    tensor_parallel_size=get_pg_size(self.pg_collection.tp),
                 )(
                     mlp_output_with_bias,
                     residual,
@@ -2030,7 +2038,10 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         with paddle.enable_grad():
             residual.stop_gradient = False
             hidden_states = self.cross_attn_bda(
-                self.training, self.config.bias_dropout_fusion
+                self.training,
+                self.config.bias_dropout_fusion,
+                use_accuracy_compatible=self.config.use_accuracy_compatible,
+                tensor_parallel_size=get_pg_size(self.pg_collection.tp),
             )(attention_output_with_bias, residual, self.hidden_dropout_prob)
 
         if is_first_fwd:
@@ -2580,7 +2591,10 @@ class TransformerLayerWithOverlap(TransformerLayer):
         mlp_output, residual = args
         with paddle.enable_grad():
             output = self.mlp_bda(
-                self.training, self.config.bias_dropout_fusion
+                self.training,
+                self.config.bias_dropout_fusion,
+                use_accuracy_compatible=self.config.use_accuracy_compatible,
+                tensor_parallel_size=get_pg_size(self.pg_collection.tp),
             )((mlp_output, None), residual, self.hidden_dropout_prob)
         if is_first_fwd:
             output.stop_gradient = False

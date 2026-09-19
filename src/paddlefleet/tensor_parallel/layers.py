@@ -26,6 +26,9 @@ import paddle
 import paddle.distributed as dist
 import paddle.nn.functional as F
 from paddle.distributed.communication.reduce_scatter import _reduce_scatter_base
+from paddle.distributed.fleet.utils.sequence_parallel_utils import (
+    mark_as_sequence_parallel_parameter,
+)
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
@@ -36,9 +39,6 @@ from ..parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-
-# from ..dist_checkpointing.mapping import ShardedStateDict
-# from ..transformer.utils import make_sharded_tensors_for_checkpoint
 from ..utils import (
     divide,
     get_pg_rank,
@@ -273,6 +273,49 @@ def _initialize_affine_weight_cpu(
     return None
 
 
+class _EmbedFp32MainGrad(paddle.autograd.Function):
+    """UAC embedding lookup whose wgrad lands in fp32 main_grad.
+
+    Forward is `weight[ids]` (bf16 activation unchanged). Backward deposits
+    via a nested IndexingBackward on an fp32 view of the accumulator.
+    Returns None for weight.grad so MixPrecision cannot add_(bf16).
+    """
+
+    @staticmethod
+    def forward(ctx, weight, ids):
+        ctx.save_for_backward(ids)
+        ctx.weight_ref = weight
+        return weight[ids]
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        ids = ctx.saved_tensor()[0]
+        weight = ctx.weight_ref
+        # Function.backward disables grads. Re-enable so W[ids] is
+        # IndexingBackward on a clone, not MixPrecision bf16 merge.
+        prev = paddle.is_grad_enabled()
+        paddle.set_grad_enabled(True)
+        try:
+            w = weight.detach().clone()
+            w.stop_gradient = False
+            looked = w[ids]
+            (gw,) = paddle.autograd.grad(
+                looked, w, grad_output, allow_unused=True
+            )
+        finally:
+            paddle.set_grad_enabled(prev)
+        if gw is None:
+            return None, None
+        fp = gw.cast(paddle.float32)
+        if hasattr(weight, "main_grad") and weight.main_grad is not None:
+            weight.main_grad.add_(fp)
+        else:
+            weight.main_grad = fp
+        if hasattr(weight, "grad_added_to_main_grad"):
+            weight.grad_added_to_main_grad = True
+        return None, None
+
+
 class _HFEmbeddingGather(paddle.autograd.PyLayer):
     """Embedding lookup whose weight gradient matches torch's scatter order.
 
@@ -443,7 +486,12 @@ class VocabParallelEmbedding(paddle.nn.Layer):
                 self.weight, masked_input
             ).reshape([*masked_input.shape, self.embedding_dim])
         elif self.deterministic_mode or self.use_accuracy_compatible:
-            output_parallel = self.weight[masked_input]
+            if self.use_accuracy_compatible:
+                output_parallel = _EmbedFp32MainGrad.apply(
+                    self.weight, masked_input
+                )
+            else:
+                output_parallel = self.weight[masked_input]
         else:
             # F.embedding currently has a non-deterministic backward function
             output_parallel = F.embedding(masked_input, self.weight)
@@ -458,6 +506,11 @@ class VocabParallelEmbedding(paddle.nn.Layer):
             output = reduce_scatter_to_sequence_parallel_region(
                 output_parallel, group=self.tp_group
             )
+        elif (
+            getattr(self.config, "use_accuracy_compatible", False)
+            and get_pg_size(self.tp_group) <= 1
+        ):
+            output = output_parallel
         else:
             # Reduce across all the model parallel GPUs.
             output = reduce_from_tensor_model_parallel_region(
@@ -774,20 +827,15 @@ def general_gemm(
         )
 
     else:
-        # Standard bf16/fp16 path
-        if bias is not None:
-            if use_accuracy_compatible:
-                weight_t = b.T.contiguous()
-                output = paddle.matmul(a, weight_t, transpose_y=True)
-                output = output + bias
-            else:
-                output = paddle.nn.functional.linear(a, b, bias)
+        # Standard bf16/fp16 path.
+        # Keep biased alignment projections' separate GEMM and bias rounding.
+        if use_accuracy_compatible and bias is not None:
+            output = paddle.matmul(a, b.T.contiguous(), transpose_y=True)
+            output = output + bias
+        elif use_accuracy_compatible or bias is not None:
+            output = F.linear(a, b, bias)
         else:
-            if use_accuracy_compatible:
-                weight_t = b.T.contiguous()
-                output = paddle.matmul(a, weight_t, transpose_y=True)
-            else:
-                output = paddle.matmul(a, b)
+            output = paddle.matmul(a, b)
         return output, None
 
 
@@ -1068,6 +1116,22 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                         )
                     grad_input = grad_input.reshape(
                         [*leading, grad_input.shape[-1]]
+                    )
+                elif ctx.use_accuracy_compatible:
+                    # IEEE e9ac / E-240: weight is [in, out]; materialize
+                    # W^T and run an NN GEMM so cuBLAS matches torch.linear
+                    # dgrad. Routing this through UAC general_gemm used to
+                    # emit matmul(go, W, transpose_y=True), which disagrees
+                    # at the live shared-down shape.
+                    original_shape = grad_output.shape
+                    flat_grad_output = grad_output.reshape(
+                        [-1, original_shape[-1]]
+                    )
+                    flat_grad_input = paddle.matmul(
+                        flat_grad_output, weight.t().contiguous()
+                    )
+                    grad_input = flat_grad_input.reshape(
+                        [*list(original_shape[:-1]), weight.shape[0]]
                     )
                 else:
                     weight_bwd = weight.t()
@@ -1410,6 +1474,25 @@ def linear_with_grad_accumulation_and_async_allreduce(
 
     tp_group = get_tensor_model_parallel_group_if_none(tp_group)
 
+    if (
+        use_accuracy_compatible
+        and get_pg_size(tp_group) <= 1
+        and not sequence_parallel
+        and not allreduce_dgrad
+        and not fp8
+        and not fp8_wgrad
+        and not gradient_accumulation_fusion
+        and grad_output_buffer is None
+        and not getattr(weight, "is_expert_param", False)
+    ):
+        # The TP1 reference uses native linear backward, without the
+        # communication PyLayer's reshaped dgrad and deferred wgrad graph.
+        # Expert parameters retain the PyLayer's FP32 main_grad accumulation.
+        output, _ = general_gemm(
+            input, weight, bias=bias, use_accuracy_compatible=True
+        )
+        return output
+
     args = [
         input,
         weight,
@@ -1586,6 +1669,7 @@ class Linear(paddle.nn.Layer):
             self.weight.allreduce = True
             self.weight.is_distributed = False
             self.weight.is_expert_param = self.is_expert
+            self._mark_replicated_grad_needs_tp_reduction(self.weight)
         else:
             self.weight = None
 
@@ -1601,6 +1685,7 @@ class Linear(paddle.nn.Layer):
                     self.bias.zero_()
             self.bias.allreduce = True
             self.bias.is_distributed = False
+            self._mark_replicated_grad_needs_tp_reduction(self.bias)
         else:
             self.bias = None
 
@@ -1641,6 +1726,25 @@ class Linear(paddle.nn.Layer):
             # Color the bf16 weight so ``clear_param_storage("linear_fp8")``
             # can free it after pre-quant.
             _maybe_color_linear_fp8_weight(self)
+
+    def _mark_replicated_grad_needs_tp_reduction(self, parameter) -> None:
+        """Mark a replicated parameter so its gradient is reduced over the TP group.
+
+        Under sequence parallelism each rank sees s/TP of the sequence, so the
+        local wgrad is a partial sum. Linear.forward never gathers, so nothing
+        else adds that term. SPGradSyncCallback all-reduces marked parameters
+        over the model-parallel group (E-205). Gated on use_accuracy_compatible
+        so the default Linear path is unchanged.
+        """
+        if self.is_expert:
+            return
+        if not getattr(self.config, "use_accuracy_compatible", False):
+            return
+        if not getattr(self.config, "sequence_parallel", False):
+            return
+        if getattr(self.config, "tensor_model_parallel_size", 1) <= 1:
+            return
+        mark_as_sequence_parallel_parameter(parameter)
 
     def fp8_quant_weight(self, batch_mode=False, quant_transpose=True):
         """Pre-quantize this Linear's weight and cache on ``self.weight``.
@@ -2191,6 +2295,10 @@ class ColumnParallelLinear(paddle.nn.Layer):
             or self.disable_grad_reduce
             or (self.tp_group is not None and self.tp_group.world_size == -1)
             or self.tp_group is None
+            or (
+                getattr(self.config, "use_accuracy_compatible", False)
+                and get_pg_size(self.tp_group) <= 1
+            )
         ):
             input_parallel = input_
         else:
@@ -2271,7 +2379,11 @@ class ColumnParallelLinear(paddle.nn.Layer):
         if gather_output:
             # All-gather across the partitions.
             output = gather_from_tensor_model_parallel_region(
-                output_parallel, group=self.tp_group
+                output_parallel,
+                group=self.tp_group,
+                use_accuracy_compatible=getattr(
+                    self.config, "use_accuracy_compatible", False
+                ),
             )
         else:
             output = output_parallel
@@ -2560,6 +2672,7 @@ class RowParallelLinear(paddle.nn.Layer):
                         self.config.cpu_offloading_activations
                     )
 
+        # Keep the custom dgrad path before the sequence-parallel reduction.
         output_parallel = self._forward_impl(
             input=input_parallel,
             weight=self.weight,
@@ -2589,6 +2702,11 @@ class RowParallelLinear(paddle.nn.Layer):
             output_ = reduce_scatter_to_sequence_parallel_region(
                 output_parallel, group=self.tp_group
             )
+        elif (
+            getattr(self.config, "use_accuracy_compatible", False)
+            and get_pg_size(self.tp_group) <= 1
+        ):
+            output_ = output_parallel
         else:
             output_ = reduce_from_tensor_model_parallel_region(
                 output_parallel, group=self.tp_group, is_expert=self.is_expert
