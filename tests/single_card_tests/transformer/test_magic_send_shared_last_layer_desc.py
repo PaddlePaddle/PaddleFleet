@@ -74,11 +74,13 @@ def _make_config(**overrides):
 def _layer_descs(num_mtp=1, **config_overrides):
     """Call get_layer_desc_list without building a real GPTModel.
 
-    The method only touches ``self.config`` and ``self.add_sequential_layer``,
-    so a stub carrying those two is enough and keeps this a single-card test.
+    The method only touches ``self.config``, ``self._model_name_prefix`` and
+    ``self.add_sequential_layer``, so a stub carrying those three is enough and
+    keeps this a single-card test.
     """
     fake_self = SimpleNamespace(
         config=_make_config(**config_overrides),
+        _model_name_prefix=lambda: "model",
         add_sequential_layer=lambda layers, desc, name_prefix="": layers.append(
             {"layer": desc, "name_prefix": name_prefix}
         ),
