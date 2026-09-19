@@ -156,12 +156,12 @@ class DocMaskMetaRegistry:
     def _warm(
         meta: CSADocMaskMetadata, ratio: int, seqlen: int, window_size: int
     ) -> None:
-        """Force the lazy index tables so the layers only read them.
+        """Force the lazy derived tables so the layers only read them.
 
-        ``build`` leaves the index tables lazy, so without this the first layer of
-        the step would still compute them inside the forward -- on the pipeline's
-        critical path, which is what this whole switch exists to avoid. The
-        getters cache on their own argument, so warming is idempotent.
+        ``build`` leaves them lazy, so without this the first layer of the step
+        would still compute them inside the forward -- on the pipeline's critical
+        path, which is what this whole switch exists to avoid. The getters cache
+        on their own argument, so warming is idempotent.
 
         Only the tables whose size is linear in ``seqlen`` are warmed. The
         ``O(seqlen^2)`` full-causal table the ``ratio == -1`` layers read is left
@@ -170,7 +170,10 @@ class DocMaskMetaRegistry:
         gain. Sharing still dedups it across layers, it just is not hoisted out
         of the forward.
         """
-        from paddlefleet.transformer.csa_attention import CSA_MQA_RATIO
+        from paddlefleet.transformer.csa_attention import (
+            CSA_HCA_MIN_RATIO,
+            CSA_MQA_RATIO,
+        )
 
         if ratio == CSA_MQA_RATIO:
             # Full-causal MQA reads only that O(seqlen^2) table, so there is
@@ -182,6 +185,17 @@ class DocMaskMetaRegistry:
             # offset is sq (no CP) or sq_global (CP) -- both are the seqlen the
             # slot was built with.
             meta.get_compress_topk_idxs(seqlen)
+        if ratio >= CSA_HCA_MIN_RATIO:
+            # The ``csa_hca_use_flashmask`` bounds, if that switch is on. Warmed
+            # unconditionally rather than threading the flag down from the
+            # trainer: these are two ``[*, 2]`` tables, i.e. ``O(seqlen)`` and
+            # orders of magnitude smaller than the ``O(seqlen x window_size)``
+            # and ``O(seqlen x n_compressed)`` index tables above, so building
+            # them when the switch is off is not worth a signature change. Only
+            # the CP-independent halves: a rank's own table needs
+            # ``seqlen_local`` and ``position_offset``, which ``preload`` does
+            # not see, and deriving it from these is a slice and a clip.
+            meta.get_hca_global_row_bounds(window_size)
 
     def preload_mqa(
         self,
