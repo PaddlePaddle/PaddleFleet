@@ -343,8 +343,20 @@ class GPTLMHead(ColumnParallelLinear):
                 self.config.num_nextn_predict_layers + 1,
             )
             logits = [self._forward(tensor_list[0])]
+            # MTP depth sampling: depths >= K were skipped by the MTP layers this
+            # step, so their slice of hidden_states carries no MTP computation. Skip
+            # the vocab projection for them and keep a None placeholder so the list
+            # length stays num_nextn_predict_layers + 1 and the loss can detect the
+            # skipped depths. K flows in dict_args (recompute / pp / grad-accum safe).
+            sampled_depth = dict_args.get(
+                "mtp_sampled_depth", self.config.num_nextn_predict_layers
+            )
+            sampling_on = bool(getattr(self.config, "mtp_depth_sampling", None))
             for i in range(self.config.num_nextn_predict_layers):
-                logits.append(self._forward(tensor_list[i + 1]))
+                if sampling_on and i >= sampled_depth:
+                    logits.append(None)
+                else:
+                    logits.append(self._forward(tensor_list[i + 1]))
             return logits
         else:
             return self._forward(hidden_states)
