@@ -52,7 +52,7 @@ from .precision import plan_precision_switches
 from .report import ChangeLog, format_header, format_report
 from .sharding_shrink import plan_sharding_shrink_switches
 from .strategies import BATCH_STRATEGIES
-from .topology import TopologyValidator
+from .topology import TopologyValidator, min_valid_cards
 from .utils import PARALLEL_FIELDS, extract_parallel_params
 
 #: Fields whose value the adapter derives itself. A ``--set`` pin on any of
@@ -98,9 +98,13 @@ class ConfigAdapter:
         scale_seq_length=None,
     ):
         self.options = options
+        # ``None`` means "derive the scale from the converted parallelism"
+        # (see :meth:`_resolve_target_cards`); both are pinned during adapt().
         self.target_nodes = target_nodes
         self.cards_per_node = cards_per_node
-        self.target_cards = target_nodes * cards_per_node
+        self.target_cards = (
+            target_nodes * cards_per_node if target_nodes is not None else None
+        )
         # --set values, split by how the target document was decided:
         # explicitly prefixed (yaml:/json:) versus auto-detected.
         self.yaml_overrides = dict(yaml_overrides or {})
@@ -114,7 +118,13 @@ class ConfigAdapter:
             int(scale_seq_length) if scale_seq_length is not None else None
         )
 
-        self.scale_tag = f"{self.target_cards}cards"
+        # Derived once the target card count is known (``_resolve_target_cards``
+        # for a derived scale, right here when --target-nodes pinned it).
+        self.scale_tag = (
+            f"{self.target_cards}cards"
+            if self.target_cards is not None
+            else None
+        )
         self.yaml_writer = YamlWriter()
         self.json_writer = JsonWriter()
         # Original bytes of an in-place rewritten model_config.json, used to
@@ -212,6 +222,21 @@ class ConfigAdapter:
         if err:
             return False, f"{input_path.name}: {err}"
 
+        # The source scale is needed twice: to derive a target scale when
+        # --target-nodes was omitted, and to rescale the batch fields later.
+        # Infer it once, here, before either consumer runs.
+        orig_cards, scale_warning, err = self._infer_orig_cards(
+            scale_source, dims_before
+        )
+        if err:
+            return False, f"{input_path.name}: {err}"
+
+        derive_warning, err = self._resolve_target_cards(
+            dims_before, dims_planned, orig_cards
+        )
+        if err:
+            return False, f"{input_path.name}: {err}"
+
         plan, err = plan_parallelism(
             config,
             dims_planned,
@@ -263,13 +288,13 @@ class ConfigAdapter:
         if not ok:
             return False, f"{input_path.name}: {message}"
 
-        orig_cards, scale_warning, err = self._infer_orig_cards(
-            scale_source, dims_before
-        )
-        if err:
-            return False, f"{input_path.name}: {err}"
+        # orig_cards / scale_warning were inferred before planning, because a
+        # derived target scale needs them; the warnings are surfaced here so
+        # the report keeps its original ordering.
         if scale_warning:
             plan.warnings.append(scale_warning)
+        if derive_warning:
+            plan.warnings.append(derive_warning)
 
         err = self._scale_batch_and_sharding(
             config, log, scale_source, orig_cards, dims_before, dims_after
@@ -571,6 +596,70 @@ class ConfigAdapter:
             "指向本次生成的 model_config 目录（源 model_config.json 不修改）",
         )
         return str(target_json), None
+
+    def _resolve_target_cards(self, dims_before, dims_planned, orig_cards):
+        """Pin ``target_cards`` / ``target_nodes`` / ``scale_tag``.
+
+        A no-op when ``--target-nodes`` was given.  Otherwise the scale is
+        derived from the conversion itself: ``--target-nodes`` being optional
+        would be circular if a shrink search were involved, but without a
+        target there *is* no search -- ``dims_planned`` is fully determined by
+        the explicit inputs (``--scale-seq-length`` / ``--set`` / the precision
+        switches), so the card count can simply be read off it afterwards::
+
+            min0   = min_valid_cards(dims_before)   # also the legal-count unit
+            slack  = orig_cards // min0             # how far above the floor
+            cards  = min_valid_cards(dims_planned) * slack
+
+        Keeping ``slack`` preserves the source job's headroom above the
+        topological floor.  An empty conversion has
+        ``dims_planned == dims_before``, so the formula collapses to
+        ``min0 * (orig_cards // min0) == orig_cards``: output scale == input
+        scale, by construction rather than by a special case.
+
+        Returns ``(warning, error)``.
+        """
+        if self.target_cards is not None:
+            return None, None
+
+        tp, pp, ep, cp, sep = dims_planned
+        min_planned = min_valid_cards(
+            tp, pp, ep, cp, sep, cards_per_node=self.cards_per_node
+        )
+        if min_planned is None:
+            return None, (
+                f"无法推导所需机器规模：并行度组合 TP={tp} PP={pp} EP={ep} "
+                f"CP={cp} SEP={sep} 违反了与卡数无关的约束"
+                f"（C3：EP % (TP×SEP) != 0；C5：SEP>1 且 CP>1），"
+                f"任何机器规模都跑不起来。请先修改 TP/SEP/EP/CP 的组合"
+            )
+
+        warning = None
+        slack = 1
+        min_before = min_valid_cards(
+            *dims_before, cards_per_node=self.cards_per_node
+        )
+        if not orig_cards:
+            warning = (
+                f"未指定 --target-nodes 且推不出源作业卡数，按拓扑下限"
+                f"（{min_planned} 卡）推导所需规模；若源作业实际跑在下限的整数"
+                f"倍上，请改用 --target-nodes 显式指定"
+            )
+        elif min_before is None or orig_cards % min_before != 0:
+            warning = (
+                f"未指定 --target-nodes 且源卡数 {orig_cards} 不是源并行度"
+                f"拓扑下限 {min_before} 的整数倍（源 YAML 本身就不自洽），"
+                f"按下限的 1 倍推导所需规模"
+            )
+        else:
+            slack = orig_cards // min_before
+
+        self.target_cards = min_planned * slack
+        # min_valid_cards always carries cards_per_node as an LCM factor, so
+        # the result is a whole number of nodes.
+        self.target_nodes = self.target_cards // self.cards_per_node
+        self.scale_tag = f"{self.target_cards}cards"
+        return warning, None
 
     @staticmethod
     def _infer_orig_cards(scale_source, dims_before):
@@ -906,6 +995,12 @@ class ConfigAdapter:
             "orig_scale_label": orig_scale_label,
             "target_cards": self.target_cards,
             "target_nodes": self.target_nodes,
+            # The generated YAML pins sharding_parallel_size and the batch
+            # fields to target_cards, so the artifact runs on exactly that many
+            # cards -- not on "at least" that many. Named separately from
+            # target_* so the report can state it as a requirement.
+            "required_cards": self.target_cards,
+            "required_nodes": self.target_nodes,
             "cards_per_node": self.cards_per_node,
             "dims_line": dims_line,
             "sharding_line": sharding_line,
@@ -914,40 +1009,3 @@ class ConfigAdapter:
             "skipped_switches": skipped_switches,
             "warnings": plan.warnings,
         }
-
-
-def inspect_config(input_path, cards_per_node=8, max_nodes=16):
-    """Read-only inspection used when no target scale is given.
-
-    Returns ``(orig_cards, orig_nodes, valid_nodes)``: the inferred source
-    scale plus every node count within ``max_nodes`` whose GPU count satisfies
-    C1..C4 for the source parallelism.  Nothing is written.
-    """
-    config = YamlWriter().load(input_path)
-    if config is None:
-        raise ValueError(f"配置文件为空：{input_path}")
-
-    dims = extract_parallel_params(config)
-    scale_source = {
-        key: config.get(key)
-        for key in (
-            "sharding_parallel_size",
-            "data_parallel_size",
-            "global_batch_size",
-            "per_device_train_batch_size",
-            "gradient_accumulation_steps",
-        )
-    }
-    orig_cards, _warning, _err = ConfigAdapter._infer_orig_cards(
-        scale_source, dims
-    )
-    orig_nodes = (
-        orig_cards // cards_per_node
-        if orig_cards and orig_cards % cards_per_node == 0
-        else None
-    )
-
-    validator = TopologyValidator(cards_per_node, cards_per_node)
-    cards = validator.suggest_valid_cards(*dims, max_nodes=max_nodes)
-    valid_nodes = sorted({max(c // cards_per_node, 1) for c in cards})
-    return orig_cards, orig_nodes, valid_nodes

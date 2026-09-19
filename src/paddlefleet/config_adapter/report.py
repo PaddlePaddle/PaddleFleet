@@ -24,8 +24,8 @@ shape::
     DELETE field=<key> old=<value>
 
 with the reason on the following indented line, and the machine-readable
-summary (``ORIGINAL_CARDS=`` / ``TARGET_CARDS=`` / ``OUTPUT=``) at the very
-end for upstream scripts.
+summary (``ORIGINAL_CARDS=`` / ``TARGET_CARDS=`` / ``REQUIRED_NODES=`` /
+``OUTPUT=``) at the very end for upstream scripts.
 
 The reasons are full sentences and the values can be whole per-layer lists, so
 everything is wrapped to :data:`LINE_WIDTH` with a hanging indent and the
@@ -209,6 +209,11 @@ def format_report(info, changelog):
             f"{info['orig_scale_label']} -> {info['target_nodes']} 节点 / "
             f"{info['target_cards']} 卡（每节点 {info['cards_per_node']} 卡）",
         ),
+        (
+            "所需规模  ",
+            f"{info['required_nodes']} 节点 / {info['required_cards']} 卡"
+            f"（sharding 与 batch 已钉死在此规模）",
+        ),
         ("并行度    ", info["dims_line"]),
         ("sharding  ", info["sharding_line"]),
         ("缩容方案  ", info["plan_note"]),
@@ -239,6 +244,8 @@ def format_report(info, changelog):
     lines.append(f"ORIGINAL_CARDS={info['orig_cards_label']}")
     lines.append(f"ORIGINAL_NODES={info['orig_nodes_label']}")
     lines.append(f"TARGET_CARDS={info['target_cards']}")
+    lines.append(f"REQUIRED_NODES={info['required_nodes']}")
+    lines.append(f"REQUIRED_CARDS={info['required_cards']}")
     lines.append(f"OUTPUT={info['output']}")
     if info.get("model_config_output"):
         lines.append(f"MODEL_CONFIG_OUTPUT={info['model_config_output']}")
