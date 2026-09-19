@@ -61,6 +61,9 @@ from paddlefleet.train_infer_consistent_ops.slice_util import (
 from paddlefleet.transformer.attention import Attention
 from paddlefleet.transformer.dw_overlap import deferrable_linear
 from paddlefleet.transformer.enums import AttnMaskType
+from paddlefleet.transformer.paddle_norm import (
+    mark_as_sequence_parallel_parameter,
+)
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.utils import get_pg_rank, get_pg_size
 
@@ -1426,6 +1429,13 @@ class MLASelfAttention(MultiLatentAttention):
                 skip_weight_param_allocation=False,
                 tp_group=pg_collection.tp,
             )
+            # Replicated (non-parallel) weight: under sequence parallelism each
+            # rank only sees a shard of the sequence, so its gradient is partial
+            # and must be all-reduced across the TP group.
+            if getattr(self.config, "sequence_parallel", False):
+                weight = getattr(self.q_a_proj, "weight", None)
+                if weight is not None:
+                    mark_as_sequence_parallel_parameter(weight)
 
             self.q_b_proj = build_spec_layer(
                 sublayers_spec.q_b_proj,
@@ -1454,6 +1464,10 @@ class MLASelfAttention(MultiLatentAttention):
             skip_weight_param_allocation=False,
             tp_group=pg_collection.tp,
         )
+        if getattr(self.config, "sequence_parallel", False):
+            weight = getattr(self.kv_a_proj_with_mqa, "weight", None)
+            if weight is not None:
+                mark_as_sequence_parallel_parameter(weight)
 
         # In split mode ``k_b_proj`` / ``v_b_proj`` below *replace* this
         # projection: together they hold exactly its elements, nothing in the
