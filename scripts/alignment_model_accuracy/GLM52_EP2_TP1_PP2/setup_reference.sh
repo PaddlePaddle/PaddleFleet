@@ -22,6 +22,14 @@ uv pip install --no-config --python "${TORCH_PYTHON}" \
     "torch==2.12.1+cu129"
 UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --no-config --python "${TORCH_PYTHON}" \
     --no-deps --require-hashes --reinstall -r "${SCRIPT_DIR}/reference_wheels.txt"
+# megatron_core is served from a BOS artifact that is periodically repacked
+# (metadata-only), so its sha256 is a moving target that breaks --require-hashes
+# (observed e908877f -> 2bf28206 -> 7a6132f0 within ~40min, aborting GLM52 setup
+# before training). Pin the exact version+build by filename and install it
+# without a hash so repacks do not fail setup; ms_swift stays hash-pinned above.
+UV_SKIP_WHEEL_FILENAME_CHECK=1 uv pip install --no-config --python "${TORCH_PYTHON}" \
+    --no-deps --reinstall \
+    "https://paddle-github-action.bj.bcebos.com/whl/megatron_core-0.19.0+4045637-cp312-cp312-linux_x86_64.whl"
 uv pip install --no-config --python "${TORCH_PYTHON}" \
     "torch==2.12.1+cu129" "ms-swift[megatron]==4.5.0.dev0" "mcore-bridge==1.6.1" \
     "transformers==5.12.1" "pynvml==13.0.1" \
