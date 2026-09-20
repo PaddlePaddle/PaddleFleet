@@ -542,7 +542,9 @@ class HyperConnectionModule(nn.Layer):
             # drifts before the first HC BDA.
             x_2d = x.reshape([-1, nC])
             weight_out_in = weight.t().contiguous()
-            proj_2d = paddle.matmul(x_2d, weight_out_in, transpose_y=True)
+            proj_2d = paddle.matmul(
+                x_2d, weight_out_in.astype(x_2d.dtype), transpose_y=True
+            )
             proj = proj_2d.reshape([*x.shape[:-1], weight.shape[-1]])
         else:
             ori_dtype = x.dtype
