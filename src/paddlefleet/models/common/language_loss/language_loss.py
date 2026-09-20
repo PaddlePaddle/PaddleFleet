@@ -67,6 +67,64 @@ def pop_per_token_local_count():
     return n
 
 
+# Display-only per-token accounting (print path only; detached, never touches
+# grads). The returned loss is a raw per-token SUM, so tr_loss is token-scale and
+# cannot be printed directly. forward() -- where the lm and mtp heads are already
+# separate -- stashes, per microbatch, each head's post-CP-gather (masked-loss-sum,
+# non-pad token count) here. The trainer prints two calibers:
+#   * old caliber (comparable to baseline): `loss` = per-microbatch per-token mean
+#     of the combined loss (lm [+ scaled mtp iff add_loss puts mtp in the value]),
+#     equal-weight averaged over microbatches; `mtp_i_loss` via mtp_loss_tracker.
+#   * new per-token caliber: `per_token_loss` = Σ lm_sum / Σ lm_tok and
+#     `mtp_per_token_loss` = Σ mtp_sum / Σ mtp_tok. The trainer all-reduces
+#     numerator and denominator separately over the whole world, so the cp/tp/pp
+#     duplication of each sequence cancels in the ratio (also makes the printed
+#     value correct on every rank, unlike a last-stage-only value).
+# Splitting lm vs mtp is done in forward(), so forward_impl/_forward keep their
+# original two-arg signatures and every caller (eval_acc monkey-patch, subbatch,
+# ...) is unaffected.
+_PER_TOKEN_DISP = {
+    "lm_sum": 0.0,
+    "lm_tok": 0,
+    "mtp_sum": 0.0,
+    "mtp_tok": 0,
+    "loss_mean_sum": 0.0,
+    "loss_mean_cnt": 0,
+}
+
+
+def accumulate_per_token_disp_lm(loss_sum, tok):
+    """Add this microbatch's lm (masked-loss-sum, token-count) for new-caliber print."""
+    _PER_TOKEN_DISP["lm_sum"] += float(loss_sum)
+    _PER_TOKEN_DISP["lm_tok"] += int(tok)
+
+
+def accumulate_per_token_disp_mtp(loss_sum, tok):
+    """Add this microbatch's aggregated mtp (masked-loss-sum, token-count)."""
+    _PER_TOKEN_DISP["mtp_sum"] += float(loss_sum)
+    _PER_TOKEN_DISP["mtp_tok"] += int(tok)
+
+
+def accumulate_per_token_disp_loss_mean(mean_value):
+    """Add this microbatch's combined per-token mean (old caliber, comparable)."""
+    _PER_TOKEN_DISP["loss_mean_sum"] += float(mean_value)
+    _PER_TOKEN_DISP["loss_mean_cnt"] += 1
+
+
+def pop_per_token_display():
+    """Return the step's display stats (dict of python scalars) and reset."""
+    d = dict(_PER_TOKEN_DISP)
+    _PER_TOKEN_DISP.update(
+        lm_sum=0.0,
+        lm_tok=0,
+        mtp_sum=0.0,
+        mtp_tok=0,
+        loss_mean_sum=0.0,
+        loss_mean_cnt=0,
+    )
+    return d
+
+
 def _loss_md5_enabled() -> bool:
     return os.environ.get("LOG_LOSS_MD5", "0") == "1"
 
@@ -325,10 +383,9 @@ class LanguageLoss(FleetLayer):
             # Per-token loss: count THIS shard's non-padded tokens before the CP
             # gather (labels here are the local shard), so the trainer's sharding
             # all-reduce sums each token exactly once. See loss_grad_normalization.md 6.1.
+            # Grad-path count spans every head; display stats are recorded in forward().
             if getattr(self.config, "calculate_per_token_loss", False):
-                accumulate_per_token_local_count(
-                    (labels != self.ignored_index).sum()
-                )
+                accumulate_per_token_local_count((labels != self.ignored_index).sum())
 
             if get_context_parallel_world_size() > 1:
                 loss = ContextParallelGatherOp.apply(
@@ -404,6 +461,7 @@ class LanguageLoss(FleetLayer):
         # Per-token loss: count this shard's non-padded tokens before the CP gather
         # (labels here are the local shard) so the trainer's sharding all-reduce
         # sums each token exactly once. See loss_grad_normalization.md 6.1.
+        # Grad-path count spans every head; display stats are recorded in forward().
         if getattr(self.config, "calculate_per_token_loss", False):
             accumulate_per_token_local_count((labels != self.ignored_index).sum())
 
@@ -673,6 +731,15 @@ class LanguageLoss(FleetLayer):
 
             mtp_loss = []
             mtp_logits = logits[1:]
+            # Display-only (calculate_per_token_loss): full non-pad token counts per
+            # head, used by _record_per_token_display below. Detached; never affects
+            # grads. lm_labels / labels_cur_depth here are the full (un-scattered)
+            # slices, so these match the post-CP-gather loss sums forward_impl returns.
+            _per_token_disp = getattr(self.config, "calculate_per_token_loss", False)
+            _lm_tok = (
+                (lm_labels != self.ignored_index).sum() if _per_token_disp else None
+            )
+            _mtp_tok_list = []
 
             if not self.config.mtp_distillation_loss:
                 if self.config.train_mtp_only:
@@ -743,6 +810,10 @@ class LanguageLoss(FleetLayer):
                         labels_cur_depth = labels_ori[
                             :, (depth + 1) : (depth + 1 + seq_length)
                         ]
+                    if _per_token_disp:
+                        _mtp_tok_list.append(
+                            (labels_cur_depth != self.ignored_index).sum()
+                        )
                     if self.config.gpt_model_use_experimental_version:
                         # Align with EB: compute per-token loss matrix and reduce
                         # with global sum/count instead of going through forward_impl
@@ -1042,9 +1113,63 @@ class LanguageLoss(FleetLayer):
                     / len(mtp_loss),
                 )
 
+            # Per-token display stats (print only; detached). Split lm vs mtp here so
+            # forward_impl keeps its original signature. Skipped for the distillation
+            # path (mtp_loss there is already a mean, not a raw sum).
+            if _per_token_disp and not self.config.mtp_distillation_loss:
+                self._record_per_token_display(
+                    lm_loss, _lm_tok, mtp_loss, _mtp_tok_list
+                )
+
             return loss
         else:
-            return self._forward(logits, labels)
+            loss = self._forward(logits, labels)
+            if getattr(self.config, "calculate_per_token_loss", False):
+                self._record_per_token_display(
+                    loss, (labels != self.ignored_index).sum(), [], []
+                )
+            return loss
+
+    def _record_per_token_display(self, lm_loss, lm_tok, mtp_loss, mtp_tok_list):
+        """Stash detached display stats for calculate_per_token_loss (print only).
+
+        lm_loss / mtp_loss[i] are the raw post-CP-gather masked-loss SUMS returned by
+        forward_impl; lm_tok / mtp_tok_list[i] are the matching full non-pad token
+        counts. Records the new per-token numerators/denominators (lm + aggregated
+        mtp) and the old-caliber combined ``loss`` per-token mean (mirrors add_loss /
+        add_mtp_loss). All values are detached and never affect gradients.
+        """
+        # lm head (lm_loss is 0.0 when train_mtp_only).
+        lm_sum = 0.0 if isinstance(lm_loss, float) else float(lm_loss.detach())
+        lm_tok_f = float(lm_tok)
+        accumulate_per_token_disp_lm(lm_sum, lm_tok_f)
+        lm_mean = lm_sum / max(lm_tok_f, 1.0)
+
+        # mtp heads, aggregated over depths.
+        mtp_sum = 0.0
+        mtp_tok = 0.0
+        mtp_means = []
+        for ml, mt in zip(mtp_loss, mtp_tok_list):
+            s = float(ml.detach())
+            t = float(mt)
+            mtp_sum += s
+            mtp_tok += t
+            mtp_means.append(s / max(t, 1.0))
+        if mtp_loss:
+            accumulate_per_token_disp_mtp(mtp_sum, mtp_tok)
+
+        # Old-caliber combined `loss`: value includes mtp only when add_loss puts it
+        # in the value (add_mtp_loss and not the accuracy-compatible kernel).
+        combined = lm_mean
+        if (
+            mtp_means
+            and self.config.add_mtp_loss
+            and not _use_accuracy_compatible_kernel()
+        ):
+            combined = lm_mean + self.config.mtp_loss_scaling_factor * (
+                sum(mtp_means) / len(mtp_means)
+            )
+        accumulate_per_token_disp_loss_mean(combined)
 
     def build_schedule_node(self):
         return ScheduleNode(self.forward, name="LanguageLoss")
