@@ -16,6 +16,7 @@
 import functools
 import hashlib
 import os
+from contextlib import contextmanager
 from contextvars import ContextVar
 
 import numpy as np
@@ -72,6 +73,45 @@ def pop_per_token_local_count():
     n = _PER_TOKEN_LOCAL_COUNT[0]
     _PER_TOKEN_LOCAL_COUNT[0] = 0
     return n
+
+
+# T_global must count the MAIN lm head's tokens ONLY (E180). Megatron's
+# finalize_model_grads divides every gradient by total_num_tokens taken from the
+# main loss alone; the MTP heads compensate inside themselves
+# (Megatron-LM/.../multi_token_prediction.py:1781/1851-1852 `original/rolled`) and
+# never enter that divisor. forward_impl is shared by the main head and by every
+# MTP depth, so the MTP calls are wrapped in suppress_per_token_count() to keep
+# their (rolled) label counts out of the step total. Without this T_global grows to
+# ~(1+mtp_num_layers)x and the main-loss gradient is diluted by the same factor --
+# and that happens even when add_mtp_loss=False, where MTP contributes no gradient
+# at all to compensate. Context-local (not a forward() argument) so no call-site
+# signature changes.
+_PT_SUPPRESS_COUNT = ContextVar("pt_suppress_count", default=False)
+
+
+@contextmanager
+def suppress_per_token_count():
+    """Keep the enclosed loss call out of the per-token T_global accounting."""
+    token = _PT_SUPPRESS_COUNT.set(True)
+    try:
+        yield
+    finally:
+        _PT_SUPPRESS_COUNT.reset(token)
+
+
+def _per_token_count_enabled(config):
+    """True when this loss call should add its tokens to the step's T_global.
+
+    Three conditions: per-token mode is on, this is not a recompute replay (a
+    replay re-runs forward_impl in backward and would double the count), and the
+    caller has not marked this call as an MTP head. Training-vs-eval is not checked
+    here -- forward_impl asserts up front that per-token never runs in eval mode.
+    """
+    return (
+        getattr(config, "calculate_per_token_loss", False)
+        and not _token_loss_replaying.get()
+        and not _PT_SUPPRESS_COUNT.get()
+    )
 
 
 # Display-only per-token accounting (print path only; detached, never touches
@@ -355,7 +395,88 @@ class LanguageLoss(FleetLayer):
         )
         self.use_subbatch = self.loss_subbatch_sequence_length > 0
 
+        # Per-token loss + MTP: only the use_erndata=True (megatron-style, rolled
+        # label) head layout has its per-head token normalisation worked out (E183).
+        # Every other combination below would be *silently* mis-scaled, so reject the
+        # config up front rather than train on a wrong objective. All of these are
+        # fixed at construction time, and the guard is scoped to
+        # calculate_per_token_loss so the legacy mean-of-means path is unaffected.
+        mtp_enabled = (
+            getattr(config, "num_nextn_predict_layers", 0)
+            and config.num_nextn_predict_layers > 0
+            and not getattr(config, "mtp_load_weight_only", False)
+        )
+        if getattr(config, "calculate_per_token_loss", False) and mtp_enabled:
+            cp_size = (
+                get_context_parallel_world_size()
+                if paddle.distributed.is_initialized()
+                else 1
+            )
+            # separate_mtp_headloss=True routes MTP through MTPLanguageLoss +
+            # MainLanguageLoss instead of the fused forward() above. That pair derives
+            # each head's token count from its own label slice/roll (both the erndata
+            # roll and the L+K slice) and never reaches forward()'s
+            # experimental-version MEAN branch, so the two guards that exist purely
+            # because of the fused layout are scoped out of it (E194).
+            separate = getattr(config, "separate_mtp_headloss", False)
+            assert separate or getattr(config, "use_erndata", False), (
+                "calculate_per_token_loss + MTP currently requires use_erndata=True "
+                "(or separate_mtp_headloss=True). In the fused path the L+K-slicing "
+                "layout leaves labels_ori as [B, L+K], so the main head's token count "
+                "and the per-depth counts are not derivable there (E183)."
+            )
+            assert not config.train_mtp_only, (
+                "calculate_per_token_loss + train_mtp_only is unsupported: the main "
+                "head is skipped, so T_global would be 0 and the trainer's clamp "
+                "would divide every gradient by 1 instead of the token count (E182)."
+            )
+            assert not config.mtp_distillation_loss, (
+                "calculate_per_token_loss + mtp_distillation_loss is unsupported: "
+                "that path returns a per-token MEAN per head and never enters the "
+                "raw-sum caliber the trainer's 1/T_global assumes (E178)."
+            )
+            assert separate or not (
+                config.gpt_model_use_experimental_version
+                and config.fused_linear_ce_loss_chunk <= 0
+            ), (
+                "calculate_per_token_loss + gpt_model_use_experimental_version with "
+                "fused_linear_ce_loss_chunk<=0 is unsupported: that branch reduces "
+                "the MTP head to a CP-LOCAL mean, which the per-head renormalisation "
+                "would scale cp_size times too large (E181)."
+            )
+            assert not (
+                config.experimental_dataflow
+                and cp_size > 1
+                and getattr(config, "use_erndata", False)
+            ), (
+                "calculate_per_token_loss + use_erndata + experimental_dataflow with "
+                "CP>1 is unsupported: per-depth labels are already CP-extracted when "
+                "they are rolled, and _forward would scatter them a second time."
+            )
+
     def forward_impl(self, logits: Tensor | tuple, labels: Tensor) -> Tensor:
+        # Per-token loss is a TRAINING-ONLY caliber, so refuse any eval / no-grad
+        # forward instead of returning a silently wrong number (E188). Two independent
+        # reasons, either of which is enough:
+        #   * the returned loss is a raw per-token SUM -- the trainer applies the single
+        #     1/T_global to the GRADIENTS at the accumulation boundary, never to this
+        #     scalar. erniebot's EvalPPLMixin.evaluate re-weights it as a per-group MEAN
+        #     NLL (`nll_sum += loss * pending_tokens`), so eval loss / PPL would be wrong
+        #     by ~the microbatch token count (usually overflowing).
+        #   * the token counters below are popped only at the training accumulation
+        #     boundary, so whatever an eval pass accumulated would leak into the NEXT
+        #     train step's T_global and dilute that step's gradients.
+        # Re-enabling eval means normalising the returned loss by its own valid-token
+        # count at the eval call site, and saving/restoring the counters around it.
+        assert self.training or not getattr(
+            self.config, "calculate_per_token_loss", False
+        ), (
+            "eval / non-training forward is unsupported under "
+            "calculate_per_token_loss: the returned loss is a raw per-token SUM (eval "
+            "PPL would be wrong by ~the microbatch token count) and the token counters "
+            "have no pop on that path (they would dilute the next train step). Disable "
+            "eval for per-token runs."
+        )
         # Fused linear + cross-entropy path: `logits` is actually a
         # (hidden_states, weight, bias) tuple emitted by GPTLMHead when
         # config.fused_linear_ce_loss_chunk > 0. Dispatch to the fused kernel
@@ -403,8 +524,10 @@ class LanguageLoss(FleetLayer):
             # Per-token loss: count THIS shard's non-padded tokens before the CP
             # gather (labels here are the local shard), so the trainer's sharding
             # all-reduce sums each token exactly once. See loss_grad_normalization.md 6.1.
-            # Grad-path count spans every head; display stats are recorded in forward().
-            if getattr(self.config, "calculate_per_token_loss", False):
+            # MAIN head only -- MTP calls arrive under suppress_per_token_count(), and
+            # recompute replays are skipped, so neither inflates T_global (E180).
+            # Display stats are recorded separately in forward().
+            if _per_token_count_enabled(self.config):
                 accumulate_per_token_local_count((labels != self.ignored_index).sum())
 
             if get_context_parallel_world_size() > 1:
@@ -484,8 +607,10 @@ class LanguageLoss(FleetLayer):
         # Per-token loss: count this shard's non-padded tokens before the CP gather
         # (labels here are the local shard) so the trainer's sharding all-reduce
         # sums each token exactly once. See loss_grad_normalization.md 6.1.
-        # Grad-path count spans every head; display stats are recorded in forward().
-        if getattr(self.config, "calculate_per_token_loss", False):
+        # MAIN head only -- MTP calls arrive under suppress_per_token_count(), and
+        # recompute replays are skipped, so neither inflates T_global (E180).
+        # Display stats are recorded separately in forward().
+        if _per_token_count_enabled(self.config):
             accumulate_per_token_local_count((labels != self.ignored_index).sum())
 
         if get_context_parallel_world_size() > 1:
@@ -666,7 +791,7 @@ class LanguageLoss(FleetLayer):
                 forward_active = False
         return self.forward_impl(logits, labels)
 
-    def _megatron_label_for_depth(self, labels_ori, depth):
+    def _megatron_label_for_depth(self, labels_ori, depth, extract_cp=True):
         """Megatron-style per-MTP-depth labels.
 
         Under use_erndata=True labels arrive length-L (no L+K append).
@@ -679,6 +804,10 @@ class LanguageLoss(FleetLayer):
 
         Mirrors the megatron branch of ``LanguageLoss.forward`` so the separate
         Main/MTP head-loss path stays consistent with the fused path.
+
+        ``extract_cp=False`` returns the FULL (un-scattered) labels; used by
+        MainLanguageLoss to count per-head tokens in the same domain as the
+        post-CP-gather loss sums.
         """
         if depth < 0:
             _lbl = labels_ori
@@ -705,7 +834,7 @@ class LanguageLoss(FleetLayer):
                     cu_seqlens_q=_cu,
                     pad_value=self.ignored_index,
                 )
-        if get_context_parallel_world_size() > 1:
+        if extract_cp and get_context_parallel_world_size() > 1:
             from paddlefleet.parallel_state import get_context_parallel_rank
             from paddlefleet.transformer.multi_token_prediction import (
                 extract_local_cp_chunks,
@@ -788,6 +917,17 @@ class LanguageLoss(FleetLayer):
             )
             _mtp_tok_list = []
 
+            # Full-sequence (pre-CP-extract) non-pad counts per head, used by the
+            # per-token renormalisation below. forward_impl returns the CP-GATHERED loss
+            # sum, so the matching denominator must be the full count, not this rank's
+            # shard; and being identical on every CP rank it makes all ranks scale a
+            # head the same way. Separate from _lm_tok / _mtp_tok_list, which stay on the
+            # display path. Supported-config guards live in __init__ (E183).
+            _lm_tok_full = (
+                (labels_ori != self.ignored_index).sum() if _per_token_disp else None
+            )
+            _mtp_tok_full_list = []
+
             if not self.config.mtp_distillation_loss:
                 if self.config.train_mtp_only:
                     lm_loss = 0.0
@@ -843,6 +983,12 @@ class LanguageLoss(FleetLayer):
                                 "rank. It should be set by GPTEmbedding.forward "
                                 "(PP=1) or GPTLMHead.forward (last PP stage)."
                             )
+                        if _per_token_disp:
+                            # Count before the CP extract: matches the CP-gathered sum
+                            # forward_impl returns, and is equal on every CP rank (E183).
+                            _mtp_tok_full_list.append(
+                                (_lbl != self.ignored_index).sum()
+                            )
                         if _cp_size_for_extract > 1:
                             # Match local logits shape by extracting this
                             # rank's CP slice.
@@ -882,10 +1028,13 @@ class LanguageLoss(FleetLayer):
                             )
 
                         if self.config.fused_linear_ce_loss_chunk > 0:
-                            loss_matrix_cur_depth = self._forward(
-                                logits_cur_depth,
-                                labels_cur_depth,
-                            )
+                            # MTP head: its rolled labels must not enter T_global,
+                            # which counts the main head only (E180).
+                            with suppress_per_token_count():
+                                loss_matrix_cur_depth = self._forward(
+                                    logits_cur_depth,
+                                    labels_cur_depth,
+                                )
                         else:
                             if (
                                 self.config.gpt_model_use_experimental_version
@@ -954,10 +1103,13 @@ class LanguageLoss(FleetLayer):
                         else:
                             loss_cur_depth = loss_matrix_cur_depth.sum() * 0.0
                     else:
-                        loss_cur_depth = self._forward(
-                            logits_cur_depth,
-                            labels_cur_depth,
-                        )
+                        # MTP head: its rolled labels must not enter T_global, which
+                        # counts the main head only (E180).
+                        with suppress_per_token_count():
+                            loss_cur_depth = self._forward(
+                                logits_cur_depth,
+                                labels_cur_depth,
+                            )
                     mtp_loss.append(loss_cur_depth)
             else:
                 lm_loss = self._forward(logits[0], lm_labels)
@@ -1142,6 +1294,27 @@ class LanguageLoss(FleetLayer):
                     else:
                         return main_loss + loss - loss.detach()
 
+            def renorm_mtp_head(idx, mtp_l):
+                """Per-token: rescale MTP head `idx` from its own token count to the
+                main head's -- the mirror of Megatron process_mtp_loss's
+                `original_num_tokens / num_tokens`
+                (Megatron-LM/megatron/core/transformer/multi_token_prediction.py:1851).
+                The head returns a raw per-token SUM here, and the trainer applies a
+                single 1/T_global (main-head tokens only) at the step boundary, so this
+                factor is what leaves mtp_loss_scaling_factor/D x (per-token mean over
+                THIS head's own valid tokens) -- the Megatron objective. Counts are
+                full-sequence and equal on every CP rank. Returns mtp_l untouched
+                outside per-token so the legacy path stays byte-identical.
+                """
+                if not _per_token_disp:
+                    return mtp_l
+                return mtp_l * (
+                    _lm_tok_full.astype("float32")
+                    / paddle.clip(
+                        _mtp_tok_full_list[idx].astype("float32"), min=1.0
+                    )
+                )
+
             if self.config.gpt_model_use_experimental_version:
                 # Align with EB: accumulate inside loop to match float32
                 # arithmetic order: loss += scaling * loss_i / N
@@ -1152,28 +1325,31 @@ class LanguageLoss(FleetLayer):
                     # behavior (loss + val - val.detach() for gradient-only flow).
                     if self.config.add_mtp_loss:
                         num_mtp = len(mtp_loss)
-                        for mtp_l in mtp_loss:
+                        for i, mtp_l in enumerate(mtp_loss):
                             mtp_val = (
                                 self.config.mtp_loss_scaling_factor
-                                * mtp_l
+                                * renorm_mtp_head(i, mtp_l)
                                 / num_mtp
                             )
                             loss = add_loss(loss, mtp_val)
                 else:
                     # Original behavior: always use add_loss
                     num_mtp = len(mtp_loss)
-                    for mtp_l in mtp_loss:
+                    for i, mtp_l in enumerate(mtp_loss):
                         loss = add_loss(
                             loss,
                             self.config.mtp_loss_scaling_factor
-                            * mtp_l
+                            * renorm_mtp_head(i, mtp_l)
                             / num_mtp,
                         )
             else:
                 loss = add_loss(
                     lm_loss,
                     self.config.mtp_loss_scaling_factor
-                    * sum(mtp_loss)
+                    * sum(
+                        renorm_mtp_head(i, mtp_l)
+                        for i, mtp_l in enumerate(mtp_loss)
+                    )
                     / len(mtp_loss),
                 )
             # per-token keeps the raw SUM (trainer divides by the global token count once
@@ -1286,24 +1462,64 @@ class MainLanguageLoss(LanguageLoss):
         else:
             lm_loss = self._forward(logits, lm_labels)
 
+        # Per-token: mtp_loss[i] is a raw masked SUM over head i's OWN rolled-label
+        # token set, while the trainer applies a single 1/T_global counted from the
+        # MAIN head only (E180). Recompute each head's FULL (pre-CP-scatter) non-pad
+        # token count from the same slice/roll MTPLanguageLoss used, so it lives in the
+        # same domain as the post-CP-gather sums. Used twice below: to recover the
+        # baseline-comparable per-token mean for the mtp_i_loss display, and to
+        # renormalise the head inside the loss value itself.
+        per_token = getattr(self.config, "calculate_per_token_loss", False)
+        mtp_tok_full_list = []
+        lm_tok_full = None
+        if per_token:
+            if getattr(self.config, "use_erndata", False):
+                lm_tok_full = (labels_ori != self.ignored_index).sum()
+            else:
+                lm_tok_full = (
+                    labels[:, : -self.config.num_nextn_predict_layers]
+                    != self.ignored_index
+                ).sum()
+            for depth in range(len(mtp_loss)):
+                if getattr(self.config, "use_erndata", False):
+                    labels_full_depth = self._megatron_label_for_depth(
+                        labels_ori, depth, extract_cp=False
+                    )
+                else:
+                    labels_full_depth = labels_ori[
+                        :, (depth + 1) : (depth + 1 + seq_length)
+                    ]
+                mtp_tok_full_list.append(
+                    (labels_full_depth != self.ignored_index).sum()
+                )
+
         # Store detached MTP loss tensors into class-level tracker and global_training_logs.
         # Use .detach() instead of .item() to avoid GPU synchronization on every
         # micro-batch. The trainer will call .item() only at logging steps.
-        for i, loss_val in enumerate(mtp_loss):
-            MainLanguageLoss.mtp_loss_tracker[f"mtp_{i + 1}_loss"] = (
-                loss_val.detach()
-            )
+        if per_token:
+            mtp_disp_vals = [
+                mtp_loss[i].detach()
+                / paddle.clip(
+                    mtp_tok_full_list[i].astype("float32"), min=1.0
+                )
+                for i in range(len(mtp_loss))
+            ]
+        else:
+            mtp_disp_vals = [loss_val.detach() for loss_val in mtp_loss]
+
+        for i, disp_val in enumerate(mtp_disp_vals):
+            MainLanguageLoss.mtp_loss_tracker[f"mtp_{i + 1}_loss"] = disp_val
             _print_scalar_loss_md5(
                 "MTP_LOSS_PATH_MD5",
                 f"mtp{i + 1}.final_loss",
-                loss_val,
+                mtp_loss[i],
             )
 
         # Also write to global_training_logs to read
         logs = get_global_training_logs()
         if logs is not None and hasattr(logs, "update"):
-            for i, loss_val in enumerate(mtp_loss):
-                logs.update(**{f"mtp_{i + 1}_loss": loss_val.detach()})
+            for i, disp_val in enumerate(mtp_disp_vals):
+                logs.update(**{f"mtp_{i + 1}_loss": disp_val})
 
         def add_loss(main_loss, loss):
             if _use_accuracy_compatible_kernel():
@@ -1320,10 +1536,39 @@ class MainLanguageLoss(LanguageLoss):
                 else:
                     return main_loss + loss - loss.detach()
 
+        def renorm_mtp_head(idx, mtp_l):
+            """Per-token: rescale MTP head `idx` from its own token count to the main
+            head's -- the mirror of Megatron process_mtp_loss's
+            `original_num_tokens / num_tokens`
+            (Megatron-LM/megatron/core/transformer/multi_token_prediction.py:1851).
+            Without it the trainer's single 1/T_global would normalise every MTP token
+            by the MAIN head's token count instead of its own, and the rolled labels
+            have fewer valid tokens. Identity outside per-token.
+            """
+            if not per_token:
+                return mtp_l
+            return mtp_l * (
+                lm_tok_full.astype("float32")
+                / paddle.clip(
+                    mtp_tok_full_list[idx].astype("float32"), min=1.0
+                )
+            )
+
         loss = add_loss(
             lm_loss,
-            self.config.mtp_loss_scaling_factor * sum(mtp_loss) / len(mtp_loss),
+            self.config.mtp_loss_scaling_factor
+            * sum(
+                renorm_mtp_head(i, mtp_l) for i, mtp_l in enumerate(mtp_loss)
+            )
+            / len(mtp_loss),
         )
+
+        # Per-token display stats (print only; detached). Same accounting as
+        # LanguageLoss.forward, which this separate-head path bypasses.
+        if per_token:
+            self._record_per_token_display(
+                lm_loss, lm_tok_full, mtp_loss, mtp_tok_full_list
+            )
 
         return loss
 
@@ -1378,10 +1623,14 @@ class MTPLanguageLoss(LanguageLoss):
                 labels_cur_depth = labels_ori[
                     :, (depth + 1) : (depth + 1 + seq_length)
                 ]
-            loss_cur_depth = self._forward(
-                logits_cur_depth,
-                labels_cur_depth,
-            )
+            # MTP head: its rolled labels must not enter T_global, which counts the
+            # main head only (E180). Same rule as the fused LanguageLoss.forward path;
+            # this separate-MTP-head class needs it independently.
+            with suppress_per_token_count():
+                loss_cur_depth = self._forward(
+                    logits_cur_depth,
+                    labels_cur_depth,
+                )
             mtp_loss.append(loss_cur_depth)
 
         dict_args.pop("mtp_logits")

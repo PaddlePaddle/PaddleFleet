@@ -672,6 +672,13 @@ class StandardMoERouter(nn.Layer):
 
         """
         # TODO: @DrownFish19 update aux_loss for Qwen2MoE and DeepSeekV2&V3
+        assert not getattr(self.config, "calculate_per_token_loss", False), (
+            "calculate_per_token_loss currently only supports "
+            "routing_type='seq_aux_loss'. This token-level aux loss averages over "
+            "the LOCAL (CP/TP-sharded) tokens with no all-gather and no valid-token "
+            "denominator, so it has no count to lift the mean to sum scale and the "
+            "trainer's 1/T_global would silently shrink it by ~T_global."
+        )
         me = paddle.mean(gates, axis=0)
         ce = paddle.mean(mask.cast("float32"), axis=0)
         aux_loss = paddle.sum(me * ce) * float(self.num_experts)
@@ -887,6 +894,28 @@ class StandardMoERouter(nn.Layer):
                     .sum(axis=1)
                     .mean()
                 )
+        if getattr(self.config, "calculate_per_token_loss", False):
+            # Per-token loss: seq_aux_loss above is an O(1) MEAN (normalised by
+            # `denom` = valid tokens, then averaged over lines), while the trainer
+            # divides EVERY gradient by a single 1/T_global at the step boundary.
+            # Dropping a mean into that pipeline shrinks the effective
+            # router_aux_loss_coef by ~T_global, i.e. turns load balancing off. Lift
+            # it to sum scale with this microbatch's full valid-token count: summed
+            # over all microbatches and DP replicas that count IS T_global, so the
+            # single 1/T_global leaves exactly the configured coeff. This mirrors
+            # Megatron router.py's `aux_loss * aux_loss_scale_num_tokens`.
+            # The count is the full (CP/TP-gathered) one, matching all_probs above,
+            # and is identical on every CP/TP rank; the all-gather's backward is what
+            # keeps each rank contributing only its own slice's gradient, so summing
+            # over CP does not double count.
+            # NOTE: exact when batch_size == 1 (packed varlen) or when all lines hold
+            # the same number of valid tokens; with B>1 and ragged lines the
+            # line-mean x total-tokens form is an approximation of sum_b m_b * t_b.
+            if input_ids is not None:
+                per_token_total = token_count_per_line.sum()
+            else:
+                per_token_total = denom * float(batch_size)
+            seq_aux_loss = seq_aux_loss * per_token_total
         return seq_aux_loss
 
     def _cal_z_loss(
@@ -943,7 +972,20 @@ class StandardMoERouter(nn.Layer):
             l_zloss = (
                 logits.logsumexp(1).square() * loss_mask
             ).sum() / paddle.clip(denom, min=1e-6)
+            if getattr(self.config, "calculate_per_token_loss", False):
+                # Same reasoning as _cal_seq_aux_loss: lift the normalised mean back
+                # to sum scale so the trainer's single 1/T_global leaves the intended
+                # router_z_loss_coef instead of shrinking it by ~T_global. `denom` is
+                # already this microbatch's full valid-token count, and the numerator
+                # uses the LOCAL loss_mask, so each rank contributes its own slice --
+                # summing over CP reconstructs the full z-loss exactly once.
+                l_zloss = l_zloss * denom
         else:
+            assert not getattr(self.config, "calculate_per_token_loss", False), (
+                "calculate_per_token_loss + router_z_loss without input_ids is "
+                "unsupported: there is no valid-token count to lift the mean to sum "
+                "scale, so the trainer's 1/T_global would shrink z_loss by ~T_global."
+            )
             l_zloss = paddle.logsumexp(logits, axis=1).square().mean()
 
         return l_zloss
