@@ -2212,7 +2212,7 @@ class TransformerConfig(ModelParallelConfig):
                     f"{type(field_value).__name__}: {field_value!r}."
                 )
 
-        trace_layers = getattr(self, "indexcache_stall_trace_layers")
+        trace_layers = self.indexcache_stall_trace_layers
         if not isinstance(trace_layers, (list, tuple)):
             raise TypeError(
                 "indexcache_stall_trace_layers must be a list or tuple of "

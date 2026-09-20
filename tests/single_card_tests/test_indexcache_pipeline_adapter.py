@@ -355,10 +355,7 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
         released_inputs = [
             tensor
             for tensor in pipeline_inputs
-            if _get_pipeline_key(tensor)
-            in {
-                "indexcache_state 5",
-            }
+            if _get_pipeline_key(tensor) == "indexcache_state 5"
         ]
         expected_metadata = [
             (list(tensor.shape), tensor.dtype) for tensor in released_inputs

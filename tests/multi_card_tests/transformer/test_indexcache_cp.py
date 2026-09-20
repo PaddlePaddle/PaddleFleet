@@ -22,7 +22,6 @@ from paddlefleet.transformer.cp_utils import all_gather_cp
 from paddlefleet.transformer.csa_attention import CompressedSparseAttention
 from paddlefleet.transformer.indexcache_state import apply_stop_gradient_mask
 
-
 CP_SIZE = None
 CP_RANK = None
 CP_GROUP = None
