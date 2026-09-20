@@ -21,8 +21,7 @@ cd "${SCRIPT_DIR}"
 
 # 新增用例列表: "用例名 paddle脚本 torch脚本"
 CASES=(
-    "MinimaxV2.5_EP2 ./MinimaxV2.5_EP2/run_paddle_minimax.sh ./MinimaxV2.5_EP2/run_torch_minimax.sh"
-    # "GLM45Air_EP2 ./GLM45Air_EP2/run_paddle_glm45.sh ./GLM45Air_EP2/run_torch_glm45.sh"
+    "DSV4_8_Cards ./DSV4_8_Cards/run_fleet_10step.sh ./DSV4_8_Cards/run_megatron_10step.sh"
     # "transformer ./paddlepaddle_transformer/run_paddle_minimax.sh ./pytorch_transformer/run_torch_minimax.sh"
 )
 
@@ -30,23 +29,30 @@ failed_cases=()
 
 run_case() {
     local name="$1" paddle_script="$2" torch_script="$3"
+    # 训练脚本把日志写在各自所在目录下的 logs/{paddle,torch}
+    local log_root="./DSV4_8_Cards/logs"
 
     echo "==================== [${name}] 开始 ===================="
-    rm -rf logs
-    bash "${paddle_script}"
-    bash "${torch_script}"
+    rm -rf "${log_root}"
+    if ! bash "${paddle_script}" || ! bash "${torch_script}"; then
+        echo "==================== [${name}] FAIL (训练异常退出) ===================="
+        failed_cases+=("${name}")
+        return
+    fi
 
-    if python3 compare_loss.py logs/paddle logs/torch; then
+    # -m 2: yaml 的 gradient_accumulation_steps 与 megatron 的 GBS/(MBS*DP) 均为 2
+    if python3 ./DSV4_8_Cards/compare_loss.py "${log_root}/paddle" "${log_root}/torch" -m 2; then
         echo "==================== [${name}] PASS ===================="
+        rm -rf "${log_root}"
     else
         echo "==================== [${name}] FAIL ===================="
         failed_cases+=("${name}")
+        echo "日志保留在 ${log_root} 供排查"
     fi
-    rm -rf logs
 }
 
 echo "==================== 统一配置环境 ===================="
-bash setup_venvs.sh
+bash ./DSV4_8_Cards/install_envs.sh
 
 for case_line in "${CASES[@]}"; do
     run_case ${case_line}
