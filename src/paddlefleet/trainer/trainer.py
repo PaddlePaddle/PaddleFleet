@@ -32,6 +32,7 @@ import time
 import types
 from collections import OrderedDict
 from collections.abc import Mapping
+from functools import cache
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -300,6 +301,25 @@ MODEL_NAME = "model"
 OPTIMIZER_NAME = "optimizer"
 DIST_CKPT_PATH = "dist_ckpt"
 DIST_MODEL_PATH = "dist_model"
+
+
+@cache
+def _supports_load_num_workers():
+    """Whether the installed paddle's ``dist.load_state_dict`` accepts ``num_workers``.
+
+    Only paddle versions that support reading tensor payloads with multiple threads
+    expose this argument, so it has to be forwarded conditionally. A
+    ``**kwargs``-style signature (e.g. a profiling wrapper installed around the real
+    function) is treated as supported, since the argument is forwarded to the wrapped
+    callable.
+    """
+    try:
+        params = inspect.signature(dist.load_state_dict).parameters
+    except (TypeError, ValueError):
+        return False
+    if "num_workers" in params:
+        return True
+    return any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 class Trainer:
@@ -1529,6 +1549,27 @@ class Trainer:
             )
             return metadata_files[0]
 
+        # `flex_ckpt_load_num_workers` > 1 asks paddle.load to read the tensor payloads
+        # of each .distcp file with several threads. The argument is only forwarded when
+        # the installed paddle accepts it, so older paddle versions keep the serial read.
+        _load_workers = int(
+            getattr(self.args, "flex_ckpt_load_num_workers", 1) or 1
+        )
+        _load_kwargs = {}
+        if _load_workers > 1:
+            if _supports_load_num_workers():
+                _load_kwargs["num_workers"] = _load_workers
+                logger.info(
+                    "[FlexCheckpoint] loading checkpoint with paddle.load "
+                    f"num_workers={_load_workers}"
+                )
+            else:
+                logger.warning(
+                    "[FlexCheckpoint] the installed paddle's dist.load_state_dict does "
+                    "not accept num_workers, ignoring "
+                    f"flex_ckpt_load_num_workers={_load_workers}."
+                )
+
         with _sprof_span("sharded_state_dict"):
             model_sharded_state_dict = self.model.sharded_state_dict()
         master_weights_path = os.path.join(
@@ -1634,6 +1675,7 @@ class Trainer:
                 comm_method=flex_ckpt_comm_method,
                 worker_groups=worker_groups,
                 **load_transform_kwargs,
+                **_load_kwargs,
             )
             if hasattr(self.model, "_synchronize_shared_weights"):
                 self.model._synchronize_shared_weights()
@@ -1682,7 +1724,10 @@ class Trainer:
                     and self._is_fc_format_ema(ema_state_path)
                 ):
                     self._ema_reshard_result = self._load_ema_with_reshard(
-                        ema_state_path, flex_ckpt_comm_method, worker_groups
+                        ema_state_path,
+                        flex_ckpt_comm_method,
+                        worker_groups,
+                        _load_kwargs,
                     )
 
             with _sprof_span("opt_sharded_state_dict"):
@@ -1729,6 +1774,7 @@ class Trainer:
                     offload=self.args.load_via_cpu,
                     comm_method=flex_ckpt_comm_method,
                     worker_groups=worker_groups,
+                    **_load_kwargs,
                 )
 
             if not self.args.ignore_load_lr_and_optim:
@@ -1756,6 +1802,7 @@ class Trainer:
                         offload=self.args.load_via_cpu,
                         comm_method=flex_ckpt_comm_method,
                         worker_groups=worker_groups,
+                        **_load_kwargs,
                     )
                 self._load_scheduler(resume_from_checkpoint)
 
@@ -1809,6 +1856,7 @@ class Trainer:
                     offload=self.args.load_via_cpu,
                     comm_method=flex_ckpt_comm_method,
                     worker_groups=worker_groups,
+                    **_load_kwargs,
                 )
             else:
                 ema_states_path = os.path.join(
@@ -1876,6 +1924,7 @@ class Trainer:
                     offload=self.args.load_via_cpu,
                     comm_method=flex_ckpt_comm_method,
                     worker_groups=worker_groups,
+                    **_load_kwargs,
                 )
 
         if enable_bf16_opt:
@@ -2104,7 +2153,7 @@ class Trainer:
         return any(f.endswith(".metadata") for f in os.listdir(ema_state_path))
 
     def _load_ema_with_reshard(
-        self, ema_state_path, comm_method, worker_groups
+        self, ema_state_path, comm_method, worker_groups, load_kwargs=None
     ):
         """Use FlexCheckpoint to reshard EMA state, return shared memory metas for subprocess."""
         model_sharded_state_dict = self.model.sharded_state_dict()
@@ -2155,6 +2204,7 @@ class Trainer:
             offload=self.args.load_via_cpu,
             comm_method=comm_method,
             worker_groups=worker_groups,
+            **(load_kwargs or {}),
         )
         logger.info("[EMA Reshard] dist.load_state_dict completed")
 
