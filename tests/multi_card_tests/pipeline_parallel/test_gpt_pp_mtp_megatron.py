@@ -84,7 +84,10 @@ def _build_config(vocab_size, seq_len):
         attention_dropout=0.0,
         use_cpu_initialization=True,
         parallel_output=True,
-        tie_word_embeddings=True,
+        # Magic send owns a separate, PP-synchronized MTP embedding table.
+        # Tying the word embedding selects a mutually exclusive builder branch
+        # and is rejected by TransformerConfig.
+        tie_word_embeddings=False,
         position_embedding_type="rope",
         rotary_percent=1.0,
         rotary_base=10000,
@@ -108,6 +111,8 @@ def _build_config(vocab_size, seq_len):
         num_nextn_predict_layers=MTP_DEGREE,
         mtp_loss_scaling_factor=0.3,
         use_erndata=True,
+        enable_mtp_magic_send=True,
+        variable_seq_lengths=True,
         overlap_p2p_comm=False,
         batch_p2p_comm=True,
     )
@@ -157,6 +162,23 @@ def run_pp(seed, batch_size, seq_len, vocab_size, cu_seqlens_list):
         num_stages=config.pipeline_model_parallel_size,
         seg_method="layer:TransformerLayer|EmptyLayer",
     )
+
+    # Magic send must materialize a local MTP embedding on whichever PP rank
+    # owns the MTP block.  Aggregate the fact across ranks so this assertion is
+    # meaningful on every process, including stage 0.
+    local_mtp_layers = gpt_model._get_all_mtp_layers()
+    local_has_mtp_embed = any(
+        layer.mtp_embed is not None for layer in local_mtp_layers
+    )
+    has_mtp_embed = paddle.to_tensor([int(local_has_mtp_embed)], dtype="int32")
+    paddle.distributed.all_reduce(has_mtp_embed)
+    assert int(has_mtp_embed.item()) > 0, "magic send did not build mtp_embed"
+    if local_has_mtp_embed:
+        assert all(
+            layer.mtp_embed.weight.stop_gradient is False
+            for layer in local_mtp_layers
+        ), "mtp_embed must participate in training"
+
     gpt_model = paddle.amp.decorate(
         models=gpt_model, optimizers=None, level="O2", dtype="bfloat16"
     )
@@ -231,10 +253,16 @@ class TestPPMTPMegatron(unittest.TestCase):
         )
 
         tracker = dict(LanguageLoss.mtp_loss_tracker)
-        if tracker:
+        is_last_stage = paddlefleet.parallel_state.is_pipeline_last_stage()
+        if is_last_stage:
+            assert tracker, "last PP stage must record at least one MTP loss"
             print(f"[PP-MTP-MEGATRON] mtp_loss_tracker={tracker}", flush=True)
             for k, v in tracker.items():
                 assert np.isfinite(float(v)), f"MTP loss {k}={v} must be finite"
+        else:
+            assert not tracker, (
+                "non-loss PP stage unexpectedly recorded MTP loss"
+            )
 
 
 if __name__ == "__main__":

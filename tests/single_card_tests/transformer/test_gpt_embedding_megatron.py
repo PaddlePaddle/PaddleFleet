@@ -168,6 +168,23 @@ class TestGptEmbeddingMegatron(unittest.TestCase):
         # LanguageLoss stash was populated for the loss stage.
         self.assertIsNotNone(LanguageLoss._cu_seqlens_q_stash)
 
+    def test_megatron_magic_send_keeps_one_carrier_and_metadata(self) -> None:
+        K, B, L, H = 2, 1, 8, 4
+        emb = _make_embedding(K, B, L, H, magic_send=True)
+        input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
+        cu = paddle.to_tensor([0, 3, 8], dtype="int32")
+
+        out = emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu})
+
+        self.assertEqual(list(out["hidden_states"].shape), [B, L, H])
+        self.assertIn("mtp_full_input_ids", out)
+        self.assertTrue(out["mtp_full_input_ids"].is_contiguous())
+        self.assertTrue(out["mtp_full_input_ids"].stop_gradient)
+        np.testing.assert_array_equal(
+            out["mtp_full_input_ids"].numpy(), input_ids.numpy()
+        )
+        self.assertIn("cu_seqlens_q", out)
+
     def test_stash_is_gpu_tensor(self) -> None:
         K, B, L, H = 1, 1, 6, 4
         emb = _make_embedding(K, B, L, H)
@@ -272,18 +289,23 @@ class TestGptEmbeddingMegatronCPSP(unittest.TestCase):
         )
 
     def test_megatron_sequence_parallel(self) -> None:
-        # sequence_parallel path with an identity ScatterOp
-        # (lines 464, 467, 501-502, 505, 508).
-        K, B, L, H = 2, 1, 8, 4
+        # Identity ScatterOp still validates the sequence-first layout for B > 1.
+        K, B, L, H = 2, 2, 8, 4
         emb = _make_embedding(K, B, L, H)
         emb.sequence_parallel = True
         emb.config.sequence_parallel = True
         input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
-        cu = paddle.to_tensor([0, 3, 8], dtype="int32")
+        cu = paddle.to_tensor([0, 3, 8, 11, 16], dtype="int32")
         with _identity_scatter():
             out = emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu})
         # SP layout is [S, B, H]; concat of K+1 chunks -> [(K+1)*L, B, H].
         self.assertEqual(list(out["hidden_states"].shape), [(K + 1) * L, B, H])
+        expected_main = emb.embedding(input_ids=input_ids, position_ids=None)
+        expected_main[0, 0, :] = 0  # pad_token_id=0 is zeroed by GPTEmbedding.
+        np.testing.assert_allclose(
+            out["hidden_states"][:L].numpy(),
+            expected_main.transpose([1, 0, 2]).numpy(),
+        )
 
 
 class TestGptEmbeddingErnie5CPSP(unittest.TestCase):
