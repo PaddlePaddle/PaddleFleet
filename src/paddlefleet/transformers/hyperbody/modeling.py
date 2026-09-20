@@ -845,6 +845,7 @@ def _build_decoder_view(config: HyperBodyConfig):
         src = copy.copy(config)
         src.moe_layer_freq = 1
     view = HyperBodyDecoderModelProvider.from_config(src)
+    view._attn_implementation = getattr(config, "_attn_implementation", None) or "default"
     view.multimodal_embedding = True
     view.image_token_id = config.image_token_id
     view.video_token_id = config.video_token_id
