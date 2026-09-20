@@ -48,6 +48,8 @@ _FLEET_UTILS_NAMES = (
     "MakeViewlessTensor",
     "make_viewless_tensor",
     "deprecate_inference_params",
+    "use_dsv4_accuracy_compatible",
+    "set_dsv4_accuracy_compatible",
 )
 
 import_structure = {

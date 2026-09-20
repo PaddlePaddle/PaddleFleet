@@ -58,6 +58,7 @@ from paddlefleet.transformer.dw_overlap import (
     deferrable_linear,
     deferred_grouped_dw_accumulator,
 )
+from paddlefleet.utils import use_dsv4_accuracy_compatible
 
 if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
@@ -94,6 +95,10 @@ def _q_rms_norm(
     use_fusion: bool = False,
 ) -> Tensor:
     """RMS normalization for query (no learnable weight)."""
+    if use_dsv4_accuracy_compatible():
+        from paddlefleet.accuracy_compatible_patch import CompatibleQRMSNorm
+
+        return CompatibleQRMSNorm.apply(q, eps)
     if high_precision_norm:
         ori_dtype = q.dtype
         q = q.float()
@@ -448,6 +453,7 @@ def _pack_dsv4_logical_batch(
     cp_size: int,
     dense_mode: bool,
     max_sequence_length: int | None = None,
+    accuracy_compatible: bool = False,
 ) -> tuple[Tensor, Tensor | None, int, int]:
     """Pack a logical batch into the single-sequence DSV4 representation."""
     if len(hidden_states.shape) != 3:
@@ -457,6 +463,11 @@ def _pack_dsv4_logical_batch(
         )
 
     batch_size, seqlen, _ = hidden_states.shape
+    if accuracy_compatible:
+        # The Megatron-aligned indexer path treats each micro-batch row as an
+        # independent sequence and does not consume Paddle's document mask.
+        # Preserve that native layout and suppress the pack/unpack transform.
+        return hidden_states, None, 1, seqlen
     if batch_size <= 1:
         return hidden_states, startend_row_indices, batch_size, seqlen
 
@@ -485,7 +496,11 @@ def _unpack_dsv4_logical_batch(
     return output.reshape([batch_size, seqlen, -1])
 
 
-from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
+from paddlefleet.train_infer_consistent_ops.inspect_util import (
+    get_current_layer,
+    inspect_tensor,
+    inspect_tensor_set_current_layer,
+)
 from paddlefleet.transformer.utils import (
     get_doc_lens,
 )
@@ -1012,6 +1027,7 @@ class DSv4HybridAttention(Attention):
                 max_sequence_length=getattr(
                     self.config, "max_sequence_length", None
                 ),
+                accuracy_compatible=use_dsv4_accuracy_compatible(),
             )
         )
         b, sq, _ = hidden_states.shape
@@ -1062,6 +1078,8 @@ class DSv4HybridAttention(Attention):
                     startend_row_indices,
                     dense_mode=self.config.csa_dense_mode,
                 )
+
+        inspect_tensor_set_current_layer(self.layer_number)
 
         # Full attention recompute: wrap qkv + core_attn + inv_rope + o_group_proj + gated_attn
         # into one RecomputeWithoutOutput block. All intermediates (query, key, value, etc.)
@@ -1146,7 +1164,9 @@ class DSv4HybridAttention(Attention):
         # o_proj output boundary: both branches converge here before the
         # original batch is unpacked, so a single probe covers everything that
         # flows out of self.o_proj(...).
-        output = inspect_tensor("attn_o_proj_output", self.layer_number, output)
+        output = inspect_tensor(
+            "attn_o_proj_output", get_current_layer(), output
+        )
 
         if original_b > 1:
             output = _unpack_dsv4_logical_batch(output, original_b, original_sq)
@@ -1270,7 +1290,7 @@ class DSv4HybridAttention(Attention):
         # at the producer) instead of at the two self.o_proj(core_attn_out)
         # call sites in forward().
         return inspect_tensor(
-            "attn_o_proj_input", self.layer_number, core_attn_out
+            "attn_o_proj_input", get_current_layer(), core_attn_out
         )
 
     def _post_core_forward(
@@ -1315,7 +1335,7 @@ class DSv4HybridAttention(Attention):
         # leaving it. Wrapping the whole pos_dim block keeps the same tags
         # valid for both the fused and the non-fused fallback branch.
         core_attn_out = inspect_tensor(
-            "attn_inv_rope_input", self.layer_number, core_attn_out
+            "attn_inv_rope_input", get_current_layer(), core_attn_out
         )
 
         if pos_dim > 0:
@@ -1372,7 +1392,7 @@ class DSv4HybridAttention(Attention):
                 core_attn_out = core_attn_out.reshape([b, sq, -1])
 
         core_attn_out = inspect_tensor(
-            "attn_inv_rope_output", self.layer_number, core_attn_out
+            "attn_inv_rope_output", get_current_layer(), core_attn_out
         )
 
         # VHA postmix: low-rank cross-head mixing while still in head space
@@ -1402,11 +1422,27 @@ class DSv4HybridAttention(Attention):
         # it; the upstream postmix has no probe, so an input-side probe is
         # needed here too.
         core_attn_out = inspect_tensor(
-            "attn_o_group_proj_input", self.layer_number, core_attn_out
+            "attn_o_group_proj_input", get_current_layer(), core_attn_out
         )
         b, sq = core_attn_out.shape[0], core_attn_out.shape[1]
         core_attn_out = core_attn_out.reshape([b, sq, self.o_local_groups, -1])
-        if (
+        if use_dsv4_accuracy_compatible():
+            from paddlefleet.accuracy_compatible_patch import (
+                CompatibleOGroupProjection,
+            )
+
+            call_idx = getattr(self, "_ogroup_projection_call_idx", 0)
+            self._ogroup_projection_call_idx = call_idx + 1
+            core_attn_out = CompatibleOGroupProjection.apply(
+                core_attn_out,
+                self.linear_o_group_proj,
+                self.o_local_groups,
+                self.config.o_lora_rank,
+                self.layer_number,
+                call_idx,
+            )
+            core_attn_out = core_attn_out.reshape([b, sq, -1])
+        elif (
             self.config.fp8 is not None
             and self.config.full_fp8_computation
             and FLEET_FP8_WO_A_GEMM
@@ -1445,12 +1481,12 @@ class DSv4HybridAttention(Attention):
                 )
         core_attn_out = core_attn_out.reshape([b, sq, -1])
         return inspect_tensor(
-            "attn_o_group_proj_output", self.layer_number, core_attn_out
+            "attn_o_group_proj_output", get_current_layer(), core_attn_out
         )
 
     def _qkv_forward(self, hidden_states, position_offset, docmask_meta):
         """The qkv segment, for the ``dsv4_hybrid_attn_qkv`` recompute switch."""
-        if hidden_states.stop_gradient:
+        if hidden_states.stop_gradient or use_dsv4_accuracy_compatible():
             query, key, _value, q_compressed, _kv_compressed = (
                 self.get_query_key_value_tensors(
                     hidden_states=hidden_states,
@@ -1832,7 +1868,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         # downstream op. The only additional probe is the function's own input
         # below, which has no upstream op to dump from.
         hidden_states = inspect_tensor(
-            "attn_hidden_states_input", self.layer_number, hidden_states
+            "attn_hidden_states_input", get_current_layer(), hidden_states
         )
 
         # Q path
@@ -1840,11 +1876,11 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             self.config, "attn_q_proj", self.linear_q_down_proj, hidden_states
         )  # [b, sq, q_lora_rank]
         q_compressed = inspect_tensor(
-            "attn_q_down_proj_output", self.layer_number, q_compressed
+            "attn_q_down_proj_output", get_current_layer(), q_compressed
         )
         q_compressed = self.q_layernorm(q_compressed)
         q_compressed = inspect_tensor(
-            "attn_q_norm_output", self.layer_number, q_compressed
+            "attn_q_norm_output", get_current_layer(), q_compressed
         )
 
         if self.use_vha_premix:
@@ -1863,20 +1899,20 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
                 self.config, "attn_q_proj", self.linear_q_up_proj, q_compressed
             )  # [b, sq, n * v_head_dim]
             q = q.reshape([b, sq, self.num_attention_heads, self.v_head_dim])
-        q = inspect_tensor("attn_q_up_proj_output", self.layer_number, q)
+        q = inspect_tensor("attn_q_up_proj_output", get_current_layer(), q)
         q = _q_rms_norm(
             q,
             getattr(self.config, "rms_norm_eps", 1e-5),
             high_precision_norm=self.config.swa_high_precision_norm,
             use_fusion=getattr(self.config, "dsv4_q_rms_norm_fusion", False),
         )
-        q = inspect_tensor("attn_q_rms_norm_output", self.layer_number, q)
+        q = inspect_tensor("attn_q_rms_norm_output", get_current_layer(), q)
 
         # KV path
         kv, _ = deferrable_linear(
             self.config, "attn_kv_proj", self.linear_kv_proj, hidden_states
         )  # [b, sq, v_head_dim]
-        kv = inspect_tensor("attn_kv_proj_output", self.layer_number, kv)
+        kv = inspect_tensor("attn_kv_proj_output", get_current_layer(), kv)
 
         if self.config.swa_high_precision_norm:
             kv = self.kv_layernorm(
@@ -1886,7 +1922,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             )
         else:
             kv = self.kv_layernorm(kv)
-        kv = inspect_tensor("attn_kv_norm_output", self.layer_number, kv)
+        kv = inspect_tensor("attn_kv_norm_output", get_current_layer(), kv)
 
         # Apply RoPE to both Q and KV
         pos_dim = self.qk_pos_emb_head_dim
@@ -1925,7 +1961,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
                 )
                 query = paddle.concat([q_nope, q_pe], axis=-1)
             query = inspect_tensor(
-                "attn_query_after_rope", self.layer_number, query
+                "attn_query_after_rope", get_current_layer(), query
             )
 
             # KV RoPE: split nope/pe, apply RoPE to pe part
@@ -1963,7 +1999,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
 
         if self.config.swa_high_precision_norm:
             kv = kv.astype(hidden_states.dtype)
-        kv = inspect_tensor("attn_key_after_rope", self.layer_number, kv)
+        kv = inspect_tensor("attn_key_after_rope", get_current_layer(), kv)
 
         # Single head: key = value = [b, sq, 1, v_head_dim]
         key = kv.unsqueeze(2)

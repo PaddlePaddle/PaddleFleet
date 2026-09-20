@@ -147,8 +147,10 @@ def _ref_h_aggregate(x: Tensor, h_pre: Tensor) -> Tensor:
 
 
 def _ref_h_post_bda(h_res, orig_res, h_post, x, bias):
-    """Pure Paddle differentiable h_post_bda."""
-    s, b, n, C = orig_res.shape
+    """Pure Paddle differentiable h_post_bda. ``orig_res`` is flat [s, b, n*C]."""
+    s, b = orig_res.shape[:2]
+    n = h_res.shape[-1]
+    C = orig_res.shape[-1] // n
     mixed = paddle.bmm(
         h_res.reshape([s * b, n, n]).transpose([0, 2, 1]),
         orig_res.reshape([s * b, n, C]),
@@ -401,7 +403,7 @@ class TestNativeHPostBDA(unittest.TestCase):
 
     def _run_fwd_bwd(self, s, b, n, C, with_bias):
         hr_data = _rand(s, b, n, n)
-        orig_data = _rand(s, b, n, C)
+        orig_data = _rand(s, b, n * C)
         hp_data = _rand(s, b, n)
         x_data = _rand(s, b, C)
         bias_data = _rand(C) if with_bias else None
@@ -475,7 +477,7 @@ class TestFusedHPostBDA(unittest.TestCase):
         from paddlefleet.fusions.fused_mhc_kernels import fused_h_post_bda
 
         hr_data = _rand(s, b, n, n)
-        orig_data = _rand(s, b, n, C)
+        orig_data = _rand(s, b, n * C)
         hp_data = _rand(s, b, n)
         x_data = _rand(s, b, C)
         bias_data = _rand(C) if with_bias else None
@@ -741,7 +743,7 @@ class TestEndToEndNative(unittest.TestCase):
 
             output = native_h_post_bda(
                 h_res,
-                hs.reshape([s, b, n, C]),
+                hs,
                 h_post,
                 layer_out_data,
                 layer_bias_data,
@@ -774,7 +776,7 @@ class TestEndToEndNative(unittest.TestCase):
 
             output = _ref_h_post_bda(
                 h_res,
-                hs.reshape([s, b, n, C]),
+                hs,
                 h_post,
                 layer_out_data,
                 layer_bias_data,
@@ -842,7 +844,7 @@ class TestEndToEndFused(unittest.TestCase):
 
             output = fused_h_post_bda(
                 h_res,
-                hs.reshape([s, b, n, C]),
+                hs,
                 h_post,
                 layer_out_data,
                 layer_bias_data,
@@ -875,7 +877,7 @@ class TestEndToEndFused(unittest.TestCase):
 
             output = _ref_h_post_bda(
                 h_res,
-                hs.reshape([s, b, n, C]),
+                hs,
                 h_post,
                 layer_out_data,
                 layer_bias_data,
@@ -956,7 +958,7 @@ class TestFrozenInputBackwardContract(unittest.TestCase):
     def _h_post_bda_inputs(with_bias):
         return [
             ("h_res", _rand(_FZ_S, _FZ_B, _FZ_N, _FZ_N)),
-            ("original_residual", _rand(_FZ_S, _FZ_B, _FZ_N, _FZ_C)),
+            ("original_residual", _rand(_FZ_S, _FZ_B, _FZ_N * _FZ_C)),
             ("h_post", _rand(_FZ_S, _FZ_B, _FZ_N)),
             ("x", _rand(_FZ_S, _FZ_B, _FZ_C)),
             ("bias", _rand(_FZ_C) if with_bias else None),

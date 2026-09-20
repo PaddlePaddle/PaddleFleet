@@ -66,6 +66,7 @@ from tqdm.auto import tqdm
 
 from ..transformers.moe_gate import PretrainedMoEGate
 from ..transformers.moe_utils import offload, reload
+from ..utils import use_dsv4_accuracy_compatible
 from ..utils.log import logger
 from .trainer_utils import (
     IntervalStrategy,
@@ -1061,6 +1062,13 @@ class MoECorrectionBiasAdjustCallback(TrainerCallback):
         usages_tensor = paddle.stack(
             usages, 0
         )  # [num_layers, num_local_experts]
+        if use_dsv4_accuracy_compatible():
+            # Preserve the frozen DSv4 path: its Fleet runtime does not expose
+            # ``fleet._hcg`` here, so the callback only performs this
+            # all-reduce and returns without updating correction bias or
+            # clearing usage.
+            dist.all_reduce(usages_tensor)
+            return
         if not hasattr(fleet, "_hcg"):
             dist.all_reduce(usages_tensor)
             return
