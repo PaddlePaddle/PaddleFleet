@@ -57,6 +57,7 @@ from paddlefleet.parallel_state import (
 from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
 from paddlefleet.transformer.transformer_config import dw_overlap_enabled
+from paddlefleet.utils import use_dsv4_accuracy_compatible
 
 # MD5 logging for MoE router precision debugging
 _LOG_LAYER_MD5 = os.environ.get("LOG_LAYER_MD5", "0") == "1"
@@ -96,6 +97,11 @@ def _log_moe_md5(tensor, name, layer_idx=None):
             f"[MD5 MoE] Rank={rank}{layer_str} {name} MD5={md5} shape={list(tensor.shape)}",
             flush=True,
         )
+
+
+def _normalize_topk_gate(top_gate):
+    denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
+    return top_gate / denominator
 
 
 _ROUTER_SCALE_FAST = None
@@ -1571,6 +1577,7 @@ class TopKRouter(StandardMoERouter):
     def set_layer_number(self, layer_number, is_mtp_layer: bool = False):
         self._layer_number = layer_number
         self.layer_number = layer_number
+        self.is_mtp_layer = is_mtp_layer
         self._setup_hash_layer(layer_number, is_mtp_layer=is_mtp_layer)
 
     def forward(self, input, input_ids=None, origin_input_ids=None):
@@ -1637,6 +1644,8 @@ class TopKRouter(StandardMoERouter):
                     f"input_ids=[{batch_size_}, {seq_len_}], "
                     f"expected [batch_size={batch_size}, seq_len={seq_len}]"
                 )
+                if use_dsv4_accuracy_compatible() and self.is_mtp_layer:
+                    input_ids_none_zero_mask = None
             else:
                 input_ids_none_zero_mask = None
         elif len(input.shape) == 2:
@@ -1985,15 +1994,17 @@ class TopKRouter(StandardMoERouter):
                     # experts actually multiply by.
                     top_gate = top_gate / top_gate.sum(axis=-1, keepdim=True)
                     top_gate = top_gate.cast(input.dtype)
-                elif self.use_accuracy_compatible:
+                elif (
+                    self.use_accuracy_compatible
+                    and not use_dsv4_accuracy_compatible()
+                ):
                     _sum_f64 = top_gate.cast(paddle.float64).sum(
                         axis=-1, keepdim=True
                     )
                     denominator = _sum_f64.cast(paddle.float32) + 1e-20
                     top_gate = top_gate / denominator
                 else:
-                    denominator = top_gate.sum(axis=-1, keepdim=True) + 1e-20
-                    top_gate = top_gate / denominator
+                    top_gate = _normalize_topk_gate(top_gate)
             # When moe_topk_fusion=True and not QB, top_gate is already normalized by MoETopkFusion
 
         if self.routed_scaling_factor_learnable:

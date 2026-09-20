@@ -41,12 +41,17 @@ from paddlefleet.models.common.embeddings.rope_utils import (
 )
 from paddlefleet.transformer import FleetLayer
 from paddlefleet.transformer.dw_overlap import deferrable_linear
+from paddlefleet.utils import use_dsv4_accuracy_compatible
 
 _ACCURACY_COMPATIBLE_KERNEL: bool = (
     os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
 )
 from paddlefleet.context_parallel_utils import ContextParallelGatherOp
 from paddlefleet.parallel_state import get_context_parallel_world_size
+from paddlefleet.train_infer_consistent_ops.inspect_util import (
+    get_current_layer,
+    inspect_tensor,
+)
 from paddlefleet.transformer.dsa_attention import (
     DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
@@ -307,6 +312,27 @@ def _build_valid_range_from_doc_bounds(
     )
     range_end = paddle.where(zero_mask, paddle.zeros_like(range_end), range_end)
     return paddle.stack([range_start, range_end], axis=-1).cast("int32")
+
+
+def _reverse_window_and_topk(
+    origin_topk_idxs: Tensor, top_k: Tensor | None, window: Tensor
+) -> Tensor:
+    """Re-lay the slots as ``[compress | window]``, the order inference uses.
+
+    This function is used for train-inference consistency comparison only; it
+    is not used during training.
+
+    Training lays the slots out as ``[window, compress]``; inference
+    concatenates them in ``[compress, window]`` order. Training is aligned to
+    inference so the two ``indices`` line up slot by slot, which is what
+    comparing them needs. This avoids the train-infer mismatch that the
+    different accumulation order would cause when computing ``attn_scores``
+    -- attention softmaxes over a set, so the reorder only moves the
+    accumulation order (the last bits), not the value.
+    """
+    if top_k is not None:
+        return paddle.concat([top_k, window], axis=-1)
+    return origin_topk_idxs
 
 
 class LinearBF16FP32Func(paddle.autograd.PyLayer):
@@ -1983,7 +2009,8 @@ class Compressor(nn.Layer):
                 else 0.02
             ),
         )
-        self._cast_to_low_precision = False
+        if not use_dsv4_accuracy_compatible():
+            self._cast_to_low_precision = False
 
         self.norm = build_spec_layer(
             sublayers_spec.norm,
@@ -2814,7 +2841,8 @@ class CompressedSparseAttention(FleetLayer):
             dtype="float32",
             default_initializer=nn.initializer.Constant(0.0),
         )
-        self._cast_to_low_precision = False
+        if not use_dsv4_accuracy_compatible():
+            self._cast_to_low_precision = False
 
         # Conditionally build Compressor (ratio > 1)
         if self.compress_ratio > 1:
@@ -3694,6 +3722,8 @@ class CompressedSparseAttention(FleetLayer):
         indexer_backend = getattr(
             self.config, "csa_indexer_backend", "tilelang"
         )
+        if use_dsv4_accuracy_compatible():
+            indexer_backend = "unfused"
         if materialize_distill_state and indexer_backend != "tilelang":
             raise NotImplementedError(
                 "IndexCache distill recompute materialization currently "
@@ -4087,6 +4117,8 @@ class CompressedSparseAttention(FleetLayer):
         indexer_backend = getattr(
             self.config, "csa_indexer_backend", "tilelang"
         )
+        if use_dsv4_accuracy_compatible():
+            indexer_backend = "unfused"
         use_tilelang_indexer = indexer_backend == "tilelang"
         use_cudnn_indexer = indexer_backend == "cudnn"
 
@@ -4542,6 +4574,11 @@ class CompressedSparseAttention(FleetLayer):
                 sq=sq,
                 is_first_fwd=not framework._dygraph_tracer()._has_grad,
             )
+            kv_full = inspect_tensor(
+                "attn_compressor_kv_full",
+                get_current_layer(),
+                kv_full,
+            )
             # Read both back off kv_full rather than recomputing them: the
             # compressor zero-pads its output up to `seqlen // ratio` (see
             # Compressor.forward), so the number of compressed slots is NOT
@@ -4575,6 +4612,7 @@ class CompressedSparseAttention(FleetLayer):
         indexcache_producer_loss_fused = False
         indexcache_loss_topk_idxs = None
         replay_applied = False
+        compress_topk_idxs = None
 
         if (
             self.compress_ratio > 1
@@ -4719,6 +4757,15 @@ class CompressedSparseAttention(FleetLayer):
             topk_idxs = paddle.concat(topk_idxs, axis=-1)
         else:
             topk_idxs = window_idxs
+
+        topk_idxs = inspect_tensor(
+            "attn_compressor_topk_idxs",
+            get_current_layer(),
+            topk_idxs,
+            pre_save_func=lambda t: _reverse_window_and_topk(
+                t, compress_topk_idxs, window_idxs
+            ),
+        )
 
         # Step 5: Sparse attention
         output = self.compressed_sparse_attn(
@@ -5282,6 +5329,8 @@ class CompressedSparseAttention(FleetLayer):
         sparse_attn_backend = getattr(
             self.config, "csa_sparse_attn_backend", "tilelang"
         )
+        if use_dsv4_accuracy_compatible():
+            sparse_attn_backend = "unfused"
         # Compact once per batch via the shared docmask-metadata cache -- but
         # ONLY for layers with no indexer (``self.indexer is None``: HCA /
         # attend-to-all). Their ``topk_idxs = concat([window, compressed])`` is
