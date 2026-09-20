@@ -2351,14 +2351,16 @@ _RING_ZERO_SM_AG = os.environ.get("RINGMOE_ZERO_SM_AG", "0") == "1"
 _RING_ZERO_SM_GROUP: dict = {}
 
 # opt-in perf experiments (default OFF in code; train_gpu.sh flips them on).
-# RS_SPLIT: run the forward output ReduceScatter on a SECOND intra NCCL comm
-# (own stream) so it overlaps the token AllGather on the primary intra comm.
 # SE_OVERLAP: leave the LAST round's intra RS async (not drained in the fold),
 # so the shared-expert subgraph in _inter_combine overlaps BOTH that last intra
-# RS and the inter RS (instead of the inter RS only). Both introduce cross-comm
-# concurrency that is deadlock-prone on sm_120/103, so they are gated to stay
+# RS and the inter RS (instead of the inter RS only). Introduces cross-comm
+# concurrency that is deadlock-prone on sm_120/103, so it is gated to stay
 # recoverable to the known-good HEAD behavior.
-_RING_RS_SPLIT = os.environ.get("RINGMOE_RS_SPLIT", "0") == "1"
+#
+# Note: the output ReduceScatter always runs on its own dedicated intra comm
+# (see _build_ring_subgroups / the fold RS block). That is NOT gated by any env
+# flag -- it is unconditionally on, because the RS must never share the token
+# AllGather's comm/stream.
 _RING_SE_OVERLAP = os.environ.get("RINGMOE_SE_OVERLAP", "0") == "1"
 
 # Tier1: prefetch round r+1's intra token AllGather on the comm stream during
@@ -2539,11 +2541,13 @@ def _build_ring_subgroups(moe_group, gpus_per_node: int = _RING_GPUS_PER_NODE):
         # plain new_group above), but only bind it for the group this rank
         # actually uses as its intra group.
         zg = _make_zero_sm_group(lst) if _RING_ZERO_SM_AG else None
-        # RS_SPLIT: a second plain group over the SAME intra ranks -> its own
-        # NCCL comm/stream for the output ReduceScatter (runs concurrently with
-        # the token AllGather on ``g``). World-collective, so gate it on the
-        # same flag on every rank to keep the new_group count consistent.
-        rsg = paddle.distributed.new_group(ranks=lst) if _RING_RS_SPLIT else None
+        # A second plain group over the SAME intra ranks -> its own NCCL
+        # comm/stream for the output ReduceScatter. ALWAYS built (never env-
+        # gated): the output RS must never share the token-AllGather's comm, or
+        # round r's RS serializes behind round r+1's AllGather on the shared
+        # stream and cannot overlap round r+1's GEMM. World-collective, so
+        # building it on every rank keeps the new_group count consistent.
+        rsg = paddle.distributed.new_group(ranks=lst)
         if global_rank in lst:
             intra_group = g
             intra_rs_group = rsg
@@ -3223,16 +3227,13 @@ class _RingRoundsFold(paddle.autograd.PyLayer):
             # backward is unchanged, so this is numerically identical.
             if intra_on:
                 nvtx.push_range(f"ringmoe/intra_rs_launch_{step}")
-                # RS_SPLIT: route the output ReduceScatter onto the 2nd intra
-                # comm (own stream) so it runs concurrently with the token
-                # AllGather on the primary intra comm; off => single intra comm
-                # (HEAD behavior, numerically identical, drained below).
-                rs_grp = (
-                    disp.intra_rs_group
-                    if (_RING_RS_SPLIT and disp.intra_rs_group is not None)
-                    else intra
-                )
-                red, t_rs = _reduce_scatter_async(out[0], rs_grp)
+                # The output ReduceScatter ALWAYS runs on its own dedicated
+                # intra comm (its own NCCL stream), never the token-AllGather
+                # comm. This is unconditional (not env-gated): sharing the AG
+                # comm serializes round r's RS behind round r+1's AllGather so
+                # it can't overlap round r+1's GEMM. Drained below (numerically
+                # identical); backward unchanged.
+                red, t_rs = _reduce_scatter_async(out[0], disp.intra_rs_group)
                 nvtx.pop_range()
                 rs_tasks.append(t_rs)
             else:
