@@ -15,9 +15,12 @@
 """Adapt a large-cluster training YAML to a smaller machine scale.
 
 Without any switch the adapter keeps every parallel dimension frozen and only
-recomputes ``sharding`` / batch, so the target scale must be compatible with
-the source parallelism (incompatible targets get an error listing the valid
-node counts).  A smaller ``sharding`` also gets the compensations in
+recomputes ``sharding`` / batch, so a ``--target-nodes`` that is incompatible
+with the source parallelism gets an error listing the valid node counts.
+``--target-nodes`` is optional: omit it and the required scale is derived from
+the converted parallelism instead, reported as ``REQUIRED_NODES=`` (an empty
+conversion therefore reproduces the source scale).  A smaller ``sharding``
+also gets the compensations in
 :mod:`paddlefleet.config_adapter.sharding_shrink` (data-stream width,
 optimizer offload).
 
@@ -41,7 +44,7 @@ Usage::
 from __future__ import annotations
 
 from .cli import build_parser, main, parse_overrides
-from .core import ConfigAdapter, inspect_config
+from .core import ConfigAdapter
 from .options import AdaptOptions
 from .plan import ParallelismPlan
 from .planner import ShrinkPlanner, plan_frozen, plan_parallelism
@@ -51,7 +54,7 @@ from .sharding_shrink import (
     OFFLOAD_PREREQUISITES,
     plan_sharding_shrink_switches,
 )
-from .topology import TopologyValidator
+from .topology import TopologyValidator, min_valid_cards
 
 __all__ = [
     "DEFAULT_SHRINK_FACTOR",
@@ -63,8 +66,8 @@ __all__ = [
     "ShrinkPlanner",
     "TopologyValidator",
     "build_parser",
-    "inspect_config",
     "main",
+    "min_valid_cards",
     "parse_overrides",
     "plan_frozen",
     "plan_parallelism",

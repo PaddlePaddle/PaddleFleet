@@ -26,7 +26,7 @@
 
       Case A (dims already legal) < EP-only < PP-only < EP+PP joint
 
-  Every candidate must pass the communication-group constraints (C1..C4) and
+  Every candidate must pass the communication-group constraints (C1..C5) and
   the model-structure constraints (M1/M2 for EP, M3/M4/M5 for PP).  Shrinking
   EP scales the routed-expert count, shrinking PP scales
   ``num_hidden_layers`` and realigns VPP / empty tail layers -- those writes
@@ -36,8 +36,17 @@
   joint tier, where the two axes follow the shrink priority ``EP > PP``: EP
   goes down to its floor first and PP absorbs only the remainder.
 
-TP and SEP are never shrunk: a smaller TP raises per-card memory and risks
-OOM.  No dimension that is > 1 in the source is ever reduced to 1, because
+TP, SEP and CP are never shrunk.  A smaller TP raises per-card memory and
+risks OOM.  A smaller CP is only safe together with a proportionally smaller
+``max_seq_length`` -- on its own it *lengthens* the per-card sequence slice --
+and rewriting the sequence length silently is not acceptable: it changes what
+the run measures, and pre-packed datasets are tokenized at one fixed sequence
+length, so a config with a different ``max_seq_length`` cannot read them at
+all.  Trading sequence length for cards therefore stays an explicit,
+user-driven decision via ``--scale-seq-length``; :func:`_cp_blocks_c4` makes
+sure the diagnostic points at it whenever CP is what blocks the shrink.
+
+No dimension that is > 1 in the source is ever reduced to 1, because
 that would delete the communication group under test.  VPP is the exception:
 whichever planner ran, :func:`enforce_vpp_limit` switches it off when the
 final PP is too small for an interleaved schedule.
@@ -64,9 +73,17 @@ from .topology import TopologyValidator
 
 # Matches a communication-group rejection ("C2 不满足：..."), so the diagnostic
 # can put the more actionable model-structure reasons first.
-_CONSTRAINT_RE = re.compile(r"C[1-4]\s*不满足")
+_CONSTRAINT_RE = re.compile(r"C[1-5]\s*不满足")
 
 VPP_FIELD = "virtual_pipeline_model_parallel_size"
+
+#: How many candidate rejections the diagnostic prints, and how many of those
+#: slots are reserved for communication-group reasons.  C4 ("sharding % CP")
+#: is regularly *the* blocking reason, and since CP never shrinks it is also
+#: the one the user has to act on -- it must not be crowded out by the
+#: model-structure lines that sort first.
+DETAIL_LIMIT = 10
+MIN_TOPOLOGICAL_DETAIL = 2
 
 
 def _vpp_off_reason(vpp_old, pp):
@@ -642,6 +659,10 @@ class ShrinkPlanner:
                 f"（TP×SEP×PP_min）"
             )
 
+        cp_reason = _cp_blocks_c4(dims, target_cards)
+        if cp_reason:
+            reasons.append(cp_reason)
+
         if not reasons:
             reasons.append("所有候选组合都不满足通信组约束或模型结构约束")
 
@@ -649,10 +670,16 @@ class ShrinkPlanner:
         # given (EP, PP) pair was thrown away is usually the fastest way to
         # see what to change.  Model-structure reasons come first -- they are
         # actionable, while the C-constraint ones repeat the same arithmetic.
+        # A couple of slots stay reserved for the latter, because C4
+        # ("sharding % CP") is often the only real blocker and would otherwise
+        # be crowded out entirely.
         unique = list(dict.fromkeys(rejections))
         topological = [r for r in unique if _CONSTRAINT_RE.search(r)]
         structural = [r for r in unique if r not in topological]
-        detail = (structural + topological)[:6]
+        reserved = min(len(topological), MIN_TOPOLOGICAL_DETAIL)
+        detail = (structural[: DETAIL_LIMIT - reserved] + topological)[
+            :DETAIL_LIMIT
+        ]
         detail_block = ""
         if detail:
             detail_block = "\n  候选淘汰明细：\n    " + "\n    ".join(detail)
@@ -685,12 +712,52 @@ class ShrinkPlanner:
                 f"请调整模型结构（如 --set json:<专家数字段>=<能被目标 EP "
                 f"整除的值>），或手动降低源 YAML 的 TP/PP/EP 后重试"
             )
+        if cp_reason:
+            advice += (
+                "；若确实可以牺牲序列长度，可显式加 --scale-seq-length "
+                "<新的 max_seq_length>（须与源值成整数倍关系），"
+                "它会按同一倍率把 CP 一起缩小"
+            )
         return (
             f"{target_cards} 卡下找不到合法的 EP/PP 缩容方案 "
             f"(tp={tp}, pp={pp}, ep={ep}, cp={cp}, sep={sep})。\n"
             f"  阻断原因：\n    " + "\n    ".join(reasons) + detail_block + "\n"
             "  建议：" + advice
         )
+
+
+def _cp_blocks_c4(dims, target_cards):
+    """Diagnostic line when CP alone rules out every candidate, else ``None``.
+
+    C4 needs ``sharding % CP == 0`` with ``sharding = N / (TP*SEP*PP)``.  CP
+    never shrinks, and PP is the only axis that moves ``sharding``, so a large
+    CP can eliminate the whole search space on its own -- no expert-count or
+    layer-count change can rescue it.  Saying so explicitly matters because the
+    generic "no candidate survived" wording sends the user off tuning EP and
+    PP, which cannot possibly help.
+    """
+    tp, pp, ep, cp, sep = dims
+    if cp <= 1:
+        return None
+    dense = tp * sep
+    best = None
+    for pp_new in [pp, *pp_candidates(pp)]:
+        denom = dense * pp_new
+        if denom < 1 or target_cards % denom:
+            continue
+        sharding = target_cards // denom
+        if sharding % cp == 0:
+            return None
+        best = sharding if best is None else max(best, sharding)
+    if best is None:
+        return None
+    return (
+        f"CP={cp} 不参与自动缩容，而 {target_cards} 卡下 sharding 最大只有 "
+        f"{best}（=卡数/(TP×SEP×PP_min)），不能被 CP={cp} 整除，"
+        f"C4 对任何 (EP, PP) 组合都无解。"
+        f"缩 CP 必须同步缩 max_seq_length，既改变被测序列长度，"
+        f"也会让按固定序列长度预打包的数据集读不进来，因此不自动进行"
+    )
 
 
 def _first_constraint(message):

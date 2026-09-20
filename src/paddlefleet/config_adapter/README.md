@@ -24,6 +24,13 @@ sharding 与 batch，仅 `--test-accuracy` 模式必要时缩小 EP/PP 并联动
   `scale_accumulation`：GBS 保持不变、acc 等比放大，等效 batch 与全量作业
   一致，loss 曲线可对齐。
 
+`--target-nodes` 是可选的。不传时不做任何缩容搜索：转换后的并行度完全由显式输入
+（`--scale-seq-length` / `--set` / 精度开关）决定，卡数是事后按这个结果算出来的，
+每次转换都会报一行 `REQUIRED_NODES=` / `REQUIRED_CARDS=` 说明产物需要多少机器。
+产物把 `sharding_parallel_size` 与 batch 字段钉死在这个规模上，所以它是「只能跑在
+这个规模」而不是「至少这么多卡」。什么参数都不给的空转换因此原样复制源配置，报出
+的规模就是源作业自己的规模。
+
 缩容（仅 `--test-accuracy`）遵守一条硬规则：**源配置里大于 1 的并行度，最小只能
 缩到 2，不允许缩成 1**（EP8 最多缩到 EP2，不会变成 EP1）。把一个维度缩成 1 等于
 把待测的通信组直接去掉，测出来的结果没有参考价值。EP 的下限还要同时满足 C3
@@ -39,7 +46,8 @@ TP 与 SEP 永远不改：减小 TP 会增大单卡显存占用，有 OOM 风险
 ## 用法
 
 ```bash
-# 1) 只看这份配置能跑在哪些机器规模上（不生成任何文件）
+# 1) 不指定机器规模：按源配置原样适配，所需规模由产物自动推导
+#    （读输出里的 REQUIRED_NODES=；空转换的产物规模就是源规模）
 python -m paddlefleet.config_adapter --input config.yaml
 
 # 2) 适配到 2 台机器（默认每台 8 卡）；默认冻结并行度，目标规模必须
@@ -83,13 +91,13 @@ python -m paddlefleet.config_adapter --input config.yaml \
 | 参数 | 必填 | 默认 | 说明 |
 |---|---|---|---|
 | `--input` | 是 | — | 源 YAML 路径 |
-| `--target-nodes N` | 否 | — | 目标机器台数；总卡数 = N × `--cards-per-node`。不传 = 只列出合法规模，不生成文件 |
+| `--target-nodes N` | 否 | — | 目标机器台数；总卡数 = N × `--cards-per-node`。不传 = 按转换后的并行度自动推导所需规模（见 `REQUIRED_NODES=`） |
 | `--cards-per-node` | 否 | 8 | 每台机器的卡数 |
 | `--test-performance` | 否 | 关 | 测速维度（冻结并行度与 acc，只改 sharding 和 GBS），可与 `--test-accuracy` 叠加 |
 | `--test-accuracy` | 否 | 关 | 精度维度（注入确定性开关，单独给时保持等效 batch；唯一允许缩小 EP/PP 的模式），可与 `--test-performance` 叠加 |
 | `--output-dir` | 否 | `./adapted_configs` | 输出目录；`--in-place` 时忽略 |
 | `--set [yaml:\|json:]KEY=VALUE` | 否 | — | 自定义覆盖，可重复 |
-| `--scale-seq-length N` | 否 | — | 把 `max_seq_length` 覆盖为 N，并同比例缩放 `context_parallel_size`；需配合 `--target-nodes` |
+| `--scale-seq-length N` | 否 | — | 把 `max_seq_length` 覆盖为 N，并同比例缩放 `context_parallel_size` |
 | `-i` / `--in-place` | 否 | 关 | 就地改写源文件，并生成 `<input>.patch` |
 | `-f` / `--force` | 否 | 关 | 允许覆盖已存在的 model_config 生成目录 |
 
@@ -252,8 +260,8 @@ tensorwise_offload_optimizer=true
 
 只列**真正发生了变化**的字段（值没变的写入不会出现在日志里），每条都带上
 「为什么改」，并保留可被上游脚本正则匹配的形状（`CHANGE field=… old=… new=…` /
-`ADD` / `DELETE`，以及末尾的 `ORIGINAL_CARDS=` / `TARGET_CARDS=` / `OUTPUT=` /
-`MODEL_CONFIG_OUTPUT=`）：
+`ADD` / `DELETE`，以及末尾的 `ORIGINAL_CARDS=` / `TARGET_CARDS=` /
+`REQUIRED_NODES=` / `REQUIRED_CARDS=` / `OUTPUT=` / `MODEL_CONFIG_OUTPUT=`）：
 
 ```
 ========================================================================================
@@ -262,6 +270,7 @@ config_adapter: 适配成功
 输入      ：big.yaml
 模式      ：accuracy（--test-accuracy），batch 策略 scale_accumulation
 机器规模  ：96 节点 / 768 卡 -> 1 节点 / 8 卡（每节点 8 卡）
+所需规模  ：1 节点 / 8 卡（sharding 与 batch 已钉死在此规模）
 并行度    ：TP 1->1  PP 8->4  EP 64->2  CP 1->1  SEP 1->1
 sharding  ：96 -> 2（moe_sharding=1, dense_sharding=2）
 缩容方案  ：EP+PP 联合缩容：EP 64 -> 2，PP 8 -> 4
@@ -294,6 +303,8 @@ sharding  ：96 -> 2（moe_sharding=1, dense_sharding=2）
 ORIGINAL_CARDS=768
 ORIGINAL_NODES=96
 TARGET_CARDS=8
+REQUIRED_NODES=1
+REQUIRED_CARDS=8
 OUTPUT=adapted_configs/big_adapted_8cards.yaml
 MODEL_CONFIG_OUTPUT=adapted_configs/model_config_separated/model_dir_adapted_8cards/model_config.json
 ```

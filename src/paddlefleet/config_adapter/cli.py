@@ -22,7 +22,7 @@ import os
 import sys
 from pathlib import Path
 
-from .core import ConfigAdapter, inspect_config
+from .core import ConfigAdapter
 from .io_writers import YamlWriter
 from .model_config_resolver import (
     ModelConfigResolveError,
@@ -33,7 +33,8 @@ from .utils import parse_value
 
 EPILOG = """\
 示例：
-  # 1) 只看这份配置能跑在哪些机器规模上（不生成文件）
+  # 1) 不指定机器规模：按源配置原样适配，所需规模由产物自动推导
+  #    （看输出里的 REQUIRED_NODES=）
   python -m paddlefleet.config_adapter --input config.yaml
 
   # 2) 适配到 2 台机器（默认每台 8 卡 = 16 卡）；默认冻结并行度，
@@ -91,7 +92,7 @@ def build_parser():
         type=int,
         default=None,
         help="目标机器台数；总卡数 = target-nodes × cards-per-node。"
-        "不传则只列出合法的机器规模，不生成任何文件",
+        "不传则按转换后的并行度自动推导所需规模（见输出的 REQUIRED_NODES=）",
     )
     parser.add_argument(
         "--cards-per-node",
@@ -136,8 +137,7 @@ def build_parser():
         metavar="N",
         help="把 max_seq_length 覆盖为 N，并按同一整数倍率缩放 "
         "context_parallel_size（序列变长时同比例扩大 CP，防止长序列 "
-        "OOM）。N 必须与源 max_seq_length 成整数倍关系；需配合 "
-        "--target-nodes 使用",
+        "OOM）。N 必须与源 max_seq_length 成整数倍关系",
     )
     parser.add_argument(
         "-i",
@@ -237,13 +237,6 @@ def main(argv=None):
         if args.scale_seq_length < 1:
             print("错误：--scale-seq-length 必须 >= 1", file=sys.stderr)
             return 1
-        if args.target_nodes is None:
-            print(
-                "错误：--scale-seq-length 需要配合 --target-nodes 使用"
-                "（不指定目标规模时只做检视，不生成任何文件）",
-                file=sys.stderr,
-            )
-            return 1
 
     try:
         yaml_overrides, json_overrides, auto_overrides = parse_overrides(
@@ -253,21 +246,7 @@ def main(argv=None):
         print(f"错误：{exc}", file=sys.stderr)
         return 1
 
-    # ---- inspection mode: no target scale, nothing is written ------------
-    if args.target_nodes is None:
-        orig_cards, orig_nodes, valid_nodes = inspect_config(
-            input_path, cards_per_node=args.cards_per_node
-        )
-        print(f"ORIGINAL_CARDS={orig_cards if orig_cards else 'UNKNOWN'}")
-        print(f"ORIGINAL_NODES={orig_nodes if orig_nodes else 'UNKNOWN'}")
-        print("VALID_NODES=" + ",".join(str(n) for n in valid_nodes))
-        print(
-            "提示：加 --target-nodes <目标机器台数> 才会生成配置；"
-            "按需叠加 --test-performance / --test-accuracy"
-        )
-        return 0
-
-    if args.target_nodes < 1:
+    if args.target_nodes is not None and args.target_nodes < 1:
         print("错误：--target-nodes 必须 >= 1", file=sys.stderr)
         return 1
 

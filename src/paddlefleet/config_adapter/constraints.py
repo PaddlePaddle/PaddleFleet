@@ -33,7 +33,7 @@ All functions here are pure: no I/O, no mutation of the arguments.
 
 from __future__ import annotations
 
-from .topology import TopologyValidator
+from .topology import min_valid_cards
 
 DEFAULT_MIN_HIDDEN_LAYERS = 4
 
@@ -76,7 +76,7 @@ def floor_dims(tp, pp, ep, cp, sep):
 
     The EP floor additionally respects C3 (``EP % (TP*SEP) == 0``): with
     TP*SEP > MIN_PARALLEL_DEGREE the naive floor of 2 is not a legal EP at
-    all, and feeding it to ``suggest_valid_cards`` would make
+    all, and feeding it to ``min_valid_cards`` would make
     :func:`min_shrink_cards` wrongly conclude that *no* card count works.
     """
     ep_floor = shrink_floor(ep)
@@ -173,9 +173,9 @@ def min_shrink_cards(tp, pp, ep, cp, sep, cards_per_node):
     ``None`` when the dims break a card-count-independent rule (C3 or C5), so
     no scale exists and callers must talk about the dims instead.
     """
-    validator = TopologyValidator(cards_per_node, cards_per_node)
-    cards = validator.suggest_valid_cards(*floor_dims(tp, pp, ep, cp, sep))
-    return cards[0] if cards else None
+    return min_valid_cards(
+        *floor_dims(tp, pp, ep, cp, sep), cards_per_node=cards_per_node
+    )
 
 
 def check_hardware(target_cards, cards_per_node, tp, pp, ep, cp, sep):

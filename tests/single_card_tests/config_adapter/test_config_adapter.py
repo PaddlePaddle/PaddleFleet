@@ -30,7 +30,6 @@ from paddlefleet.config_adapter import (
     OFFLOAD_PREREQUISITES,
     AdaptOptions,
     ConfigAdapter,
-    inspect_config,
     main,
     parse_overrides,
     plan_precision_switches,
@@ -845,6 +844,8 @@ class TestChangeReporting(unittest.TestCase):
             "orig_scale_label": "96 节点 / 768 卡",
             "target_cards": 8,
             "target_nodes": 1,
+            "required_cards": 8,
+            "required_nodes": 1,
             "cards_per_node": 8,
             "dims_line": "TP 1->1",
             "sharding_line": "96 -> 4",
@@ -1699,7 +1700,14 @@ class TestCliErrorPaths(ConfigAdapterTestBase):
 
     def test_python_m_entry_point(self):
         # `python -m paddlefleet.config_adapter` must reach the same main().
-        argv = ["paddlefleet.config_adapter", "--input", str(self.yaml_path)]
+        # No --target-nodes: the scale is derived, and a file is still written.
+        argv = [
+            "paddlefleet.config_adapter",
+            "--input",
+            str(self.yaml_path),
+            "--output-dir",
+            str(self.output_dir),
+        ]
         buffer = io.StringIO()
         with (
             mock.patch.object(sys, "argv", argv),
@@ -1708,7 +1716,7 @@ class TestCliErrorPaths(ConfigAdapterTestBase):
         ):
             runpy.run_module("paddlefleet.config_adapter", run_name="__main__")
         self.assertEqual(ctx.exception.code, 0)
-        self.assertIn("VALID_NODES=", buffer.getvalue())
+        self.assertIn("REQUIRED_NODES=", buffer.getvalue())
 
 
 class TestLayerFields(ConfigAdapterTestBase):
@@ -1959,16 +1967,160 @@ class TestGeneratedPaths(ConfigAdapterTestBase):
             shutil.rmtree(outside, ignore_errors=True)
 
 
-class TestInspection(ConfigAdapterTestBase):
-    """No target scale: report the source scale and legal node counts."""
+class TestDerivedTargetScale(ConfigAdapterTestBase):
+    """No --target-nodes: derive the scale from the converted parallelism.
 
-    def test_reports_source_scale_and_valid_nodes(self):
-        orig_cards, orig_nodes, valid_nodes = inspect_config(
-            self.yaml_path, cards_per_node=8
+    ``min0 = min_valid_cards(dims_before)`` is also the unit every legal card
+    count is a multiple of, so ``slack = orig_cards // min0`` carries the
+    source job's headroom over to ``min_valid_cards(dims_planned) * slack``.
+    An empty conversion has ``dims_planned == dims_before``, which makes the
+    formula collapse to ``orig_cards`` -- identity by construction.
+    """
+
+    #: 128 cards / 16 nodes, TP1 PP8 EP16 CP16: min0 = lcm(8, 8, 128, 128).
+    DSV4_YAML = """\
+model_name_or_path: ./model_dir
+max_seq_length: 131072
+global_batch_size: 32
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 32
+tensor_model_parallel_size: 1
+pipeline_model_parallel_size: 8
+expert_model_parallel_size: 16
+context_parallel_size: 16
+max_steps: 100
+"""
+
+    #: 16 cards / 2 nodes, TP1 PP2 CP1: min0 = lcm(2, 8) = 8, so slack = 2.
+    SLACK_YAML = """\
+model_name_or_path: ./model_dir
+max_seq_length: 8192
+global_batch_size: 16
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 2
+sharding_parallel_size: 8
+data_parallel_size: 1
+tensor_model_parallel_size: 1
+pipeline_model_parallel_size: 2
+context_parallel_size: 1
+max_steps: 100
+"""
+
+    def _cli(self, argv):
+        """Run the CLI with ``--output-dir`` bound. Returns ``(code, out)``."""
+        buffer, err = io.StringIO(), io.StringIO()
+        with (
+            contextlib.redirect_stdout(buffer),
+            contextlib.redirect_stderr(err),
+        ):
+            code = main([*argv, "--output-dir", str(self.output_dir)])
+        return code, buffer.getvalue() + err.getvalue()
+
+    def test_empty_conversion_reproduces_the_source_scale(self):
+        # Every degree, the sharding degree and the batch fields come back
+        # unchanged, and the reported scale is the source's own.
+        self.write_yaml(self.SLACK_YAML)
+        ok, message = self.adapt(None)
+        self.assertTrue(ok, message)
+        out = self.load_output_yaml(16)
+        source = YamlWriter().load(self.yaml_path)
+        for field in (
+            "tensor_model_parallel_size",
+            "pipeline_model_parallel_size",
+            "context_parallel_size",
+            "sharding_parallel_size",
+            "global_batch_size",
+            "gradient_accumulation_steps",
+            "max_seq_length",
+        ):
+            self.assertEqual(out[field], source[field], field)
+        self.assertIn("REQUIRED_NODES=2", message)
+        self.assertIn("REQUIRED_CARDS=16", message)
+
+    def test_dsv4_shape_derives_its_own_sixteen_nodes(self):
+        self.write_yaml(self.DSV4_YAML)
+        ok, message = self.adapt(None)
+        self.assertTrue(ok, message)
+        self.assertIn("REQUIRED_NODES=16", message)
+        self.assertIn("REQUIRED_CARDS=128", message)
+
+    def test_shorter_sequence_does_not_free_up_machines(self):
+        # CP 16 -> 4, but PP x EP = 128 still pins the floor at 128 cards.
+        # Counter-intuitive and worth asserting: scaling the sequence length
+        # down buys nothing on this shape.
+        self.write_yaml(self.DSV4_YAML)
+        ok, message = self.adapt(None, scale_seq_length=32768)
+        self.assertTrue(ok, message)
+        out = self.load_output_yaml(128)
+        self.assertEqual(out["max_seq_length"], 32768)
+        self.assertEqual(out["context_parallel_size"], 4)
+        self.assertIn("REQUIRED_NODES=16", message)
+
+    def test_accuracy_mode_injects_switches_without_shrinking(self):
+        # --test-accuracy *may* shrink EP/PP, but only to reach a target that
+        # was asked for. Without one there is no search, so the dims stand.
+        self.write_yaml(self.DSV4_YAML)
+        ok, message = self.adapt(None, test_accuracy=True)
+        self.assertTrue(ok, message)
+        out = self.load_output_yaml(128)
+        self.assertEqual(out["pipeline_model_parallel_size"], 8)
+        self.assertEqual(out["expert_model_parallel_size"], 16)
+        self.assertIn("REQUIRED_NODES=16", message)
+        # The determinism switches still land: only the shrink search is gone.
+        self.assertEqual(out["csa_sparse_attn_backend"], "tilelang")
+
+    def test_headroom_over_the_floor_is_preserved(self):
+        # 16 cards against a floor of 8: the derived scale keeps the 2x.
+        self.write_yaml(self.SLACK_YAML)
+        ok, message = self.adapt(None)
+        self.assertTrue(ok, message)
+        self.assertIn("REQUIRED_CARDS=16", message)
+        self.assertTrue(
+            (self.output_dir / "source_adapted_16cards.yaml").is_file()
         )
-        self.assertEqual(orig_cards, 768)
-        self.assertEqual(orig_nodes, 96)
-        self.assertEqual(valid_nodes, [64])
+
+    def test_card_count_independent_violation_is_refused(self):
+        # C3 (EP % (TP*SEP) != 0) cannot be fixed by any scale, so the failure
+        # has to name the dims -- and nothing may be written.
+        self.write_yaml(
+            self.SLACK_YAML.replace(
+                "tensor_model_parallel_size: 1",
+                "tensor_model_parallel_size: 4\nexpert_model_parallel_size: 6",
+            )
+        )
+        ok, message = self.adapt(None)
+        self.assertFalse(ok)
+        self.assertIn("C3", message)
+        self.assertFalse(self.output_dir.exists())
+
+    def test_an_illegal_source_floor_is_not_named(self):
+        # SEP=2 next to CP=2 violates C5, so the *source* dims have no
+        # topological floor at all, while the converted ones do:
+        # --scale-seq-length drops CP to 1 and makes them legal.  The slack
+        # fallback must say that instead of interpolating the missing floor
+        # into the warning as the literal "None".
+        self.write_yaml(
+            self.SLACK_YAML.replace(
+                "context_parallel_size: 1",
+                "context_parallel_size: 2\nsep_parallel_size: 2",
+            )
+        )
+        ok, message = self.adapt(None, scale_seq_length=4096)
+        self.assertTrue(ok, message)
+        self.assertIn("C3/C5", message)
+        self.assertNotIn("None", message)
+
+    def test_an_explicit_target_still_wins(self):
+        # Regression guard: --target-nodes keeps deciding the scale outright,
+        # and REQUIRED_* simply echoes it.
+        self.write_yaml(self.SLACK_YAML)
+        code, out = self._cli(
+            ["--input", str(self.yaml_path), "--target-nodes", "1"]
+        )
+        self.assertEqual(code, 0, out)
+        self.assertIn("TARGET_CARDS=8", out)
+        self.assertIn("REQUIRED_NODES=1", out)
+        self.assertIn("REQUIRED_CARDS=8", out)
 
 
 class TestCli(ConfigAdapterTestBase):
@@ -2016,11 +2168,23 @@ class TestCli(ConfigAdapterTestBase):
         self.assertEqual(code, 0, out)
         self.assertIn("performance+accuracy", out)
 
-    def test_inspection_output_is_machine_readable(self):
-        code, out = self._run(["--input", str(self.yaml_path)])
-        self.assertEqual(code, 0)
+    def test_bare_input_derives_the_scale_and_writes(self):
+        # The fixture's 768 cards break C2 (768 % (PP 8 x EP 64) != 0), so the
+        # derivation falls back to 1x the floor -- 512 cards / 64 nodes -- and
+        # says so instead of silently picking a number.
+        code, out = self._run(
+            [
+                "--input",
+                str(self.yaml_path),
+                "--output-dir",
+                str(self.output_dir),
+            ]
+        )
+        self.assertEqual(code, 0, out)
         self.assertIn("ORIGINAL_CARDS=768", out)
-        self.assertIn("VALID_NODES=64", out)
+        self.assertIn("REQUIRED_NODES=64", out)
+        self.assertIn("REQUIRED_CARDS=512", out)
+        self.assertIn("不自洽", out)
 
     def test_in_place_writes_a_patch(self):
         code, out = self._run(
@@ -2155,7 +2319,9 @@ max_steps: 100
         out = self.load_output_yaml(16)
         self.assertEqual(out["context_parallel_size"], 4)
 
-    def test_cli_requires_target_nodes(self):
+    def test_cli_no_longer_requires_target_nodes(self):
+        # --scale-seq-length used to be refused without --target-nodes; it now
+        # converts and reports the scale the result needs.
         buffer, err = io.StringIO(), io.StringIO()
         with (
             contextlib.redirect_stdout(buffer),
@@ -2167,10 +2333,18 @@ max_steps: 100
                     str(self.yaml_path),
                     "--scale-seq-length",
                     "16384",
+                    "--output-dir",
+                    str(self.output_dir),
                 ]
             )
-        self.assertEqual(code, 1)
-        self.assertIn("--target-nodes", err.getvalue())
+        out = buffer.getvalue()
+        self.assertEqual(code, 0, out + err.getvalue())
+        # Source: 32 cards, floor lcm(1, 8) = 8 -> slack 4. CP 2 -> 4 lifts
+        # the floor to lcm(1, 8, 4) = 8, so the scale stays 32 cards.
+        self.assertIn("REQUIRED_CARDS=32", out)
+        adapted = self.load_output_yaml(32)
+        self.assertEqual(adapted["max_seq_length"], 16384)
+        self.assertEqual(adapted["context_parallel_size"], 4)
 
     def test_cli_passes_the_value_through(self):
         buffer = io.StringIO()
@@ -2194,6 +2368,83 @@ max_steps: 100
         out = self.load_output_yaml(16)
         self.assertEqual(out["max_seq_length"], 16384)
         self.assertEqual(out["context_parallel_size"], 4)
+
+
+class TestCpNeverShrinks(ConfigAdapterTestBase):
+    """CP is frozen even under --test-accuracy; the diagnostic explains why.
+
+    Shrinking CP only works if ``max_seq_length`` shrinks with it, which
+    changes what the run measures and makes pre-packed datasets unreadable, so
+    it stays an explicit ``--scale-seq-length`` decision.
+    """
+
+    #: dsv4-flash shape: 16 nodes / 128 cards, TP1 PP8 EP16 CP16, 128k seq.
+    #: At 8 cards sharding = 8/PP <= 4 < 16 = CP, so C4 has no solution for
+    #: any (EP, PP) pair -- CP is the sole blocker.
+    DSV4_YAML = """\
+model_name_or_path: ./model_dir
+max_seq_length: 131072
+global_batch_size: 8
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+sharding_parallel_size: 16
+data_parallel_size: 1
+tensor_model_parallel_size: 1
+expert_model_parallel_size: 16
+pipeline_model_parallel_size: 8
+context_parallel_size: 16
+num_empty_layers_add_in_head: 0
+num_empty_layers_add_in_tail: 5
+max_steps: 100
+"""
+
+    DSV4_JSON = {
+        "num_hidden_layers": 43,
+        "n_routed_experts": 256,
+        "num_experts_per_tok": 6,
+        "first_k_dense_replace": 1,
+        "num_nextn_predict_layers": 1,
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.write_yaml(self.DSV4_YAML)
+        self.write_json(self.DSV4_JSON)
+
+    def test_a_large_cp_blocks_the_shrink_and_says_so(self):
+        ok, message = self.adapt(1, test_accuracy=True)
+        self.assertFalse(ok, message)
+        self.assertIn("CP=16 不参与自动缩容", message)
+        # sharding maxes out at 8/(1*1*2) = 4 with PP at its floor.
+        self.assertIn("sharding 最大只有 4", message)
+        self.assertIn("--scale-seq-length", message)
+
+    def test_the_c4_rejections_survive_the_detail_truncation(self):
+        """C4 lines must not be crowded out by model-structure rejections."""
+        ok, message = self.adapt(1, test_accuracy=True)
+        self.assertFalse(ok, message)
+        self.assertIn("候选淘汰明细", message)
+        self.assertIn("C4 不满足", message)
+
+    def test_a_smaller_cp_needs_no_excuse(self):
+        """CP=2 divides every reachable sharding, so it never blocks."""
+        self.write_yaml(
+            self.DSV4_YAML.replace(
+                "context_parallel_size: 16", "context_parallel_size: 2"
+            )
+        )
+        ok, message = self.adapt(1, test_accuracy=True)
+        self.assertNotIn("不参与自动缩容", message)
+
+    def test_scale_seq_length_is_the_way_to_move_cp(self):
+        """The explicit escape hatch still works and shrinks CP with the seq."""
+        ok, message = self.adapt(
+            1, test_accuracy=True, scale_seq_length=131072 // 8
+        )
+        self.assertTrue(ok, message)
+        out = self.load_output_yaml(8)
+        self.assertEqual(out["max_seq_length"], 16384)
+        self.assertEqual(out["context_parallel_size"], 2)
 
 
 if __name__ == "__main__":
