@@ -141,6 +141,7 @@ setup_paddle_venv() {
         "setuptools>=66.1.0" pip wheel packaging "ninja==1.11.1.1" \
         "pybind11[global]>=2.13,<3" \
         "tensor-spec-worker"
+    uv pip uninstall paddle-nvidia-nvshmem-cu12 -y
     uv pip install --python "${paddle_py}" "paddle-nvidia-nvshmem-cu13>=3.3.9,<3.5" -i https://www.paddlepaddle.org.cn/packages/nightly/cu130/
 
     # PaddleFleet. --no-deps is intentionally dropped: the wheel's pinned
