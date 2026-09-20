@@ -752,15 +752,13 @@ class GPTEmbedding(FleetLayer):
                                 and self.config.experimental_dataflow
                             ):
                                 # In EB data flow, mtp input embed apply CP scatter here
-                                inputs_embeds_mtp = (
-                                    ContextParallelScatterOp.apply(
-                                        inputs_embeds_mtp,
-                                        axis=1,
-                                        mode=self.config.cp_balance_mode,
-                                        # Embedding output (E175): divide out cp-duplicate
-                                        # embed grads under per-token; no-op otherwise.
-                                        scale_grad_by_cp=True,
-                                    )
+                                inputs_embeds_mtp = ContextParallelScatterOp.apply(
+                                    inputs_embeds_mtp,
+                                    axis=1,
+                                    mode=self.config.cp_balance_mode,
+                                    # Embedding output (E175): divide out cp-duplicate
+                                    # embed grads under per-token; no-op otherwise.
+                                    scale_grad_by_cp=True,
                                 )
 
                             if self.sequence_parallel:
@@ -831,7 +829,9 @@ class GPTEmbedding(FleetLayer):
                     "generation."
                 )
                 decoder_input = ContextParallelScatterOp.apply(
-                    decoder_input, axis=1, mode=self.config.cp_balance_mode,
+                    decoder_input,
+                    axis=1,
+                    mode=self.config.cp_balance_mode,
                     # Embedding output, plain no-MTP path (E175): divide out
                     # cp-duplicate embed grads under per-token; no-op otherwise.
                     scale_grad_by_cp=True,

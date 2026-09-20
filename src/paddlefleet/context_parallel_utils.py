@@ -551,7 +551,13 @@ class ContextParallelScatterOp(PyLayer):
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, axis=0, mode="dualchunk_allgather", scale_grad_by_cp=False):
+    def forward(
+        ctx,
+        input_tensor,
+        axis=0,
+        mode="dualchunk_allgather",
+        scale_grad_by_cp=False,
+    ):
         ctx.axis = axis
         ctx.mode = mode
         # Per-token loss only: divide the all-gathered gradient by the CP group
@@ -587,14 +593,19 @@ class ContextParallelScatterOp(PyLayer):
                 grad_output, group=ctx.group, axis=ctx.axis
             )
         else:
-            grad = all_gather_balance(grad_output, axis=ctx.axis, group=ctx.group)
+            grad = all_gather_balance(
+                grad_output, axis=ctx.axis, group=ctx.group
+            )
         # Per-token loss + this specific call site opted in (embedding output): the
         # all-gather put cp identical full-sequence gradient copies on every CP
         # rank, so the upstream embedding parameter would be counted cp times under
         # the pure-SUM reduce. Divide them back out here; ``ctx.group`` carries this
         # microbatch's own CP size. Both conditions are required, so every other
         # call site and the legacy path are untouched. See loss_grad_normalization.md 3.5/6.1.
-        if getattr(ctx, "scale_grad_by_cp", False) and _per_token_grad_scale_enabled():
+        if (
+            getattr(ctx, "scale_grad_by_cp", False)
+            and _per_token_grad_scale_enabled()
+        ):
             nranks = getattr(ctx.group, "nranks", 1)
             if nranks and nranks > 1:
                 grad = grad / nranks

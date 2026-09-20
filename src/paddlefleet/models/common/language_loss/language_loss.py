@@ -528,7 +528,9 @@ class LanguageLoss(FleetLayer):
             # recompute replays are skipped, so neither inflates T_global (E180).
             # Display stats are recorded separately in forward().
             if _per_token_count_enabled(self.config):
-                accumulate_per_token_local_count((labels != self.ignored_index).sum())
+                accumulate_per_token_local_count(
+                    (labels != self.ignored_index).sum()
+                )
 
             if get_context_parallel_world_size() > 1:
                 loss = ContextParallelGatherOp.apply(
@@ -611,7 +613,9 @@ class LanguageLoss(FleetLayer):
         # recompute replays are skipped, so neither inflates T_global (E180).
         # Display stats are recorded separately in forward().
         if _per_token_count_enabled(self.config):
-            accumulate_per_token_local_count((labels != self.ignored_index).sum())
+            accumulate_per_token_local_count(
+                (labels != self.ignored_index).sum()
+            )
 
         if get_context_parallel_world_size() > 1:
             loss = ContextParallelGatherOp.apply(
@@ -911,9 +915,13 @@ class LanguageLoss(FleetLayer):
             # head, used by _record_per_token_display below. Detached; never affects
             # grads. lm_labels / labels_cur_depth here are the full (un-scattered)
             # slices, so these match the post-CP-gather loss sums forward_impl returns.
-            _per_token_disp = getattr(self.config, "calculate_per_token_loss", False)
+            _per_token_disp = getattr(
+                self.config, "calculate_per_token_loss", False
+            )
             _lm_tok = (
-                (lm_labels != self.ignored_index).sum() if _per_token_disp else None
+                (lm_labels != self.ignored_index).sum()
+                if _per_token_disp
+                else None
             )
             _mtp_tok_list = []
 
@@ -924,7 +932,9 @@ class LanguageLoss(FleetLayer):
             # head the same way. Separate from _lm_tok / _mtp_tok_list, which stay on the
             # display path. Supported-config guards live in __init__ (E183).
             _lm_tok_full = (
-                (labels_ori != self.ignored_index).sum() if _per_token_disp else None
+                (labels_ori != self.ignored_index).sum()
+                if _per_token_disp
+                else None
             )
             _mtp_tok_full_list = []
 
@@ -1379,7 +1389,9 @@ class LanguageLoss(FleetLayer):
                 loss = LossScaleBeforeBackward.scale(loss)
             return loss
 
-    def _record_per_token_display(self, lm_loss, lm_tok, mtp_loss, mtp_tok_list):
+    def _record_per_token_display(
+        self, lm_loss, lm_tok, mtp_loss, mtp_tok_list
+    ):
         """Stash detached display stats for calculate_per_token_loss (print only).
 
         lm_loss / mtp_loss[i] are the raw post-CP-gather masked-loss SUMS returned by
@@ -1499,9 +1511,7 @@ class MainLanguageLoss(LanguageLoss):
         if per_token:
             mtp_disp_vals = [
                 mtp_loss[i].detach()
-                / paddle.clip(
-                    mtp_tok_full_list[i].astype("float32"), min=1.0
-                )
+                / paddle.clip(mtp_tok_full_list[i].astype("float32"), min=1.0)
                 for i in range(len(mtp_loss))
             ]
         else:
@@ -1549,17 +1559,13 @@ class MainLanguageLoss(LanguageLoss):
                 return mtp_l
             return mtp_l * (
                 lm_tok_full.astype("float32")
-                / paddle.clip(
-                    mtp_tok_full_list[idx].astype("float32"), min=1.0
-                )
+                / paddle.clip(mtp_tok_full_list[idx].astype("float32"), min=1.0)
             )
 
         loss = add_loss(
             lm_loss,
             self.config.mtp_loss_scaling_factor
-            * sum(
-                renorm_mtp_head(i, mtp_l) for i, mtp_l in enumerate(mtp_loss)
-            )
+            * sum(renorm_mtp_head(i, mtp_l) for i, mtp_l in enumerate(mtp_loss))
             / len(mtp_loss),
         )
 

@@ -981,7 +981,9 @@ class StandardMoERouter(nn.Layer):
                 # summing over CP reconstructs the full z-loss exactly once.
                 l_zloss = l_zloss * denom
         else:
-            assert not getattr(self.config, "calculate_per_token_loss", False), (
+            assert not getattr(
+                self.config, "calculate_per_token_loss", False
+            ), (
                 "calculate_per_token_loss + router_z_loss without input_ids is "
                 "unsupported: there is no valid-token count to lift the mean to sum "
                 "scale, so the trainer's 1/T_global would shrink z_loss by ~T_global."
