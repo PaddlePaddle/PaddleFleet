@@ -856,6 +856,13 @@ def _build_decoder_view(config: HyperBodyConfig):
     namespace = types.SimpleNamespace(**merged)
 
     view = HyperBodyDecoderModelProvider.from_config(namespace)
+    # b80ef7d5: MLA 核注意力 kernel 由 _attn_implementation 决定; HyperBodyConfig 继承 HF
+    # PretrainedConfig 默认 "eager", 而 ernie5_v2(lite) 用 "default"(融合/flash), 二者对同一
+    # q/k/v 产生 ~1e-5 差, 从首个 MLA 层累积 -> 与 standalone lite 前向不逐位对齐。让它由 config
+    # (yaml/json/kwargs)驱动, 缺省回退 "default"(对齐 lite), 避免 HF 默认 "eager" 泄漏。
+    view._attn_implementation = (
+        getattr(config, "_attn_implementation", None) or "default"
+    )
     view.multimodal_embedding = True
     view.image_token_id = config.image_token_id
     view.video_token_id = config.video_token_id
