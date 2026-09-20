@@ -2350,6 +2350,17 @@ _RING_ZERO_SM_AG = os.environ.get("RINGMOE_ZERO_SM_AG", "0") == "1"
 # Plain intra group (by id) -> its cta_policy=2 twin, populated at group build.
 _RING_ZERO_SM_GROUP: dict = {}
 
+# opt-in perf experiments (default OFF in code; train_gpu.sh flips them on).
+# RS_SPLIT: run the forward output ReduceScatter on a SECOND intra NCCL comm
+# (own stream) so it overlaps the token AllGather on the primary intra comm.
+# SE_OVERLAP: leave the LAST round's intra RS async (not drained in the fold),
+# so the shared-expert subgraph in _inter_combine overlaps BOTH that last intra
+# RS and the inter RS (instead of the inter RS only). Both introduce cross-comm
+# concurrency that is deadlock-prone on sm_120/103, so they are gated to stay
+# recoverable to the known-good HEAD behavior.
+_RING_RS_SPLIT = os.environ.get("RINGMOE_RS_SPLIT", "0") == "1"
+_RING_SE_OVERLAP = os.environ.get("RINGMOE_SE_OVERLAP", "0") == "1"
+
 # Tier1: prefetch round r+1's intra token AllGather on the comm stream during
 # round r's expert GEMM, so the (SM-free, zero-SM) gather is hidden behind the
 # GEMM instead of serialized in front of it. Only meaningful with zero-SM AG on
@@ -2521,15 +2532,21 @@ def _build_ring_subgroups(moe_group, gpus_per_node: int = _RING_GPUS_PER_NODE):
         return out
 
     global_rank = paddle.distributed.get_rank()
-    intra_group = inter_group = None
+    intra_group = inter_group = intra_rs_group = None
     for lst in _unique_sorted("intra"):
         g = paddle.distributed.new_group(ranks=lst)
         # Build the zero-SM twin unconditionally (world-collective, like the
         # plain new_group above), but only bind it for the group this rank
         # actually uses as its intra group.
         zg = _make_zero_sm_group(lst) if _RING_ZERO_SM_AG else None
+        # RS_SPLIT: a second plain group over the SAME intra ranks -> its own
+        # NCCL comm/stream for the output ReduceScatter (runs concurrently with
+        # the token AllGather on ``g``). World-collective, so gate it on the
+        # same flag on every rank to keep the new_group count consistent.
+        rsg = paddle.distributed.new_group(ranks=lst) if _RING_RS_SPLIT else None
         if global_rank in lst:
             intra_group = g
+            intra_rs_group = rsg
             if zg is not None:
                 _RING_ZERO_SM_GROUP[id(g)] = zg
     for lst in _unique_sorted("inter"):
@@ -2552,7 +2569,7 @@ def _build_ring_subgroups(moe_group, gpus_per_node: int = _RING_GPUS_PER_NODE):
         N,
     )
 
-    result = (G, N, intra_group, inter_group)
+    result = (G, N, intra_group, inter_group, intra_rs_group)
     _RING_SUBGROUP_CACHE[key] = result
     _tune_zero_sm_ring_size(N)
     return result
@@ -3039,7 +3056,7 @@ class _RingRoundsFold(paddle.autograd.PyLayer):
     @staticmethod
     def forward(
         ctx, tok, w, idx, disp, expert_fn, recompute_moe_gate_up, is_first_fwd,
-        gate_pf_handle=None,
+        gate_pf_handle=None, se_overlap=False,
     ):
         n, intra, inter = disp.N, disp.intra_group, disp.inter_group
         r0 = inter.rank
@@ -3047,6 +3064,10 @@ class _RingRoundsFold(paddle.autograd.PyLayer):
         ctx.n, ctx.disp, ctx.r0, ctx.dst, ctx.src = n, disp, r0, dst, src
         ctx.tok_needs_grad = not tok.stop_gradient
         ctx.w_needs_grad = not w.stop_gradient
+        # SE_OVERLAP: leave the LAST round's intra RS async (not drained here)
+        # and return the per-round partials (un-concatenated), so the caller's
+        # shared-expert combine can overlap that last RS + the inter RS.
+        ctx.se_overlap = se_overlap
         # fp8 forward output is e4m3 while the expert backward returns bf16, and
         # idx carries no grad. Same pair as _RingFP8AllGather.
         ctx.set_grad_in_dtype_consistent(False)
@@ -3201,9 +3222,24 @@ class _RingRoundsFold(paddle.autograd.PyLayer):
             # backward is unchanged, so this is numerically identical.
             if intra_on:
                 nvtx.push_range(f"ringmoe/intra_rs_launch_{step}")
-                red, t_rs = _reduce_scatter_async(out[0], intra)
+                # RS_SPLIT: route the output ReduceScatter onto the 2nd intra
+                # comm (own stream) so it runs concurrently with the token
+                # AllGather on the primary intra comm; off => single intra comm
+                # (HEAD behavior, numerically identical, drained below).
+                rs_grp = (
+                    disp.intra_rs_group
+                    if (_RING_RS_SPLIT and disp.intra_rs_group is not None)
+                    else intra
+                )
+                red, t_rs = _reduce_scatter_async(out[0], rs_grp)
                 nvtx.pop_range()
-                rs_tasks.append(t_rs)
+                # SE_OVERLAP: keep the LAST round's RS in flight (do NOT drain
+                # it here) so the shared-expert combine overlaps it; hold a ref
+                # on disp so it is not collected before the combine consumes it.
+                if se_overlap and step == n - 1:
+                    disp._se_last_rs_task = t_rs
+                else:
+                    rs_tasks.append(t_rs)
             else:
                 red = out[0]
             partials[(r0 - step) % n] = red
@@ -3214,18 +3250,29 @@ class _RingRoundsFold(paddle.autograd.PyLayer):
 
         nvtx.pop_range()
         ctx.bwfs = bwfs
+        if se_overlap:
+            # Un-concatenated partials (last one's intra RS still async). The
+            # SE-overlap combine issues the shared expert, then concats (which
+            # stream-waits that RS), then the inter RS.
+            return tuple(partials)
         return paddle.concat(partials, axis=0)
 
     @staticmethod
-    def backward(ctx, grad_buf):
+    def backward(ctx, *grads):
         n, disp = ctx.n, ctx.disp
         r0, dst, src = ctx.r0, ctx.dst, ctx.src
         intra, inter = disp.intra_group, disp.inter_group
-        T = grad_buf.shape[0] // n
-        # partials[d] occupied rows [d*T, (d+1)*T) of the concat.
-        grad_home = [
-            grad_buf[d * T : (d + 1) * T].contiguous() for d in range(n)
-        ]
+        if ctx.se_overlap:
+            # forward returned N partials -> one grad per partial, already in
+            # partial-home order.
+            grad_home = [g.contiguous() for g in grads]
+        else:
+            grad_buf = grads[0]
+            T = grad_buf.shape[0] // n
+            # partials[d] occupied rows [d*T, (d+1)*T) of the concat.
+            grad_home = [
+                grad_buf[d * T : (d + 1) * T].contiguous() for d in range(n)
+            ]
 
         # Reverse of the async intra ReduceScatter is an intra AllGather. Issue
         # round i-1's while round i's expert backward runs: this is the whole
@@ -3289,6 +3336,57 @@ class _RingRoundsFold(paddle.autograd.PyLayer):
         )
 
 
+class _RingSEOverlapCombine(paddle.autograd.PyLayer):
+    """Inter-node combine that overlaps the shared-expert subgraph with BOTH
+    the (still in-flight) last intra ReduceScatter and the inter RS.
+
+    Positional inputs: the N per-round partials (the last round's intra RS is
+    still async when this runs), followed by the shared-expert ``fn_args``.
+    Forward issues the shared expert on the calc stream FIRST, then concats the
+    partials (which stream-waits the pending last intra RS), then the inter
+    ReduceScatter on the comm stream -- so the shared expert runs across that
+    whole comm chain. Mirrors ``_AllGatherCombineAsync``'s bf16 grad dual:
+    backward AllGathers the combined grad over the inter group (overlapping the
+    shared-expert backward) and slices it back into per-partial grads.
+    """
+
+    @staticmethod
+    def forward(ctx, *args, n_partials, group, fn, is_first_fwd=False):
+        if fn is None:
+            raise ValueError("_RingSEOverlapCombine requires a non-None fn.")
+        partials = args[:n_partials]
+        fn_args = args[n_partials:]
+        ctx.group = group
+        ctx.n_partials = n_partials
+        # Shared expert FIRST on the calc stream, so it overlaps the pending
+        # last intra RS (waited by the concat below) and the inter RS.
+        ctx.bwf, fn_out = manual_backward(fn, is_first_fwd, *fn_args)
+        x = paddle.concat(partials, axis=0)
+        if group is None or group.nranks == 1:
+            combined_x = x.clone()
+            return (combined_x,) + fn_out  # noqa: RUF005
+        combined_x, task = _reduce_scatter_async(x, group)
+        task.wait()
+        return (combined_x,) + fn_out  # noqa: RUF005
+
+    @staticmethod
+    def backward(ctx, grad_combined, *fn_out_grads):
+        group = ctx.group
+        n = ctx.n_partials
+        if group is None or group.nranks == 1:
+            grad_x = grad_combined.clone()
+            fn_args_grads = ctx.bwf(*fn_out_grads)
+        else:
+            grad_x, task = _all_gather_async(grad_combined, group)
+            fn_args_grads = ctx.bwf(*fn_out_grads)
+            task.wait()
+        T = grad_x.shape[0] // n
+        gp = tuple(
+            grad_x[i * T : (i + 1) * T].contiguous() for i in range(n)
+        )
+        return gp + fn_args_grads  # noqa: RUF005
+
+
 class RingMoETokenDispatcher(AllGatherTokenDispatcher):
     """Two-level ring dispatcher for intermediate-sharded experts.
 
@@ -3349,7 +3447,7 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             f"nranks={None if moe_group is None else moe_group.nranks}. Use "
             "moe_token_dispatcher_type='allgather' for single-GPU / no-EP."
         )
-        self.G, self.N, self.intra_group, self.inter_group = (
+        self.G, self.N, self.intra_group, self.inter_group, self.intra_rs_group = (
             _build_ring_subgroups(moe_group, _RING_GPUS_PER_NODE)
         )
         assert self.N > 1, (
@@ -3659,8 +3757,13 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         # are hidden and nearly free), so any future attempt must keep it async.
         from paddle import framework as _framework
 
+        se_overlap = (
+            _RING_SE_OVERLAP
+            and combine_overlap_handle is not None
+            and combine_overlap_handle.get("fn") is not None
+        )
         nvtx.push_range("ringmoe/rounds_fold")
-        buf = _RingRoundsFold.apply(
+        fold_out = _RingRoundsFold.apply(
             tok,
             cur_w,
             cur_idx,
@@ -3669,14 +3772,31 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             recompute_moe_gate_up,
             not _framework._dygraph_tracer()._has_grad,
             self._gate_pf_handle,
+            se_overlap,
         )
         # Consumed as round 0's handle inside the fold; drop our ref so a later
         # forward without a fresh pre_gate_token_ag cannot reuse a stale handle.
         self._gate_pf_handle = None
         nvtx.pop_range()
         nvtx.push_range("ringmoe/final_inter_combine")
-        out = self._inter_combine(
-            buf, self.inter_group, combine_overlap_handle
-        )
+        if se_overlap:
+            # SE_OVERLAP: the fold returned the N per-round partials (last one's
+            # intra RS still async). Run the shared expert first, then concat
+            # (waits that RS) + inter RS -- shared expert overlaps both.
+            combined_x, *fn_out = _RingSEOverlapCombine.apply(
+                *fold_out,
+                *(combine_overlap_handle["fn_args"]),
+                n_partials=self.N,
+                group=self.inter_group,
+                fn=combine_overlap_handle["fn"],
+                is_first_fwd=not _framework._dygraph_tracer()._has_grad,
+            )
+            combine_overlap_handle["fn_out"] = tuple(fn_out)
+            self._se_last_rs_task = None
+            out = combined_x
+        else:
+            out = self._inter_combine(
+                fold_out, self.inter_group, combine_overlap_handle
+            )
         nvtx.pop_range()
         return out
