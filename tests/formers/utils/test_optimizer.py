@@ -552,22 +552,35 @@ def _clone_state(state):
     return copy.deepcopy(state)
 
 
-def _flatten_opt_tensors(state, prefix=""):
-    """Flatten an optimizer ``state_dict`` to ``{key: ndarray}`` of its tensors.
+def _sorted_state_values(state):
+    """Collect every tensor value in an optimizer ``state_dict`` into one
+    sorted 1-D ``ndarray``.
 
-    Non-tensor entries (e.g. the LR scheduler dict) are recursed into so nested
-    accumulator tensors are still captured; scalars are ignored.
+    Keys are deliberately ignored: Paddle mangles each optimizer instance's
+    accumulator variable names with a per-instance unique suffix, so two
+    optimizers over the same parameters do not share ``state_dict`` keys. The
+    accumulated moment / beta-power *values* are what a resume restores, and
+    those are what we compare. Non-tensor entries (e.g. the nested LR-scheduler
+    dict of scalars) are recursed into so any nested tensors are still caught.
     """
-    out = {}
-    for k, v in state.items():
-        key = f"{prefix}{k}"
-        if isinstance(v, np.ndarray):
-            out[key] = v
-        elif hasattr(v, "numpy"):
-            out[key] = v.numpy()
-        elif isinstance(v, dict):
-            out.update(_flatten_opt_tensors(v, prefix=f"{key}/"))
-    return out
+    chunks = []
+
+    def _collect(node):
+        if isinstance(node, np.ndarray):
+            chunks.append(node.reshape(-1))
+        elif hasattr(node, "numpy"):
+            chunks.append(np.asarray(node.numpy()).reshape(-1))
+        elif isinstance(node, dict):
+            for v in node.values():
+                _collect(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                _collect(v)
+
+    _collect(state)
+    if not chunks:
+        return np.empty(0, dtype="float64")
+    return np.sort(np.concatenate(chunks).astype("float64"))
 
 
 class TestAdamWCustomStateRestore(unittest.TestCase):
@@ -643,7 +656,7 @@ class TestAdamWCustomStateRestore(unittest.TestCase):
         # Snapshot the restored optimizer's *public* state (state_dict) after
         # its (3rd) step. Because the step count was restored, its moment /
         # beta-power accumulators are three steps in.
-        restored_state = _flatten_opt_tensors(opt3.state_dict())
+        restored_vals = _sorted_state_values(opt3.state_dict())
 
         # Negative control: same weights, but a fresh (un-restored) optimizer.
         # AdamW's magnitude-normalized update makes the *weights* after a single
@@ -652,25 +665,30 @@ class TestAdamWCustomStateRestore(unittest.TestCase):
         # optimizer state the restore actually carried: a fresh optimizer that
         # takes a single step from the same weights holds different moment /
         # beta-power accumulators than the resumed (3-step) optimizer.
+        #
+        # The state is compared *by value*, not by key: Paddle mangles each
+        # optimizer's accumulator variable names with a per-instance unique
+        # suffix, so two optimizers over the same parameters share no
+        # state_dict keys. The accumulated moment / beta-power values are what
+        # the resume genuinely restores, and those differ between a 3-step
+        # (resumed) and a 1-step (fresh) optimizer.
         linear.weight.set_value(w_at2)
         linear.bias.set_value(b_at2)
         fresh_opt = _make_custom_optimizer(
             linear.parameters(), learning_rate=0.3
         )
         self._fixed_grad_step(linear, fresh_opt)
-        fresh_state = _flatten_opt_tensors(fresh_opt.state_dict())
+        fresh_vals = _sorted_state_values(fresh_opt.state_dict())
 
-        common = set(restored_state) & set(fresh_state)
         self.assertTrue(
-            common, "optimizer state_dicts share no comparable tensors"
+            restored_vals.size and fresh_vals.size,
+            "optimizer state_dicts exposed no comparable tensors",
         )
-        any_diff = any(
-            restored_state[k].shape != fresh_state[k].shape
-            or not np.allclose(restored_state[k], fresh_state[k])
-            for k in common
+        same_state = restored_vals.size == fresh_vals.size and np.allclose(
+            restored_vals, fresh_vals
         )
-        self.assertTrue(
-            any_diff,
+        self.assertFalse(
+            same_state,
             "a fresh optimizer must not share the resumed optimizer's "
             "moment/beta-power state (proving the state genuinely "
             "participated in the resume)",
