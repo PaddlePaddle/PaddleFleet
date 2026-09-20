@@ -32,6 +32,7 @@ except ImportError:
 import paddle.distributed as dist
 from paddle.autograd.py_layer import PyLayer
 
+from paddlefleet.accuracy_target import AccuracyTarget, targets_hf
 from paddlefleet.tensor_parallel.random import (
     get_cuda_rng_tracker,
     get_expert_parallel_rng_tracker_name,
@@ -166,6 +167,7 @@ class _UnpermuteGatherSumAlignedPyLayer(PyLayer):
         topk,
         hidden,
         has_padding,
+        accuracy_target,
     ):
         ctx.input_dtype = permuted_tokens.dtype
         ctx.num_total_tokens = num_total_tokens
@@ -181,6 +183,19 @@ class _UnpermuteGatherSumAlignedPyLayer(PyLayer):
             gathered = gathered * valid_rows.cast(gathered.dtype).reshape(
                 [num_tokens, 1, 1]
             )
+        if targets_hf(accuracy_target):
+            # ``Qwen3_5MoeExperts`` combines with one ``index_add_`` per expert
+            # into a BF16 buffer, i.e. a token's ``topk`` contributions are added
+            # one at a time in ascending expert order and rounded after each add.
+            # ``sum(axis=1)`` is FP32-accumulated (``reduce_sum`` is AMP
+            # black-listed) and rounds only once, which differs in the last
+            # mantissa bit. ``_build_aligned_gather_index`` already orders the
+            # slot columns by ascending expert index.
+            with paddle.amp.auto_cast(False):
+                output_tokens = gathered[:, 0]
+                for slot in range(1, topk):
+                    output_tokens = output_tokens + gathered[:, slot]
+            return output_tokens.cast(ctx.input_dtype)
         output_tokens = gathered.sum(axis=1)
         return output_tokens.cast(ctx.input_dtype)
 
@@ -282,6 +297,7 @@ def _unpermute_gather_sum_aligned(
     sorted_indices: paddle.Tensor,
     restore_shape,
     routing_map: paddle.Tensor,
+    accuracy_target=True,
 ) -> paddle.Tensor:
     num_tokens, hidden = restore_shape[0], restore_shape[-1]
     num_total_tokens = permuted_tokens.shape[0]
@@ -301,6 +317,7 @@ def _unpermute_gather_sum_aligned(
         topk,
         hidden,
         has_padding,
+        accuracy_target,
     )
 
 
@@ -308,8 +325,9 @@ class ApplyPermutedProbs(PyLayer):
     """tokens * probs with fp32-accumulated probs gradient."""
 
     @staticmethod
-    def forward(ctx, permuted_tokens, permuted_probs):
+    def forward(ctx, permuted_tokens, permuted_probs, accuracy_target=True):
         ctx.input_dtype = permuted_tokens.dtype
+        ctx.hf_bitexact = targets_hf(accuracy_target)
         ctx.save_for_backward(permuted_tokens, permuted_probs)
         return permuted_tokens * permuted_probs.unsqueeze(-1)
 
@@ -317,9 +335,20 @@ class ApplyPermutedProbs(PyLayer):
     def backward(ctx, grad_output):
         permuted_tokens, permuted_probs = ctx.saved_tensor()
         grad_tokens = grad_output * permuted_probs.unsqueeze(-1)
-        grad_probs = (
-            permuted_tokens.cast("float32") * grad_output.cast("float32")
-        ).sum(axis=-1)
+        if ctx.hf_bitexact:
+            # ``Qwen3_5MoeExperts`` scales in the activation dtype
+            # (``current_hidden_states * top_k_weights[...]``), so the reference
+            # mul-backward multiplies in BF16 and only the broadcast reduction
+            # uses an FP32 accumulator. Upcasting both operands first (the branch
+            # below) rounds differently and shifts the router weight gradient.
+            with paddle.amp.auto_cast(False):
+                grad_probs = (grad_output * permuted_tokens).sum(
+                    axis=-1, dtype="float32"
+                )
+        else:
+            grad_probs = (
+                permuted_tokens.cast("float32") * grad_output.cast("float32")
+            ).sum(axis=-1)
         return grad_tokens.cast(ctx.input_dtype), grad_probs.cast(
             permuted_probs.dtype
         )
@@ -342,12 +371,14 @@ class _PermuteAlignedPyLayer(PyLayer):
         topk,
         hidden,
         has_padding,
+        accuracy_target,
     ):
         ctx.input_dtype = tokens.dtype
         ctx.num_tokens = num_tokens
         ctx.topk = topk
         ctx.hidden = hidden
         ctx.has_padding = has_padding
+        ctx.hf_bitexact = targets_hf(accuracy_target)
         ctx.save_for_backward(gather_index_flat, valid_rows)
         permuted_input = tokens.index_select(axis=0, index=sorted_indices)
         return permuted_input
@@ -359,6 +390,27 @@ class _PermuteAlignedPyLayer(PyLayer):
             return paddle.zeros(
                 [ctx.num_tokens, ctx.hidden], dtype=ctx.input_dtype
             )
+        if ctx.hf_bitexact:
+            # ``Qwen3_5MoeExperts`` is a Python loop over experts, so on the HF
+            # side ``hidden_states`` has one autograd consumer per expert and
+            # their gradients are accumulated one BF16 add at a time, in reverse
+            # creation order (highest expert index first). A single FP32
+            # reduction over the top-k slots rounds once instead of k times and
+            # does not reproduce that. ``_build_aligned_gather_index`` orders the
+            # slot columns by ascending expert index, so walk them backwards.
+            gathered = grad_permuted.index_select(
+                axis=0, index=gather_index_flat
+            ).reshape([ctx.num_tokens, ctx.topk, ctx.hidden])
+            if ctx.has_padding:
+                gathered = gathered * valid_rows.cast(gathered.dtype).reshape(
+                    [ctx.num_tokens, 1, 1]
+                )
+            with paddle.amp.auto_cast(False):
+                acc = gathered[:, ctx.topk - 1]
+                for slot in range(ctx.topk - 2, -1, -1):
+                    acc = acc + gathered[:, slot]
+            return acc.cast(ctx.input_dtype)
+
         # gather → [N*topk, H] in fp32 → reshape [N, topk, H] → sum(axis=1)
         gathered = grad_permuted.cast("float32").index_select(
             axis=0, index=gather_index_flat
@@ -378,7 +430,7 @@ def permute(
     routing_map,
     num_out_tokens: int | None = None,
     drop_and_pad: bool = False,
-    use_accuracy_compatible: bool = False,
+    use_accuracy_compatible: AccuracyTarget = False,
 ):
     """Permute the tokens and probs based on the mask.
     Tokens with the same designated expert will be grouped together.
@@ -421,6 +473,7 @@ def permute(
             topk_val,
             hidden,
             has_padding,
+            use_accuracy_compatible,
         )
     else:
         # use the mapping to permute the tokens
@@ -436,7 +489,7 @@ def unpermute(
     probs: paddle.Tensor = None,
     routing_map: paddle.Tensor = None,
     drop_and_pad: bool = False,
-    use_accuracy_compatible: bool = False,
+    use_accuracy_compatible: AccuracyTarget = False,
 ):
     """
     Restore the original order of tokens after permutation. If probs are provided, it
@@ -466,14 +519,18 @@ def unpermute(
         )
         if use_accuracy_compatible_kernel():
             permuted_tokens = ApplyPermutedProbs.apply(
-                permuted_tokens, permuted_probs
+                permuted_tokens, permuted_probs, use_accuracy_compatible
             )
         else:
             permuted_tokens = permuted_tokens * permuted_probs.unsqueeze(-1)
 
     if use_accuracy_compatible and routing_map is not None:
         return _unpermute_gather_sum_aligned(
-            permuted_tokens, sorted_indices, restore_shape, routing_map
+            permuted_tokens,
+            sorted_indices,
+            restore_shape,
+            routing_map,
+            use_accuracy_compatible,
         )
 
     if use_accuracy_compatible_kernel():

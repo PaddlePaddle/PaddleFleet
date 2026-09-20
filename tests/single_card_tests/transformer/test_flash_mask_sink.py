@@ -285,15 +285,13 @@ class TestCuteFlashmaskSink(unittest.TestCase):
     def test_small_head_dim_sink(self):
         self._run(2, 128, 4, 4, 64, causal=False, use_sink=True)
 
-    def test_fixed_sink_backward_returns_dsink_slot(self):
-        # A FIXED (stop_gradient=True) bf16 sink is a valid forward input, but
-        # FlashMaskFunc.backward chooses its return arity from
-        # ``learnable_sink is None`` alone (interface.py:1770-1772) -- it does
-        # NOT consult stop_gradient. So a non-None fixed sink makes backward
-        # return the 4-tuple (dq, dk, dv, dsink); Paddle's PyLayer then rejects
-        # it because the sink forward input has stop_gradient=True and its slot
-        # must be None. We assert the forward is still numerically correct and
-        # that backward raises this ValueError, documenting the limitation.
+    def test_fixed_sink_backward_skips_dsink_slot(self):
+        # A FIXED (stop_gradient=True) bf16 sink is a valid forward input, and
+        # Paddle requires the PyLayer's backward to return None at that slot.
+        # FlashMaskFunc records which inputs want a gradient in its forward
+        # (``ctx.needs_grad``) and honours it, so backward returns the 4-tuple
+        # (dq, dk, dv, None) rather than an unconditional dsink: q/k/v get their
+        # gradients and the frozen sink receives nothing.
         from paddlefleet_ops.flash_mask.cute.interface import (
             flashmask_attention,
         )
@@ -328,11 +326,16 @@ class TestCuteFlashmaskSink(unittest.TestCase):
             (out - out_ref).abs().max().item(), 2e-2 + fwd_atol
         )
 
-        with self.assertRaises(ValueError):
-            out.backward(paddle.randn(out.shape, dtype=out.dtype))
+        out.backward(paddle.randn(out.shape, dtype=out.dtype))
+        for name, t in (("dq", q), ("dk", k), ("dv", v)):
+            self.assertIsNotNone(t.grad, f"{name} missing")
+        self.assertTrue(sink.stop_gradient)
+        self.assertIsNone(sink.grad)
 
-    def test_sink_dtype_assert(self):
-        # The cute kernel asserts learnable_sink is bf16; fp32 must raise.
+    def test_sink_dtype_contract(self):
+        # flash-attention 5007a05 ("fp16/fp32 sink") widened the bf16-only
+        # assert to _LEARNABLE_SINK_DTYPES = (fp16, bf16, fp32); anything else
+        # still raises.
         from paddlefleet_ops.flash_mask.cute.interface import (
             flashmask_attention,
         )
@@ -342,8 +345,21 @@ class TestCuteFlashmaskSink(unittest.TestCase):
         q = paddle.randn([b, s, h, d], dtype=DTYPE)
         k = paddle.randn([b, s, h, d], dtype=DTYPE)
         v = paddle.randn([b, s, h, d], dtype=DTYPE)
-        sink_fp32 = paddle.zeros([h], dtype=paddle.float32)
         idx = _startend_row_indices(b, s, causal=True)
+
+        # fp32 is now a supported sink dtype: the forward runs and stays finite.
+        out = flashmask_attention(
+            q,
+            k,
+            v,
+            startend_row_indices=idx,
+            causal=True,
+            learnable_sink=paddle.zeros([h], dtype=paddle.float32),
+        )
+        self.assertEqual(list(out.shape), [b, s, h, d])
+        self.assertTrue(paddle.isfinite(out.astype("float32")).all().item())
+
+        # fp64 is not.
         with self.assertRaises(AssertionError):
             flashmask_attention(
                 q,
@@ -351,7 +367,7 @@ class TestCuteFlashmaskSink(unittest.TestCase):
                 v,
                 startend_row_indices=idx,
                 causal=True,
-                learnable_sink=sink_fp32,
+                learnable_sink=paddle.zeros([h], dtype=paddle.float64),
             )
 
 
@@ -559,6 +575,11 @@ class TestDotProductAttentionSinkForward(unittest.TestCase):
         if softmax_type == "learnable":
             self.assertIsNotNone(attn.softmax_offset.grad)
             self.assertEqual(attn.softmax_offset.grad.dtype, paddle.bfloat16)
+        elif softmax_type == "off-by-one":
+            # A fixed offset must stay frozen and gradient-free: FlashMaskFunc
+            # returns None at its slot instead of an unconditional dsink.
+            self.assertTrue(attn.softmax_offset.stop_gradient)
+            self.assertIsNone(attn.softmax_offset.grad)
 
     def test_forward_vanilla(self):
         self._run("vanilla")
@@ -567,10 +588,10 @@ class TestDotProductAttentionSinkForward(unittest.TestCase):
         self._run("learnable")
 
     def test_forward_offbyone(self):
-        # off-by-one builds an fp32 zeros offset; the cute kernel asserts bf16,
-        # so this path is expected to raise on the fa4 sink branch.
-        with self.assertRaises(AssertionError):
-            self._run("off-by-one")
+        # off-by-one builds a fixed fp32 zeros offset. fp32 sinks are accepted
+        # since flash-attention 5007a05, and the frozen sink no longer trips the
+        # PyLayer's None-slot contract, so this runs end to end.
+        self._run("off-by-one")
 
 
 @unittest.skipUnless(_SINK_AVAILABLE, _SKIP_REASON)
@@ -658,31 +679,23 @@ class TestRefinedRecomputeFlashMaskSink(unittest.TestCase):
             max_diff, 1e-2, f"rr fwd max diff {max_diff} vs non-rr too large"
         )
 
-        # A fixed (stop_gradient) sink makes the non-rr flashmask_attention
-        # PyLayer return a dsink slot that Paddle rejects on backward (a known
-        # limitation of that op, covered by test_fixed_sink_backward_returns_
-        # dsink_slot). So only run the reference backward when the sink is not a
-        # fixed tensor; the rr backward is always exercised below.
-        ref_backward_safe = not (use_sink and not sink_trainable)
-
+        # A fixed (stop_gradient) sink used to make the non-rr
+        # flashmask_attention PyLayer return a dsink slot that Paddle rejected on
+        # backward, so the reference backward had to be skipped there. The op now
+        # returns None at that slot, so both paths are always comparable.
         g = paddle.randn(out.shape, dtype=out.dtype)
         out.backward(g.clone())
-        if ref_backward_safe:
-            out_ref.backward(g.clone())
-            for name, a, ref in (
-                ("dq", q.grad, q_ref.grad),
-                ("dk", k.grad, k_ref.grad),
-                ("dv", v.grad, v_ref.grad),
-            ):
-                self.assertIsNotNone(a, f"{name} grad is None")
-                diff = (a - ref).abs().max().item()
-                self.assertLessEqual(
-                    diff, 2e-2, f"rr {name} max diff {diff} vs non-rr too large"
-                )
-        else:
-            # Still assert the rr backward produced q/k/v grads.
-            for name, a in (("dq", q.grad), ("dk", k.grad), ("dv", v.grad)):
-                self.assertIsNotNone(a, f"{name} grad is None")
+        out_ref.backward(g.clone())
+        for name, a, ref in (
+            ("dq", q.grad, q_ref.grad),
+            ("dk", k.grad, k_ref.grad),
+            ("dv", v.grad, v_ref.grad),
+        ):
+            self.assertIsNotNone(a, f"{name} grad is None")
+            diff = (a - ref).abs().max().item()
+            self.assertLessEqual(
+                diff, 2e-2, f"rr {name} max diff {diff} vs non-rr too large"
+            )
 
         if use_sink and sink_trainable:
             self.assertIsNotNone(sink.grad)
@@ -695,8 +708,9 @@ class TestRefinedRecomputeFlashMaskSink(unittest.TestCase):
                 f"rr dsink max diff {sink_diff} vs non-rr too large",
             )
         elif use_sink and not sink_trainable:
-            # Fixed sink is stop_gradient -> rr returns no sink grad.
+            # Fixed sink is stop_gradient -> neither path returns a sink grad.
             self.assertIsNone(sink.grad)
+            self.assertIsNone(sink_ref.grad)
 
     def test_rr_causal_trainable_sink(self):
         self._run(causal=True, use_sink=True)

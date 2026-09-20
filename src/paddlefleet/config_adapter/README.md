@@ -1,28 +1,35 @@
 # config_adapter
 
 把面向大集群的训练 YAML 自动改写成能在**更小机器规模**上跑起来的配置：重算
-sharding 与 batch，必要时缩小 EP/PP 并联动改写 `model_config.json`，并保证改写
-后的配置满足 Fleet 的通信组约束。
+sharding 与 batch，仅 `--test-accuracy` 模式必要时缩小 EP/PP 并联动改写
+`model_config.json`，并保证改写后的配置满足 Fleet 的通信组约束。
 
 `--test-performance` 与 `--test-accuracy` 是**两个正交的、可选的**测试维度，各管
 一件事，可以单独给、同时给、也可以都不给：
 
 | 组合 | 并行度 | acc | batch 策略 | 精度开关 |
 |---|---|---|---|---|
-| 都不给 | 需要时缩小 EP/PP | 不变 | `scale_batch` | 不注入 |
+| 都不给 | 全部冻结 | 不变 | `scale_batch` | 不注入 |
 | `--test-performance` | 全部冻结 | 冻结 | `scale_batch` | 不注入 |
 | `--test-accuracy` | 需要时缩小 EP/PP | 等比放大 | `scale_accumulation` | 注入 |
 | 两个都给 | 全部冻结 | 冻结 | `scale_batch` | 注入 |
 
-- `--test-performance` 负责「测出来的单步耗时可比」：冻结 TP/PP/EP/CP/SEP 与
-  `gradient_accumulation_steps`，只动 sharding 和 `global_batch_size`。
-- `--test-accuracy` 负责「结果可复现、不 aadiff」：注入确定性开关；只要没同时给
-  `--test-performance`，就用放大 acc 的方式保持等效 batch。
+- 默认与 `--test-performance` 都**不缩规模**：缩小 EP/PP 会等比改写专家数 /
+  层数，属于模型结构变更，不允许默默发生；目标机器规模必须与源并行度兼容，
+  否则报错并列出合法节点数。batch 用 `scale_batch`：`global_batch_size`
+  随数据并行路数等比缩小，`gradient_accumulation_steps` 保持不变，单卡单步
+  计算量与源一致（`--test-performance` 据此保证测出的 step time 可比）。
+- `--test-accuracy` 负责「结果可复现、不 aadiff」：注入确定性开关，是
+  **唯一允许缩小 EP/PP** 的模式；单独给（未叠加 `--test-performance`）时用
+  `scale_accumulation`：GBS 保持不变、acc 等比放大，等效 batch 与全量作业
+  一致，loss 曲线可对齐。
 
-两种组合都遵守同一条硬规则：**源配置里大于 1 的并行度，最小只能缩到 2，不允许
-缩成 1**（EP8 最多缩到 EP2，不会变成 EP1）。把一个维度缩成 1 等于把待测的通信
-组直接去掉，测出来的结果没有参考价值。唯一例外是 VPP：框架硬断言 VPP>1 需要
-PP>2，PP 缩到 2 时 VPP 只能是 1。
+缩容（仅 `--test-accuracy`）遵守一条硬规则：**源配置里大于 1 的并行度，最小只能
+缩到 2，不允许缩成 1**（EP8 最多缩到 EP2，不会变成 EP1）。把一个维度缩成 1 等于
+把待测的通信组直接去掉，测出来的结果没有参考价值。EP 的下限还要同时满足 C3
+（`EP % (TP·SEP) == 0`）：TP·SEP > 2 时 EP 最小只能缩到 TP·SEP 的最小合法倍数，
+而不是 2。唯一例外是 VPP：框架硬断言
+VPP>1 需要 PP>2，PP 缩到 2 时 VPP 只能是 1（这条兜底在所有模式下生效）。
 
 TP 与 SEP 永远不改：减小 TP 会增大单卡显存占用，有 OOM 风险。EP 与 PP 都要缩时按
 **EP 优先于 PP** 的顺序缩（缩 EP 只损失路由专家数，缩 PP 会连带改层数与逐层配置）。
@@ -35,14 +42,15 @@ TP 与 SEP 永远不改：减小 TP 会增大单卡显存占用，有 OOM 风险
 # 1) 只看这份配置能跑在哪些机器规模上（不生成任何文件）
 python -m paddlefleet.config_adapter --input config.yaml
 
-# 2) 只要能跑起来：适配到 2 台机器（默认每台 8 卡），必要时自动缩 EP/PP
+# 2) 适配到 2 台机器（默认每台 8 卡）；默认冻结并行度，目标规模必须
+#    与源并行度兼容，否则报错并列出合法节点数（缩 EP/PP 见 --test-accuracy）
 python -m paddlefleet.config_adapter --input config.yaml --target-nodes 2
 
-# 3) 测速：冻结并行策略与 acc，只改 sharding 和 GBS
+# 3) 测速：冻结并行策略与 acc，只缩放 sharding 和 GBS
 python -m paddlefleet.config_adapter --input config.yaml \
     --target-nodes 2 --test-performance
 
-# 4) 精度测试：注入避免 aadiff 的开关，并保持等效 batch
+# 4) 精度测试：注入避免 aadiff 的开关，并允许缩小 EP/PP（唯一允许改模型结构的模式）
 python -m paddlefleet.config_adapter --input config.yaml \
     --target-nodes 1 --test-accuracy
 
@@ -62,6 +70,10 @@ python -m paddlefleet.config_adapter --input config.yaml \
 python -m paddlefleet.config_adapter --input config.yaml \
     --target-nodes 1 --test-accuracy \
     --set max_steps=10 --set n_routed_experts=32
+
+# 9) 序列长度改到 32k：max_seq_length 覆盖为 32768，CP 同比例扩大
+python -m paddlefleet.config_adapter --input config.yaml \
+    --target-nodes 8 --scale-seq-length 32768
 ```
 
 改写 YAML 时用 `ruamel.yaml` 保留注释与字段顺序，它是 paddlefleet 的运行时依赖，随包一起安装，无需额外操作。
@@ -73,10 +85,11 @@ python -m paddlefleet.config_adapter --input config.yaml \
 | `--input` | 是 | — | 源 YAML 路径 |
 | `--target-nodes N` | 否 | — | 目标机器台数；总卡数 = N × `--cards-per-node`。不传 = 只列出合法规模，不生成文件 |
 | `--cards-per-node` | 否 | 8 | 每台机器的卡数 |
-| `--test-performance` | 否 | 关 | 测速维度，可与 `--test-accuracy` 叠加 |
-| `--test-accuracy` | 否 | 关 | 精度维度，可与 `--test-performance` 叠加 |
+| `--test-performance` | 否 | 关 | 测速维度（冻结并行度与 acc，只改 sharding 和 GBS），可与 `--test-accuracy` 叠加 |
+| `--test-accuracy` | 否 | 关 | 精度维度（注入确定性开关，单独给时保持等效 batch；唯一允许缩小 EP/PP 的模式），可与 `--test-performance` 叠加 |
 | `--output-dir` | 否 | `./adapted_configs` | 输出目录；`--in-place` 时忽略 |
 | `--set [yaml:\|json:]KEY=VALUE` | 否 | — | 自定义覆盖，可重复 |
+| `--scale-seq-length N` | 否 | — | 把 `max_seq_length` 覆盖为 N，并同比例缩放 `context_parallel_size`；需配合 `--target-nodes` |
 | `-i` / `--in-place` | 否 | 关 | 就地改写源文件，并生成 `<input>.patch` |
 | `-f` / `--force` | 否 | 关 | 允许覆盖已存在的 model_config 生成目录 |
 
@@ -97,6 +110,16 @@ python -m paddlefleet.config_adapter --input config.yaml \
 结构字段在 `model_config.json` 里读不到（不同模型家族命名不一致）时，也用
 `--set <字段>=<值>` 兜底。
 
+`--scale-seq-length N` 覆盖 `max_seq_length` 并把 `context_parallel_size`
+按同一倍率缩放：序列变长 k 倍（N 必须是源值的整数倍），CP 也扩大 k 倍，让每卡
+分到的序列片段（进而激活显存）保持在源配置的水平，防止长序列 OOM；序列变短则
+CP 同比例缩小，下限为 1。缩放发生在并行度规划**之前**，因此 C1..C5 校验、
+sharding 重算和 batch 重算都以新 CP 为准（冻结模式 —— 默认或
+`--test-performance` —— 冻结的也是缩放后的 CP）。两个被改写的字段与 `--set`
+一样受保护。注意：CP 扩大后仍需满足 C4
+（sharding 能被 CP 整除）与 C5（SEP 与 CP 不能同时 > 1），不满足会直接报错；
+若新序列长度超过 `max_position_embeddings`，报告里会给出 WARNING。
+
 源作业卡数按两条证据推断并交叉校验：通信组
 （`DP × sharding × TP × SEP × PP`）与 batch 字段
 （`GBS / (micro_bs × acc) × TP × SEP × PP × CP`）。两者都能算且不一致时，取「没漏因子」
@@ -116,21 +139,21 @@ C3/C5 只取决于并行度本身，与卡数无关：这两项冲突时不会�
 ```
 加载 YAML
   -> 应用 --set yaml:（并锁定这些字段）
-  -> 删除 fa_version（与环境强绑定的 flash-attention 版本 pin）
   -> 需要时加载 model_config.json 并应用 --set json:
   -> 扫描两个文件，落定不带前缀的 --set
-  -> 规划最终 TP/PP/EP/CP/SEP（冻结或缩容）
+  -> --scale-seq-length：改写 max_seq_length 并同比例缩放 CP（并锁定两字段）
+  -> 规划最终 TP/PP/EP/CP/SEP（默认冻结；--test-accuracy 时允许缩容）
   -> 写入 model_config.json 的结构改动（专家数 / 层数）
   -> 注入精度开关（给了 --test-accuracy 时）
   -> model_config.json 有改动时另存一份，并把 model_name_or_path 指过去
   -> 应用并行度改动并复核 C1..C4
-  -> 缩放 batch、sharding、data_parallel_size
+  -> 重算 batch（策略见上表）、sharding、data_parallel_size
   -> sharding 路数变小时注入补偿开关（数据流路数 / 优化器 offload）
   -> 写出 YAML 并打印报告
 ```
 
-不冻结并行度时（默认，或只给了 `--test-accuracy`），按「改动越小越优先」的顺序
-尝试，命中第一个可行方案就停：
+只给了 `--test-accuracy`（未同时给 `--test-performance`）时进入缩容规划，按
+「改动越小越优先」的顺序尝试，命中第一个可行方案就停：
 
 ```
 维度已合法  <  只缩 EP  <  只缩 PP  <  EP+PP 联合缩
@@ -251,8 +274,8 @@ sharding  ：96 -> 2（moe_sharding=1, dense_sharding=2）
             优先于 PP 的缩容顺序，先把 EP 压到可行下限，再尽量少缩 PP（缩 PP 会连带改层
             数/VPP/尾部空层/逐层配置）
 
-  CHANGE field=gradient_accumulation_steps old=2 new=192
-      原因：保持等效 batch：GBS 保持 1536 不变，acc 放大为 2 × 768 / 8 = 192
+  CHANGE field=gradient_accumulation_steps old=2 new=96
+      原因：保持等效 batch：GBS 保持 192 不变，acc 按数据并行路数放大为 2 × 96 / 2 = 96
 
   ADD field=tensorwise_offload_optimizer new=True
       原因：sharding 路数 96 -> 2，单卡优化器状态放大 48 倍，offload 到 host 内存防 OOM

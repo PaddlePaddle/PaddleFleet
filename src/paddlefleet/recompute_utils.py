@@ -133,10 +133,11 @@ def need_recompute_in_block(layer_number, config, recompute_num_layers):
         else 1
     )
     parallel_size = config.pipeline_model_parallel_size * vpp_size
-    assert total_num_hidden_layers % parallel_size == 0, (
-        "num_hidden_layers must be divided by parallel_size"
-    )
-    chunk_size = int(total_num_hidden_layers / parallel_size)
+    # This count only covers decoder layers; the network split also includes
+    # other units (embedding/MTP/heads/loss), so divisibility is not required.
+    # ceil division lets the last chunk be unfilled, e.g. 15 layers pp=4 ->
+    # chunks 4,4,4,3.
+    chunk_size = (total_num_hidden_layers + parallel_size - 1) // parallel_size
     assert recompute_num_layers <= chunk_size
     layers = list(range(total_num_hidden_layers))
     recompute_layers = list(
@@ -167,13 +168,14 @@ def need_recompute_in_first_n(layer_number, config, recompute_num_layers):
         else 1
     )
     parallel_size = config.pipeline_model_parallel_size * vpp_size
-    assert total_num_hidden_layers % parallel_size == 0, (
-        "num_hidden_layers must be divided by parallel_size"
-    )
-    chunk_size = int(total_num_hidden_layers / parallel_size)
+    # This count only covers decoder layers; the network split also includes
+    # other units (embedding/MTP/heads/loss), so divisibility is not required.
+    # ceil division lets the last chunk be unfilled, e.g. 15 layers pp=4 ->
+    # chunks 4,4,4,3.
+    chunk_size = (total_num_hidden_layers + parallel_size - 1) // parallel_size
     num_layers_in_each_stage = (
-        total_num_hidden_layers / config.pipeline_model_parallel_size
-    )
+        total_num_hidden_layers + config.pipeline_model_parallel_size - 1
+    ) // config.pipeline_model_parallel_size
     assert recompute_num_layers <= num_layers_in_each_stage, (
         "recompute_num_layers cannot be greater than num_layers_in_each_stage"
     )

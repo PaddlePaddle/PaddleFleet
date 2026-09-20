@@ -72,8 +72,20 @@ def shrink_floor(degree):
 
 
 def floor_dims(tp, pp, ep, cp, sep):
-    """Dims after shrinking EP / PP as far as the no-collapse rule allows."""
-    return tp, shrink_floor(pp), shrink_floor(ep), cp, sep
+    """Dims after shrinking EP / PP as far as the no-collapse rule allows.
+
+    The EP floor additionally respects C3 (``EP % (TP*SEP) == 0``): with
+    TP*SEP > MIN_PARALLEL_DEGREE the naive floor of 2 is not a legal EP at
+    all, and feeding it to ``suggest_valid_cards`` would make
+    :func:`min_shrink_cards` wrongly conclude that *no* card count works.
+    """
+    ep_floor = shrink_floor(ep)
+    dense = tp * sep
+    if ep > 1 and dense > 1:
+        # Smallest multiple of TP*SEP at or above the generic floor,
+        # capped at the source EP (which C3 already guarantees is legal).
+        ep_floor = min(ep, -(-ep_floor // dense) * dense)
+    return tp, shrink_floor(pp), ep_floor, cp, sep
 
 
 def ep_candidates(ep_orig, tp, sep=1):

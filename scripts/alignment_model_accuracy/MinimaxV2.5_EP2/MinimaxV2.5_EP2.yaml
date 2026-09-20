@@ -105,7 +105,7 @@ load_checkpoint_format: flex_checkpoint
 continue_training: true
 
 # 原理不一致
-# calculate_per_token_loss: true  # PaddleFormers 不支持此字段，loss 已默认 per-token 平均
+# calculate_per_token_loss: true  # PaddleFleet 不支持此字段，loss 已默认 per-token 平均
 use_qk_norm: true
 multi_latent_attention: false
 fp32_residual_connection: false

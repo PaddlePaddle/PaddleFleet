@@ -32,6 +32,7 @@ import paddle.nn.functional as F
 from paddle import Tensor, nn
 
 from paddlefleet.tensor_parallel.random import get_cuda_rng_tracker
+from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
@@ -885,7 +886,9 @@ class HyperConnectionModule(nn.Layer):
 
     # ==================== Fused kernel placeholder ====================
 
-    def bda_span_pays_off(self, dropout_prob: float, training: bool) -> bool:
+    def bda_span_pays_off(
+        self, dropout_prob: float, training: bool, bias=None
+    ) -> bool:
         """Whether wrapping ``fused_h_res_h_post_bda`` in a recompute span saves.
 
         Two things are worth hiding from the live set:
@@ -907,6 +910,10 @@ class HyperConnectionModule(nn.Layer):
         if dropout_prob > 0.0 and training:
             return True
         if not self.config.high_precision_mhc:
+            return False
+        # Mirrors the ``fuse_cast`` predicate in fused_h_res_h_post_bda; keep the
+        # two in step, they decide the same thing from opposite ends.
+        if self._widen_in_kernel and bias is None:
             return False
         return not _use_accuracy_compatible_kernel()
 
@@ -1018,8 +1025,14 @@ class HyperConnectionExpandLayer(FleetLayer):
         self.n = config.num_residual_streams
 
     def forward(self, dict_args: dict) -> dict:
+        dict_args["hidden_states"] = inspect_tensor(
+            "mhc_expand_input", -1, dict_args["hidden_states"]
+        )
         dict_args["hidden_states"] = HyperConnectionModule.input_expand(
             dict_args["hidden_states"], self.n
+        )
+        dict_args["hidden_states"] = inspect_tensor(
+            "mhc_expand_output", -1, dict_args["hidden_states"]
         )
         return dict_args
 

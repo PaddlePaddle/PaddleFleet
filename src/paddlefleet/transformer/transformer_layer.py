@@ -984,10 +984,11 @@ class TransformerLayer(nn.Layer):
             # receive unused tensors that cause backward errors.
             dict_args.pop("blocks", None)
         # Shared CSA document-mask metadata (see _docmask_meta_kwargs). Taken HERE,
-        # outside the recompute wrapper below: `forward` runs exactly once per
-        # (layer, micro-batch) whatever the recompute granularity is, while
-        # `_forward_impl` may be replayed. Empty dict for every layer class that
-        # does not opt in.
+        # outside the recompute wrapper below: for a decoder layer `forward` runs
+        # exactly once per (layer, micro-batch) whatever the recompute
+        # granularity is, while `_forward_impl` may be replayed. Empty dict for
+        # every layer class that does not opt in, and for MTP layers, whose
+        # `forward` is itself inside the MTP module's recompute segment.
         docmask_meta_kwargs = self._docmask_meta_kwargs()
 
         if self.full_recompute or (not has_recovered()):
@@ -2020,9 +2021,15 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         # Consumer identity for the shared CSA document-mask metadata
         # (config.csa_share_docmask_meta): one forward counter per consumer, so
         # virtual-pipeline interleaving across chunks cannot mix them up.
+        #
+        # MTP layers are not consumers at all -- see _docmask_meta_kwargs for
+        # why -- so they are not registered either; registering them would leave
+        # a permanently-unused counter in the step-boundary audit.
+        self._docmask_meta_is_consumer = not bool(is_mtp_layer)
         self._docmask_meta_key = (int(layer_number), bool(is_mtp_layer))
-        if getattr(config, "csa_share_docmask_meta", False) or getattr(
-            config, "mqa_share_docmask_meta", False
+        if self._docmask_meta_is_consumer and (
+            getattr(config, "csa_share_docmask_meta", False)
+            or getattr(config, "mqa_share_docmask_meta", False)
         ):
             from paddlefleet.transformer.doc_mask_meta_registry import (
                 doc_mask_meta_registry,
@@ -2075,11 +2082,14 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             "training": self.training,
             "fused": self.config.bias_dropout_fusion,
         }
+        x, bias = layer_output_with_bias
         # Only wrap when the call actually retains something the span can hide;
         # ``bda_span_pays_off`` owns that predicate because it depends on which
-        # path ``fused_h_res_h_post_bda`` takes.
+        # path ``fused_h_res_h_post_bda`` takes. ``bias`` is part of that: it is
+        # half of the ``fuse_cast`` condition, and with the up-casts fused into
+        # the kernel the span has nothing left to hide.
         if not hyper_connection.bda_span_pays_off(
-            self.hidden_dropout_prob, self.training
+            self.hidden_dropout_prob, self.training, bias
         ):
             enable_recompute = False
         if not enable_recompute:
@@ -2091,8 +2101,6 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 **bda_kwargs,
             )
             return output, None
-
-        x, bias = layer_output_with_bias
 
         def _fused(h_res, original_residual, h_post, x, bias):
             return hyper_connection.fused_h_res_h_post_bda(
@@ -2166,7 +2174,25 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         Called from ``TransformerLayer.forward``, i.e. outside the recompute
         wrapper: the counter must advance exactly once per (layer, micro-batch),
         whereas ``_forward_impl`` may be replayed by recompute.
+
+        MTP layers opt out. Two reasons, either of which is sufficient:
+
+        * they would gain nothing. The trainer prebuilds only the ``("main",)``
+          mask group, while an MTP layer's attention asks for its own
+          ``("mtp", layer_number)`` group -- it is fed a slice of
+          ``mtp_startend_row_indices_all``, a different mask -- so every lookup
+          misses by design and the layer builds its own metadata anyway.
+        * their ``forward`` is not outside the recompute wrapper.
+          ``MultiTokenPredictionLayer._checkpointed_forward`` recomputes
+          ``_proj_and_transformer_layer``, i.e. one level *above* this layer's
+          ``forward``, so under ``recompute_granularity="full"`` +
+          ``recompute_method="uniform"`` the call lands inside a recompute
+          segment and ``advance`` rejects it -- the counter cannot be made
+          correct there, since paddle runs the original forward under
+          ``no_grad`` and only the backward replay with grad enabled.
         """
+        if not self._docmask_meta_is_consumer:
+            return {}
         if not (
             getattr(self.config, "csa_share_docmask_meta", False)
             or getattr(self.config, "mqa_share_docmask_meta", False)
@@ -2223,12 +2249,22 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             )
         aggregated = aggregated.to(ori_dtype)
 
+        h_post = inspect_tensor("mhc_attn_post", self.layer_number, h_post)
+        h_res = inspect_tensor("mhc_attn_comb", self.layer_number, h_res)
+
         # LayerNorm on aggregated single stream
         if self.recompute_input_layernorm:
             input_layernorm_output = recompute(self.input_layernorm, aggregated)
         else:
             input_layernorm_output = self.input_layernorm(aggregated)
 
+        # Observation only: "Attn_input" below owns this tensor's injection.
+        inspect_tensor(
+            "mhc_attn_pre",
+            self.layer_number,
+            input_layernorm_output,
+            load=False,
+        )
         self._log_md5(
             input_layernorm_output, "input_layernorm_out", self.layer_number
         )
@@ -2343,6 +2379,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         hidden_states = self._cast_and_discard_fused_bda(
             hidden_states, ori_dtype, fused_span
         )
+        hidden_states = inspect_tensor(
+            "mhc_attn_residual_output", self.layer_number, hidden_states
+        )
 
         # Cross attention (unchanged)
         residual = hidden_states
@@ -2398,6 +2437,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             aggregated, h_res, h_post = self.mlp_hyper_connection(hidden_states)
         aggregated = aggregated.to(ori_dtype)
 
+        h_post = inspect_tensor("mhc_mlp_post", self.layer_number, h_post)
+        h_res = inspect_tensor("mhc_mlp_comb", self.layer_number, h_res)
+
         # LayerNorm on aggregated single stream
         if self.recompute_post_attention_layernorm:
             post_attention_layernorm_output = recompute(
@@ -2408,6 +2450,13 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 aggregated
             )
 
+        # Observation only: "moe_or_dense_input" below owns the injection.
+        inspect_tensor(
+            "mhc_mlp_pre",
+            self.layer_number,
+            post_attention_layernorm_output,
+            load=False,
+        )
         self._log_md5(
             post_attention_layernorm_output,
             "post_attn_layernorm_out",
@@ -2478,6 +2527,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             self._mlp_mhc_recompute = None
         hidden_states = self._cast_and_discard_fused_bda(
             hidden_states, ori_dtype, fused_span
+        )
+        hidden_states = inspect_tensor(
+            "mhc_mlp_residual_output", self.layer_number, hidden_states
         )
 
         if is_first_fwd:

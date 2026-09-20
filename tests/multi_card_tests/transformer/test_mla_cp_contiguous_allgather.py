@@ -207,6 +207,17 @@ def build_cfg(cp_size, sink=False, attn_mode="mha"):
     c.dsa_index_topk = 128
     c.dsa_indexer_rotary_interleaved = False
     c.dsa_indexer_use_sparse_loss = True
+    # The indexer's ranking reaches attention only through ``topk`` indices,
+    # which carry no gradient, so its parameters join the backward graph *only*
+    # via the KL loss -- and ``_needs_indexer_loss``
+    # (mqa_latent_attention.py:990) gates that on a positive coefficient. At the
+    # default 0.0 no ``indexer.*`` parameter can ever get a gradient, which is
+    # what ``test_6b`` asserts about. Same knob and magnitude as
+    # ``test_mqa_dsa_cp.py::test_7_indexer_loss_normalisation``, whose subject
+    # is the loss *denominator*; here the loss is the means by which the
+    # indexer's own CP path is compared against CP=1 through the whole MLA
+    # layer.
+    c.dsa_indexer_loss_coeff = 0.1
     c.csa_window_size = 128
     c.add_full_attention_sink_bias = sink
     c.rope_type = "rope"
@@ -471,11 +482,14 @@ class TestMLAContiguousAllgatherCP(unittest.TestCase):
     def _check_mqa(self, attn_mode):
         # ``mqa_full_causal`` (and the phase-2 warmup) accept dense FA4 only --
         # ``MQALatentAttention._assert_dense_fa4`` raises otherwise -- and a bare
-        # launcher process leaves the flag at the image default 2. Pin it to the
-        # value ``TrainingArguments.__post_init__`` derives on these SM100 boxes.
+        # launcher process leaves the flag at the image default 2. ``_fa4_pin``
+        # reproduces both flags ``TrainingArguments.__post_init__`` /production
+        # imply on these SM100 boxes: version 4 *and* determinism off, since
+        # ``ci/multi-card_test.sh`` exports ``FLAGS_cudnn_deterministic=1`` and
+        # that alone degrades the (576, 512) pair back to FA2.
         # Call-site scoped, not module scoped: ``test_4`` asserts on the refusal
         # the *default* flag produces.
-        with U._flash_attn_version(4):
+        with U._fa4_pin():
             r = run_mla_cp(_row_end([200, 150, 162], 512), attn_mode=attn_mode)
         self.assertLess(r["fwd"], FWD_RTOL, f"{attn_mode}: forward")
         self.assertLess(r["dH"], GRAD_RTOL, f"{attn_mode}: dH")
