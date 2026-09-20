@@ -41,7 +41,12 @@ def test_copy_forward_identity_backward_all_reduce():
     # Each rank feeds a distinct constant (rank + 1); identity keeps it.
     local = (paddle.ones([3], dtype="float32") * (rank + 1)).cuda()
     local.stop_gradient = False
-    out = mappings.copy_to_tensor_model_parallel_region(local)
+    # ``_CopyToModelParallelRegion.forward`` returns its input unchanged, so
+    # handing it a leaf that requires grad would alias that leaf in place and
+    # trip Paddle's "leaf var can't use inplace" guard. Feed a non-leaf view
+    # (``local * 1.0``); the gradient still flows straight back to ``local``.
+    routed = local * 1.0
+    out = mappings.copy_to_tensor_model_parallel_region(routed)
     expected_fwd = (paddle.ones([3], dtype="float32") * (rank + 1)).cuda()
     assert paddle.equal_all(out, expected_fwd)
 

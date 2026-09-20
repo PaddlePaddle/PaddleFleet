@@ -51,10 +51,15 @@ def _second_expert(t):
 
 
 def _init_expert_parallel():
-    """Initialise a real EP=4 Fleet topology (DP=MP=PP=sharding=1).
+    """Initialise a real EP=4 Fleet topology across the 4-GPU world.
 
-    With every non-expert degree set to 1, the whole 4-GPU world forms a
-    single 4-rank expert-parallel group -- the topology the
+    ``EPHybridCommunicateGroup`` requires the *dense* (non-expert) degrees to
+    cover the whole world, otherwise it cannot assign each rank a data-parallel
+    id and ``fleet.init`` aborts. Following the proven pattern of the sibling
+    ``test_allgather_dispatcher_ep`` / ``test_ring_dispatcher_ep`` tests, the
+    dense world is filled with ``sharding_degree = EP_DEGREE`` while the expert
+    group overlays it (``ep_degree = EP_DEGREE``). The whole 4-GPU world thus
+    forms a single 4-rank expert-parallel group -- the topology the
     AllToAllTokenDispatcher's cross-rank all-to-all is built for.
     """
     strategy = fleet.DistributedStrategy()
@@ -62,7 +67,7 @@ def _init_expert_parallel():
         "dp_degree": 1,
         "mp_degree": 1,
         "pp_degree": 1,
-        "sharding_degree": 1,
+        "sharding_degree": EP_DEGREE,
         "sep_degree": 1,
         "cp_degree": 1,
         "ep_degree": EP_DEGREE,

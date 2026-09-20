@@ -204,7 +204,11 @@ def test_gpt_builder_pipeline_forward_backward():
     pp_model = distributed_model(model)
 
     micro_batch_size = 1
-    num_acc = 4
+    # The pipeline engine's accumulate_steps defaults to 1 (the shared
+    # ``Utils.initialize_model_parallel`` does not configure gradient
+    # accumulation), so exactly one micro-batch must be supplied; feeding more
+    # trips ``_load_micro_batch_impl``'s ``len(data) == acc_steps`` guard.
+    num_acc = 1
     inputs = _make_lm_batch(micro_batch_size, num_acc)
 
     loss = pp_model.forward_backward_pipeline(inputs, None)
