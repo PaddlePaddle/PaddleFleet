@@ -275,7 +275,9 @@ class NativeOpsTest(unittest.TestCase):
         h_post = paddle.to_tensor([[0.5, 2.0]], dtype="float32")
         x = paddle.to_tensor([[100.0, 200.0]], dtype="float32")
         residual_streams = residual.reshape([1, 2, 2])
-        out = native_h_post_bda(h_res, residual_streams, h_post, x, None)
+        # native_h_post_bda takes the residual *flat* as [..., n*C]; the numpy
+        # oracle takes the [..., n, C] stream view.
+        out = native_h_post_bda(h_res, residual, h_post, x, None)
         ref = _ref_h_post_bda(
             h_res.numpy(),
             residual_streams.numpy(),
@@ -295,7 +297,8 @@ class NativeOpsTest(unittest.TestCase):
         h_res = paddle.to_tensor([[[1.0, 0.0], [0.0, 1.0]]], dtype="float32")
         residual = paddle.to_tensor(
             [[1.0, 2.0, 3.0, 4.0]], dtype="float32"
-        ).reshape([1, 2, 2])
+        )  # [T=1, n*C=4], flat
+        residual_streams = residual.reshape([1, 2, 2])
         h_post = paddle.to_tensor([[0.5, 2.0]], dtype="float32")
         x = paddle.to_tensor([[10.0, 20.0]], dtype="float32")
         bias = paddle.to_tensor([1.0, -1.0], dtype="float32")
@@ -303,7 +306,7 @@ class NativeOpsTest(unittest.TestCase):
         out_nobias = native_h_post_bda(h_res, residual, h_post, x, None)
         ref = _ref_h_post_bda(
             h_res.numpy(),
-            residual.numpy(),
+            residual_streams.numpy(),
             h_post.numpy(),
             x.numpy(),
             bias.numpy(),
@@ -322,9 +325,11 @@ class NativeOpsTest(unittest.TestCase):
         n, C = 3, 2
         h_res = paddle.to_tensor(rng.randn(2, 2, n, n), dtype="float32")
         residual = paddle.to_tensor(rng.randn(2, 2, n, C), dtype="float32")
+        # native_h_post_bda consumes the residual flat as [..., n*C].
+        residual_flat = residual.reshape([2, 2, n * C])
         h_post = paddle.to_tensor(rng.randn(2, 2, n), dtype="float32")
         x = paddle.to_tensor(rng.randn(2, 2, C), dtype="float32")
-        out = native_h_post_bda(h_res, residual, h_post, x, None)
+        out = native_h_post_bda(h_res, residual_flat, h_post, x, None)
         ref = _ref_h_post_bda(
             h_res.numpy(), residual.numpy(), h_post.numpy(), x.numpy(), None
         )

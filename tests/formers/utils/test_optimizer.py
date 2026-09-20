@@ -552,25 +552,69 @@ def _clone_state(state):
     return copy.deepcopy(state)
 
 
-def _accumulator_values(opt):
-    """Flatten every moment / beta-power accumulator the optimizer holds into
-    one sorted 1-D ``ndarray``.
+def _optimizer_state_values(opt):
+    """Flatten every numeric leaf of an optimizer's *state* into one sorted
+    1-D ``float64`` ndarray.
 
-    The live ``_accumulators`` store (which ``step`` populates) is read
-    directly rather than ``state_dict()``: for CPU/fp32 ``AdamWCustom``,
-    ``state_dict()`` exposes no moment tensors to a generic walk, whereas
-    ``_accumulators`` always holds the moment1 / moment2 and beta1 / beta2
-    power tensors keyed by parameter name. Those keys are identical across two
-    optimizer instances over the same parameters, so the *values* are directly
-    comparable, and the values are what a resume restores.
+    Two independent, public sources are unioned so the extraction never depends
+    on one internal layout:
+
+    * ``opt.state_dict()`` -- the checkpoint surface the trainer saves/restores;
+      its payload (moment1 / moment2 / beta powers ...) is exactly what a resume
+      carries. It is walked fully generically (descending dicts/lists/tuples and
+      collecting any paddle ``Tensor`` / numpy array / python number leaf).
+    * ``opt._get_accumulator(name, p)`` for the four known moment / beta-power
+      accumulators of every parameter, guarded by ``try`` so a missing one is
+      simply skipped.
+
+    The same extraction is applied to both sides of every comparison, so any
+    overlap between the two sources cancels out.
     """
     chunks = []
-    for per_param in opt._accumulators.values():
-        for var in per_param.values():
-            chunks.append(np.asarray(var.numpy()).reshape(-1))
+
+    def _walk(obj):
+        if isinstance(obj, paddle.Tensor):
+            chunks.append(np.asarray(obj.numpy()).astype("float64").reshape(-1))
+        elif isinstance(obj, np.ndarray):
+            chunks.append(obj.astype("float64").reshape(-1))
+        elif isinstance(obj, bool):
+            return
+        elif isinstance(obj, (int, float)):
+            chunks.append(np.asarray([obj], dtype="float64"))
+        elif isinstance(obj, dict):
+            for value in obj.values():
+                _walk(value)
+        elif isinstance(obj, (list, tuple)):
+            for value in obj:
+                _walk(value)
+
+    _walk(opt.state_dict())
+
+    acc_names = [
+        getattr(opt, attr, None)
+        for attr in (
+            "_moment1_acc_str",
+            "_moment2_acc_str",
+            "_beta1_pow_acc_str",
+            "_beta2_pow_acc_str",
+        )
+    ]
+    for param in opt._parameter_list:
+        for name in acc_names:
+            if not name:
+                continue
+            try:
+                acc = opt._get_accumulator(name, param)
+            except Exception:
+                continue
+            if isinstance(acc, paddle.Tensor):
+                chunks.append(
+                    np.asarray(acc.numpy()).astype("float64").reshape(-1)
+                )
+
     if not chunks:
         return np.empty(0, dtype="float64")
-    return np.sort(np.concatenate(chunks).astype("float64"))
+    return np.sort(np.concatenate(chunks))
 
 
 class TestAdamWCustomStateRestore(unittest.TestCase):
@@ -579,22 +623,24 @@ class TestAdamWCustomStateRestore(unittest.TestCase):
     The loss is quadratic in the parameters, so the gradient changes every step
     and the continuous trajectory genuinely depends on the accumulated optimizer
     state (moments / beta powers). A restored *new* optimizer must reproduce the
-    continuous trajectory to full precision (positive control), while a fresh
-    optimizer that only inherits the weights carries none of the step/beta-power
-    state (negative control).
+    continuous trajectory to full precision (weight positive control) *and* end
+    up holding the same optimizer state as the continuous reference (state
+    positive control), while a fresh optimizer that only inherits the weights
+    carries none of the step/beta-power state (negative control).
 
-    The negative control asserts on the optimizer *accumulators*, not the
-    weights. AdamW's magnitude-normalized update makes the weights after a
-    single step history-insensitive -- a fresh optimizer stepping from the same
-    weights reproduces the reference to 1e-6 -- so a weight comparison cannot
-    prove restoration (this was verified on CI: the weight-difference control
-    failed because the fresh weights did match). What genuinely differs is the
-    accumulator state: a fresh optimizer holds first-step beta powers
-    (0.9, 0.999) with zero-seeded moments, whereas the resumed optimizer holds
-    third-step powers (0.9^3, 0.999^3) with two steps of accumulated moments.
-    A constant (parameter-independent) gradient is avoided because it would make
-    the bias-corrected AdamW moments collapse to m_hat = g and v_hat = g^2 at
-    *every* step, rendering the trajectory history-free and the test vacuous.
+    The controls observe the optimizer *state* via its public ``state_dict``
+    surface (unioned with the moment / beta-power accumulators), not the
+    weights. AdamW's magnitude-normalized update makes the weights after a single
+    step history-insensitive -- a fresh optimizer stepping from the same weights
+    reproduces the reference to 1e-6 -- so a weight comparison cannot prove
+    restoration (this was verified on CI: the weight-difference control failed
+    because the fresh weights did match). What genuinely differs is the state: a
+    fresh optimizer holds first-step beta powers (0.9, 0.999) with a single step
+    of moments, whereas the resumed optimizer holds third-step powers
+    (0.9^3, 0.999^3) with three steps of accumulated moments. A constant
+    (parameter-independent) gradient is avoided because it would make the
+    bias-corrected AdamW moments collapse to m_hat = g and v_hat = g^2 at *every*
+    step, rendering the trajectory history-free and the test vacuous.
     """
 
     def _fixed_grad_step(self, linear, opt):
@@ -625,6 +671,8 @@ class TestAdamWCustomStateRestore(unittest.TestCase):
             self._fixed_grad_step(linear, ref_opt)
         ref_w = linear.weight.numpy().copy()
         ref_b = linear.bias.numpy().copy()
+        # Continuous reference optimizer state after its 3 steps.
+        ref_state = _optimizer_state_values(ref_opt)
 
         # Interrupted: reset params, run 2 steps, snapshot optimizer state.
         linear.weight.set_value(init_w)
@@ -647,39 +695,44 @@ class TestAdamWCustomStateRestore(unittest.TestCase):
             linear.bias.numpy(), ref_b, rtol=1e-6, atol=1e-7
         )
 
-        # Snapshot the resumed optimizer's moment / beta-power accumulators
-        # after its (3rd) step. Because the step count was restored, these are
-        # three steps in.
-        restored_vals = _accumulator_values(opt3)
+        # Positive control on the optimizer STATE (not just the weights): after
+        # the resumed 3rd step, opt3 must hold the same moment / beta-power
+        # state as the continuous reference optimizer, which took the identical
+        # three steps. This is history-sensitive -- unlike the weights, the
+        # moments encode the whole trajectory -- so it fails if the resume
+        # silently dropped the saved state.
+        restored_state = _optimizer_state_values(opt3)
+        self.assertTrue(
+            restored_state.size and ref_state.size,
+            "optimizer state exposed no comparable tensors",
+        )
+        np.testing.assert_allclose(
+            restored_state, ref_state, rtol=1e-6, atol=1e-7
+        )
 
         # Negative control: same starting weights (w_at2/b_at2), but a fresh,
         # un-restored optimizer. AdamW's magnitude-normalized update makes the
         # *weights* after one step history-insensitive (a fresh step reproduces
         # ref to 1e-6), so a weight comparison cannot prove restoration. Compare
-        # instead the accumulator state the restore actually carried: a fresh
-        # optimizer holds first-step beta powers (0.9, 0.999) with zero-seeded
-        # moments, whereas the resumed optimizer holds third-step powers
-        # (0.9^3, 0.999^3) with two steps of accumulated moments, so their value
-        # multisets must differ.
+        # instead the optimizer state: a fresh optimizer holds first-step beta
+        # powers (0.9, 0.999) with a single step of moments, whereas the resumed
+        # optimizer holds third-step powers (0.9^3, 0.999^3) with three steps of
+        # accumulated moments, so their value multisets must differ.
         linear.weight.set_value(w_at2)
         linear.bias.set_value(b_at2)
         fresh_opt = _make_custom_optimizer(
             linear.parameters(), learning_rate=0.3
         )
         self._fixed_grad_step(linear, fresh_opt)
-        fresh_vals = _accumulator_values(fresh_opt)
+        fresh_state = _optimizer_state_values(fresh_opt)
 
-        self.assertTrue(
-            restored_vals.size and fresh_vals.size,
-            "optimizer accumulators exposed no comparable tensors",
-        )
-        same_state = restored_vals.size == fresh_vals.size and np.allclose(
-            restored_vals, fresh_vals
+        same_state = fresh_state.size == restored_state.size and np.allclose(
+            fresh_state, restored_state
         )
         self.assertFalse(
             same_state,
             "a fresh optimizer must not share the resumed optimizer's "
-            "moment/beta-power accumulators (proving the state genuinely "
+            "moment/beta-power state (proving the saved state genuinely "
             "participated in the resume)",
         )
 
