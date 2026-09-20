@@ -552,6 +552,27 @@ def _clone_state(state):
     return copy.deepcopy(state)
 
 
+def _accumulator_values(opt):
+    """Flatten every moment / beta-power accumulator the optimizer holds into
+    one sorted 1-D ``ndarray``.
+
+    The live ``_accumulators`` store (which ``step`` populates) is read
+    directly rather than ``state_dict()``: for CPU/fp32 ``AdamWCustom``,
+    ``state_dict()`` exposes no moment tensors to a generic walk, whereas
+    ``_accumulators`` always holds the moment1 / moment2 and beta1 / beta2
+    power tensors keyed by parameter name. Those keys are identical across two
+    optimizer instances over the same parameters, so the *values* are directly
+    comparable, and the values are what a resume restores.
+    """
+    chunks = []
+    for per_param in opt._accumulators.values():
+        for var in per_param.values():
+            chunks.append(np.asarray(var.numpy()).reshape(-1))
+    if not chunks:
+        return np.empty(0, dtype="float64")
+    return np.sort(np.concatenate(chunks).astype("float64"))
+
+
 class TestAdamWCustomStateRestore(unittest.TestCase):
     """End-to-end resume through the real ``optimizer.step`` (CPU/fp32).
 
@@ -562,20 +583,17 @@ class TestAdamWCustomStateRestore(unittest.TestCase):
     optimizer that only inherits the weights carries none of the step/beta-power
     state (negative control).
 
-    The negative control compares the resulting *weights* against the same
-    continuous-trajectory reference at the tight tolerance the positive control
-    meets. A fresh optimizer that inherits only the weights carries zero moments
-    and a step count of 0, so its single step runs under first-step bias
-    correction (beta1_pow=0.9, beta2_pow=0.999) rather than the resumed
-    optimizer's third-step correction (0.9^3, 0.999^3). Because the loss is
-    quadratic -- the gradient varies with the parameters, so the moments carry
-    real per-step history -- the fresh step's effective update differs from the
-    continuous one by ~1e-4 per element, well above the 1e-7 tolerance the
-    resumed optimizer meets. The fresh weights therefore fail the tight
-    comparison that the resumed weights pass, proving the restored state (not
-    merely the weights) is what reproduced the reference. A constant
-    (parameter-independent) gradient is avoided because it would make the
-    bias-corrected AdamW moments collapse to m_hat = g and v_hat = g^2 at
+    The negative control asserts on the optimizer *accumulators*, not the
+    weights. AdamW's magnitude-normalized update makes the weights after a
+    single step history-insensitive -- a fresh optimizer stepping from the same
+    weights reproduces the reference to 1e-6 -- so a weight comparison cannot
+    prove restoration (this was verified on CI: the weight-difference control
+    failed because the fresh weights did match). What genuinely differs is the
+    accumulator state: a fresh optimizer holds first-step beta powers
+    (0.9, 0.999) with zero-seeded moments, whereas the resumed optimizer holds
+    third-step powers (0.9^3, 0.999^3) with two steps of accumulated moments.
+    A constant (parameter-independent) gradient is avoided because it would make
+    the bias-corrected AdamW moments collapse to m_hat = g and v_hat = g^2 at
     *every* step, rendering the trajectory history-free and the test vacuous.
     """
 
@@ -628,50 +646,41 @@ class TestAdamWCustomStateRestore(unittest.TestCase):
         np.testing.assert_allclose(
             linear.bias.numpy(), ref_b, rtol=1e-6, atol=1e-7
         )
-        resumed_err = max(
-            float(np.abs(linear.weight.numpy() - ref_w).max()),
-            float(np.abs(linear.bias.numpy() - ref_b).max()),
-        )
+
+        # Snapshot the resumed optimizer's moment / beta-power accumulators
+        # after its (3rd) step. Because the step count was restored, these are
+        # three steps in.
+        restored_vals = _accumulator_values(opt3)
 
         # Negative control: same starting weights (w_at2/b_at2), but a fresh,
-        # un-restored optimizer. It holds zero moments and a step count of 0, so
-        # its single step runs under first-step bias correction instead of the
-        # resumed optimizer's third-step correction. With a quadratic (history-
-        # dependent) loss the fresh step diverges from the continuous reference
-        # by ~1e-4 per element -- far above the 1e-7 tolerance the resumed
-        # optimizer met -- so the fresh weights must NOT match the reference at
-        # that same tight tolerance. This proves the restored optimizer state,
-        # not merely the inherited weights, is what reproduced the trajectory.
+        # un-restored optimizer. AdamW's magnitude-normalized update makes the
+        # *weights* after one step history-insensitive (a fresh step reproduces
+        # ref to 1e-6), so a weight comparison cannot prove restoration. Compare
+        # instead the accumulator state the restore actually carried: a fresh
+        # optimizer holds first-step beta powers (0.9, 0.999) with zero-seeded
+        # moments, whereas the resumed optimizer holds third-step powers
+        # (0.9^3, 0.999^3) with two steps of accumulated moments, so their value
+        # multisets must differ.
         linear.weight.set_value(w_at2)
         linear.bias.set_value(b_at2)
         fresh_opt = _make_custom_optimizer(
             linear.parameters(), learning_rate=0.3
         )
         self._fixed_grad_step(linear, fresh_opt)
-        fresh_w = linear.weight.numpy().copy()
-        fresh_b = linear.bias.numpy().copy()
-        fresh_err = max(
-            float(np.abs(fresh_w - ref_w).max()),
-            float(np.abs(fresh_b - ref_b).max()),
-        )
+        fresh_vals = _accumulator_values(fresh_opt)
 
-        weights_match = np.allclose(
-            fresh_w, ref_w, rtol=1e-6, atol=1e-7
-        ) and np.allclose(fresh_b, ref_b, rtol=1e-6, atol=1e-7)
-        self.assertFalse(
-            weights_match,
-            "a fresh (un-restored) optimizer must not reproduce the continuous "
-            "trajectory at the tolerance the resumed optimizer met; the "
-            "restored moment/beta-power state genuinely participated in the "
-            "resume",
+        self.assertTrue(
+            restored_vals.size and fresh_vals.size,
+            "optimizer accumulators exposed no comparable tensors",
         )
-        # The divergence is a real systematic effect, not float noise: it is
-        # orders of magnitude larger than the resumed optimizer's residual.
-        self.assertGreater(
-            fresh_err,
-            max(1e-5, resumed_err * 10),
-            f"fresh-optimizer divergence {fresh_err:g} is not clearly larger "
-            f"than the resumed residual {resumed_err:g}",
+        same_state = restored_vals.size == fresh_vals.size and np.allclose(
+            restored_vals, fresh_vals
+        )
+        self.assertFalse(
+            same_state,
+            "a fresh optimizer must not share the resumed optimizer's "
+            "moment/beta-power accumulators (proving the state genuinely "
+            "participated in the resume)",
         )
 
 
