@@ -677,24 +677,17 @@ class PipelinePretrainedModel(PretrainedModel):
             pp_to_single_mapping = {}
 
             state_dict_keys = list(super().state_dict().keys())
-            # Whether the layers are chunked is a property of the model, not
-            # something the key shapes can tell: a chunk key is
-            # `{chunk_start}.{local_idx}.xxx`, but an ordinary PP
-            # `LayerDesc(nn.Sequential, ...)` also yields
-            # `{global_idx}.{sublayer_idx}.xxx`, and conversely the first key of
-            # a chunked stage may be a shared layer alias or a directly added
-            # layer, both of which keep a non digit second segment. Ask the
-            # pipeline layer itself; dualpipev chunks the layers as well.
+            first_key = ""
+            for k in state_dict_keys:
+                if "shared_layers" not in k:
+                    first_key = k
+                    break
+            first_key = first_key.split(".")
             use_virtual_pipeline_model_parallel_size = (
-                self._num_virtual_pipeline_stages > 1 or self._use_dualpipev
+                first_key[0].isdigit() and first_key[1].isdigit()
             )
 
             prefixes = self.get_sequential_name_prefixs()
-            shared_layer_names = {
-                s.layer_name
-                for s in self._layers_desc
-                if isinstance(s, SharedLayerDesc)
-            }
             for k in state_dict_keys:
                 name_splited = k.split(".")
                 if use_virtual_pipeline_model_parallel_size:
@@ -705,31 +698,13 @@ class PipelinePretrainedModel(PretrainedModel):
                             )
                             single_name = [prefixes[idx]]
                             single_name.extend(name_splited[2:])
-                        elif name_splited[1] in shared_layer_names:
-                            # A SharedLayerDesc with `forward_func` is
-                            # registered on the chunk itself under VPP, so its
-                            # key is `{chunk_start}.{shared_name}.rest`. It
-                            # aliases the same parameter as
-                            # `shared_layers.{shared_name}.rest` and must
-                            # resolve to the same single card name.
-                            single_name = [
-                                self.get_shardlayer_prefix(name_splited)
-                            ]
-                            single_name.extend(name_splited[2:])
                         else:
-                            # Layers directly added to the PipelineLayer under
-                            # VPP (e.g. lm_head) are named `{global_idx}.rest`
-                            # instead of `{chunk_start}.{local_idx}.rest`, so
-                            # the first segment is already the global index.
-                            # Resolve them per layer like the non-VPP branch,
-                            # otherwise every such key collapses onto the last
-                            # layer prefix, drops its submodule name and
-                            # collides with its siblings.
-                            idx = name_splited[0]
-                            single_name = (
-                                [] if prefixes[idx] == "" else [prefixes[idx]]
+                            single_name = [prefixes[str(len(prefixes) - 1)]]
+                            single_name.extend(name_splited[2:])
+                            logger.warning(
+                                f"Please check! we treat this key as last layer, get {k}, \
+                                        set origin name as {'.'.join(single_name)}"
                             )
-                            single_name.extend(name_splited[1:])
                     elif name_splited[0] == "shared_layers":
                         single_name = [self.get_shardlayer_prefix(name_splited)]
                         single_name.extend(name_splited[2:])
@@ -1247,20 +1222,11 @@ class ErnieMoEForCausalLMPipe(PipelinePretrainedModel, PipelineLayer):
             self._get_tensor_parallel_mappings(self.config, is_split=True),
         )
 
-        unmapped_keys = []
         for k in list(state_dict.keys()):
             v = state_dict.pop(k)
             if k not in self._pipeline_name_mapping:
-                unmapped_keys.append(k)
                 continue
             state_dict[self._pipeline_name_mapping[k]] = v
-        if unmapped_keys:
-            logger.warning(
-                f"[pp-name-mapping] {len(unmapped_keys)} keys have no entry "
-                f"in _pipeline_name_mapping and were dropped. Keys owned by "
-                f"other pipeline stages land here too. First 20: "
-                f"{unmapped_keys[:20]}"
-            )
         missing_keys, mismatch_keys = super().set_state_dict(
             state_dict, *args, **kwargs
         )
@@ -1276,15 +1242,5 @@ class ErnieMoEForCausalLMPipe(PipelinePretrainedModel, PipelineLayer):
             tmp_missing_keys.append(key)
         missing_keys = tmp_missing_keys
 
-        if missing_keys:
-            # The precise signal that a name mapping is broken: a parameter
-            # this stage owns received no value and keeps its initial one.
-            # Shared layer aliases are already filtered out above, so this
-            # list is meaningful.
-            logger.warning(
-                f"[pp-name-mapping] {len(missing_keys)} parameters of this "
-                f"pipeline stage got no value from the checkpoint and keep "
-                f"their initial values: {missing_keys}"
-            )
         logger.info(f"moe_set_state_dict: {missing_keys}, {mismatch_keys}")
         return missing_keys, mismatch_keys
