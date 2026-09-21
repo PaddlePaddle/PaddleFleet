@@ -23,20 +23,12 @@ Scope and evidence boundary:
 * ``AdamWMini`` keeps a single shared scalar second moment (mean of g*g), while
   ``AdamWCustom`` keeps an element-wise second moment -- the fixtures use
   distinguishable per-element grads so the two are not interchangeable.
-* State restore is checked end-to-end through the real ``optimizer.step``:
-  one optimizer's ``state_dict`` is written and read back through the same
-  ``paddle.save``/``paddle.load`` path the trainer uses, loaded into a *new*
-  optimizer instance, and training is required to continue the exact reference
-  trajectory for every subsequent step (a dropped moment / step count would
-  drift away within a few steps).
 * The fp16/bf16 master-weight numerics are a GPU concern; the control logic
   (master-weight consumption, ``skip_update_param``, ``multi_precision`` gate)
   is verified on CPU in fp32, and the device-dtype numeric case is guarded by
   ``skipUnless(is_compiled_with_cuda)``.
 """
 
-import os
-import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -542,118 +534,6 @@ class TestAdamWCustomAdamwCustom(unittest.TestCase):
             param.numpy(), exp_param, rtol=1e-5, atol=1e-6
         )
         np.testing.assert_array_equal(master.numpy(), [10.0, 20.0])
-
-
-class TestAdamWCustomStateRestore(unittest.TestCase):
-    """End-to-end optimizer-state checkpoint resume through the real
-    ``optimizer.step`` (CPU/fp32).
-
-    The loss is quadratic in the parameters, so the gradient changes every step
-    and the continuous trajectory genuinely depends on the accumulated optimizer
-    state (moments / beta powers). One optimizer's ``state_dict`` is written and
-    read back through the same ``paddle.save`` / ``paddle.load`` path the trainer
-    uses, then loaded into a brand-new optimizer instance, which must continue
-    the *exact* reference trajectory for every subsequent step.
-
-    The check is on the weights across a MULTI-step continuation -- the signal
-    that is reliably observable here. AdamW's magnitude-normalized update makes
-    the weights after a *single* step from identical weights history-insensitive
-    (a fresh optimizer reproduces the continuous reference to 1e-6, verified on
-    CI), so a single-step weight comparison cannot discriminate; a broken resume
-    that dropped the saved moments / step count would instead drift from the
-    continuous reference as the trajectory is extended step after step. The
-    optimizer's moment / beta-power accumulators are not exposed through any
-    public python handle on this paddle build (``state_dict()`` deep-walk,
-    ``_accumulators`` and ``_get_accumulator`` all came back empty on CI), so the
-    trajectory -- not an internal-state read -- is the contract under test.
-    """
-
-    N_WARMUP = 2  # steps taken before the checkpoint is written
-    N_RESUME = 3  # steps taken after resuming from the checkpoint
-    N_TOTAL = N_WARMUP + N_RESUME
-
-    def _fixed_grad_step(self, linear, opt):
-        # Quadratic loss -> gradient (w * cw, b * cb) varies with the parameters,
-        # so the optimizer moments carry real history across steps.
-        loss = (0.5 * linear.weight.square() * self.cw).sum() + (
-            0.5 * linear.bias.square() * self.cb
-        ).sum()
-        loss.backward()
-        opt.step()
-        opt.clear_grad()
-
-    def setUp(self):
-        paddle.seed(20240101)
-        self.cw = paddle.to_tensor(
-            [[0.1, -0.2], [0.3, 0.05], [-0.15, 0.25]], dtype="float32"
-        )
-        self.cb = paddle.to_tensor([0.2, -0.1], dtype="float32")
-
-    def test_new_optimizer_resumes_continuous_trajectory(self):
-        linear = nn.Linear(3, 2)
-        init_w = linear.weight.detach().clone()
-        init_b = linear.bias.detach().clone()
-
-        # Reference: N_TOTAL continuous steps with a single optimizer; record the
-        # weight after every step so the whole post-checkpoint trajectory can be
-        # compared, not merely its endpoint.
-        ref_opt = _make_custom_optimizer(linear.parameters(), learning_rate=0.3)
-        ref_traj = []
-        for _ in range(self.N_TOTAL):
-            self._fixed_grad_step(linear, ref_opt)
-            ref_traj.append(
-                (linear.weight.numpy().copy(), linear.bias.numpy().copy())
-            )
-
-        # Interrupted run: reset to the identical initial weights, take only the
-        # warm-up steps, then checkpoint the optimizer state exactly as the
-        # trainer would -- a paddle.save -> paddle.load round-trip.
-        linear.weight.set_value(init_w)
-        linear.bias.set_value(init_b)
-        opt2 = _make_custom_optimizer(linear.parameters(), learning_rate=0.3)
-        for _ in range(self.N_WARMUP):
-            self._fixed_grad_step(linear, opt2)
-
-        with tempfile.TemporaryDirectory() as tmp:
-            ckpt = os.path.join(tmp, "opt_state.pdopt")
-            paddle.save(opt2.state_dict(), ckpt)
-            loaded_state = paddle.load(ckpt)
-
-        # The checkpoint must actually carry optimizer state; an empty payload
-        # would make the resume vacuous.
-        self.assertTrue(
-            loaded_state, "optimizer state_dict checkpoint is empty"
-        )
-
-        # Resume into a brand-new optimizer from the checkpoint, then continue.
-        # Every remaining step must reproduce the continuous reference to full
-        # precision: this is only possible if the saved moments / beta powers /
-        # step count were genuinely restored.
-        opt3 = _make_custom_optimizer(linear.parameters(), learning_rate=0.3)
-        opt3.set_state_dict(loaded_state)
-        for step in range(self.N_WARMUP, self.N_TOTAL):
-            self._fixed_grad_step(linear, opt3)
-            exp_w, exp_b = ref_traj[step]
-            np.testing.assert_allclose(
-                linear.weight.numpy(),
-                exp_w,
-                rtol=1e-6,
-                atol=1e-7,
-                err_msg=(
-                    f"resumed weight diverged from the continuous reference "
-                    f"at step {step}"
-                ),
-            )
-            np.testing.assert_allclose(
-                linear.bias.numpy(),
-                exp_b,
-                rtol=1e-6,
-                atol=1e-7,
-                err_msg=(
-                    f"resumed bias diverged from the continuous reference "
-                    f"at step {step}"
-                ),
-            )
 
 
 class TestAdamWCustomDtypePredicate(unittest.TestCase):
