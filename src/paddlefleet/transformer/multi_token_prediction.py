@@ -763,6 +763,16 @@ class MTPLossAutoScaler(paddle.autograd.PyLayer):
         MTPLossAutoScaler.main_loss_backward_scale = scale
 
 
+# The checkpoint holds an MTP block's transformer tensors directly under the
+# layer, one module shallower than the live tree, which nests them under
+# ``transformer_layer``. Dropping that segment before every checkpoint-name
+# lookup in this subtree is what lets one ``checkpoint_name_mapping`` layer
+# entry cover an ordinary layer and an MTP block's inner transformer alike; the
+# model-side names keep the segment. Children that do not carry it (``enorm``,
+# ``hnorm``, ``eh_proj``, ...) are unaffected.
+_AOA_DROP_SEGMENT = "transformer_layer"
+
+
 class MultiTokenPredictionLayer(FleetLayer):
     """The implementation for Multi-Token Prediction (MTP) which extends
     the prediction scope to multiple future tokens at each position.
@@ -905,7 +915,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             # The output will be sent to the following transformer layer,
             # so the output's shape should be [s, b, h].
             if self.config.gpt_model_use_experimental_version:
-                self.eh_proj = paddle.incubate.nn.FusedLinear(
+                self.eh_proj = tensor_parallel.FusedLinear(
                     self.config.hidden_size * 2,
                     self.config.hidden_size,
                     bias_attr=self.config.use_bias,
@@ -1007,6 +1017,41 @@ class MultiTokenPredictionLayer(FleetLayer):
     @property
     def transformer_layer_weights(self):
         return self.transformer_layer.named_parameters()
+
+    def gen_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Checkpoint->model AOA for this block and everything under it.
+
+        Declares the subtree's drop segment and otherwise leaves the walk to
+        the standard recursion, so the inner transformer layer and its
+        components emit their own rules and nothing here enumerates them. An
+        MTP block is always registered as a top-level pipeline layer, never
+        inside another subtree, so there is no inherited segment to keep.
+        """
+        return super().gen_aoa_statements(
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            checkpoint_lookup_drop_segment=_AOA_DROP_SEGMENT,
+        )
+
+    def gen_inv_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Inverse (model -> checkpoint) AOA, independently generated."""
+        return super().gen_inv_aoa_statements(
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            checkpoint_lookup_drop_segment=_AOA_DROP_SEGMENT,
+        )
 
     def _concat_embeddings(
         self,
