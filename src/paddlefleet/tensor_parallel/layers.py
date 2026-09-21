@@ -1456,7 +1456,11 @@ linear_with_grad_accumulation_and_async_allreduce.warned = False
 
 
 def gen_linear_aoa_statements(
-    layer, ctx, *, structured_name_prefix="", aoa_name_scope=None
+    layer,
+    ctx,
+    *,
+    structured_name_prefix="",
+    checkpoint_lookup_drop_segment=None,
 ):
     """Checkpoint->model generator for the Linear family.
 
@@ -1483,7 +1487,7 @@ def gen_linear_aoa_statements(
             structured_name_prefix,
             ctx.pp_to_single_mapping,
             ctx.checkpoint_name_mapping,
-            aoa_name_scope=aoa_name_scope,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
             model_name_prefix=ctx.model_name_prefix,
         )
         if name == "weight":
@@ -1494,7 +1498,11 @@ def gen_linear_aoa_statements(
 
 
 def gen_linear_inv_aoa_statements(
-    layer, ctx, *, structured_name_prefix="", aoa_name_scope=None
+    layer,
+    ctx,
+    *,
+    structured_name_prefix="",
+    checkpoint_lookup_drop_segment=None,
 ):
     """Inverse (model -> checkpoint) generator for the Linear family.
 
@@ -1514,7 +1522,7 @@ def gen_linear_inv_aoa_statements(
             structured_name_prefix,
             ctx.pp_to_single_mapping,
             ctx.checkpoint_name_mapping,
-            aoa_name_scope=aoa_name_scope,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
             model_name_prefix=ctx.model_name_prefix,
         )
         if name == "weight":
@@ -1837,34 +1845,41 @@ class Linear(paddle.nn.Layer):
         )
 
     def gen_aoa_statements(
-        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
     ):
         """Checkpoint->model AOA for this Linear.
 
-        Weight is transposed (``^T``); bias / persistable buffers use identity;
-        a dtype cast suffix is appended when the model rules match.
+        Weight is transposed (``^T``); bias / persistable buffers use identity,
+        which is omitted when the two resolved names already match.
         """
         return gen_linear_aoa_statements(
             self,
             ctx,
             structured_name_prefix=structured_name_prefix,
-            aoa_name_scope=aoa_name_scope,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
         )
 
     def gen_inv_aoa_statements(
-        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
     ):
         """Inverse (model -> checkpoint) AOA for this Linear.
 
         Independently generated, not derived from the checkpoint->model text:
-        weight is transposed back, bias / buffers use identity, dtype cast
-        endpoints are swapped.
+        weight is transposed back and the identity endpoints are swapped.
         """
         return gen_linear_inv_aoa_statements(
             self,
             ctx,
             structured_name_prefix=structured_name_prefix,
-            aoa_name_scope=aoa_name_scope,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
         )
 
     def set_extra_state(self, state):
@@ -2396,34 +2411,41 @@ class ColumnParallelLinear(paddle.nn.Layer):
         )
 
     def gen_aoa_statements(
-        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
     ):
         """Checkpoint->model AOA for this Linear.
 
-        Weight is transposed (``^T``); bias / persistable buffers use identity;
-        a dtype cast suffix is appended when the model rules match.
+        Weight is transposed (``^T``); bias / persistable buffers use identity,
+        which is omitted when the two resolved names already match.
         """
         return gen_linear_aoa_statements(
             self,
             ctx,
             structured_name_prefix=structured_name_prefix,
-            aoa_name_scope=aoa_name_scope,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
         )
 
     def gen_inv_aoa_statements(
-        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
     ):
         """Inverse (model -> checkpoint) AOA for this Linear.
 
         Independently generated, not derived from the checkpoint->model text:
-        weight is transposed back, bias / buffers use identity, dtype cast
-        endpoints are swapped.
+        weight is transposed back and the identity endpoints are swapped.
         """
         return gen_linear_inv_aoa_statements(
             self,
             ctx,
             structured_name_prefix=structured_name_prefix,
-            aoa_name_scope=aoa_name_scope,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
         )
 
     def set_extra_state(self, state):
@@ -2745,34 +2767,41 @@ class RowParallelLinear(paddle.nn.Layer):
         )
 
     def gen_aoa_statements(
-        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
     ):
         """Checkpoint->model AOA for this Linear.
 
-        Weight is transposed (``^T``); bias / persistable buffers use identity;
-        a dtype cast suffix is appended when the model rules match.
+        Weight is transposed (``^T``); bias / persistable buffers use identity,
+        which is omitted when the two resolved names already match.
         """
         return gen_linear_aoa_statements(
             self,
             ctx,
             structured_name_prefix=structured_name_prefix,
-            aoa_name_scope=aoa_name_scope,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
         )
 
     def gen_inv_aoa_statements(
-        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
     ):
         """Inverse (model -> checkpoint) AOA for this Linear.
 
         Independently generated, not derived from the checkpoint->model text:
-        weight is transposed back, bias / buffers use identity, dtype cast
-        endpoints are swapped.
+        weight is transposed back and the identity endpoints are swapped.
         """
         return gen_linear_inv_aoa_statements(
             self,
             ctx,
             structured_name_prefix=structured_name_prefix,
-            aoa_name_scope=aoa_name_scope,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
         )
 
     def set_extra_state(self, state):

@@ -1256,9 +1256,10 @@ class GPTModel(PipelineLayer):
         ``self.config`` otherwise.
 
         The signature deliberately does not accept the ``Layer`` recursion
-        protocol's ``structured_name_prefix`` / ``aoa_name_scope``: this is a
-        whole-model boundary, so a container that recursed into it raises
-        ``TypeError`` instead of silently producing partial statements.
+        protocol's ``structured_name_prefix`` /
+        ``checkpoint_lookup_drop_segment``: this is a whole-model boundary, so a
+        container that recursed into it raises ``TypeError`` instead of silently
+        producing partial statements.
         """
         ctx = build_aoa_context(
             self, config if config is not None else self.config

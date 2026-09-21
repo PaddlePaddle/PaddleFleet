@@ -149,9 +149,9 @@ class TestWholeModelAOAEntry(unittest.TestCase):
 
         The entry takes ``(config=None)`` only, so it cannot absorb the base
         ``Layer`` protocol's keyword-only ``structured_name_prefix`` /
-        ``aoa_name_scope``. Recursing into this boundary therefore raises
-        instead of silently emitting statements that skip whole-model
-        orchestration.
+        ``checkpoint_lookup_drop_segment``. Recursing into this boundary
+        therefore raises instead of silently emitting statements that skip
+        whole-model orchestration.
         """
         model = _entry_model()
         ctx = gen.build_aoa_context(_two_leaf_model(), _Cfg())
@@ -246,13 +246,21 @@ class _OverridingLeaf(paddle.nn.Layer):
         self.seen_ctx = None
 
     def gen_aoa_statements(
-        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
     ):
         self.seen_ctx = ctx
         return [f"__component__:{structured_name_prefix}"]
 
     def gen_inv_aoa_statements(
-        self, ctx, *, structured_name_prefix="", aoa_name_scope=None
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
     ):
         self.seen_ctx = ctx
         return [f"__component_inv__:{structured_name_prefix}"]
