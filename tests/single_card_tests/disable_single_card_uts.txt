@@ -6,3 +6,8 @@ test_count_cumsum.py
 test_rr_attn_estimate_triton_op.py
 test_layers.py
 test_sigmoid_gate_fusion_triton.py
+# internal_medicine: megatron/torch backend tests. The single-card CI image has
+# no torch, so these run in the megatron env only (INTERNAL_MEDICINE_TEST_BACKEND).
+test_megatron_monitors.py
+test_mhc_monitor.py
+test_triton_qk_kernel.py
