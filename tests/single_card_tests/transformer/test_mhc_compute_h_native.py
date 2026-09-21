@@ -376,5 +376,49 @@ class TestSingleStreamInit(unittest.TestCase):
         self.assertGreater(float(g.abs().max()), 1e-4)
 
 
+class TestAccuracyCompatibleProjectionDtype(unittest.TestCase):
+    """fp32 mapping weight x bf16 activation under the Megatron-aligned kernel.
+
+    ``FLAGS_use_accuracy_compatible_kernel`` is read once at import and cached in
+    ``hc._ACCURACY_COMPATIBLE_KERNEL``; every other mHC test leaves it off, so
+    the accuracy-compatible branch of ``_projection_and_get_norm`` -- the one
+    that runs a raw ``paddle.matmul`` instead of ``_proj_rms_op`` -- is otherwise
+    never exercised. That branch is the whole point of the flag: it matches the
+    Megatron clean path ``matmul(x, weight.t())`` rather than ``nn.Linear``.
+
+    ``mapping_proj.weight`` is pinned to fp32 (``param_dtype`` /
+    ``_cast_to_low_precision=False`` in ``__init__``) while bf16 amp feeds a bf16
+    activation, so the weight has to be cast to the activation dtype before the
+    matmul or the two operands disagree. This pins that cast, mirroring the
+    ``weight.astype(ori_dtype)`` the ``else`` branch already relies on.
+    """
+
+    @unittest.skipUnless(
+        paddle.is_compiled_with_cuda(), "bf16 matmul needs a GPU"
+    )
+    def test_fp32_weight_bf16_activation_projection(self):
+        prev = hc._ACCURACY_COMPATIBLE_KERNEL
+        # Flip the cached flag rather than the env var: _use_accuracy_compatible_kernel
+        # reads this module global at call time, and __init__ consults it to bind
+        # the reference compute_h, so the whole accuracy-compatible path is live.
+        hc._ACCURACY_COMPATIBLE_KERNEL = True
+        try:
+            m = _module(use_fused_mhc=False)
+            # the fix only makes sense while the weight stays fp32 under bf16 amp
+            self.assertEqual(m.mapping_proj.weight.dtype, paddle.float32)
+
+            paddle.seed(23)
+            x = paddle.randn([_S, _B, _N * _C], dtype="bfloat16")
+
+            # the raw-matmul branch: fp32 weight cast to the bf16 activation dtype.
+            # Without the cast this matmul raises a dtype-mismatch error.
+            proj, r = m._projection_and_get_norm(x)
+            self.assertEqual(proj.dtype, paddle.bfloat16)
+            self.assertEqual(r.dtype, paddle.bfloat16)
+            self.assertEqual(proj.shape, [_S, _B, _P])
+        finally:
+            hc._ACCURACY_COMPATIBLE_KERNEL = prev
+
+
 if __name__ == "__main__":
     unittest.main()
