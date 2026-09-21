@@ -974,6 +974,7 @@ class SonicMoEExpert(GroupedMLPExpert):
         fp8_scale=None,
         recompute_moe_gate_up=False,
         fp8_combine_grad_handle=None,
+        sync_free_sizing=False,
     ):
         self.convert_weights_to_sonic_layout()
         if self.sonic_moe_config.enabled is True and self.need_quant_weight():
@@ -1003,6 +1004,9 @@ class SonicMoEExpert(GroupedMLPExpert):
             # TypeError.  SiTU already fails early and clearly on such a build:
             # the encode_situ_activation import in __init__ raises ImportError.
             **self._sonic_activation_kwargs,
+            # Same forward-compat reasoning: only the ring dispatcher asks for
+            # sync-free metadata sizing, so older builds keep seeing the old call.
+            **({"sync_free_sizing": True} if sync_free_sizing else {}),
         )
         # Release fp8 weights on last micro batch to save memory.
         # Only transposed_fp8 is kept for backward computation.

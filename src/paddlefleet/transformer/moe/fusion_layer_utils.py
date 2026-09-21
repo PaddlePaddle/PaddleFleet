@@ -3444,6 +3444,7 @@ def run_sonic_moe(
     fp8_config=None,
     release_fp8_weights=False,
     activation_type="swiglu",
+    sync_free_sizing=False,
 ):
     # This is the in-tree fallback used only when paddlefleet_ops.sonicmoe
     # cannot be imported; it predates the SiTU work and has no
@@ -3464,7 +3465,7 @@ def run_sonic_moe(
         else topk_indices.cast(paddle.int32)
     )
 
-    if tokens_per_expert is None:
+    if tokens_per_expert is None and not sync_free_sizing:
         valid = topk_indices >= 0
         valid_experts = topk_indices[valid].cast(paddle.int32)
         tokens_per_expert = paddle.bincount(valid_experts, minlength=E).cast(
@@ -3502,6 +3503,7 @@ def run_sonic_moe(
                 gated_n=gated_n,
                 gated_preact_bf16=not gated_z_quant,
                 gated_allocate_z_scale=gated_z_quant,
+                sync_free_sizing=sync_free_sizing,
             )
         else:
             metadata_result = deepep_topk_to_sonic_metadata_with_scales(
@@ -3512,6 +3514,7 @@ def run_sonic_moe(
                 fp8_scale,
                 int(hidden_states.shape[1]),
                 block=128,
+                sync_free_sizing=sync_free_sizing,
             )
         (
             expert_frequency_offset,
@@ -3545,6 +3548,7 @@ def run_sonic_moe(
             tokens_per_expert,
             E,
             block=128 if fp8 else 1,
+            sync_free_sizing=sync_free_sizing,
         )
 
     s_scatter_idx.stop_gradient = True
