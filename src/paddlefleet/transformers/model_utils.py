@@ -4756,6 +4756,7 @@ def save_full_param(
     moe_sharding_world_size: int,
     max_shard_size: str = "2GB",
     num_saver_ranks: int = 8,
+    sync_copy_threshold_bytes: int = 1 << 30,
 ) -> None:
     """
     Saves model weights from an iterator into shards, supporting max shard size
@@ -4784,6 +4785,9 @@ def save_full_param(
         moe_sharding_world_size (int): The total number of processes.
         max_shard_size (str): The maximum size for each shard file, e.g., "500MB", "2GB".
         num_saver_ranks (int): The number of ranks (starting from 0) that will save files.
+        sync_copy_threshold_bytes (int): Params larger than this, and any
+            non-contiguous or CPU-resident param, skip the pinned pool and copy
+            synchronously via param.cpu().
     """
     # 1. Non-saver ranks simply consume the iterator to stay in sync.
     if rank >= num_saver_ranks:
@@ -4807,8 +4811,6 @@ def save_full_param(
 
     # Max async D2H copies (each = one pinned buffer) kept outstanding.
     pinned_param_pool_capacity = 4
-    # Params larger than this skip the pinned pool and copy synchronously.
-    sync_copy_threshold_bytes = 1 << 30  # 1 GiB
     # create_async_load() returns None on custom-device builds; without a real
     # loader every param takes the synchronous path below.
     async_loader = (
