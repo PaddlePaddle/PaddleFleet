@@ -12,38 +12,41 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HyperBody 多模输入 <-> 纯 Tensor 打包工具（fleet pipeline 兼容）。
+"""HyperBody multimodal inputs <-> pure-Tensor packing (fleet-pipeline friendly).
 
-背景
-----
-fleet pipeline 的 micro-batch loader（``paddle/.../pipeline_parallel.py``）只接受
-**Tensor/None** 字段（对每个字段逐个 ``.detach()`` / 切片），不能传 python list。
-而 HyperBody 的 packed 多模输入按段是 list::
+Background
+----------
+The fleet pipeline micro-batch loader (``paddle/.../pipeline_parallel.py``) only
+accepts **Tensor/None** fields (it ``.detach()`` / slices each field), it cannot
+carry python lists. HyperBody's packed multimodal input is per-segment lists::
 
-    image = [Tensor(C, H, W) | None, ...]   # 每个 context 段一个(变尺寸)
+    image = [Tensor(C, H, W) | None, ...]   # one per context segment (varying size)
     audio = [Tensor(M, L)    | None, ...]
 
-本模块把它们打包成"纯 Tensor + 元信息"，过完 loader 后再无损恢复成原 list。
-`use_long_query` 由组网根据 decoder input_ids/cu_seqlens 生成，不经过数据传输。
+This module packs them into "pure Tensors + metadata" and losslessly restores the
+original lists after the loader. ``use_long_query`` is derived by the model from
+decoder input_ids/cu_seqlens and is not carried through the data path.
 
-元信息设计（ragged/jagged tensor，自描述，模态无关）
-----------------------------------------------------
-对一个"每段可选张量"的 list，用 3 个 Tensor 表示::
+Metadata design (ragged/jagged tensor, self-describing, modality-agnostic)
+--------------------------------------------------------------------------
+A list of "per-segment optional tensor" is represented by 3 Tensors::
 
-    {prefix}_values    : 1-D, 原 dtype, 所有存在张量 flatten 后拼接
-    {prefix}_shapes    : int64 [K, R], 每个存在张量的形状(R=该模态 rank, 自描述)
-    {prefix}_seg_index : int32 [S], 第 s 段 -> 存在列表下标 k, 无则 -1
+    {prefix}_values    : 1-D, original dtype, all present tensors flattened + concat
+    {prefix}_shapes    : int64 [K, R], shape of each present tensor (R = modality rank)
+    {prefix}_seg_index : int32 [S], segment s -> index k in the present list, else -1
 
-K=存在张量数, S=段数; 每段字节偏移由 prod(shapes) 累加得到, 不单独存(最小冗余)。
-空 list: values=[0] float32, shapes=[0,0], seg_index 全 -1。
+K = number of present tensors, S = number of segments; per-segment byte offset is
+the running sum of prod(shapes), not stored separately (minimal redundancy).
+Empty list: values=[0] float32, shapes=[0,0], seg_index all -1.
 
-调用点
-------
-* 数据侧(erniebot ``_hyperbody_hack_inputs`` / 未来真实 collator):
-  ``batch.update(pack_hyperbody_mm(image, audio))`` 后删除原 list 键，使 batch 只剩
-  Tensor，可进 fleet pipeline。
-* 组网侧(``HyperBodyEncoderFrontEnd.forward`` 顶部):
-  ``unpack_hyperbody_mm(dict_args)`` 原地还原 image/audio 并清理打包键。
+Call sites
+----------
+* Data side (erniebot ``_hyperbody_hack_inputs`` / a future real collator):
+  ``batch.update(pack_hyperbody_mm(image, audio))`` then drop the original list
+  keys, so the batch is Tensor-only and can enter the fleet pipeline.
+* Model side (top of ``HyperBodyEncoderFrontEnd.forward``):
+  ``unpack_hyperbody_mm(dict_args)`` restores image/audio in place and cleans up
+  the packing keys.
 """
 
 from __future__ import annotations
@@ -64,7 +67,7 @@ HB_AUDIO_PREFIX = "hb_audio"
 
 
 def pack_optional_tensor_list(items, prefix):
-    """list[Tensor|None] -> {prefix}_values/_shapes/_seg_index 三个 Tensor。"""
+    """list[Tensor|None] -> the 3 Tensors {prefix}_values/_shapes/_seg_index."""
     seg_index = [-1] * len(items)
     flats, shapes, dtype, k = [], [], None, 0
     for s, t in enumerate(items):
@@ -90,12 +93,12 @@ def pack_optional_tensor_list(items, prefix):
 
 
 def unpack_optional_tensor_list(packed, prefix):
-    """还原 pack_optional_tensor_list 的结果 -> list[Tensor|None]（长度 S）。"""
+    """Restore the output of pack_optional_tensor_list -> list[Tensor|None] (length S)."""
     values = packed[f"{prefix}_values"]
     shapes_t = packed[f"{prefix}_shapes"]
     seg_idx = packed[
         f"{prefix}_seg_index"
-    ].tolist()  # 小 int 张量, host 侧控制流
+    ].tolist()  # small int tensor, host-side control flow
     present, off = [], 0
     if int(shapes_t.shape[0]) > 0:
         for shp in shapes_t.tolist():
@@ -109,7 +112,7 @@ def unpack_optional_tensor_list(packed, prefix):
 
 
 def pack_hyperbody_mm(image, audio):
-    """把 HyperBody 的 image/audio list 打包成纯 Tensor dict。"""
+    """Pack HyperBody image/audio lists into a pure-Tensor dict."""
     packed = {}
     packed.update(pack_optional_tensor_list(image, HB_IMAGE_PREFIX))
     packed.update(pack_optional_tensor_list(audio, HB_AUDIO_PREFIX))
@@ -117,7 +120,7 @@ def pack_hyperbody_mm(image, audio):
 
 
 def unpack_hyperbody_mm(dict_args):
-    """原地还原 image/audio 并清理打包键；无打包键时原样返回。"""
+    """Restore image/audio in place and drop the packing keys; no-op if absent."""
     if f"{HB_IMAGE_PREFIX}_seg_index" not in dict_args:
         return dict_args
     dict_args["image"] = unpack_optional_tensor_list(dict_args, HB_IMAGE_PREFIX)

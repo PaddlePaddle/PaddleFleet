@@ -336,8 +336,8 @@ class HyperBodyEncoderFrontEnd(FleetLayer):
                 dict_args, build_dense_mask, prefix_lm_pad_len
             )
 
-        # fleet pipeline micro-batch loader 只传 Tensor；image/audio 以 ragged Tensor
-        # 打包传入，这里原地还原成 list。
+        # The fleet pipeline micro-batch loader only passes Tensors; image/audio
+        # are packed as ragged Tensors upstream and restored in place to lists here.
         unpack_hyperbody_mm(dict_args)
 
         context_ids = dict_args["context_ids"]
@@ -848,18 +848,21 @@ def _build_decoder_view(config: HyperBodyConfig):
     dec = config.decoder_config
     for key in DECODER_VIEW_KEYS:
         merged[key] = dec.__dict__[key]
-    # 4de472f9: first_k_dense_replace 置位时给 provider 传 moe_layer_freq=1(int),
-    # 让 __post_init__ 生成 [0]+[1]*(L-1) 的 dense-first 布局(first_k 与 list
-    # moe_layer_freq 不能并存)。否则 layer0 会是 MoE 而非 dense, 与真 ernielite 架构不符。
+    # When first_k_dense_replace is set, feed the provider an int moe_layer_freq=1
+    # so __post_init__ builds the [0] + [1]*(L-1) dense-first table (first_k cannot
+    # coexist with a list moe_layer_freq). Otherwise layer 0 would be MoE instead of
+    # dense, diverging from the real ernie5_v2 architecture.
     if merged.get("first_k_dense_replace"):
         merged["moe_layer_freq"] = 1
     namespace = types.SimpleNamespace(**merged)
 
     view = HyperBodyDecoderModelProvider.from_config(namespace)
-    # b80ef7d5: MLA 核注意力 kernel 由 _attn_implementation 决定; HyperBodyConfig 继承 HF
-    # PretrainedConfig 默认 "eager", 而 ernie5_v2(lite) 用 "default"(融合/flash), 二者对同一
-    # q/k/v 产生 ~1e-5 差, 从首个 MLA 层累积 -> 与 standalone lite 前向不逐位对齐。让它由 config
-    # (yaml/json/kwargs)驱动, 缺省回退 "default"(对齐 lite), 避免 HF 默认 "eager" 泄漏。
+    # The MLA core attention kernel is selected by _attn_implementation. HyperBodyConfig
+    # inherits HF PretrainedConfig's default "eager", whereas ernie5_v2(lite) uses
+    # "default" (fused/flash); the two differ by ~1e-5 on the same q/k/v and accumulate
+    # from the first MLA layer, breaking bit-exact forward parity with standalone lite.
+    # Drive it from config (yaml/json/kwargs), falling back to "default" (matching lite)
+    # so HF's "eager" default does not leak in.
     view._attn_implementation = (
         getattr(config, "_attn_implementation", None) or "default"
     )
