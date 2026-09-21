@@ -79,10 +79,13 @@ def merge_coverage_files(coverage_files):
             if not filename:
                 continue
 
-            # Only include PaddleFleet code, exclude third-party
-            if not filename.startswith("src/paddlefleet/") or any(
-                pattern in filename for pattern in exclude_patterns
-            ):
+            # Only include PaddleFleet code, exclude third-party.  Both
+            # top-level packages count: paddlefleet_config_adapter is a sibling
+            # of paddlefleet, not a subpackage, so a "src/paddlefleet/" prefix
+            # alone would silently drop it out of the gate.
+            if not filename.startswith(
+                ("src/paddlefleet/", "src/paddlefleet_config_adapter/")
+            ) or any(pattern in filename for pattern in exclude_patterns):
                 continue
 
             # Iterate over lines

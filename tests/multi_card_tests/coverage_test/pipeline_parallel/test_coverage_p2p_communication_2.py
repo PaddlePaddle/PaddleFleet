@@ -266,6 +266,18 @@ class TestP2pHelperExtra(unittest.TestCase):
         self.assertFalse(helper._send_recv_meta.has_send_meta)
         self.assertIn("using cache: True", repr(helper))
 
+    def test_clear_dynamic_meta_cache_resets_all_slots(self):
+        helper = P2pHelper(use_cache=True, dynamic_shape=True)
+        helper._send_recv_meta_list = [SendRecvMeta(), SendRecvMeta()]
+        helper._dynamic_cnt = 2
+        helper._send_recv_meta.has_send_meta = True
+
+        helper.clear_meta_cache()
+
+        self.assertEqual(helper._send_recv_meta_list, [])
+        self.assertEqual(helper._dynamic_cnt, 0)
+        self.assertFalse(helper._send_recv_meta.has_send_meta)
+
     def test_p2p_helper_asserts_meta_and_no_comm_returns_empty_triplet(self):
         old_hcg = p2p_communication._hcg
         p2p_communication._hcg = DummyHCG()

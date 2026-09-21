@@ -222,6 +222,26 @@ class TestFusedGateDetachMatmulTarget(unittest.TestCase):
         np.testing.assert_allclose(grads[0], grads[1], rtol=0, atol=1.0)
         self.assertFalse(np.array_equal(grads[0], grads[1]))
 
+    def test_backward_restores_rank3_input_shape(self):
+        """A ``[s, b, d]`` input must get a ``[s, b, d]`` x-grad back.
+
+        The PyLayer flattens the tokens internally, so every backward branch
+        has to reshape ``x_grad`` to the original rank before returning it --
+        the ``hf`` branch used to skip that and return the flat ``[s*b, d]``.
+        """
+        for target in ("hf", "megatron", False):
+            with self.subTest(target=target):
+                x = paddle.randn([3, 5, 32], dtype=paddle.bfloat16)
+                x.stop_gradient = False
+                w = self.w.detach()
+                w.stop_gradient = False
+                out = FusedGateDetachMatmul.apply(x, w, False, target)
+                self.assertEqual(list(out.shape), [15, 4])
+                g = paddle.randn(out.shape, dtype=paddle.float32)
+                gx, gw = paddle.grad([out], [x, w], grad_outputs=[g])
+                self.assertEqual(list(gx.shape), [3, 5, 32])
+                self.assertEqual(list(gw.shape), list(self.w.shape))
+
 
 _CP_PATCH = (
     "paddlefleet.transformer.moe.moe_router.get_context_parallel_world_size"
