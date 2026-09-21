@@ -123,12 +123,42 @@ def test_first_k_dense_replace_builds_dense_first_without_conflict():
     assert all(x == 1 for x in freq[1:]), freq  # rest MoE
 
 
+def test_dense_use_long_query_scalar_and_homogeneous_list():
+    """Dense path reduces scalar / homogeneous-list use_long_query correctly."""
+    from paddlefleet.transformers.hyperbody.modeling import (
+        _dense_scalar_use_long_query,
+    )
+
+    assert _dense_scalar_use_long_query(True) is True
+    assert _dense_scalar_use_long_query(False) is False
+    assert _dense_scalar_use_long_query([True, True]) is True
+    assert _dense_scalar_use_long_query([False, False]) is False
+    assert _dense_scalar_use_long_query([]) is False  # empty -> short
+
+
+def test_dense_use_long_query_rejects_mixed_list():
+    """A mixed per-segment list is not representable in the dense layout."""
+    from paddlefleet.transformers.hyperbody.modeling import (
+        _dense_scalar_use_long_query,
+    )
+
+    raised = False
+    try:
+        _dense_scalar_use_long_query([True, False])
+    except ValueError as e:
+        assert "homogeneous use_long_query" in str(e)
+        raised = True
+    assert raised, "mixed [True, False] must raise ValueError"
+
+
 if __name__ == "__main__":
     try:
         test_nested_dict_promoted_to_subconfigs()
         test_attn_implementation_passthrough_to_view()
         test_attn_implementation_falls_back_to_default_when_absent()
         test_first_k_dense_replace_builds_dense_first_without_conflict()
+        test_dense_use_long_query_scalar_and_homogeneous_list()
+        test_dense_use_long_query_rejects_mixed_list()
     except AssertionError:
         import traceback
 

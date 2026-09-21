@@ -89,6 +89,30 @@ __all__ = [
 ]
 
 
+def _dense_scalar_use_long_query(use_long_query):
+    """Reduce ``use_long_query`` to the single scalar the dense encoder path
+    supports.
+
+    The dense frontend builds one rectangular ``[B, n_ctx, H]`` block with a
+    single query table shared by every segment, so it cannot represent a mixed
+    per-segment selection. ``_infer_use_long_query`` may return a per-segment
+    ``list[bool]``; a non-empty list is always truthy, so treating it as a raw
+    bool would silently pick the long-query table for every segment. Accept a
+    list only if all entries agree (reduce to that scalar); reject a mixed list
+    (such packs must use the packed decoder path, ``hyperencoder_packed_decoder``).
+    """
+    if isinstance(use_long_query, (list, tuple)):
+        if len({bool(u) for u in use_long_query}) > 1:
+            raise ValueError(
+                "dense encoder path requires a homogeneous use_long_query; got "
+                f"a mixed per-segment list {list(use_long_query)}. Use the packed "
+                "decoder path (hyperencoder_packed_decoder=True) for mixed "
+                "short/long segments."
+            )
+        return bool(use_long_query[0]) if use_long_query else False
+    return bool(use_long_query)
+
+
 # ======================================================================= #
 # NEW wrapper layer 1: encoder frontend (pipeline-hostile logic isolated)  #
 # ======================================================================= #
@@ -411,6 +435,12 @@ class HyperBodyEncoderFrontEnd(FleetLayer):
         prefix_lm_pad_len,
     ):
         # Non-SP [B,S,H] dense-mask path (dp backend).
+        # The dense layout uses ONE query table for all segments (rectangular
+        # [B, n_ctx, H]); ``_infer_use_long_query`` may hand us a per-segment
+        # ``list[bool]`` whose non-empty truthiness would silently pick the
+        # long-query table for every segment. Reduce to the scalar the dense
+        # layout supports (mixed lists are rejected -> use the packed path).
+        use_long_query = _dense_scalar_use_long_query(use_long_query)
         bs, n_context, _ = context_embeds.shape
         qw = (self.query_long if use_long_query else self.query_short).weight
         queries = qw.unsqueeze(0).expand([bs, -1, -1])
