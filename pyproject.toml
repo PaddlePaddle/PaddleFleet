@@ -35,7 +35,7 @@ dependencies = [
     "omegaconf",
     "orjson",
     "paddlecodec>=0.2,<0.3; sys_platform == 'linux'",
-    "paddlepaddle-gpu==3.4.0.post20260917+aa8eb3270a8",
+    "paddlepaddle-gpu==3.4.0.post20260921+de71f3b8211",
     "protobuf>=3.20.2",
     "regex",
     "ruamel.yaml>=0.17",
