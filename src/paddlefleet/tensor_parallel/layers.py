@@ -1927,6 +1927,46 @@ class Linear(paddle.nn.Layer):
         )
 
 
+class FusedLinear(paddle.incubate.nn.FusedLinear):
+    """``paddle.incubate.nn.FusedLinear`` that takes part in modular AOA.
+
+    The base class stores ``weight`` as ``[in_features, out_features]``, the
+    same layout as the rest of the Linear family, so it needs the same ``^T``.
+    Inheriting ``paddle.nn.Layer`` directly, it would otherwise fall back to the
+    identity recursion and silently load a transposed weight.
+    """
+
+    def gen_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Checkpoint->model AOA, identical to the rest of the Linear family."""
+        return gen_linear_aoa_statements(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+
+    def gen_inv_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Inverse (model -> checkpoint) AOA, independently generated."""
+        return gen_linear_inv_aoa_statements(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+
+
 def column_sequence_parallel_linear(
     x,
     weight,
