@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""``python -m paddlefleet.config_adapter`` entry point."""
+"""``python -m paddlefleet_config_adapter`` entry point."""
 
 from __future__ import annotations
 

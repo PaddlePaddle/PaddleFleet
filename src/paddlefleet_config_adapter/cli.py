@@ -35,41 +35,41 @@ EPILOG = """\
 示例：
   # 1) 不指定机器规模：按源配置原样适配，所需规模由产物自动推导
   #    （看输出里的 REQUIRED_NODES=）
-  python -m paddlefleet.config_adapter --input config.yaml
+  python -m paddlefleet_config_adapter --input config.yaml
 
   # 2) 适配到 2 台机器（默认每台 8 卡 = 16 卡）；默认冻结并行度，
   #    目标规模必须与源并行度兼容（缩 EP/PP 见 --test-accuracy）
-  python -m paddlefleet.config_adapter --input config.yaml --target-nodes 2
+  python -m paddlefleet_config_adapter --input config.yaml --target-nodes 2
 
   # 3) 测速：冻结 TP/PP/EP/CP/SEP 与 acc，只改 sharding 和 GBS
-  python -m paddlefleet.config_adapter --input config.yaml \\
+  python -m paddlefleet_config_adapter --input config.yaml \\
       --target-nodes 2 --test-performance
 
   # 4) 精度测试：注入避免 aadiff 的开关，保持等效 batch，
   #    并允许缩小 EP/PP（唯一允许改模型结构的模式）
-  python -m paddlefleet.config_adapter --input config.yaml \\
+  python -m paddlefleet_config_adapter --input config.yaml \\
       --target-nodes 1 --test-accuracy
 
   # 5) 两个维度可以同时给：既冻结并行策略，又注入精度开关
-  python -m paddlefleet.config_adapter --input config.yaml \\
+  python -m paddlefleet_config_adapter --input config.yaml \\
       --target-nodes 8 --test-performance --test-accuracy
 
   # 6) 单机 2 卡（用 --cards-per-node 表达非 8 卡机型）
-  python -m paddlefleet.config_adapter --input config.yaml \\
+  python -m paddlefleet_config_adapter --input config.yaml \\
       --target-nodes 1 --cards-per-node 2 --test-accuracy
 
   # 7) 就地改写源文件，并额外生成 <input>.patch
-  python -m paddlefleet.config_adapter --input config.yaml \\
+  python -m paddlefleet_config_adapter --input config.yaml \\
       --target-nodes 1 --test-accuracy --in-place
 
   # 8) 自定义字段：不带前缀时自动判断改 yaml 还是 model_config.json
-  python -m paddlefleet.config_adapter --input config.yaml \\
+  python -m paddlefleet_config_adapter --input config.yaml \\
       --target-nodes 1 --test-accuracy \\
       --set max_steps=10 --set n_routed_experts=32 \\
       --set json:some_new_field=1
 
   # 9) 序列长度改到 32k：max_seq_length 覆盖为 32768，CP 同比例扩大
-  python -m paddlefleet.config_adapter --input config.yaml \\
+  python -m paddlefleet_config_adapter --input config.yaml \\
       --target-nodes 8 --scale-seq-length 32768
 """
 
@@ -77,7 +77,7 @@ EPILOG = """\
 def build_parser():
     """Build the argument parser."""
     parser = argparse.ArgumentParser(
-        prog="python -m paddlefleet.config_adapter",
+        prog="python -m paddlefleet_config_adapter",
         description=(
             "把面向大集群的训练 YAML 适配到更小的机器规模："
             "重算 sharding 与 batch；仅 --test-accuracy 模式允许缩小 "

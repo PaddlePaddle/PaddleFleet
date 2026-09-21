@@ -29,7 +29,7 @@ Each switch owns one concern:
   full-scale job -- only ``sharding`` and ``global_batch_size`` move.  The
   default freezes the dims too and shares the same batch strategy.
 * ``--test-accuracy`` pins the determinism switches in
-  :mod:`paddlefleet.config_adapter.precision`.  It is also the ONLY mode
+  :mod:`paddlefleet_config_adapter.precision`.  It is also the ONLY mode
   allowed to shrink EP/PP: shrinking rescales the expert count / layer
   count, i.e. it changes the model structure, so it must be an explicit
   opt-in rather than a silent default.

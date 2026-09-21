@@ -54,6 +54,13 @@ classifiers = [
 Download = "https://github.com/PaddlePaddle/PaddleFleet/releases"
 Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
 
+[project.scripts]
+# Its own entry point rather than a paddlefleet-cli subcommand: dispatching
+# through paddlefleet would execute the parent package's eager imports (paddle,
+# transformers) and turn a 0.02s config rewrite into a 30s one.  develop also
+# ships paddlefleet-cli here; that is a separate change and is not backported.
+paddlefleet-config-adapter = "paddlefleet_config_adapter.cli:main"
+
 [build-system]
 requires = ["setuptools>=66.1.0"]
 build-backend = "build_backend"
@@ -256,7 +263,7 @@ ignore = [
 
 [tool.ruff.lint.isort]
 combine-as-imports = true
-known-first-party = ["paddlefleet"]
+known-first-party = ["paddlefleet", "paddlefleet_config_adapter"]
 
 [tool.ruff.lint.per-file-ignores]
 # Ignore for re-export in __init__ files

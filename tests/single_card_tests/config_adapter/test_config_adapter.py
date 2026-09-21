@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for paddlefleet.config_adapter (pure Python, no device)."""
+"""Unit tests for paddlefleet_config_adapter (pure Python, no device)."""
 
 import contextlib
 import io
@@ -25,7 +25,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from paddlefleet.config_adapter import (
+from paddlefleet_config_adapter import (
     DEFAULT_SHRINK_FACTOR,
     OFFLOAD_PREREQUISITES,
     AdaptOptions,
@@ -35,7 +35,7 @@ from paddlefleet.config_adapter import (
     plan_precision_switches,
     plan_sharding_shrink_switches,
 )
-from paddlefleet.config_adapter.constraints import (
+from paddlefleet_config_adapter.constraints import (
     MIN_PP_FOR_VPP,
     align_layers,
     check_ep_shrink,
@@ -45,39 +45,39 @@ from paddlefleet.config_adapter.constraints import (
     min_shrink_cards,
     pp_candidates,
 )
-from paddlefleet.config_adapter.field_spec import (
+from paddlefleet_config_adapter.field_spec import (
     FIELD_SPECS,
     describe_missing,
     resolve_fields,
 )
-from paddlefleet.config_adapter.io_writers import (
+from paddlefleet_config_adapter.io_writers import (
     JsonWriter,
     YamlWriter,
     detect_map_indent,
 )
-from paddlefleet.config_adapter.layer_fields import (
+from paddlefleet_config_adapter.layer_fields import (
     effective_mtp_layers,
     plan_layer_field_shrink,
 )
-from paddlefleet.config_adapter.model_config_resolver import (
+from paddlefleet_config_adapter.model_config_resolver import (
     ModelConfigResolveError,
     build_adapted_dir,
     resolve_model_config,
     rewrite_model_name_or_path,
 )
-from paddlefleet.config_adapter.report import (
+from paddlefleet_config_adapter.report import (
     LINE_WIDTH,
     ChangeLog,
     _width,
     format_header,
     format_report,
 )
-from paddlefleet.config_adapter.strategies import (
+from paddlefleet_config_adapter.strategies import (
     scale_accumulation,
     scale_batch,
 )
-from paddlefleet.config_adapter.topology import TopologyValidator
-from paddlefleet.config_adapter.utils import (
+from paddlefleet_config_adapter.topology import TopologyValidator
+from paddlefleet_config_adapter.utils import (
     extract_parallel_params,
     multi_lcm,
     parse_value,
@@ -234,8 +234,8 @@ class TestMinShrinkCards(unittest.TestCase):
             "per_device_train_batch_size": 1,
             "gradient_accumulation_steps": 6,
         }
-        from paddlefleet.config_adapter.planner import ShrinkPlanner
-        from paddlefleet.config_adapter.utils import (
+        from paddlefleet_config_adapter.planner import ShrinkPlanner
+        from paddlefleet_config_adapter.utils import (
             extract_parallel_params as _dims,
         )
 
@@ -1699,10 +1699,10 @@ class TestCliErrorPaths(ConfigAdapterTestBase):
         self.assertIn("适配失败", out)
 
     def test_python_m_entry_point(self):
-        # `python -m paddlefleet.config_adapter` must reach the same main().
+        # `python -m paddlefleet_config_adapter` must reach the same main().
         # No --target-nodes: the scale is derived, and a file is still written.
         argv = [
-            "paddlefleet.config_adapter",
+            "paddlefleet_config_adapter",
             "--input",
             str(self.yaml_path),
             "--output-dir",
@@ -1714,7 +1714,7 @@ class TestCliErrorPaths(ConfigAdapterTestBase):
             contextlib.redirect_stdout(buffer),
             self.assertRaises(SystemExit) as ctx,
         ):
-            runpy.run_module("paddlefleet.config_adapter", run_name="__main__")
+            runpy.run_module("paddlefleet_config_adapter", run_name="__main__")
         self.assertEqual(ctx.exception.code, 0)
         self.assertIn("REQUIRED_NODES=", buffer.getvalue())
 

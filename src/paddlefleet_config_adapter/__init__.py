@@ -21,7 +21,7 @@ with the source parallelism gets an error listing the valid node counts.
 the converted parallelism instead, reported as ``REQUIRED_NODES=`` (an empty
 conversion therefore reproduces the source scale).  A smaller ``sharding``
 also gets the compensations in
-:mod:`paddlefleet.config_adapter.sharding_shrink` (data-stream width,
+:mod:`paddlefleet_config_adapter.sharding_shrink` (data-stream width,
 optimizer offload).
 
 Two orthogonal, optional test dimensions refine that:
@@ -31,13 +31,13 @@ Two orthogonal, optional test dimensions refine that:
   ``sharding`` and ``global_batch_size`` move.
 * ``--test-accuracy`` -- the ONLY mode that may shrink EP / PP (never below
   2, rewriting a copy of ``model_config.json`` accordingly); it also pins
-  the determinism switches in :mod:`paddlefleet.config_adapter.precision`
+  the determinism switches in :mod:`paddlefleet_config_adapter.precision`
   so the run does not aadiff, and (unless the performance switch froze
   ``acc``) keeps the effective batch.
 
 Usage::
 
-    python -m paddlefleet.config_adapter --input config.yaml \\
+    python -m paddlefleet_config_adapter --input config.yaml \\
         --target-nodes 1 --test-accuracy
 """
 

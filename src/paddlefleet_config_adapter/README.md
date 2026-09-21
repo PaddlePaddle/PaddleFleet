@@ -1,4 +1,4 @@
-# config_adapter
+# paddlefleet_config_adapter
 
 把面向大集群的训练 YAML 自动改写成能在**更小机器规模**上跑起来的配置：重算
 sharding 与 batch，仅 `--test-accuracy` 模式必要时缩小 EP/PP 并联动改写
@@ -48,43 +48,48 @@ TP 与 SEP 永远不改：减小 TP 会增大单卡显存占用，有 OOM 风险
 ```bash
 # 1) 不指定机器规模：按源配置原样适配，所需规模由产物自动推导
 #    （读输出里的 REQUIRED_NODES=；空转换的产物规模就是源规模）
-python -m paddlefleet.config_adapter --input config.yaml
+python -m paddlefleet_config_adapter --input config.yaml
 
 # 2) 适配到 2 台机器（默认每台 8 卡）；默认冻结并行度，目标规模必须
 #    与源并行度兼容，否则报错并列出合法节点数（缩 EP/PP 见 --test-accuracy）
-python -m paddlefleet.config_adapter --input config.yaml --target-nodes 2
+python -m paddlefleet_config_adapter --input config.yaml --target-nodes 2
 
 # 3) 测速：冻结并行策略与 acc，只缩放 sharding 和 GBS
-python -m paddlefleet.config_adapter --input config.yaml \
+python -m paddlefleet_config_adapter --input config.yaml \
     --target-nodes 2 --test-performance
 
 # 4) 精度测试：注入避免 aadiff 的开关，并允许缩小 EP/PP（唯一允许改模型结构的模式）
-python -m paddlefleet.config_adapter --input config.yaml \
+python -m paddlefleet_config_adapter --input config.yaml \
     --target-nodes 1 --test-accuracy
 
 # 5) 两个维度同时给：既冻结并行策略，又注入精度开关
-python -m paddlefleet.config_adapter --input config.yaml \
+python -m paddlefleet_config_adapter --input config.yaml \
     --target-nodes 8 --test-performance --test-accuracy
 
 # 6) 非 8 卡机型用 --cards-per-node 表达（这里是单机 2 卡）
-python -m paddlefleet.config_adapter --input config.yaml \
+python -m paddlefleet_config_adapter --input config.yaml \
     --target-nodes 1 --cards-per-node 2 --test-accuracy
 
 # 7) 就地改写源文件，并额外生成 <input>.patch
-python -m paddlefleet.config_adapter --input config.yaml \
+python -m paddlefleet_config_adapter --input config.yaml \
     --target-nodes 1 --test-accuracy --in-place
 
 # 8) 自定义字段：不带前缀时工具自己判断该改 yaml 还是 model_config.json
-python -m paddlefleet.config_adapter --input config.yaml \
+python -m paddlefleet_config_adapter --input config.yaml \
     --target-nodes 1 --test-accuracy \
     --set max_steps=10 --set n_routed_experts=32
 
 # 9) 序列长度改到 32k：max_seq_length 覆盖为 32768，CP 同比例扩大
-python -m paddlefleet.config_adapter --input config.yaml \
+python -m paddlefleet_config_adapter --input config.yaml \
     --target-nodes 8 --scale-seq-length 32768
 ```
 
-改写 YAML 时用 `ruamel.yaml` 保留注释与字段顺序，它是 paddlefleet 的运行时依赖，随包一起安装，无需额外操作。
+改写 YAML 时用 `ruamel.yaml` 保留注释与字段顺序，它随 `paddlefleet` wheel 一起安装，无需额外操作。
+
+本包与 `paddlefleet` 平级，由同一个 wheel 分发，但**不导入 paddlefleet**，因此不会拉起
+`paddle` 等重依赖：`import paddlefleet_config_adapter` 约 0.02 秒，而经由
+`paddlefleet.` 前缀导入要先执行父包的 eager import，约 30 秒。改写配置不需要 GPU 环境，
+所以这条快路径是刻意保持的 —— 请不要在本包里 `import paddlefleet`。
 
 ### 命令行参数
 
@@ -314,7 +319,7 @@ MODEL_CONFIG_OUTPUT=adapted_configs/model_config_separated/model_dir_adapted_8ca
 ## 目录结构
 
 ```
-config_adapter/
+paddlefleet_config_adapter/
 ├── cli.py                    # 参数解析 + main()
 ├── core.py                   # ConfigAdapter：编排整个适配流程
 ├── options.py                # AdaptOptions：两个正交开关的派生行为
