@@ -1937,6 +1937,17 @@ class TrainingArguments:
             )
         },
     )
+    muon_epsilon: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Epsilon for the Muon (Newton-Schulz orthogonalization) direction, "
+                "kept separate from adam_epsilon so muon and adamw can use different "
+                "values. Default: None -> falls back to adam_epsilon (previous "
+                "shared behaviour). Only used when optim=muon."
+            )
+        },
+    )
     muon_version: int = field(
         default=3,
         metadata={
