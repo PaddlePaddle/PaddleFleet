@@ -71,7 +71,7 @@ from paddlefleet.transformer.layer import FleetLayer
 
 from ...nn.pp_model import GeneralModelForCausalLMPipe
 from ..model_utils import PretrainedModel
-from .configuration import DECODER_VIEW_KEYS, HyperBodyConfig
+from .configuration import CONTEXT_TOKEN, DECODER_VIEW_KEYS, HyperBodyConfig
 from .providers import (
     HyperBodyDecoderModelProvider,
     HyperEncoderConfig,
@@ -954,7 +954,9 @@ def _build_encoder_view(config: HyperBodyConfig, decoder_hidden: int):
         # turns it on, the decoder's moe_router allocates a learnable
         # ``routed_scaling_factor_param``. Not forwarding it here would leave the
         # encoder on a fixed scale while the decoder learns one -> silent divergence.
-        routed_scaling_factor_learnable=config.routed_scaling_factor_learnable,
+        routed_scaling_factor_learnable=getattr(
+            config.encoder_config, "routed_scaling_factor_learnable", False
+        ),
         # Recompute intent, clamped to the encoder's only supported mode (see above).
         recompute_granularity=enc_recompute_granularity,
     )
@@ -984,6 +986,16 @@ def build_hyperbody_unified_model(
         raise NotImplementedError(
             "HyperBody unified model only supports PP=1 in this phase."
         )
+
+    from .configuration import (
+        HyperBodyDecoderConfig,
+        HyperBodyEncoderConfig,
+    )
+
+    if isinstance(getattr(config, "decoder_config", None), dict):
+        config.decoder_config = HyperBodyDecoderConfig(**config.decoder_config)
+    if isinstance(getattr(config, "encoder_config", None), dict):
+        config.encoder_config = HyperBodyEncoderConfig(**config.encoder_config)
 
     decoder_view = _build_decoder_view(config)
 
