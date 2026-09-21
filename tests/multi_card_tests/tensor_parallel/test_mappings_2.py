@@ -68,7 +68,12 @@ def test_reduce_forward_all_reduce_backward_identity():
 
     local = (paddle.ones([2], dtype="float32") * (rank + 1)).cuda()
     local.stop_gradient = False
-    out = mappings.reduce_from_tensor_model_parallel_region(local)
+    # ``_ReduceFromModelParallelRegion.forward`` all-reduces its input in place,
+    # so handing it a leaf that requires grad trips Paddle's "leaf var can't use
+    # inplace" guard. Feed a non-leaf view (``local * 1.0``); the identity
+    # backward still routes the upstream grad straight back to ``local``.
+    routed = local * 1.0
+    out = mappings.reduce_from_tensor_model_parallel_region(routed)
     reduced = float(sum(range(1, ws + 1)))  # 1 + 2 + 3 + 4 = 10
     expected_fwd = (paddle.ones([2], dtype="float32") * reduced).cuda()
     assert paddle.equal_all(out, expected_fwd)
