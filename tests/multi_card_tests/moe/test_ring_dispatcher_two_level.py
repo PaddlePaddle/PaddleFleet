@@ -186,6 +186,7 @@ class TestTwoLevelRing(_TwoLevelBase):
         disp = _dispatcher(self.ep_group, self.num_experts)
         x = self._tokens()
         idx, w = self._routing()
+        disp.pre_gate_token_ag(x)  # ring's sole (always-on) token-gather entry
         out = disp.ring_forward(x, w, idx, _scale_expert_fn(2.0), w.dtype)
         self.assertEqual(out.shape, [self.T_local, self.d_latent])
         np.testing.assert_allclose(
@@ -199,6 +200,7 @@ class TestTwoLevelRing(_TwoLevelBase):
         disp = _dispatcher(self.ep_group, self.num_experts)
         x = self._tokens()
         idx, w = self._routing()
+        disp.pre_gate_token_ag(x)
         out = disp.ring_forward(x, w, idx, _scale_expert_fn(2.0), w.dtype)
         out.sum().backward()
         self.assertIsNotNone(x.grad)
@@ -222,6 +224,7 @@ class TestTwoLevelRing(_TwoLevelBase):
         disp = _dispatcher(self.ep_group, self.num_experts)
         x = self._tokens(requires_grad=False)
         idx, w = self._routing(pad_last=True)
+        disp.pre_gate_token_ag(x)
         out = disp.ring_forward(x, w, idx, _weighted_expert_fn(), w.dtype)
         s = paddle.where(idx < 0, paddle.zeros_like(w), w).sum(
             axis=-1, keepdim=True
@@ -241,6 +244,7 @@ class TestTwoLevelRing(_TwoLevelBase):
         disp = _dispatcher(self.ep_group, self.num_experts)
         x = self._tokens(requires_grad=False)
         idx, w = self._routing(pad_last=True)
+        disp.pre_gate_token_ag(x)
         out = disp.ring_forward(x, w, idx, _weighted_expert_fn(), w.dtype)
         out.sum().backward()
         self.assertIsNotNone(w.grad)
@@ -262,6 +266,7 @@ class TestTwoLevelRing(_TwoLevelBase):
         first = None
         for _ in range(3):
             x = self._tokens(requires_grad=False)
+            disp.pre_gate_token_ag(x)
             out = disp.ring_forward(x, w, idx, _scale_expert_fn(2.0), w.dtype)
             if first is None:
                 first = out.numpy()

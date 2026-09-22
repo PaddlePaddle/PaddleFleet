@@ -1143,18 +1143,18 @@ class MoELayer(nn.Layer):
         return self.unpermute(expert_outs)
 
     def _maybe_pre_allgather_overlap(self, hidden_states: paddle.Tensor):
-        """Pre-issue the flat EP token AllGather on the comm stream, before the gate.
+        """Pre-issue round 0's token AllGather on the comm stream, before the gate.
 
-        Needs ``moe_allgather_gate_overlap``, EP>1 and the 'allgather'
-        dispatcher, whose ``dispatch_preprocess`` is what consumes the handle.
-        'ringmoe' historically did not prefetch, since the only thing it can hide
-        behind the gate is round 0's intra-node AllGather, and issuing that early
-        was thought to cost more in SM/comm contention than the gate was worth.
-        It does not: the gather goes out on its own comm stream, so a ringmoe
-        branch -- gated on the SAME ``moe_allgather_gate_overlap``
-        config flag as the allgather path -- now pre-issues round 0's token gather
-        here via ``pre_gate_token_ag``. Only the tokens can be prefetched; the
-        routing idx/weight AllGathers need the gate output.
+        Two branches, by dispatcher:
+          * 'allgather': runs only with ``moe_allgather_gate_overlap`` and EP>1;
+            pre-issues the flat EP token gather, consumed by
+            ``dispatch_preprocess``.
+          * 'ringmoe': runs for EVERY forward (EP>1), NOT gated on
+            ``moe_allgather_gate_overlap`` -- the prefetched intra gather is the
+            ring's single, always-on token-gather path, so ``pre_gate_token_ag``
+            must issue round 0's gather here for both fp8 and bf16.
+        Only the tokens can be prefetched; the routing idx/weight AllGathers need
+        the gate output.
 
         For latent MoE, ``fc1_latent_proj`` is hoisted here so the AllGather runs
         in latent space; ``_project_to_latent`` reuses it via
@@ -1163,13 +1163,14 @@ class MoELayer(nn.Layer):
         if (
             self.expert_model_parallel_size > 1
             and self.moe_token_dispatcher_type == "ringmoe"
-            and self.moe_allgather_gate_overlap
         ):
-            # RingMoE gate-overlap: hoist round 0's intra token AllGather onto the
-            # comm stream ahead of the gate. Mirrors the allgather branch below
-            # (reuse the latent projection via self._latent_hidden), but the
-            # handle is consumed as round 0's prefetch in ring_forward. Gated
-            # on the dispatcher flag so nothing changes when the opt-in is off.
+            # RingMoE always prefetches round 0's intra token AllGather onto its
+            # own comm stream ahead of the gate: it is the ring's only
+            # token-gather path (ring_forward has no inline fallback), so this is
+            # unconditional for ringmoe rather than gated on
+            # moe_allgather_gate_overlap. Mirrors the allgather branch below for
+            # the latent projection; the handle is consumed as round 0's prefetch
+            # in ring_forward.
             if self.use_latent_moe:
                 self._latent_hidden = deferrable_linear_bare(
                     self.config,

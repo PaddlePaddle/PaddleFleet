@@ -1521,33 +1521,30 @@ class AllToAllTokenDispatcher(nn.Layer):
 
 
 class _RouterAllGather(paddle.autograd.PyLayer):
-    """AllGather for router topk weights, used only by the allgather dispatcher.
+    """AllGather for router topk weights, shared by the allgather and ringmoe
+    dispatchers (the ring calls it per round via ``_ag_router``).
 
     Forward:  [T_local, K] --AllGather(EP)--> [T_global, K]  (identical on all ranks)
     Backward: [T_global, K] --ReduceScatter(EP, SUM)--> [T_local, K]
 
-    In the allgather dispatcher every EP rank holds an intermediate-dim shard
-    of every expert and computes a partial expert output for ALL global tokens
-    using the same all-gathered router weights.  Each rank therefore produces
-    its own partial gradient for the shared weight tensor; the backward must
-    sum these partials (reduce) and return each rank its own token segment
-    (scatter).  A plain scatter would keep only the origin rank's partial and
-    discard the rest, under-training the router by ~1/nranks.
+    Every EP rank holds an intermediate-dim shard of every expert and computes a
+    partial expert output for ALL global tokens using the same all-gathered
+    router weights.  Each rank therefore produces its own partial gradient for
+    the shared weight tensor; the backward must sum these partials (reduce) and
+    return each rank its own token segment (scatter).  A plain scatter would keep
+    only the origin rank's partial and discard the rest, under-training the
+    router.
     """
 
     @staticmethod
     def forward(ctx, input, group):
         ctx.group = group
         ctx.input_shape = list(input.shape)
-        # NOTE on stream placement (measured, see allgather perf optimization):
-        # The topk_weights AllGather intentionally runs on the CALC stream
-        # (synchronous) rather than the comm stream.  The indices AllGather runs
-        # async on the comm stream; issuing BOTH on the comm stream would
-        # serialize the small weights gather behind the much larger fused
-        # fp8-data AllGather already queued there, increasing dispatch latency
-        # (measured +~4ms/step).  Keeping weights on calc lets it overlap with
-        # the in-flight comm-stream gathers.  Backward (reduce-scatter) is on
-        # the comm stream and unchanged. _ring_all_gather keeps use_calc_stream.
+        # The router-weight gather stays on the CALC stream, not the comm
+        # stream: the token/index gathers already occupy the comm stream, so
+        # queuing this small gather behind them would serialize it and add
+        # dispatch latency. On calc it overlaps the in-flight comm-stream
+        # gathers instead. Backward (reduce-scatter) is unaffected.
         return _ring_all_gather(input, group)
 
     @staticmethod
@@ -2311,7 +2308,8 @@ _RING_SUBGROUP_CACHE: dict = {}
 # Intra-node GPU count (G) the ring splits on. Fixed rather than detected: the
 # split has to match the real NVLink domain, and over-estimating it silently
 # routes inter-node traffic as if it were intra-node, which shows up as an
-# unexplained slowdown instead of an error. Every target machine has 8.
+# unexplained slowdown instead of an error. Set to the NVLink domain size of
+# the target machines.
 _RING_GPUS_PER_NODE = 8
 
 
@@ -2456,7 +2454,7 @@ def _build_ring_subgroups(moe_group, gpus_per_node: int = _RING_GPUS_PER_NODE):
         # round r's own gather-wait pull in everything queued behind it on that
         # stream -- the cross-stream wait on the inter shift AND round r+1's
         # gather -- so the calc stream (and with it round r's expert GEMM) ended
-        # up waiting for both. Measured as a ~2.5 ms serial prologue in front of
+        # up waiting for both. This showed up as a serial prologue in front of
         # round 0's GEMM. Always built, for new_group count consistency.
         agg = paddle.distributed.new_group(ranks=lst)
         # A fourth one, for the routing (idx/w) gather-ahead. Same story: this
@@ -3162,16 +3160,17 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         self.fp8_dispatch = fp8_dispatch
         # ring_forward validates the inter-node token layout on its first step.
         self._equal_tokens_checked = False
-        # Gate-overlap: handle for round 0's token AllGather pre-issued before the
-        # gate (set by pre_gate_token_ag, consumed as round 0's handle in the
-        # fold). None => round 0 gathers inline as before. Gate-overlap itself is
-        # controlled by the ``moe_allgather_gate_overlap`` config flag, checked in
-        # MoELayer._maybe_pre_allgather_overlap (same knob as the allgather path).
+        # Handle for round 0's token AllGather, pre-issued before the gate by
+        # pre_gate_token_ag and consumed as round 0's handle in the fold.
+        # MoELayer issues it for every ringmoe forward (not gated on
+        # moe_allgather_gate_overlap), so on the two-level ring it is always set;
+        # None only on the degenerate single-node ring (no intra level).
         self._gate_pf_handle = None
         # Packed token + in-flight round-0 hop from pre_gate_token_ag; consumed
-        # (and cleared) by ring_forward. None => ring_forward packs inline.
+        # (and cleared) by ring_forward. None only on the degenerate ring.
         self._gate_pack = None
-        # Build the 2-level ring topology on a fixed 8 GPUs per node. RingMoE only
+        # Build the 2-level ring topology on a fixed per-node GPU count
+        # (``_RING_GPUS_PER_NODE``). RingMoE only
         # makes sense when EP spans MORE than one node (N>1): with N==1 the ring
         # degenerates to a single intra-node AllGather == the flat 'allgather'
         # dispatcher. Reject that (and single-GPU/no-EP) at construction with a
@@ -3256,11 +3255,11 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
     def pre_gate_token_ag(self, tokens):
         """Pack the token ONCE and start round 0's collectives, before the gate.
 
-        Called by MoELayer only when ``moe_allgather_gate_overlap`` is on, with
-        the same tensor ``_project_to_latent`` will hand to
-        :meth:`ring_forward` (it caches it as ``_latent_hidden``), so the pack
-        done here is the one the whole ring uses -- autograd stays connected
-        through this tensor.
+        Called by MoELayer for every ringmoe forward (NOT gated on
+        ``moe_allgather_gate_overlap``), with the same tensor
+        ``_project_to_latent`` will hand to :meth:`ring_forward` (it caches it as
+        ``_latent_hidden``), so the pack done here is the one the whole ring uses
+        -- autograd stays connected through this tensor.
 
         Two things get issued ahead of the gate:
 
@@ -3274,9 +3273,9 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         ring again for the hop); on bf16 there is nothing to quantize, so the
         token itself is the carrier and the two collectives are plain ones.
 
-        No-op unless the ring spans >1 node and the intra group exists; the bf16
-        path additionally still has its inline fallback in :meth:`ring_forward`
-        for callers that skip this hook.
+        No-op only when there is no intra level to gather over (single-node ring,
+        ``intra_group is None``); on the two-level ring this is the ring's sole
+        token-gather entry point, so :meth:`ring_forward` asserts it ran.
         """
         # A previous forward that aborted between here and ring_forward leaves
         # in-flight NCCL tasks owning output buffers (the round-0 gather and the
@@ -3421,7 +3420,7 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
 
         Quantizing that transfer to fp8 was tried and rejected: an all-to-all
         does not reduce, so fp8 IS allowed there (NCCL refuses fp8 reductions),
-        but the e4m3 round-trip cost ~1-2% relative on the MoE output and its
+        but the e4m3 round-trip measurably degraded the MoE output and its
         gradients. bf16 on the wire, no exceptions.
 
         A ``combine_overlap_handle`` means the shared-expert subgraph runs
@@ -3558,24 +3557,28 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         if fp8_ring:
             # The fp8 ring has exactly one entry point: pre_gate_token_ag packed
             # the token and started round 0's gather and hop before the gate.
-            # There is deliberately no inline fallback -- it would be a second
-            # code path issuing the same collectives later, on the intra comm
-            # this way never touches, for no benefit.
             assert pre is not None, (
-                "RingMoE fp8 dispatch requires the pre-gate prefetch: "
-                "MoELayer must call pre_gate_token_ag() before ring_forward(), "
-                "which needs moe_allgather_gate_overlap=True."
+                "RingMoE fp8 dispatch requires the pre-gate prefetch: MoELayer "
+                "must call pre_gate_token_ag() before ring_forward()."
             )
             meta = pre["meta"]
             cur_data, cur_scale = pre["data"], pre["scale"]
-        elif pre is not None:
-            # bf16 ring: same takeover, one tensor and no scale. Adopt the
-            # pre-gate's reshaped copy as the carrier so the tensor whose bytes
-            # are on the wire is the same one that carries the gradient.
+        elif intra_on:
+            # bf16 two-level: same single always-on entry point. MoELayer issues
+            # pre_gate_token_ag for every ringmoe forward (not gated on
+            # moe_allgather_gate_overlap), so round 0's gather and hop are already
+            # in flight. Adopt the pre-gate's reshaped copy as the carrier so the
+            # tensor whose bytes are on the wire is the one carrying the gradient.
+            assert pre is not None, (
+                "RingMoE dispatch requires the pre-gate prefetch: MoELayer must "
+                "call pre_gate_token_ag() before ring_forward()."
+            )
             cur_tok = pre["data"]
+        # else: degenerate single-node ring (no intra level) -- nothing was
+        # pre-gated, cur_tok stays the local token and round 0 gathers nothing.
         # Round 0's gather may already be in flight (issued before the gate);
-        # None means gather inline. Dropped after use so a later forward without
-        # a fresh pre_gate_token_ag cannot reuse a stale handle.
+        # None on the degenerate ring. Dropped after use so a later forward
+        # without a fresh pre_gate_token_ag cannot reuse a stale handle.
         pf_handle = self._gate_pf_handle
         self._gate_pf_handle = None
         # Routing (idx/w) gather for THIS round, pre-issued by the previous one.
@@ -3589,7 +3592,7 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             # on ahead of the expert call, and a wait picks up everything queued
             # before it on that comm -- issue it after the cross-stream wait on
             # the hop and the next round's pair gather, and waiting for it would
-            # drag the GEMM behind the hop again (the ~2.5 ms prologue, once more).
+            # drag the GEMM behind the hop again (the serial prologue, once more).
             h_w0 = None
             if pf_rt is None and rt_group is not None:
                 h_w0 = _prefetch_pair_ag(cur_w_r, rt_group)
@@ -3645,7 +3648,7 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
                     # On its own comm (NOT intra_group): sharing the token
                     # AllGather's comm makes this round's own gather-wait pick up
                     # everything queued behind it there -- the cross-stream wait
-                    # and the next round's gather -- which put ~2.5 ms of serial
+                    # and the next round's gather -- which put a serial
                     # prologue in front of round 0's GEMM. Same lesson as
                     # intra_rs_group.
                     if _order_after(ag_group, inter):
@@ -3672,18 +3675,21 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
                 # Always a prefetched gather: round 0's was issued before the
                 # gate, every later round's during the previous round's GEMM.
                 g_tok, g_scale = _PreAllGatherFP8Ring.apply(cur_data, pf_handle)
-            elif pf_handle is not None:
-                # bf16, prefetched: round 0's gather came from the pre-gate hook,
-                # later rounds' from the previous round's gather-ahead.
+            elif intra_on:
+                # bf16 two-level: the ring has a SINGLE, always-on intra-gather
+                # path -- prefetched. Round 0's gather came from
+                # pre_gate_token_ag (MoELayer issues it for every ringmoe
+                # forward, regardless of moe_allgather_gate_overlap), later
+                # rounds' from the previous round's gather-ahead. No inline
+                # fallback: the ring never gathers on the calc stream.
                 g_tok, g_scale = (
                     _PreAllGatherPair.apply(cur_tok, pf_handle),
                     None,
                 )
             else:
-                # bf16 without the pre-gate hook (moe_allgather_gate_overlap off,
-                # or a direct ring_forward call in the tests): gather inline on
-                # the calc stream. Kept, unlike on the fp8 path, because it needs
-                # no extra comm and is the only entry point those callers have.
+                # Degenerate single-node ring (no intra level to gather over):
+                # tokens are already local, so this is a passthrough -- fp8 still
+                # quantizes locally to produce a scale, the collective is skipped.
                 g_tok, g_scale = self._ag_tokens(cur_tok, intra)
             # Round 0 has no prefetched routing gather -- idx and w come out of
             # the gate, so there is nothing to pre-issue before the loop. Split
@@ -3698,7 +3704,7 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             #           routing comm and overlaps the idx gather AND the
             #           histogram.
             #
-            # (The old "+4ms/step when weights go on the comm stream" result was
+            # (The old "weights on the comm stream slow the step" result was
             # measured when they queued behind the big token AllGather on a
             # shared comm; rt_group is a comm of its own, and round 0's token
             # gather was issued before the gate anyway.)
@@ -3731,7 +3737,7 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
                     # path, which delays this rank's collective enqueue and shows
                     # up as intra-node skew. Size from shapes instead -- rows here
                     # are dense (every rank holds all experts), so the bound is
-                    # within ~1% of the exact row count.
+                    # within a small margin of the exact row count.
                     sync_free_sizing=True,
                 )
             y = res[0] if isinstance(res, (tuple, list)) else res
