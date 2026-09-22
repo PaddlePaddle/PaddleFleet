@@ -3968,16 +3968,18 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         recover, and raising here would mask whatever aborted the previous
         forward.
         """
-        pending = []
-        if self._gate_pf_handle is not None:
-            pending.extend(
-                [
-                    self._gate_pf_handle.get("data_task"),
-                    self._gate_pf_handle.get("scale_task"),
-                ]
-            )
+        def _tasks_of(h):
+            # fp8 token gather -> data_task/scale_task; plain gather and
+            # _InterRingShift -> task; _FP8TokenShift -> tasks list.
+            if not h:
+                return ()
+            out = [h.get("data_task"), h.get("scale_task"), h.get("task")]
+            out.extend(h.get("tasks") or ())
+            return out
+
+        pending = list(_tasks_of(self._gate_pf_handle))
         if self._gate_pack is not None:
-            pending.extend(self._gate_pack.get("h_shift", {}).get("tasks") or ())
+            pending.extend(_tasks_of(self._gate_pack.get("h_shift")))
         self._gate_pf_handle = None
         self._gate_pack = None
         for task in pending:
@@ -3993,7 +3995,7 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
                 )
 
     def pre_gate_token_ag(self, tokens):
-        """Quantize the token ONCE and start round 0's collectives, before the gate.
+        """Pack the token ONCE and start round 0's collectives, before the gate.
 
         Called by MoELayer only when ``moe_allgather_gate_overlap`` is on, with
         the same tensor ``_project_to_latent`` will hand to
@@ -4008,11 +4010,14 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
           does not need anything the gate produces. ``idx``/``w`` DO come out of
           the gate, so their (tiny) hops stay in the loop.
 
-        This also removes a redundant quantization: before, the gate prefetch
-        quantized for the gather and the ring quantized again for the hop.
+        Both dtypes go through here. On fp8 this also removes a redundant
+        quantization (the gate prefetch used to quantize for the gather and the
+        ring again for the hop); on bf16 there is nothing to quantize, so the
+        token itself is the carrier and the two collectives are plain ones.
 
-        No-op (``ring_forward`` packs inline instead) unless fp8 dispatch is on,
-        the ring spans >1 node, and the intra group is real.
+        No-op unless the ring spans >1 node and the intra group exists; the bf16
+        path additionally still has its inline fallback in :meth:`ring_forward`
+        for callers that skip this hook.
         """
         # A previous forward that aborted between here and ring_forward leaves
         # in-flight NCCL tasks owning output buffers (the round-0 gather and the
@@ -4020,31 +4025,41 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         # collectives issued below race buffers nobody is going to read. Same
         # reasoning as _drain_async_handle on the flat allgather path.
         self._drain_stale_pregate()
-        if not (
-            self.fp8_dispatch
-            and self.N > 1
-            and self.intra_group is not None
-        ):
+        if not (self.N > 1 and self.intra_group is not None):
             return
         nvtx.push_range("ringmoe/reshape_input")
         t = tokens.reshape([-1, tokens.shape[-1]]).contiguous()
         nvtx.pop_range()
-        meta = {}
-        nvtx.push_range("ringmoe/fp8_quant")
-        data, scale = _FP8TokenPack.apply(t, meta)
-        nvtx.pop_range()
-        self._gate_pf_handle = _prefetch_tok_ag_fp8(
-            _fp8_pair(data, scale, meta), self.intra_group
-        )
         n = self.N
         r0 = self.inter_group.rank
         dst, src = (r0 + 1) % n, (r0 - 1) % n
+        meta = {}
         h_shift = {}
-        nvtx.push_range("ringmoe/inter_shift_launch_pre_gate")
-        nxt_data, nxt_scale = _FP8TokenShift.apply(
-            data, scale, self.inter_group, dst, src, h_shift
-        )
-        nvtx.pop_range()
+        if self.fp8_dispatch:
+            nvtx.push_range("ringmoe/fp8_quant")
+            data, scale = _FP8TokenPack.apply(t, meta)
+            nvtx.pop_range()
+            self._gate_pf_handle = _prefetch_tok_ag_fp8(
+                _fp8_pair(data, scale, meta), self.intra_group
+            )
+            nvtx.push_range("ringmoe/inter_shift_launch_pre_gate")
+            nxt_data, nxt_scale = _FP8TokenShift.apply(
+                data, scale, self.inter_group, dst, src, h_shift
+            )
+            nvtx.pop_range()
+        else:
+            # bf16 ring: the same schedule with one tensor instead of two and no
+            # quantization. _prefetch_pair_ag / _PreAllGatherPair are just the
+            # prefetched form of _RingAllGather -- identical AllGather forward and
+            # ReduceScatter backward -- so round 0's gather and its hop hide under
+            # the gate exactly like they do on the fp8 path.
+            data, scale, nxt_scale = t, None, None
+            self._gate_pf_handle = _prefetch_pair_ag(t, self.intra_group)
+            nvtx.push_range("ringmoe/inter_shift_launch_pre_gate")
+            nxt_data = _InterRingShift.apply(
+                t, self.inter_group, dst, src, h_shift
+            )
+            nvtx.pop_range()
         self._gate_pack = {
             "meta": meta,
             "data": data,
@@ -4375,6 +4390,11 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             )
             meta = pre["meta"]
             cur_data, cur_scale = pre["data"], pre["scale"]
+        elif pre is not None:
+            # bf16 ring: same takeover, one tensor and no scale. Adopt the
+            # pre-gate's reshaped copy as the carrier so the tensor whose bytes
+            # are on the wire is the same one that carries the gradient.
+            cur_tok = pre["data"]
         # Round 0's gather may already be in flight (issued before the gate);
         # None means gather inline. Dropped after use so a later forward without
         # a fresh pre_gate_token_ag cannot reuse a stale handle.
@@ -4411,9 +4431,11 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             if step < n - 1:
                 nvtx.push_range(f"ringmoe/inter_shift_launch_{step}")
                 h_t, h_i = {}, {}
-                if fp8_ring and step == 0 and pre is not None:
+                if step == 0 and pre is not None:
                     # Already in flight since before the gate.
                     nxt_data, nxt_scale = pre["nxt_data"], pre["nxt_scale"]
+                    if not fp8_ring:
+                        nxt_tok = nxt_data
                     h_t = pre["h_shift"]
                 elif fp8_ring:
                     # Bytes on the wire: half the payload of bf16, and the
@@ -4459,6 +4481,18 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
                             _fp8_pair(nxt_data, nxt_scale, meta), ag_group
                         )
                     nvtx.pop_range()
+                elif intra_on:
+                    # Same on the bf16 path: one tensor instead of two, and no
+                    # quantization, but the schedule is identical -- issue the
+                    # next round's gather on its own comm, ordered after the hop
+                    # comm->comm so the GEMM is not pinned behind the hop. The
+                    # AllGather reads the hop's output buffer while it is still in
+                    # flight, which is safe for the same reason as fp8: enqueuing
+                    # it touches the calc stream not at all.
+                    nvtx.push_range(f"ringmoe/gather_ahead_launch_{step}")
+                    if _order_after(ag_group, inter):
+                        pf_ahead = _prefetch_pair_ag(nxt_tok, ag_group)
+                    nvtx.pop_range()
                 # Same treatment for the routing pair: its own comm, ordered
                 # after the hop the same way. One gather instead of two.
                 if rt_group is not None:
@@ -4471,7 +4505,15 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
                 # Always a prefetched gather: round 0's was issued before the
                 # gate, every later round's during the previous round's GEMM.
                 g_tok, g_scale = _PreAllGatherFP8Ring.apply(cur_data, pf_handle)
+            elif pf_handle is not None:
+                # bf16, prefetched: round 0's gather came from the pre-gate hook,
+                # later rounds' from the previous round's gather-ahead.
+                g_tok, g_scale = _PreAllGatherPair.apply(cur_tok, pf_handle), None
             else:
+                # bf16 without the pre-gate hook (moe_allgather_gate_overlap off,
+                # or a direct ring_forward call in the tests): gather inline on
+                # the calc stream. Kept, unlike on the fp8 path, because it needs
+                # no extra comm and is the only entry point those callers have.
                 g_tok, g_scale = self._ag_tokens(cur_tok, intra)
             # Round 0 has no prefetched routing gather -- idx and w come out of
             # the gate, so there is nothing to pre-issue before the loop. Split
@@ -4558,14 +4600,17 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
                 # fallback for when the comm->comm ordering could not be
                 # installed (see _order_after), where it has to wait until the
                 # hop is drained. Still on its own comm so this round's own
-                # gather-wait cannot get stuck behind it. The bf16 path has no
-                # prefetch: it gathers inline through _ag_tokens.
+                # gather-wait cannot get stuck behind it.
                 pf_handle = pf_ahead
                 if pf_handle is None and fp8_ring:
                     nvtx.push_range(f"ringmoe/prefetch_launch_{step}")
                     pf_handle = _prefetch_tok_ag_fp8(
                         _fp8_pair(cur_data, cur_scale, meta), ag_group
                     )
+                    nvtx.pop_range()
+                elif pf_handle is None and intra_on:
+                    nvtx.push_range(f"ringmoe/prefetch_launch_{step}")
+                    pf_handle = _prefetch_pair_ag(cur_tok, ag_group)
                     nvtx.pop_range()
                 # Same for the routing gather: normally already in flight from
                 # ahead of the expert call, otherwise issued now.
