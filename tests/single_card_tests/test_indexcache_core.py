@@ -352,9 +352,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
         window = paddle.full([batch, seq, 1], -1, dtype="int32")
         original = paddle.full([batch, seq, 2], 8, dtype="int32")
         replay = paddle.full([batch, seq, 2], 9, dtype="int32")
-        topk_probs = paddle.full(
-            [batch, seq, 2], 0.5, dtype="float32"
-        )
+        topk_probs = paddle.full([batch, seq, 2], 0.5, dtype="float32")
         loss_state = TilelangIndexerLossState(
             paddle.ones([1], dtype="float32"),
             paddle.ones([1], dtype="float32"),
@@ -368,9 +366,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
             None,
         )
         packed_state = (paddle.ones([1], dtype="float32"),)
-        attention_output = paddle.ones(
-            [batch, seq, 1, 2], dtype="float32"
-        )
+        attention_output = paddle.ones([batch, seq, 1, 2], dtype="float32")
 
         class _Compressor:
             def __call__(self, *_args, **_kwargs):
@@ -507,9 +503,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
                     key,
                     x,
                     qr,
-                    indexcache_state=(
-                        packed_state if action == "S" else None
-                    ),
+                    indexcache_state=(packed_state if action == "S" else None),
                 )
             else:
                 stack.enter_context(
@@ -546,9 +540,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
                     key,
                     x=x,
                     qr=qr,
-                    indexcache_state=(
-                        packed_state if action == "S" else None
-                    ),
+                    indexcache_state=(packed_state if action == "S" else None),
                 )
 
         replay_hook.assert_called_once()
@@ -618,11 +610,14 @@ class TestIndexCacheCoreState(unittest.TestCase):
         self.assertFalse(applied)
         self.assertTrue(paddle.equal_all(result, native).item())
 
-        with patch.object(
-            CompressedSparseAttention,
-            "_postprocess_indexer_replay",
-            return_value=None,
-        ), self.assertRaisesRegex(TypeError, "must return"):
+        with (
+            patch.object(
+                CompressedSparseAttention,
+                "_postprocess_indexer_replay",
+                return_value=None,
+            ),
+            self.assertRaisesRegex(TypeError, "must return"),
+        ):
             layer._apply_indexer_replay(native, 2, 4)
 
     def test_replay_status_preserves_legacy_hook_call_signature(self):
@@ -658,9 +653,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
 
         query = paddle.zeros([1, 2, 1, 2], dtype="float32")
         key = paddle.zeros([1, 4, 2], dtype="float32")
-        native_indices = paddle.to_tensor(
-            [[[2, 3], [2, -1]]], dtype="int32"
-        )
+        native_indices = paddle.to_tensor([[[2, 3], [2, -1]]], dtype="int32")
         topk_probs = paddle.to_tensor(
             [[[0.5, 0.5], [1.0, 0.0]]], dtype="float32"
         )
@@ -1043,9 +1036,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
                 served.cp_enabled = True
                 served.cp_rank = cp_rank
                 served.cp_size = 8
-                reused = served._indexcache_reuse_topk(
-                    1, 4, 1, pattern, state
-                )
+                reused = served._indexcache_reuse_topk(1, 4, 1, pattern, state)
                 self.assertTrue(paddle.equal_all(reused, expected).item())
 
     @patch("paddlefleet.tilelang_ops.csa_indexer_bwd")

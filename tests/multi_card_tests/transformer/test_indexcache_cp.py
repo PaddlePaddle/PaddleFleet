@@ -268,7 +268,9 @@ class TestIndexCacheContextParallel(unittest.TestCase):
         self.assertIs(producer.replay_input, producer.native_topk)
         self.assertTrue(paddle.equal_all(state[0], producer.native_topk).item())
         self.assertTrue(
-            paddle.equal_all(producer.attention_topk, producer.replay_topk).item()
+            paddle.equal_all(
+                producer.attention_topk, producer.replay_topk
+            ).item()
         )
 
         served = _IndexCacheCPHarness("S")

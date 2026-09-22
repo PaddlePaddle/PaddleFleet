@@ -1719,9 +1719,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
             native_compressed,
             paddle.to_tensor(-1, dtype="int32"),
         )
-        topk_scores = paddle.randn(
-            [1, seq_len, seq_len_comp], dtype="float32"
-        )
+        topk_scores = paddle.randn([1, seq_len, seq_len_comp], dtype="float32")
         topk_scores = paddle.where(
             valid_mask,
             topk_scores,
@@ -1757,9 +1755,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
             seen["target_key"] = key
             seen["target_topk"] = topk_indices
             seen["target_scale"] = softmax_scale
-            target = native_target(
-                query, key, topk_indices, softmax_scale
-            )
+            target = native_target(query, key, topk_indices, softmax_scale)
             seen["target"] = target
             return target
 
@@ -1799,9 +1795,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
         self.assertTrue(output.isfinite().all().item())
         self.assertEqual(fallback.call_count, 1)
         self.assertTrue(
-            paddle.equal_all(
-                seen["target_topk"], seen["native_topk"]
-            ).item()
+            paddle.equal_all(seen["target_topk"], seen["native_topk"]).item()
         )
         target_reference = _compute_attn_target_on_selected_set(
             seen["target_query"],
@@ -1818,9 +1812,7 @@ class TestDSv4HybridDocumentRoPE(unittest.TestCase):
             ).item()
         )
         self.assertFalse(
-            paddle.equal_all(
-                seen["attention_topk"], seen["native_topk"]
-            ).item()
+            paddle.equal_all(seen["attention_topk"], seen["native_topk"]).item()
         )
 
 

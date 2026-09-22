@@ -28,9 +28,7 @@ _INDEXCACHE_CONFIG = None
 
 
 def _debug_enabled() -> bool:
-    return bool(
-        getattr(_INDEXCACHE_CONFIG, "indexcache_train_debug", False)
-    )
+    return bool(getattr(_INDEXCACHE_CONFIG, "indexcache_train_debug", False))
 
 
 def _is_indexcache_key(key) -> bool:

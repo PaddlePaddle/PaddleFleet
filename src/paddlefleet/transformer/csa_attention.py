@@ -3883,9 +3883,10 @@ class CompressedSparseAttention(FleetLayer):
         if indexer_backend in ("cudnn", "tilelang") and need_indexer_state:
             target = None
             if materialize_distill_state:
-                if self.tp_group is not None and getattr(
-                    self.tp_group, "nranks", 1
-                ) > 1:
+                if (
+                    self.tp_group is not None
+                    and getattr(self.tp_group, "nranks", 1) > 1
+                ):
                     target = _compute_attn_target_on_selected_set(
                         query.detach(),
                         compressed_kv.detach(),
@@ -4130,16 +4131,12 @@ class CompressedSparseAttention(FleetLayer):
             and self._indexcache_multi_layer_distill_enabled()
         ):
             c4_ordinal, _action, pattern = indexcache_action
-            served_count = self._indexcache_served_count(
-                pattern, c4_ordinal
-            )
+            served_count = self._indexcache_served_count(pattern, c4_ordinal)
             loss_coeff_override = self._indexcache_scaled_loss_coeff(
                 served_count
             )
             materialize_distill_state = (
-                self._indexcache_has_future_served_layer(
-                    pattern, c4_ordinal
-                )
+                self._indexcache_has_future_served_layer(pattern, c4_ordinal)
             )
 
         indexer_loss_coeff = float(
@@ -4152,14 +4149,10 @@ class CompressedSparseAttention(FleetLayer):
             and paddle.is_grad_enabled()
             and indexer_loss_coeff > 0
         )
-        loss_topk_effective = self._resolve_topk_effective(
-            n_compressed_global
-        )
+        loss_topk_effective = self._resolve_topk_effective(n_compressed_global)
         # Keep the current mainline phase semantics: phase 2 widens the
         # attention set, while phase 3 uses the configured learned top-k.
-        attn_topk_effective = self._resolve_topk_effective(
-            n_compressed_global
-        )
+        attn_topk_effective = self._resolve_topk_effective(n_compressed_global)
 
         x_det = x.detach()
         qr_det = qr.detach()
@@ -4187,9 +4180,7 @@ class CompressedSparseAttention(FleetLayer):
 
         if use_tilelang_indexer or use_cudnn_indexer:
             grad_ctx = (
-                contextlib.nullcontext
-                if need_indexer_loss
-                else paddle.no_grad
+                contextlib.nullcontext if need_indexer_loss else paddle.no_grad
             )
             with grad_ctx():
                 if use_cudnn_indexer:
@@ -4236,16 +4227,14 @@ class CompressedSparseAttention(FleetLayer):
                         if need_indexer_loss or materialize_distill_state
                         else attn_topk_effective
                     )
-                    topk_indices_compressed, topk_probs = (
-                        csa_indexer_topk_fwd(
-                            q_indexer_bf,
-                            k_indexer_global,
-                            weights_indexer_bf,
-                            ratio=self.compress_ratio,
-                            topk_effective=topk_effective,
-                            seq_offset=position_offset,
-                            valid_range=valid_range,
-                        )
+                    topk_indices_compressed, topk_probs = csa_indexer_topk_fwd(
+                        q_indexer_bf,
+                        k_indexer_global,
+                        weights_indexer_bf,
+                        ratio=self.compress_ratio,
+                        topk_effective=topk_effective,
+                        seq_offset=position_offset,
+                        valid_range=valid_range,
                     )
 
             if need_indexer_loss:
@@ -4296,16 +4285,12 @@ class CompressedSparseAttention(FleetLayer):
                     attn_topk_effective,
                     indexer_loss_coeff,
                     causal_mask.unsqueeze(1),
-                    getattr(
-                        self.config, "dsa_indexer_use_sparse_loss", True
-                    ),
+                    getattr(self.config, "dsa_indexer_use_sparse_loss", True),
                     self.tp_group,
                     loss_mask,
                     global_valid_count,
                 )
-                topk_indices_compressed = (
-                    FusedDSAIndexerLoss._last_topk_indices
-                )
+                topk_indices_compressed = FusedDSAIndexerLoss._last_topk_indices
                 DSAIndexerLossLoggingHelper.save_loss_to_tracker(
                     loss=indexer_loss,
                     layer_number=self.layer_number,
@@ -4731,12 +4716,10 @@ class CompressedSparseAttention(FleetLayer):
                 # learned/reused top-k table. Replay is an attention-only
                 # postprocess and must never redefine those tensors.
                 indexcache_loss_topk_idxs = compress_topk_idxs
-                compress_topk_idxs, replay_applied = (
-                    self._apply_indexer_replay(
-                        compress_topk_idxs,
-                        n_compressed,
-                        offset,
-                    )
+                compress_topk_idxs, replay_applied = self._apply_indexer_replay(
+                    compress_topk_idxs,
+                    n_compressed,
+                    offset,
                 )
             compress_topk_idxs = compress_topk_idxs.astype("int32")
 
@@ -5228,14 +5211,12 @@ class CompressedSparseAttention(FleetLayer):
                 # Preserve the native F/S table for the cached state and loss.
                 # Replay may replace only the table consumed by attention.
                 indexcache_loss_topk_idxs = compress_topk_idxs
-                compress_topk_idxs, replay_applied = (
-                    self._apply_indexer_replay(
-                        compress_topk_idxs,
-                        n_compressed_global,
-                        offset,
-                        position_offset=position_offset,
-                        q_positions=q_positions,
-                    )
+                compress_topk_idxs, replay_applied = self._apply_indexer_replay(
+                    compress_topk_idxs,
+                    n_compressed_global,
+                    offset,
+                    position_offset=position_offset,
+                    q_positions=q_positions,
                 )
             compress_topk_idxs = compress_topk_idxs.astype("int32")
 
