@@ -192,22 +192,25 @@ class TransformerConfig(ModelParallelConfig):
     """When True, MTP layers share the last backbone TransformerLayer parameters."""
 
     mtp_shared_weights: bool = False
-    """When True, all MTP depths share a single MultiTokenPredictionLayer's parameters
-    by aliasing depths 1..D-1 onto depth 0 (parameter-object aliasing, so the LayerDesc
-    tree is preserved and AOA still emits per-MTP checkpoint keys).
+    """When True, ALL MTP depths share one MultiTokenPredictionLayer's parameters --
+    the internal transformer_layer body AND the per-depth fusion modules
+    (enorm / hnorm / eh_proj or e_proj+h_proj / norm).
 
-    Composes with mtp_shared_last_layer:
-    - mtp_shared_last_layer=False: the whole MTP layer is shared across depths, i.e.
-      the internal transformer_layer body AND the per-depth fusion modules
-      (enorm / hnorm / eh_proj / norm).
-    - mtp_shared_last_layer=True: the transformer_layer body is already shared by
-      paddle's SharedLayerDesc machinery (all depths use the same "mtp_reuse_transformer"
-      key), so aliasing is restricted to the fusion modules and deliberately leaves
-      the SharedLayerDesc-managed body parameters untouched.
+    Implemented through paddle's SharedLayerDesc: every depth is emitted under the
+    single key "mtp_shared_all" with shared_submodule_weight_only=True and
+    shared_weight_attr="all_weights". The first desc on the pivot stage becomes the
+    shared layer, the rest are aliased onto it (GPTModel._alias_shared_layer widens
+    paddle's `transformer_layer`-only default to the whole MTP layer), and every
+    parameter is registered in PipelineLayer.shared_comm, so the cross-stage
+    broadcast and gradient allreduce work at pipeline_model_parallel_size > 1.
+    Parameter identity is shared, so the LayerDesc tree is preserved and AOA still
+    emits per-MTP checkpoint keys; on load, whichever depth's keys are read last
+    wins.
 
-    Cross-PP-stage sharing is NOT supported (parameter aliasing cannot bridge stages);
-    a rank holding fewer than two MTP layers logs a skip warning and does nothing.
-    No effect when num_nextn_predict_layers <= 1."""
+    Mutually exclusive with mtp_shared_last_layer (see __post_init__): one LayerDesc
+    carries one key, and the two want different pivots. Requires
+    num_nextn_predict_layers >= 2. Not usable with the dualpipev scheduler, which
+    paddle rejects for SharedLayerDesc outright."""
 
     mtp_depth_sampling: list | None = None
     """Per-step random sampling of how many MTP depths to actually run, to keep MTP
@@ -219,12 +222,12 @@ class TransformerConfig(ModelParallelConfig):
       only MTP depths 1..K; depths >K are skipped (no transformer_layer forward, no
       vocab projection, no loss). The loss averages over the K computed depths, so
       depth j's effective weight is w_j = E[1{K>=j}/K] and sum_j w_j == 1. K is
-      sampled once per micro-batch and broadcast from global rank 0 so that MoE
-      expert-parallel all-to-all stays consistent across ranks.
-    Requires pipeline_model_parallel_size == 1 (rejected otherwise in __post_init__):
-    MTP layers only land on the last pipeline stage, so the rank-0 broadcast would be
-    entered by a subset of the world group. Validated at single card; not yet validated
-    at expert_model_parallel_size>1."""
+      sampled once per micro-batch from a private RNG seeded by a per-call
+      counter, so every rank running the MTP layers derives the same K with no
+      collective; MoE expert-parallel all-to-all therefore stays consistent.
+    Works under pipeline_model_parallel_size > 1 (covered by
+    tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_depth_sampling.py).
+    Not yet validated at expert_model_parallel_size > 1."""
 
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
@@ -2275,6 +2278,29 @@ class TransformerConfig(ModelParallelConfig):
                     f"{self.virtual_pipeline_model_parallel_size}"
                 )
 
+        if self.mtp_shared_weights:
+            # Raise, not assert: ``python -O`` strips assertions, and both cases
+            # below would otherwise fail deep inside PipelineLayer's shared-layer
+            # bookkeeping, where the cause is no longer visible.
+            if self.mtp_shared_last_layer:
+                raise ValueError(
+                    "mtp_shared_weights and mtp_shared_last_layer cannot both be "
+                    "True. A LayerDesc carries exactly one SharedLayerDesc key, and "
+                    "the two want different pivots for the same MTP layers: "
+                    "mtp_shared_last_layer points the body at the last backbone "
+                    "TransformerLayer, mtp_shared_weights points every depth at MTP "
+                    "depth 0. mtp_shared_weights already shares the body across all "
+                    "depths, so it subsumes the cross-depth half of "
+                    "mtp_shared_last_layer."
+                )
+            if self.num_nextn_predict_layers < 2:
+                raise ValueError(
+                    "mtp_shared_weights requires num_nextn_predict_layers >= 2, got "
+                    f"num_nextn_predict_layers={self.num_nextn_predict_layers}. With "
+                    "a single depth there is nothing to share and the flag would "
+                    "silently do nothing."
+                )
+
         if self.mtp_shared_last_layer:
             # When MTP reuses the last backbone TransformerLayer's parameters,
             # the MTP transformer block must have an identical structure to the
@@ -2372,23 +2398,6 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError(
                     "mtp_depth_sampling must sum to 1.0 (it is the distribution "
                     f"P(K=k)), got sum={_s} for {self.mtp_depth_sampling}"
-                )
-            if self.pipeline_model_parallel_size > 1:
-                raise ValueError(
-                    "mtp_depth_sampling requires pipeline_model_parallel_size == 1, "
-                    f"got pipeline_model_parallel_size="
-                    f"{self.pipeline_model_parallel_size}. Two independent reasons, "
-                    "both fatal rather than degraded: (1) K is broadcast from global "
-                    "rank 0 over the default (world) group inside "
-                    "MultiTokenPredictionLayer._sample_mtp_depth, but MTP layers are "
-                    "appended after the backbone and therefore only land on the last "
-                    "pipeline stage, so only those ranks reach the collective and the "
-                    "remaining ranks never join it -> hang; (2) K rides in dict_args "
-                    "as a plain int, and paddle's stage-boundary "
-                    "convert_tensor_dict_to_tuple() assigns `.key` on every dict "
-                    "value, which fails on a non-tensor. Supporting PP needs a "
-                    "dedicated communication group for the ranks that hold MTP plus "
-                    "a tensor-typed carrier; neither is implemented yet."
                 )
 
         if self.enable_mtp_magic_send:

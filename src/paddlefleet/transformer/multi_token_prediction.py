@@ -1009,6 +1009,17 @@ class MultiTokenPredictionLayer(FleetLayer):
     def transformer_layer_weights(self):
         return self.transformer_layer.named_parameters()
 
+    @property
+    def all_weights(self):
+        """Every parameter of this MTP depth: the transformer_layer body plus the
+        per-depth fusion modules (enorm / hnorm / eh_proj or e_proj+h_proj / norm).
+
+        Used as ``shared_weight_attr`` for the ``mtp_shared_weights`` key so that
+        paddle registers all of them in ``PipelineLayer.shared_comm`` -- unlike
+        ``transformer_layer_weights``, which deliberately covers the body only.
+        """
+        return self.named_parameters()
+
     def _concat_embeddings(
         self,
         hidden_states: paddle.Tensor,
@@ -1375,13 +1386,19 @@ class MultiTokenPredictionLayer(FleetLayer):
         """Sample how many MTP depths K to actually run this step (prefix 1..K).
 
         Driven by config.mtp_depth_sampling, a list P(K=k) of length
-        D=num_nextn_predict_layers. Every rank draws (so the numpy stream advances
-        identically everywhere) and the value is then overwritten with global rank
-        0's via broadcast, because all ranks must run the exact same set of depths
-        for MoE expert-parallel all-to-all to stay consistent. A broadcast failure
-        is deliberately NOT swallowed: falling back to a per-rank sample would
-        desync the depths and resurface later as an all-to-all mismatch or hang.
-        Returns D when sampling is disabled.
+        D=num_nextn_predict_layers. Returns D when sampling is disabled.
+
+        The draw is DETERMINISTIC and collective-free: a private RNG is seeded by
+        a per-call counter, so every rank that runs this MTP layer draws the SAME
+        K without any communication. That is all the consistency the feature
+        needs -- K only gates the MTP layers, and every rank executing them (the
+        last pipeline stage's dp/tp/ep ranks) advances the counter in lockstep,
+        so their MoE expert-parallel all-to-all always agrees on which depths are
+        skipped. A world-group broadcast(src=0) -- the previous mechanism --
+        deadlocks under pp>1 instead: only the last pipeline stage runs the MTP
+        layer, while src=0 sits on the first stage and never joins the
+        collective. A private Generator is used (not np.random.*) so the global
+        RNG stream used elsewhere is untouched.
         """
         d = self.config.num_nextn_predict_layers
         ratio = getattr(self.config, "mtp_depth_sampling", None)
@@ -1389,11 +1406,13 @@ class MultiTokenPredictionLayer(FleetLayer):
             return d
         probs = np.asarray(ratio, dtype="float64")
         probs = probs / probs.sum()
-        k = int(np.random.choice(len(probs), p=probs)) + 1
-        if paddle.distributed.is_initialized():
-            t = paddle.to_tensor([k], dtype="int32")
-            paddle.distributed.broadcast(t, src=0)
-            k = int(t.item())
+        if not hasattr(self, "_mtp_sampling_counter"):
+            self._mtp_sampling_counter = 0
+        base = int(getattr(self.config, "seed", 0) or 0)
+        seed = base * 1_000_003 + self._mtp_sampling_counter
+        self._mtp_sampling_counter += 1
+        rng = np.random.default_rng(seed)
+        k = int(rng.choice(len(probs), p=probs)) + 1
         return max(1, min(k, d))
 
     def forward(self, dict_args: dict):
@@ -1430,7 +1449,12 @@ class MultiTokenPredictionLayer(FleetLayer):
             and not self.config.enable_mtp_magic_send
         ):
             d = self.config.num_nextn_predict_layers
-            if self.layer_number == 0:
+            if self.layer_number == 0 and "mtp_sampled_depth" not in dict_args:
+                # Draw once per micro-batch. The `not in dict_args` guard makes
+                # this idempotent: if a recompute pass re-enters this layer with
+                # the same dict_args, K is reused (not re-drawn), so the skip
+                # decision matches the original forward and the private RNG
+                # counter does not run ahead of the other ranks.
                 k = self._sample_mtp_depth()
                 dict_args["mtp_sampled_depth"] = k
                 # observability only, never read by the logic

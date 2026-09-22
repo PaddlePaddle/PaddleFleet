@@ -165,9 +165,13 @@ class TestMTPSharedWeights(unittest.TestCase):
             f"depths must stay independent when the flag is off, shared={shared[:5]}"
         )
 
-    def test_shared_last_layer_false_shares_everything(self):
-        """mtp_shared_weights alone: depth 1 shares depth 0's FULL parameter set,
-        i.e. the transformer_layer body plus enorm/hnorm/eh_proj/norm."""
+    @unittest.skipUnless(
+        PADDLE_SUPPORTS_SHARED_SUBMODULE,
+        "installed paddle's SharedLayerDesc lacks shared_submodule_weight_only",
+    )
+    def test_shares_everything(self):
+        """mtp_shared_weights: depth 1 shares depth 0's FULL parameter set, i.e.
+        the transformer_layer body plus enorm/hnorm/eh_proj/norm."""
         config = GPTConfig(
             **self._base_kwargs(),
             mtp_shared_weights=True,
@@ -197,84 +201,59 @@ class TestMTPSharedWeights(unittest.TestCase):
                 f"fusion {fusion} not shared across depths"
             )
 
-    def test_shared_last_layer_true_skips_body_aliases_fusion(self):
-        """The mtp_shared_last_layer=True branch in isolation.
+    def test_mutually_exclusive_with_shared_last_layer(self):
+        """One LayerDesc carries one SharedLayerDesc key, and the two flags want
+        different pivots for the same MTP layers, so the combination is refused."""
+        with self.assertRaisesRegex(
+            ValueError,
+            r"mtp_shared_weights and mtp_shared_last_layer cannot both be True",
+        ):
+            GPTConfig(
+                **self._base_kwargs(),
+                mtp_shared_last_layer=True,
+                mtp_shared_weights=True,
+            )
 
-        When the body is owned by paddle's SharedLayerDesc bookkeeping,
-        _alias_mtp_shared_weights must leave transformer_layer.* alone and still
-        share the fusion modules. Built here with independent depths and the flag
-        flipped afterwards, so depth-0 and depth-1 body params are DISTINCT objects
-        and a skip is therefore observable (an unguarded alias would re-point them).
-        """
-        config = GPTConfig(**self._base_kwargs())
-        model = gpt_builder(config, num_stages=1)
-        mtp = _mtp_layers(model)
-        assert len(mtp) == 2
+    def test_single_depth_rejected(self):
+        """With one depth there is nothing to share; refuse instead of no-op."""
+        with self.assertRaisesRegex(
+            ValueError,
+            r"mtp_shared_weights requires num_nextn_predict_layers >= 2",
+        ):
+            GPTConfig(
+                **self._base_kwargs(num_nextn=1),
+                mtp_shared_weights=True,
+            )
 
-        body_before = {
-            name: p
-            for name, p in mtp[1].named_parameters()
-            if name.startswith("transformer_layer.")
-        }
-        assert body_before, "expected transformer_layer.* params"
-
-        model.config.mtp_shared_last_layer = True
-        try:
-            model._alias_mtp_shared_weights()
-        finally:
-            model.config.mtp_shared_last_layer = False
-
-        d0 = dict(mtp[0].named_parameters())
-        d1 = dict(mtp[1].named_parameters())
-
-        re_pointed = [n for n, p in body_before.items() if d1.get(n) is not p]
-        assert not re_pointed, (
-            "SharedLayerDesc-owned body params must not be re-pointed, "
-            f"re_pointed={re_pointed[:5]}"
+    @unittest.skipUnless(
+        PADDLE_SUPPORTS_SHARED_SUBMODULE,
+        "installed paddle's SharedLayerDesc lacks shared_submodule_weight_only",
+    )
+    def test_emits_one_shared_key_for_all_depths(self):
+        """Every MTP depth must land under the SAME key, and the backbone-last
+        pivot of mtp_reuse_transformer must not be emitted: a pivot with no
+        members would build a shared_comm group nobody joins."""
+        config = GPTConfig(
+            **self._base_kwargs(),
+            mtp_shared_weights=True,
         )
-        fusion = [n for n in d0 if not n.startswith("transformer_layer.")]
-        assert fusion, "expected fusion params outside transformer_layer.*"
-        not_shared = [n for n in fusion if d0[n] is not d1.get(n)]
-        assert not not_shared, (
-            f"fusion modules must still be shared, not_shared={not_shared[:5]}"
+        model = gpt_builder(config, num_stages=1)
+        keys = [
+            layer.layer_name
+            for layer in model.layers
+            if isinstance(layer, SharedLayerDesc)
+        ]
+        assert keys.count("mtp_shared_all") == 2, (
+            f"expected one mtp_shared_all desc per MTP depth, got {keys}"
+        )
+        assert "mtp_reuse_transformer" not in keys, (
+            f"mtp_reuse_transformer must not be emitted, got {keys}"
         )
 
     @unittest.skipUnless(
         PADDLE_SUPPORTS_SHARED_SUBMODULE,
         "installed paddle's SharedLayerDesc lacks shared_submodule_weight_only",
     )
-    def test_with_shared_last_layer_end_to_end(self):
-        """mtp_shared_weights + mtp_shared_last_layer: every depth's body shares
-        storage with the backbone-last layer, fusion modules shared across depths."""
-        config = GPTConfig(
-            **self._base_kwargs(),
-            mtp_shared_last_layer=True,
-            mtp_shared_weights=True,
-        )
-        model = gpt_builder(config, num_stages=1)
-        mtp = _mtp_layers(model)
-        decoder = _decoder_layers(model)
-        assert len(mtp) == 2
-        assert decoder, "model should have decoder layers"
-
-        backbone = dict(decoder[-1].transformer_layer_weights)
-        for depth, layer in enumerate(mtp):
-            for name, param in layer.transformer_layer_weights:
-                assert name in backbone, f"depth-{depth} param {name} missing"
-                assert param.data_ptr() == backbone[name].data_ptr(), (
-                    f"depth-{depth} body param {name} does not share storage "
-                    "with the backbone-last layer"
-                )
-
-        d0 = dict(mtp[0].named_parameters())
-        d1 = dict(mtp[1].named_parameters())
-        fusion = [n for n in d0 if not n.startswith("transformer_layer.")]
-        assert fusion, "expected fusion params"
-        not_shared = [n for n in fusion if d0[n] is not d1.get(n)]
-        assert not not_shared, (
-            f"fusion modules not shared across depths, not_shared={not_shared[:5]}"
-        )
-
     def test_forward_backward_with_shared_weights(self):
         """Sharing must not break the training step."""
         config = GPTConfig(

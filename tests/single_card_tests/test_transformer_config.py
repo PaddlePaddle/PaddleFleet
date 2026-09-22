@@ -727,23 +727,22 @@ class TestMTPDepthSamplingValidation(unittest.TestCase):
                 mtp_distillation_loss=True,
             )
 
-    def test_pipeline_parallel_rejected(self):
-        """PP>1 must be refused, not warned: only the last stage holds the MTP
-        layers, so the rank-0 broadcast would be entered by a subset of the
-        world group and the remaining ranks would never join it."""
-        with self.assertRaisesRegex(
-            ValueError,
-            r"mtp_depth_sampling requires pipeline_model_parallel_size == 1",
-        ) as context:
-            TransformerConfig(
-                num_nextn_predict_layers=2,
-                mtp_depth_sampling=[0.5, 0.5],
-                pipeline_model_parallel_size=2,
-            )
-        self.assertIn("hang", str(context.exception))
+    def test_pipeline_parallel_accepted(self):
+        """PP>1 is supported: the sampler is collective-free, so the last stage
+        can draw K on its own without the other stages joining a collective.
+        The end-to-end pp=2 coverage lives in
+        tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_depth_sampling.py.
+        """
+        config = TransformerConfig(
+            num_nextn_predict_layers=2,
+            mtp_depth_sampling=[0.5, 0.5],
+            pipeline_model_parallel_size=2,
+        )
+        self.assertEqual(config.mtp_depth_sampling, [0.5, 0.5])
+        self.assertEqual(config.pipeline_model_parallel_size, 2)
 
-    def test_pipeline_parallel_allowed_when_sampling_off(self):
-        """The rejection is scoped to mtp_depth_sampling; PP stays usable."""
+    def test_pipeline_parallel_with_sampling_off(self):
+        """Sampling off + PP>1 keeps working (regression guard)."""
         config = TransformerConfig(
             num_nextn_predict_layers=2,
             pipeline_model_parallel_size=2,

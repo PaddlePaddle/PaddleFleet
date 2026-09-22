@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import logging
-import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -250,106 +249,73 @@ class GPTModel(PipelineLayer):
 
         # Tie GPTMTPLMHead weight to GPTMainLMHead weight on the same stage.
         self._tie_mtp_lm_head_weight()
-        # MTP cross-depth weight sharing: alias every MTP depth (1..D-1) onto the
-        # first MTP layer (depth 0) on this PP rank. When mtp_shared_last_layer is
-        # also on, the transformer_layer body is already shared through paddle's
-        # SharedLayerDesc machinery, so only the fusion modules are aliased here.
-        if getattr(self.config, "mtp_shared_weights", False):
-            self._alias_mtp_shared_weights()
 
-    def _alias_mtp_shared_weights(self):
-        """Share ONE MultiTokenPredictionLayer's parameters across all MTP depths on
-        this PP rank: alias depths 1..D-1 onto depth 0 (the first MTP layer).
+    def _alias_shared_layer(self, dest_layer, src_layer):
+        """Alias a whole MTP layer, not just its ``transformer_layer``.
 
-        This is parameter-object aliasing (Parameter identity is shared, NOT module
-        reference replacement), so the LayerDesc tree is preserved and checkpoint save
-        via AOA still emits per-MTP keys. Loading semantics: all depths point at the
-        same Parameter, so whichever depth's keys are loaded last wins.
+        paddle's ``PipelineLayer._alias_shared_layer`` hardcodes
+        ``dest_layer.transformer_layer`` as the aliasing scope. That is correct for
+        ``mtp_shared_last_layer``, whose pivot is a backbone TransformerLayer: the
+        pivot's parameter names line up with the names under the MTP body. It is too
+        narrow for ``mtp_shared_weights``, where every MTP depth must also share the
+        fusion modules (enorm / hnorm / eh_proj or e_proj+h_proj / norm).
 
-        Interaction with ``mtp_shared_last_layer``:
-          - False: alias everything, i.e. the internal ``transformer_layer`` body plus
-            the per-depth fusion modules (enorm / hnorm / eh_proj / norm).
-          - True: every MTP depth registers the same SharedLayerDesc key
-            ("mtp_reuse_transformer"), so paddle already points all depths' body
-            parameters at the backbone-last layer and also tracks those Parameter
-            objects in ``PipelineLayer.shared_comm`` for the cross-stage gradient
-            allreduce. Re-pointing them here would leave that bookkeeping referring to
-            Parameter objects the modules no longer use, so ``transformer_layer.*`` is
-            deliberately skipped and only the fusion modules are aliased.
+        When both sides are MTP layers, pivot and destination are the same class, so
+        their ``named_parameters()`` live at the same level and aliasing the whole
+        layer is both correct and complete. Everything else falls through to paddle,
+        so ``mtp_shared_last_layer`` and the embedding / lm_head keys are untouched.
 
-        Cross-stage sharing is NOT supported (parameter aliasing cannot bridge PP
-        stages); on a rank with fewer than two MTP layers this is a no-op with a clear
-        warning so operators can grep the log.
+        Only rank-local Parameter identity is established here; the cross-stage
+        broadcast and gradient allreduce come from ``PipelineLayer.shared_comm``,
+        which is built from the desc's ``shared_weight_attr`` (``all_weights`` for the
+        mtp_shared_weights key, so every parameter is covered).
 
-        Grep tags:
-          [MTP-SHARED-WEIGHTS-CONFIRM]   alias succeeded for one MTP depth
-          [MTP-SHARED-WEIGHTS-SKIP]      stage has < 2 MTP layers (nothing to share)
-          [MTP-SHARED-WEIGHTS-WARN]      partial / shape-mismatched alias
+        The widening is gated on ``config.mtp_shared_weights``, not on the operand
+        types alone: under ``mtp_shared_last_layer`` the pivot can be an MTP layer too
+        (when the backbone-last pivot lands off-stage), but that key's
+        ``shared_weight_attr`` is ``transformer_layer_weights``, so widening there
+        would alias fusion params that shared_comm never syncs -- silently divergent
+        across stages instead of loudly broken.
         """
-        mtp_layers = self._get_all_mtp_layers()
+        if not (
+            getattr(self.config, "mtp_shared_weights", False)
+            and isinstance(dest_layer, MultiTokenPredictionLayer)
+            and isinstance(src_layer, MultiTokenPredictionLayer)
+        ):
+            return super()._alias_shared_layer(dest_layer, src_layer)
 
-        if len(mtp_layers) < 2:
-            warnings.warn(
-                "[MTP-SHARED-WEIGHTS-SKIP] not applied on this PP rank: "
-                f"num_mtp_layers={len(mtp_layers)} (<2, nothing to share). "
-                "If pipeline_model_parallel_size>1 and MTP depths are on different "
-                "stages, parameter-level aliasing cannot bridge stages — use "
-                "SharedLayerDesc instead."
-            )
-            return
+        source_params = dict(src_layer.named_parameters())
+        dest_named = list(dest_layer.named_parameters())
+        aliased = missing = shape_mismatch = 0
+        for name, dest_param in dest_named:
+            src_param = source_params.get(name)
+            if src_param is None:
+                missing += 1
+                continue
+            if tuple(src_param.shape) != tuple(dest_param.shape):
+                shape_mismatch += 1
+                continue
+            # Overwrite the entry in the owning module's _parameters dict so the
+            # Parameter object identity is shared, leaving the LayerDesc tree (and
+            # therefore the per-depth checkpoint keys) intact.
+            parts = name.split(".")
+            owner = dest_layer
+            for p in parts[:-1]:
+                owner = getattr(owner, p)
+            leaf = parts[-1]
+            if leaf in owner._parameters:
+                owner._parameters[leaf] = src_param
+            else:
+                setattr(owner, leaf, src_param)
+            aliased += 1
 
-        # Parameters already shared by SharedLayerDesc must not be re-pointed here.
-        body_owned_by_shared_layer = getattr(
-            self.config, "mtp_shared_last_layer", False
+        assert aliased == len(dest_named), (
+            f"MTP depth {dest_layer.layer_number} cannot be fully aliased onto "
+            f"depth {src_layer.layer_number}: aliased={aliased}/{len(dest_named)}, "
+            f"missing={missing}, shape_mismatch={shape_mismatch}. All MTP depths are "
+            "built from the same spec, so a mismatch means the specs diverged "
+            "(e.g. use_dense_mtp differing across depths)."
         )
-
-        src = mtp_layers[0]
-        src_params = dict(src.named_parameters())
-
-        for mtp in mtp_layers[1:]:
-            dst_named = list(mtp.named_parameters())
-            aliased = 0
-            skipped_body = 0
-            shape_mismatch = 0
-            missing = 0
-            for dotted_name, dst_param in dst_named:
-                if body_owned_by_shared_layer and dotted_name.startswith(
-                    "transformer_layer."
-                ):
-                    skipped_body += 1
-                    continue
-                src_param = src_params.get(dotted_name)
-                if src_param is None:
-                    missing += 1
-                    continue
-                if tuple(src_param.shape) != tuple(dst_param.shape):
-                    shape_mismatch += 1
-                    continue
-                # Walk to the parent submodule and overwrite the entry in its
-                # _parameters dict so the Parameter object identity is shared.
-                parts = dotted_name.split(".")
-                owner = mtp
-                for p in parts[:-1]:
-                    owner = getattr(owner, p)
-                attr_name = parts[-1]
-                if attr_name in owner._parameters:
-                    owner._parameters[attr_name] = src_param
-                else:
-                    setattr(owner, attr_name, src_param)
-                aliased += 1
-
-            total = len(dst_named)
-            tag = "[MTP-SHARED-WEIGHTS-CONFIRM]"
-            if missing or shape_mismatch:
-                tag = "[MTP-SHARED-WEIGHTS-WARN]"
-            warnings.warn(
-                f"{tag} mtp_layer_number={mtp.layer_number} "
-                f"aliased={aliased}/{total} params to MTP depth-0 "
-                f"(missing={missing}, shape_mismatch={shape_mismatch}, "
-                f"skipped_shared_body={skipped_body}). All MTP depths are built from "
-                "the same spec, so a clean run reports aliased+skipped_shared_body"
-                "==total with missing=shape_mismatch=0."
-            )
 
     def _get_weight_only_params(self):
         """Get all parameters marked with is_weight_only_mtp flag."""
@@ -448,8 +414,13 @@ class GPTModel(PipelineLayer):
             if (
                 is_last
                 and getattr(self.config, "mtp_shared_last_layer", False)
+                and not getattr(self.config, "mtp_shared_weights", False)
                 and spec.mtp
             ):
+                # Skipped under mtp_shared_weights: that mode shares across MTP
+                # depths only, with depth 0 as the pivot, so emitting the backbone
+                # pivot here would leave "mtp_reuse_transformer" with a pivot and
+                # no members. TransformerConfig rejects the two flags together.
                 desc = SharedLayerDesc(
                     "mtp_reuse_transformer",
                     transformer_layer_spec,
@@ -505,7 +476,23 @@ class GPTModel(PipelineLayer):
                 # rather than degrading to broadcast -- depth 0 becomes the stored
                 # shared layer and depth 1 aliases against its
                 # `transformer_layer.`-prefixed names.
-                if getattr(self.config, "mtp_shared_last_layer", False):
+                if getattr(self.config, "mtp_shared_weights", False):
+                    # Cross-depth FULL sharing: one key for every depth, so the
+                    # first MTP desc on the pivot stage becomes the shared layer
+                    # and the rest alias onto it. shared_weight_attr spans the
+                    # whole layer (body + fusion modules), which is what puts
+                    # every parameter into PipelineLayer.shared_comm and makes the
+                    # cross-stage broadcast / gradient allreduce work when the
+                    # depths land on different stages. The rank-local aliasing is
+                    # widened from paddle's `transformer_layer`-only default by
+                    # the _alias_shared_layer override above.
+                    desc = SharedLayerDesc(
+                        "mtp_shared_all",
+                        mtp_spec,
+                        shared_submodule_weight_only=True,
+                        shared_weight_attr="all_weights",
+                    )
+                elif getattr(self.config, "mtp_shared_last_layer", False):
                     desc = SharedLayerDesc(
                         "mtp_reuse_transformer",
                         mtp_spec,
