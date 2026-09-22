@@ -1060,16 +1060,16 @@ class TestRingDegenerateHelpers(_RingTestBase):
         class _G:
             process_group = _NoStreamPG()
 
-        before = td._ORDER_AFTER_MISSES
+        td._ORDER_AFTER_WARNED = False
         # get_stream raises -> treated as "nothing to order against yet".
         self.assertFalse(td._order_after(_G(), _G()))
-        self.assertEqual(td._ORDER_AFTER_MISSES, before + 1)
+        self.assertTrue(td._ORDER_AFTER_WARNED)
 
-    def test_ring_all_gather_degenerate_is_clone(self):
+    def test_calc_stream_all_gather_degenerate_is_clone(self):
         from paddlefleet.transformer.moe import token_dispatcher as td
 
         x = self._tokens(requires_grad=False)
-        out = td._ring_all_gather(x, None)
+        out = td._calc_stream_all_gather(x, None)
         np.testing.assert_array_equal(out.numpy(), x.numpy())
 
     def test_prefetch_tok_ag_fp8_degenerate_returns_none(self):
