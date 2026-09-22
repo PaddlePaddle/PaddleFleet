@@ -541,60 +541,70 @@ class GPTEmbedding(FleetLayer):
                         inputs_embeds = inputs_embeds_ori
 
                     if self.sequence_parallel:
-                        _sp_local_bs, _sp_local_sl, _sp_local_h = (
+                        # ScatterOp partitions axis 0, so establish the canonical
+                        # [S, B, H] layout before scattering the sequence.
+                        inputs_embeds = inputs_embeds.transpose(
+                            [1, 0, 2]
+                        ).contiguous()
+                        _sp_local_sl, _sp_local_bs, _sp_local_h = (
                             inputs_embeds.shape
                         )
-                        inputs_embeds = inputs_embeds.reshape([-1, _sp_local_h])
-                        inputs_embeds = ScatterOp.apply(inputs_embeds)
-                        inputs_embeds = (
-                            inputs_embeds.reshape(
-                                [_sp_local_bs, -1, _sp_local_h]
-                            )
-                            .permute(1, 0, 2)
-                            .contiguous()
+                        inputs_embeds = ScatterOp.apply(
+                            inputs_embeds.reshape([-1, _sp_local_h])
                         )
+                        inputs_embeds = inputs_embeds.reshape(
+                            [-1, _sp_local_bs, _sp_local_h]
+                        ).contiguous()
 
-                    mtp_emb_res = [inputs_embeds]
+                    if self.config.enable_mtp_magic_send:
+                        # Packed magic-send keeps the pipeline carrier at 1x.
+                        # The MTP stage re-embeds ``mtp_full_input_ids`` and rolls
+                        # that float embedding per document for each depth.
+                        decoder_input = inputs_embeds
+                    else:
+                        mtp_emb_res = [inputs_embeds]
 
-                    # Cumulative rolls: depth k uses decoder_input rolled by
-                    # (k+1) positions. Roll on the full-length float embedding
-                    # (identical on every CP rank), then extract this rank's
-                    # local slice — avoids a ContextParallelScatterOp per depth.
-                    rolled_embed = inputs_embeds_ori
-                    for depth in range(self.config.num_nextn_predict_layers):
-                        rolled_embed, _ = roll_tensor(
-                            rolled_embed,
-                            shifts=-1,
-                            dims=1,
-                            cp_group=None,  # full-length semantics; see docstring
-                            cu_seqlens_q=cu_seqlens_q,
-                        )
-
-                        if _cp_size > 1:
-                            inputs_embeds_mtp = extract_local_cp_chunks(
+                        # Cumulative rolls: depth k uses decoder_input rolled by
+                        # (k+1) positions. Roll on the full-length float embedding
+                        # (identical on every CP rank), then extract this rank's
+                        # local slice — avoids a ContextParallelScatterOp per depth.
+                        rolled_embed = inputs_embeds_ori
+                        for depth in range(
+                            self.config.num_nextn_predict_layers
+                        ):
+                            rolled_embed, _ = roll_tensor(
                                 rolled_embed,
-                                _cp_rank,
-                                _cp_size,
-                                axis=1,
-                                mode=self.config.cp_balance_mode,
+                                shifts=-1,
+                                dims=1,
+                                cp_group=None,
+                                cu_seqlens_q=cu_seqlens_q,
                             )
-                        else:
-                            inputs_embeds_mtp = rolled_embed
 
-                        if self.sequence_parallel:
-                            _sp_bs, _sp_sl, _sp_h = inputs_embeds_mtp.shape
-                            inputs_embeds_mtp = inputs_embeds_mtp.reshape(
-                                [-1, _sp_h]
-                            )
-                            inputs_embeds_mtp = ScatterOp.apply(
-                                inputs_embeds_mtp
-                            )
-                            inputs_embeds_mtp = (
-                                inputs_embeds_mtp.reshape([_sp_bs, -1, _sp_h])
-                                .permute(1, 0, 2)
-                                .contiguous()
-                            )
-                        mtp_emb_res.append(inputs_embeds_mtp)
+                            if _cp_size > 1:
+                                inputs_embeds_mtp = extract_local_cp_chunks(
+                                    rolled_embed,
+                                    _cp_rank,
+                                    _cp_size,
+                                    axis=1,
+                                    mode=self.config.cp_balance_mode,
+                                )
+                            else:
+                                inputs_embeds_mtp = rolled_embed
+
+                            if self.sequence_parallel:
+                                # Match the main slot: scatter the canonical
+                                # sequence-first [S, B, H] layout.
+                                inputs_embeds_mtp = inputs_embeds_mtp.transpose(
+                                    [1, 0, 2]
+                                ).contiguous()
+                                _sp_sl, _sp_bs, _sp_h = inputs_embeds_mtp.shape
+                                inputs_embeds_mtp = ScatterOp.apply(
+                                    inputs_embeds_mtp.reshape([-1, _sp_h])
+                                )
+                                inputs_embeds_mtp = inputs_embeds_mtp.reshape(
+                                    [-1, _sp_bs, _sp_h]
+                                ).contiguous()
+                            mtp_emb_res.append(inputs_embeds_mtp)
                 else:
                     # Split input_ids for MoE mask: main part for backbone, per-depth for MTP
                     if input_ids_for_moe_mask is not None:
@@ -887,11 +897,20 @@ class GPTEmbedding(FleetLayer):
             rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(
                 rope_base, self.config, packed_seq_params
             )
+            # packed_decoder_rope gate (HyperBody packed decoder): feed the
+            # per-segment reset position_ids into RoPE even in training so the
+            # decoder RoPE restarts at 0 for each packed document. Default off
+            # => every other model keeps the original training behavior
+            # (position_ids=None, monotonic 0..S).
+            if getattr(self.config, "packed_decoder_rope", False):
+                rope_position_ids = mtp_position_ids
+            else:
+                rope_position_ids = None if self.training else mtp_position_ids
             rotary_pos_emb = self.rotary_pos_emb(
                 rotary_seq_len,
                 packed_seq=packed_seq_params is not None
                 and packed_seq_params.qkv_format == "thd",
-                position_ids=None if self.training else mtp_position_ids,
+                position_ids=rope_position_ids,
             )
         elif (
             self.position_embedding_type == "mrope"
@@ -1001,6 +1020,17 @@ class GPTEmbedding(FleetLayer):
                     swa_rotary_pos_sin, axis=1, mode=self.config.cp_balance_mode
                 )
 
+        mtp_full_input_ids = None
+        if (
+            getattr(self.config, "use_erndata", False)
+            and self.config.enable_mtp_magic_send
+            and self.config.num_nextn_predict_layers is not None
+            and self.config.num_nextn_predict_layers > 0
+            and not self.config.mtp_load_weight_only
+        ):
+            mtp_full_input_ids = input_ids.contiguous()
+            mtp_full_input_ids.stop_gradient = True
+
         preproc_output = {
             "hidden_states": decoder_input.contiguous(),  # prepare for pp send
             "attention_mask": attention_mask,
@@ -1022,11 +1052,9 @@ class GPTEmbedding(FleetLayer):
                 if self.config.gpt_model_use_experimental_version
                 else None
             ),
-            # Under use_erndata cu_seqlens_q travels down the
-            # pipeline dict as a raw int32 tensor. MultiTokenPredictionLayer
-            # derives per-depth attn_mask_startend_row_indices from it via
-            # build_startend_row_indices_from_cu_seqlens. Under "ernie5"
-            # this is None (stripped by the None-cleanup loop below).
+            # Packed magic-send metadata is explicit pipeline state. Unlike the
+            # legacy magic path, no process-global MagicInstance is involved.
+            "mtp_full_input_ids": mtp_full_input_ids,
             "cu_seqlens_q": cu_seqlens_q,
         }
         # New dataflow: pass mtp_startend_row_indices_all and mtp_hidden_inputs_mask_all

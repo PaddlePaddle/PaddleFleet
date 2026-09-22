@@ -26,8 +26,7 @@ megatron-style prologue is exercised:
   both the 1-col (fleet) and 2-col (experimental / include_pos) layouts
   (lines 1667-1717), plus batch_size>1 expand (1713-1716).
 - concat write-back (lines 1723-1726).
-- guard raises: cross-attention (1621-1625), magic-send incompatibility
-  (1626-1634), and 3-D input_ids (1656-1660).
+- guard raises: cross-attention, missing packed magic metadata, and 3-D input_ids.
 """
 
 from __future__ import annotations
@@ -162,12 +161,13 @@ class TestMtpForwardMegatron(unittest.TestCase):
                 {"hidden_states": hs, "context": object()}
             )
 
-    def test_magic_send_incompatible_raises(self) -> None:
-        # enable_mtp_magic_send=True -> ValueError (lines 1626-1634).
+    def test_magic_send_missing_metadata_raises(self) -> None:
         K, S, H = 1, 8, 4
         layer, _ = _make_layer(K, magic_send=True)
-        hs = paddle.zeros([(K + 1), S, H], dtype="float32")
-        with self.assertRaises(ValueError):
+        layer.mhc_enabled = False
+        layer.sequence_parallel = False
+        hs = paddle.zeros([1, S, H], dtype="float32")
+        with self.assertRaisesRegex(RuntimeError, r"mtp_full_input_ids"):
             layer._forward_megatron_style(
                 {"hidden_states": hs, "context": None}
             )

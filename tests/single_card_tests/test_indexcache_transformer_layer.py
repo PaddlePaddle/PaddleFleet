@@ -6,7 +6,8 @@
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
+from unittest.mock import patch
 
 import paddle
 
@@ -64,6 +65,7 @@ def _fake_fused_h_res_h_post_bda(
     _h_post,
     layer_output_with_bias,
     _enable_recompute,
+    manager=None,
 ):
     return layer_output_with_bias[0], None
 
@@ -90,6 +92,16 @@ def _make_attention_layer(layer_type, state_update):
         _log_md5=lambda *_args, **_kwargs: None,
     )
     if layer_type is HyperConnectionTransformerLayer:
+        layer.recompute_mhc_block = False
+        layer.mhc_checkpoint_input_layernorm = False
+        for name in ("_mhc_block_manager", "_mhc_head", "_mhc_layernorm"):
+            setattr(
+                layer,
+                name,
+                MethodType(
+                    getattr(HyperConnectionTransformerLayer, name), layer
+                ),
+            )
         layer.self_attention_hyper_connection = _FakeHyperConnection()
         layer._fused_h_res_h_post_bda = _fake_fused_h_res_h_post_bda
         layer._cast_and_discard_fused_bda = (
@@ -123,6 +135,54 @@ def _make_forward_impl_layer(attention_result):
 
 
 class TestIndexCacheTransformerLayerStateTransitions(unittest.TestCase):
+    def test_forward_preserves_mtp_ids_with_indexcache_update_and_clear(self):
+        hidden_states = paddle.ones([1, 1, 4], dtype="float32")
+        mtp_ids = paddle.to_tensor([[1, 2]], dtype="int64")
+        old_state = _topk_state(1)
+        for state in (_topk_state(2), None):
+            with self.subTest(clear=state is None):
+                forwarded = {}
+
+                def forward_impl(**kwargs):
+                    forwarded.update(kwargs)
+                    return hidden_states, None, state
+
+                layer = SimpleNamespace(
+                    config=SimpleNamespace(
+                        num_nextn_predict_layers=1,
+                        mtp_load_weight_only=False,
+                        enable_mtp_magic_send=True,
+                        block_attention_residuals=False,
+                        indexcache_train_debug=True,
+                        index_topk_pattern="FS",
+                    ),
+                    layer_number=1,
+                    full_recompute=False,
+                    _docmask_meta_kwargs=lambda: {},
+                    _forward_impl=forward_impl,
+                )
+                with (
+                    patch(
+                        "paddlefleet.transformer.transformer_layer.has_recovered",
+                        return_value=True,
+                    ),
+                    redirect_stdout(StringIO()),
+                ):
+                    result = TransformerLayer.forward(
+                        layer,
+                        {
+                            "hidden_states": hidden_states,
+                            "mtp_full_input_ids": mtp_ids,
+                            "indexcache_state": old_state,
+                        },
+                    )
+                self.assertIs(result["mtp_full_input_ids"], mtp_ids)
+                self.assertNotIn("mtp_full_input_ids", forwarded)
+                if state is None:
+                    self.assertNotIn("indexcache_state", result)
+                else:
+                    self.assertIs(result["indexcache_state"], state)
+
     def test_stall_trace_is_driven_by_normalized_config(self):
         disabled = SimpleNamespace(
             indexcache_stall_trace=False,

@@ -35,7 +35,7 @@ dependencies = [
     "omegaconf",
     "orjson",
     "paddlecodec>=0.2,<0.3; sys_platform == 'linux'",
-    "paddlepaddle-gpu==3.4.0.post20260917+aa8eb3270a8",
+    "paddlepaddle-gpu==3.4.0.post20260921+de71f3b8211",
     "protobuf>=3.20.2",
     "regex",
     "ruamel.yaml>=0.17",
@@ -81,6 +81,10 @@ Homepage = "https://github.com/PaddlePaddle/PaddleFleet/src"
 
 [project.scripts]
 paddlefleet-cli = "paddlefleet.cli.cli:main"
+# Its own entry point rather than a paddlefleet-cli subcommand: dispatching
+# through paddlefleet would execute the parent package's eager imports (paddle,
+# transformers) and turn a 0.02s config rewrite into a 30s one.
+paddlefleet-config-adapter = "paddlefleet_config_adapter.cli:main"
 
 [build-system]
 requires = ["setuptools>=66.1.0"]
@@ -347,7 +351,7 @@ ignore = [
 
 [tool.ruff.lint.isort]
 combine-as-imports = true
-known-first-party = ["paddlefleet"]
+known-first-party = ["paddlefleet", "paddlefleet_config_adapter"]
 
 [tool.ruff.lint.per-file-ignores]
 # Ignore for re-export in __init__ files

@@ -33,13 +33,14 @@ Two contracts that end-to-end smoke can only surface as opaque shape errors
 from __future__ import annotations
 
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import paddle
 
 from paddlefleet.transformer.multi_token_prediction import (
     MultiTokenPredictionLayer,
     build_startend_row_indices_from_cu_seqlens,
+    roll_tensor,
 )
 
 
@@ -153,7 +154,9 @@ _CHUNK_MARK = 10.0
 _BLOCK_DELTA = 1.0
 
 
-def _make_mhc_layer(K: int, layer_number: int, n: int, h: int):
+def _make_mhc_layer(
+    K: int, layer_number: int, n: int, h: int, *, magic_send: bool = False
+):
     """Real MultiTokenPredictionLayer with stubbed block + postprocess.
 
     ``__new__`` avoids fleet init; only the fields ``_forward_megatron_style``
@@ -162,15 +165,24 @@ def _make_mhc_layer(K: int, layer_number: int, n: int, h: int):
     layer = MultiTokenPredictionLayer.__new__(MultiTokenPredictionLayer)
     cfg = MagicMock()
     cfg.use_erndata = True
-    cfg.enable_mtp_magic_send = False
+    cfg.enable_mtp_magic_send = magic_send
     cfg.num_nextn_predict_layers = K
     cfg.gpt_model_use_experimental_version = False
     cfg.sequence_parallel = False
+    cfg.tensor_model_parallel_size = 1
+    cfg.expert_model_parallel_size = 1
+    cfg.gpt_model_use_experimental_version = False
+    cfg.fp32_residual_connection = False
+    cfg.pad_token_id = 0
+    cfg.cp_balance_mode = "dualchunk_allgather"
     cfg.num_residual_streams = n
     cfg.hidden_size = h
     layer.config = cfg
     layer.layer_number = layer_number
     layer.mhc_enabled = True
+    layer.sequence_parallel = False
+    if magic_send:
+        object.__setattr__(layer, "mtp_embed", paddle.nn.Embedding(32, h))
 
     recorded = {}
 
@@ -256,6 +268,40 @@ class TestErndataMhcMultiDepthChain(unittest.TestCase):
         # The carrier stays width-uniform across all K+1 slots.
         self.assertEqual(list(out1["hidden_states"].shape), [(K + 1) * B, S, h])
         self.assertNotIn("decoder_input", out1)
+
+    def test_magic_send_chains_multistream_and_grows_uniform_carrier(
+        self,
+    ) -> None:
+        K, B, S, n, h = self.K, self.B, self.S, self.n, self.h
+        ids = paddle.to_tensor([[1, 2, 3, 4]], dtype="int64")
+        cu = paddle.to_tensor([0, 2, 4], dtype="int32")
+        args = self._initial_args()
+        # Magic transport starts with the bare backbone carrier; decoder
+        # embeddings are rebuilt locally at each MTP depth.
+        args["hidden_states"] = args["hidden_states"][:B]
+        args["mtp_full_input_ids"] = ids
+        args["cu_seqlens_q"] = cu
+
+        l0, rec0 = _make_mhc_layer(K, 0, n, h, magic_send=True)
+        l1, rec1 = _make_mhc_layer(K, 1, n, h, magic_send=True)
+        l1.mtp_embed.weight.set_value(l0.mtp_embed.weight)
+
+        out0 = l0.forward(args)
+        self.assertEqual(list(out0["hidden_states"].shape), [2 * B, S, h])
+        self.assertIn("mhc_multistream", out0)
+        self.assertIn("mtp_full_input_ids", out0)
+        self.assertEqual(float(rec0["hidden_in"].numpy()[0, 0, 0]), _CHUNK_MARK)
+
+        out1 = l1.forward(out0)
+        self.assertEqual(list(out1["hidden_states"].shape), [(K + 1) * B, S, h])
+        self.assertNotIn("mhc_multistream", out1)
+        self.assertNotIn("mtp_full_input_ids", out1)
+        self.assertEqual(
+            float(rec1["hidden_in"].numpy()[0, 0, 0]),
+            _CHUNK_MARK + _BLOCK_DELTA,
+        )
+        for slot in paddle.split(out1["hidden_states"], K + 1):
+            self.assertEqual(list(slot.shape), [B, S, h])
 
     def test_carrier_slots_hold_contracted_outputs(self) -> None:
         """Each depth writes its contracted output into carrier slot k+1."""
@@ -347,6 +393,252 @@ def _make_mask_layer(
 
     layer._proj_and_transformer_layer = _stub_proj
     return layer, recorded
+
+
+class TestErndataMagicSend(unittest.TestCase):
+    def _make_layer(self, K: int, depth: int, *, magic_send: bool = True):
+        layer = MultiTokenPredictionLayer.__new__(MultiTokenPredictionLayer)
+        cfg = MagicMock()
+        cfg.use_erndata = True
+        cfg.enable_mtp_magic_send = magic_send
+        cfg.num_nextn_predict_layers = K
+        cfg.gpt_model_use_experimental_version = False
+        cfg.sequence_parallel = False
+        cfg.tensor_model_parallel_size = 1
+        cfg.expert_model_parallel_size = 1
+        cfg.pad_token_id = 0
+        cfg.cp_balance_mode = "dualchunk_allgather"
+        layer.config = cfg
+        layer.layer_number = depth
+        layer.sequence_parallel = False
+        layer.mhc_enabled = False
+        object.__setattr__(layer, "mtp_embed", paddle.nn.Embedding(16, 1))
+        layer.mtp_embed.weight.set_value(
+            paddle.arange(16, dtype="float32").reshape([16, 1])
+        )
+        recorded = {}
+
+        def _stub_proj(hidden_states, decoder_input, **kwargs):
+            recorded["hidden"] = hidden_states
+            recorded["decoder"] = decoder_input
+            recorded["kwargs"] = kwargs
+            return hidden_states + 1
+
+        layer._proj_and_transformer_layer = _stub_proj
+        return layer, recorded
+
+    def test_multidepth_grows_carrier_and_rolls_float_embedding(self) -> None:
+        K, B, S = 2, 1, 6
+        ids = paddle.to_tensor([[1, 2, 3, 4, 5, 6]], dtype="int64")
+        cu = paddle.to_tensor([0, 3, 6], dtype="int32")
+        args = {
+            "hidden_states": paddle.zeros([B, S, 1]),
+            "mtp_full_input_ids": ids,
+            "cu_seqlens_q": cu,
+            "context": None,
+        }
+        l0, rec0 = self._make_layer(K, 0)
+        l1, rec1 = self._make_layer(K, 1)
+        out0 = l0._forward_megatron_style(args)
+        self.assertIn("mtp_full_input_ids", out0)
+        self.assertIs(out0["mtp_full_input_ids"], ids)
+        self.assertIs(out0["cu_seqlens_q"], cu)
+        self.assertNotIn("mtp_full_input_ids", rec0["kwargs"])
+        self.assertEqual(list(out0["hidden_states"].shape), [2 * B, S, 1])
+        self.assertEqual(
+            rec0["decoder"].squeeze(-1).numpy().tolist(),
+            [[2.0, 3.0, 0.0, 5.0, 6.0, 0.0]],
+        )
+        out1 = l1._forward_megatron_style(out0)
+        self.assertEqual(list(out1["hidden_states"].shape), [3 * B, S, 1])
+        self.assertNotIn("mtp_full_input_ids", out1)
+        self.assertIs(out1["cu_seqlens_q"], cu)
+        self.assertEqual(
+            rec1["decoder"].squeeze(-1).numpy().tolist(),
+            [[3.0, 0.0, 0.0, 6.0, 0.0, 0.0]],
+        )
+        self.assertTrue(paddle.equal_all(rec1["hidden"], rec0["hidden"] + 1))
+
+    def test_ep_padding_is_zeroed_before_packed_roll(self) -> None:
+        layer, _ = self._make_layer(1, 0)
+        layer.config.expert_model_parallel_size = 2
+        layer.config.tensor_model_parallel_size = 1
+        layer.mtp_embed.weight.set_value(
+            paddle.ones_like(layer.mtp_embed.weight)
+        )
+        ids = paddle.to_tensor([[1, 0, 2, 3, 4, 5]], dtype="int64")
+        cu = paddle.to_tensor([0, 3, 6], dtype="int32")
+        decoder = layer._prepare_erndata_magic_decoder_input(ids, cu)
+        self.assertEqual(
+            decoder.squeeze(-1).numpy().tolist(),
+            [[0.0, 1.0, 0.0, 1.0, 1.0, 0.0]],
+        )
+
+    def test_experimental_version_padding_is_zeroed_before_roll(self) -> None:
+        layer, _ = self._make_layer(1, 0)
+        layer.config.expert_model_parallel_size = 1
+        layer.config.tensor_model_parallel_size = 1
+        layer.config.gpt_model_use_experimental_version = True
+        layer.mtp_embed.weight.set_value(
+            paddle.ones_like(layer.mtp_embed.weight)
+        )
+        ids = paddle.to_tensor([[1, 0, 2, 3, 4, 5]], dtype="int64")
+        cu = paddle.to_tensor([0, 3, 6], dtype="int32")
+        decoder = layer._prepare_erndata_magic_decoder_input(ids, cu)
+        self.assertEqual(
+            decoder.squeeze(-1).numpy().tolist(),
+            [[0.0, 1.0, 0.0, 1.0, 1.0, 0.0]],
+        )
+
+    def test_fp32_residual_connection_promotes_decoder_input(self) -> None:
+        layer, _ = self._make_layer(1, 0)
+        layer.config.fp32_residual_connection = True
+        object.__setattr__(
+            layer, "mtp_embed", paddle.nn.Embedding(16, 1, dtype="float16")
+        )
+        ids = paddle.to_tensor([[1, 2, 3, 4, 5, 6]], dtype="int64")
+        cu = paddle.to_tensor([0, 3, 6], dtype="int32")
+        decoder = layer._prepare_erndata_magic_decoder_input(ids, cu)
+        self.assertEqual(decoder.dtype, paddle.float32)
+
+    def test_missing_cu_seqlens_is_rejected(self) -> None:
+        """Without boundaries the roll would leak across documents.
+
+        A missing ``cu_seqlens_q`` must fail loudly rather than silently
+        degrade to a single-sequence roll, which trains each document's last
+        token to predict the next document's first token.
+        """
+        layer, _ = self._make_layer(1, 0)
+        ids = paddle.to_tensor([[1, 2, 3, 4, 5, 6]], dtype="int64")
+        with self.assertRaisesRegex(RuntimeError, "cu_seqlens_q"):
+            layer._prepare_erndata_magic_decoder_input(ids, None)
+
+    def test_cp_slice_follows_cp_balance_mode_after_the_full_roll(self) -> None:
+        """Under CP each rank keeps only its own zigzag chunks.
+
+        The roll runs on the full sequence (so document tails are zeroed
+        globally) and the layout-aware slice happens afterwards. Slicing first
+        would shift tokens across chunk boundaries that the rank does not own.
+        """
+        ids = paddle.to_tensor([[1, 2, 3, 4, 5, 6, 7, 8]], dtype="int64")
+        cu = paddle.to_tensor([0, 4, 8], dtype="int32")
+        # full rolled sequence: [2, 3, 4, 0, 6, 7, 8, 0]
+        # dualchunk zigzag over cp_size=2: rank0 owns [0,1]+[6,7],
+        # rank1 owns [2,3]+[4,5]
+        expected = {0: [2.0, 3.0, 8.0, 0.0], 1: [4.0, 0.0, 6.0, 7.0]}
+        for cp_rank, want in expected.items():
+            with self.subTest(cp_rank=cp_rank):
+                layer, _ = self._make_layer(1, 0)
+                with (
+                    patch(
+                        "paddlefleet.transformer.multi_token_prediction."
+                        "get_context_parallel_world_size",
+                        return_value=2,
+                    ),
+                    patch(
+                        "paddlefleet.transformer.multi_token_prediction."
+                        "get_context_parallel_rank",
+                        return_value=cp_rank,
+                    ),
+                ):
+                    decoder = layer._prepare_erndata_magic_decoder_input(
+                        ids, cu
+                    )
+                self.assertEqual(list(decoder.shape), [1, 4, 1])
+                self.assertEqual(decoder.squeeze(-1).numpy().tolist(), [want])
+
+    def test_sequence_parallel_scatters_axis_zero_without_interleaving(
+        self,
+    ) -> None:
+        """SP scatter must see canonical ``[S, B, H]``, not ``[B, S, H]``.
+
+        ``ScatterOp`` partitions axis 0 of the flattened tensor, so scattering
+        a ``[B, S, H]`` layout would hand rank 0 whole samples instead of the
+        first sequence shard of every sample.
+        """
+        layer, _ = self._make_layer(1, 0)
+        layer.sequence_parallel = True
+        ids = paddle.to_tensor([[1, 2, 3, 4], [5, 6, 7, 8]], dtype="int64")
+        cu = paddle.to_tensor([0, 2, 4], dtype="int32")
+        # per-sample rolled: [[2, 0, 4, 0], [6, 0, 8, 0]]
+        seen = {}
+
+        class _HalfScatter:
+            @staticmethod
+            def apply(tensor):
+                seen["shape"] = list(tensor.shape)
+                return tensor[: tensor.shape[0] // 2]
+
+        with patch(
+            "paddlefleet.transformer.multi_token_prediction.ScatterOp",
+            _HalfScatter,
+        ):
+            decoder = layer._prepare_erndata_magic_decoder_input(ids, cu)
+
+        # flattened [S*B, H], i.e. seq-major so the split lands on the seq axis
+        self.assertEqual(seen["shape"], [4 * 2, 1])
+        self.assertEqual(list(decoder.shape), [2, 2, 1])
+        self.assertEqual(
+            decoder.squeeze(-1).numpy().tolist(), [[2.0, 6.0], [0.0, 0.0]]
+        )
+
+    def test_magic_and_nonmagic_decoder_embeddings_match_k1_and_k2(
+        self,
+    ) -> None:
+        """Identical tables yield identical packed decoder embeddings.
+
+        This directly compares the magic path's local re-embedding with the
+        ordinary path's precomputed float-embedding carrier.  It covers K=1 and
+        both cumulative depths of K=2, including zero-filled document tails.
+        """
+        B, S = 1, 6
+        ids = paddle.to_tensor([[1, 2, 3, 4, 5, 6]], dtype="int64")
+        cu = paddle.to_tensor([0, 3, 6], dtype="int32")
+        weight = paddle.arange(16, dtype="float32").reshape([16, 1])
+        base = paddle.nn.functional.embedding(ids, weight)
+
+        for K in (1, 2):
+            ordinary_chunks = [base]
+            rolled = base
+            for _ in range(K):
+                rolled, _ = roll_tensor(
+                    rolled, shifts=-1, dims=1, cu_seqlens_q=cu
+                )
+                ordinary_chunks.append(rolled)
+
+            ordinary_args = {
+                "hidden_states": paddle.concat(ordinary_chunks),
+                "cu_seqlens_q": cu,
+                "context": None,
+            }
+            magic_args = {
+                "hidden_states": base,
+                "mtp_full_input_ids": ids,
+                "cu_seqlens_q": cu,
+                "context": None,
+            }
+            for depth in range(K):
+                ordinary, ordinary_rec = self._make_layer(
+                    K, depth, magic_send=False
+                )
+                magic, magic_rec = self._make_layer(K, depth)
+                magic.mtp_embed.weight.set_value(ordinary.mtp_embed.weight)
+
+                ordinary_args = ordinary._forward_megatron_style(ordinary_args)
+                magic_args = magic._forward_megatron_style(magic_args)
+
+                self.assertTrue(
+                    paddle.equal_all(
+                        magic_rec["decoder"], ordinary_rec["decoder"]
+                    )
+                )
+                doc_tails = magic_rec["decoder"][:, [2, 5], :]
+                self.assertTrue(
+                    paddle.equal_all(doc_tails, paddle.zeros_like(doc_tails))
+                )
+
+            self.assertIs(magic_args["cu_seqlens_q"], cu)
+            self.assertNotIn("mtp_full_input_ids", magic_args)
 
 
 class TestMaskFallbackWithoutInputIds(unittest.TestCase):

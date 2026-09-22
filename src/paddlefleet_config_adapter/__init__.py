@@ -1,0 +1,76 @@
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Adapt a large-cluster training YAML to a smaller machine scale.
+
+Without any switch the adapter keeps every parallel dimension frozen and only
+recomputes ``sharding`` / batch, so a ``--target-nodes`` that is incompatible
+with the source parallelism gets an error listing the valid node counts.
+``--target-nodes`` is optional: omit it and the required scale is derived from
+the converted parallelism instead, reported as ``REQUIRED_NODES=`` (an empty
+conversion therefore reproduces the source scale).  A smaller ``sharding``
+also gets the compensations in
+:mod:`paddlefleet_config_adapter.sharding_shrink` (data-stream width,
+optimizer offload).
+
+Two orthogonal, optional test dimensions refine that:
+
+* ``--test-performance`` -- freeze every parallel dimension and
+  ``gradient_accumulation_steps`` so the step time stays comparable; only
+  ``sharding`` and ``global_batch_size`` move.
+* ``--test-accuracy`` -- the ONLY mode that may shrink EP / PP (never below
+  2, rewriting a copy of ``model_config.json`` accordingly); it also pins
+  the determinism switches in :mod:`paddlefleet_config_adapter.precision`
+  so the run does not aadiff, and (unless the performance switch froze
+  ``acc``) keeps the effective batch.
+
+Usage::
+
+    python -m paddlefleet_config_adapter --input config.yaml \\
+        --target-nodes 1 --test-accuracy
+"""
+
+from __future__ import annotations
+
+from .cli import build_parser, main, parse_overrides
+from .core import ConfigAdapter
+from .options import AdaptOptions
+from .plan import ParallelismPlan
+from .planner import ShrinkPlanner, plan_frozen, plan_parallelism
+from .precision import PRECISION_SWITCHES, plan_precision_switches
+from .sharding_shrink import (
+    DEFAULT_SHRINK_FACTOR,
+    OFFLOAD_PREREQUISITES,
+    plan_sharding_shrink_switches,
+)
+from .topology import TopologyValidator, min_valid_cards
+
+__all__ = [
+    "DEFAULT_SHRINK_FACTOR",
+    "OFFLOAD_PREREQUISITES",
+    "PRECISION_SWITCHES",
+    "AdaptOptions",
+    "ConfigAdapter",
+    "ParallelismPlan",
+    "ShrinkPlanner",
+    "TopologyValidator",
+    "build_parser",
+    "main",
+    "min_valid_cards",
+    "parse_overrides",
+    "plan_frozen",
+    "plan_parallelism",
+    "plan_precision_switches",
+    "plan_sharding_shrink_switches",
+]

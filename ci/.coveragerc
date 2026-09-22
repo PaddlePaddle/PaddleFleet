@@ -1,6 +1,8 @@
 [run]
 branch = True
-source = paddlefleet
+source =
+    paddlefleet
+    paddlefleet_config_adapter
 concurrency = multiprocessing
 patch = subprocess
 parallel = True
@@ -8,6 +10,12 @@ omit =
     **/sonicmoe/**
 
 [paths]
+# The config_adapter aliases come first on purpose: "src/paddlefleet" is a
+# string prefix of "src/paddlefleet_config_adapter", so the shorter pattern
+# would otherwise absorb the sibling package and merge the two into one.
+config_adapter =
+    src/paddlefleet_config_adapter
+    */site-packages/paddlefleet_config_adapter
 source =
     src/paddlefleet
     */site-packages/paddlefleet
