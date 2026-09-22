@@ -93,7 +93,7 @@ jobs:
           export LD_LIBRARY_PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/lib/:${LD_LIBRARY_PATH}
           export PATH=/opt/_internal/cpython-${{ matrix.python_version }}.0/bin/:${PATH}
           source /root/proxy
-          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
+          wget -q --tries=5 --no-proxy https://only-internal-network-support.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
           tar -xf PaddleFleet.tar.gz --strip-components=1
           rm PaddleFleet.tar.gz
@@ -137,23 +137,12 @@ jobs:
           PY_VERSION_SHORT="${PY_VERSION//./}"
           ls paddlefleet-*.whl | head -n1 > paddlefleet-${{ matrix.cuda.bos_CUDA }}-linux_x86_64.whl.name
           if [[ "${{ github.ref_type }}" == "branch" ]]; then
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu126/paddlefleet
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu129/paddlefleet
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu130/paddlefleet
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/cu132/paddlefleet
-            export AK=paddle
-            export SK=paddle
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}
+            python ../bos/BosClient.py paddlefleet-*.whl only-internal-network-support/PaddleFleet/${BRANCH}/${COMMIT_ID}
             mv paddlefleet-*.whl paddlefleet-0.0.0-py3-none-linux_x86_64.whl
-            python ../bos/BosClient.py paddlefleet-0.0.0-py3-none-linux_x86_64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest
+            python ../bos/BosClient.py paddlefleet-0.0.0-py3-none-linux_x86_64.whl only-internal-network-support/PaddleFleet/${BRANCH}/latest
           elif [[ "${{ github.ref_type }}" == "tag" ]]; then
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/cu126/paddlefleet
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/cu129/paddlefleet
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/cu130/paddlefleet
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/cu132/paddlefleet
-
+            python ../bos/BosClient.py paddlefleet-*.whl only-internal-network-support/PaddleFleet/${BRANCH}/stable
           fi
-          curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           '
 
       - name: Upload wheel name artifact
@@ -237,7 +226,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -xc '
           rm -rf * .[^.]*
           source /root/proxy
-          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
+          wget -q --tries=5 --no-proxy https://only-internal-network-support.bj.bcebos.com/PaddleFleet/${BRANCH}/${PR_ID}/${COMMIT_ID}/PaddleFleet.tar.gz --no-check-certificate
           echo "Extracting PaddleFleet.tar.gz"
           tar -xf PaddleFleet.tar.gz --strip-components=1
           rm PaddleFleet.tar.gz
@@ -274,21 +263,16 @@ jobs:
           cd dist
           ls paddlefleet-*.whl | head -n1 > paddlefleet-${{ matrix.cuda.bos_CUDA }}-linux_aarch64.whl.name
           if [[ "${{ github.ref_type }}" == "branch" ]]; then
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/nightly/${{ matrix.cuda.bos_CUDA }}/paddlefleet
-            export AK=paddle
-            export SK=paddle
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}
+            python ../bos/BosClient.py paddlefleet-*.whl only-internal-network-support/PaddleFleet/${BRANCH}/${COMMIT_ID}
             PY_VERSION="${{ matrix.python_version }}"
             PY_VERSION_SHORT="${PY_VERSION//./}"
             mv paddlefleet-*.whl paddlefleet-0.0.0-py3-none-linux_aarch64.whl
             echo paddlefleet-0.0.0-py3-none-linux_aarch64.whl > paddlefleet-${{ matrix.cuda.bos_CUDA }}-linux_aarch64.whl.name
-            python ../bos/BosClient.py paddlefleet-${{ matrix.cuda.bos_CUDA }}-linux_aarch64.whl.name paddle-github-action/PaddleFleet/${BRANCH}/${COMMIT_ID}
-            python ../bos/BosClient.py paddlefleet-0.0.0-py3-none-linux_aarch64.whl paddle-github-action/PaddleFleet/${BRANCH}/latest
+            python ../bos/BosClient.py paddlefleet-${{ matrix.cuda.bos_CUDA }}-linux_aarch64.whl.name only-internal-network-support/PaddleFleet/${BRANCH}/${COMMIT_ID}
+            python ../bos/BosClient.py paddlefleet-0.0.0-py3-none-linux_aarch64.whl only-internal-network-support/PaddleFleet/${BRANCH}/latest
           elif [[ "${{ github.ref_type }}" == "tag" ]]; then
-            python ../bos/BosClient.py paddlefleet-*.whl paddle-whl/stable/${{ matrix.cuda.bos_CUDA }}/paddlefleet
-
+            python ../bos/BosClient.py paddlefleet-*.whl only-internal-network-support/PaddleFleet/${BRANCH}/stable
           fi
-          curl https://www.paddlepaddle.org.cn/inner/whl/update/path/new
           '
 
       - name: Cleanup
@@ -325,7 +309,7 @@ jobs:
       - name: Download arm wheel name from bos
         if: matrix.cuda.platform == 'linux_aarch64'
         run: |
-          wget -q --tries=5 --no-proxy https://paddle-github-action.bj.bcebos.com/PaddleFleet/${BRANCH}/${COMMIT_ID}/paddlefleet-${{ matrix.cuda.artifact_CUDA }}-${{ matrix.cuda.platform }}.whl.name --no-check-certificate
+          wget -q --tries=5 --no-proxy https://only-internal-network-support.bj.bcebos.com/PaddleFleet/${BRANCH}/${COMMIT_ID}/paddlefleet-${{ matrix.cuda.artifact_CUDA }}-${{ matrix.cuda.platform }}.whl.name --no-check-certificate
 
       - name: Upload wheel to paddletest
         run: |
