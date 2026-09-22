@@ -357,9 +357,7 @@ class TestRingCollectives(_RingTestBase):
         x = self._tokens(dtype="bfloat16")
         tok = x * 1.0
         gathered, scale = disp._ag_tokens(tok, disp.inter_group)
-        self.assertEqual(
-            gathered.shape, [self.T_local * disp.N, self.d_latent]
-        )
+        self.assertEqual(gathered.shape, [self.T_local * disp.N, self.d_latent])
         self.assertEqual(str(gathered.dtype), "paddle.float8_e4m3fn")
         self.assertEqual(scale.shape[0], self.T_local * disp.N)
         _Fp8StraightThrough.apply(gathered).sum().backward()
@@ -539,9 +537,7 @@ class TestRingCombineOverlap(_RingTestBase):
         # partials arrive as a per-node list, so a single-entry list is the
         # degenerate case.
         self.assertIs(disp._inter_combine([x], None, None), x)
-        rs = disp._inter_combine(
-            [x] * disp.N, disp.inter_group, None
-        )
+        rs = disp._inter_combine([x] * disp.N, disp.inter_group, None)
         self.assertEqual(rs.shape, [self.T_local, self.d_latent])
 
     def test_overlapped_combine_matches_serial(self):
@@ -1007,7 +1003,9 @@ class TestAllGatherCombineNoOverlapGrad(_RingTestBase):
     def test_fp8_backward_populates_handle(self):
         from paddlefleet.transformer.moe import token_dispatcher as td
 
-        x = self._widen(paddle.randn([self.T_local * self.ep_size, self.d_latent]))
+        x = self._widen(
+            paddle.randn([self.T_local * self.ep_size, self.d_latent])
+        )
         x = x.astype("bfloat16")
         x.stop_gradient = False
         handle = {}
@@ -1045,9 +1043,7 @@ class TestSonicMoEExpertReleasePredicate(unittest.TestCase):
         e.weight1 = SimpleNamespace()
         e.weight2 = SimpleNamespace()
         # quant format is not "1x32", so the release predicate is False.
-        self.assertFalse(
-            SonicMoEExpert._release_fp8_weight_after_fwd(e, False)
-        )
+        self.assertFalse(SonicMoEExpert._release_fp8_weight_after_fwd(e, False))
 
 
 class TestRingDegenerateHelpers(_RingTestBase):

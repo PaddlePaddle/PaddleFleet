@@ -16,7 +16,6 @@
 from __future__ import annotations
 
 import logging
-import os
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
@@ -2366,7 +2365,6 @@ def _order_after(dst_group, src_group):
     return True
 
 
-
 def _ring_all_gather(input, group):
     """Intra AllGather over ``group``.
 
@@ -2441,7 +2439,9 @@ def _build_ring_subgroups(moe_group, gpus_per_node: int = _RING_GPUS_PER_NODE):
         return out
 
     global_rank = paddle.distributed.get_rank()
-    intra_group = inter_group = intra_rs_group = intra_ag_group = intra_rt_group = None
+    intra_group = inter_group = intra_rs_group = intra_ag_group = (
+        intra_rt_group
+    ) = None
     for lst in _unique_sorted("intra"):
         g = paddle.distributed.new_group(ranks=lst)
         # A second plain group over the SAME intra ranks -> its own NCCL
@@ -2488,8 +2488,13 @@ def _build_ring_subgroups(moe_group, gpus_per_node: int = _RING_GPUS_PER_NODE):
     logger.info("RingMoE ring topology: G=%d N=%d", G, N)
 
     result = (
-        G, N, intra_group, inter_group,
-        intra_rs_group, intra_ag_group, intra_rt_group,
+        G,
+        N,
+        intra_group,
+        inter_group,
+        intra_rs_group,
+        intra_ag_group,
+        intra_rt_group,
     )
     _RING_SUBGROUP_CACHE[key] = result
     return result
@@ -2689,7 +2694,6 @@ class _RingFP8AllGather(paddle.autograd.PyLayer):
         return reduce_scatter_group(grad_output.contiguous(), group=group)
 
 
-
 class _PreAllGatherFP8Ring(paddle.autograd.PyLayer):
     """Consume a pre-issued fp8 intra AllGather (Tier1 prefetch).
 
@@ -2717,9 +2721,9 @@ class _PreAllGatherFP8Ring(paddle.autograd.PyLayer):
         T_global = handle["data_buf"].shape[0]
         out = (
             handle["data_buf"].view("float8_e4m3fn"),
-            handle["scale_buf"].view(handle["sdt"]).reshape(
-                [T_global, handle["nsb"]]
-            ),
+            handle["scale_buf"]
+            .view(handle["sdt"])
+            .reshape([T_global, handle["nsb"]]),
         )
         # Drop the handle's refs (the tensors live on via ``out``); keeps the
         # handle from pinning anything past consumption.
@@ -2740,9 +2744,6 @@ class _PreAllGatherFP8Ring(paddle.autograd.PyLayer):
         if group is None or group.nranks == 1:
             return grad_output
         return reduce_scatter_group(grad_output.contiguous(), group=group)
-
-
-
 
 
 class _FP8TokenPack(paddle.autograd.PyLayer):
@@ -2962,11 +2963,14 @@ class _InterCombineSum(paddle.autograd.PyLayer):
         ctx.shapes = [list(p.shape) for p in partials]
         handle["task"].wait()
         recv, peers, T, r0 = (
-            handle["recv"], handle["peers"], handle["T"], handle["r0"]
+            handle["recv"],
+            handle["peers"],
+            handle["T"],
+            handle["r0"],
         )
         out = partials[r0]
         for i in range(len(peers)):
-            out = out + recv[i * T:(i + 1) * T]
+            out = out + recv[i * T : (i + 1) * T]
         handle.clear()
         return out
 
@@ -2976,7 +2980,7 @@ class _InterCombineSum(paddle.autograd.PyLayer):
         T = ctx.shapes[0][0]
         outs = []
         for d in range(ctx.n):
-            gd = g[d * T:(d + 1) * T]
+            gd = g[d * T : (d + 1) * T]
             if list(gd.shape) != ctx.shapes[d]:
                 gd = gd.reshape(ctx.shapes[d])
             outs.append(gd)
@@ -3025,7 +3029,10 @@ def _prefetch_pair_ag(pair, group):
         return None
     out, task = _all_gather_async(pair, group)
     return {
-        "out": out, "task": task, "shape": list(pair.shape), "group": group,
+        "out": out,
+        "task": task,
+        "shape": list(pair.shape),
+        "group": group,
     }
 
 
@@ -3087,16 +3094,28 @@ def _prefetch_tok_ag_fp8(tok_fp8, group):
         [rows * group.nranks, *scale_local.shape[1:]], dtype="uint8"
     )
     data_task = paddle.distributed.stream.all_gather(
-        data_buf, data_local, group=group, sync_op=False, use_calc_stream=False,
+        data_buf,
+        data_local,
+        group=group,
+        sync_op=False,
+        use_calc_stream=False,
     )
     scale_task = paddle.distributed.stream.all_gather(
-        scale_buf, scale_local, group=group, sync_op=False, use_calc_stream=False,
+        scale_buf,
+        scale_local,
+        group=group,
+        sync_op=False,
+        use_calc_stream=False,
     )
-    return {"data_buf": data_buf, "scale_buf": scale_buf,
-            "data_task": data_task, "scale_task": scale_task,
-            "nsb": tok_fp8["nsb"], "sdt": tok_fp8["sdt"], "group": group}
-
-
+    return {
+        "data_buf": data_buf,
+        "scale_buf": scale_buf,
+        "data_task": data_task,
+        "scale_task": scale_task,
+        "nsb": tok_fp8["nsb"],
+        "sdt": tok_fp8["sdt"],
+        "group": group,
+    }
 
 
 class RingMoETokenDispatcher(AllGatherTokenDispatcher):
@@ -3207,6 +3226,7 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         recover, and raising here would mask whatever aborted the previous
         forward.
         """
+
         def _tasks_of(h):
             # fp8 token gather -> data_task/scale_task; plain gather and
             # _InterRingShift -> task; _FP8TokenShift -> tasks list.
@@ -3390,7 +3410,6 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         if self.moe_group is not None and self.moe_group.nranks > 1:
             paddle.distributed.all_reduce(counts, group=self.moe_group)
         return counts
-
 
     def _inter_combine(self, partials, group, combine_overlap_handle):
         """Final inter-node combine: fp8-free, concat-free, overlapped.
@@ -3656,7 +3675,10 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             elif pf_handle is not None:
                 # bf16, prefetched: round 0's gather came from the pre-gate hook,
                 # later rounds' from the previous round's gather-ahead.
-                g_tok, g_scale = _PreAllGatherPair.apply(cur_tok, pf_handle), None
+                g_tok, g_scale = (
+                    _PreAllGatherPair.apply(cur_tok, pf_handle),
+                    None,
+                )
             else:
                 # bf16 without the pre-gate hook (moe_allgather_gate_overlap off,
                 # or a direct ring_forward call in the tests): gather inline on
@@ -3753,7 +3775,6 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
                 pf_rt = pf_rt_ahead
                 if pf_rt is None and rt_group is not None:
                     pf_rt = _prefetch_pair_ag(cur_pair, rt_group)
-
 
         self._drain(rs_handles)
         out = self._inter_combine(partials, inter, combine_overlap_handle)
