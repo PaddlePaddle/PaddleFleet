@@ -4555,17 +4555,8 @@ class PipelinePretrainedModel(PretrainedModel):
         ret = super().set_state_dict(state_dict, *args, **kwargs)
         # `nn.Layer.set_state_dict` returns (missing_keys, unexpected_keys).
         # Anything else means the parent does not report those two lists, so
-        # there is nothing to filter or warn about -- pass its value through
-        # unchanged rather than guessing. Say so, otherwise a parent that
-        # silently changes its return type would also silently disable the
-        # name mapping diagnostics below.
+        # there is nothing to filter -- pass its value through unchanged.
         if not (isinstance(ret, tuple) and len(ret) == 2):
-            logger.warning(
-                f"[pp-name-mapping] the parent set_state_dict returned "
-                f"{type(ret).__name__} instead of (missing_keys, "
-                f"unexpected_keys), so the shared layer alias filter and the "
-                f"missing parameter check were skipped for this load."
-            )
             return ret
         missing_keys, unexpected_keys = ret
 
