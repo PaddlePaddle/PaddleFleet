@@ -1017,8 +1017,21 @@ class MultiTokenPredictionLayer(FleetLayer):
         Used as ``shared_weight_attr`` for the ``mtp_shared_weights`` key so that
         paddle registers all of them in ``PipelineLayer.shared_comm`` -- unlike
         ``transformer_layer_weights``, which deliberately covers the body only.
+
+        ``mtp_embed`` is excluded. Under enable_mtp_magic_send it is a real
+        VocabParallelEmbedding sublayer, but GPTModel already owns it end to end:
+        _tie_mtp_embed_weights_intra_rank shares it within a rank,
+        _create_mtp_embed_global_group / _synchronize_mtp_embed_weight sync it across
+        stages, and _mark_mtp_embed_shared_flags sets its is_firstly_shared. Letting
+        it into shared_comm as well would allreduce its gradient a second time, give
+        its initial broadcast two competing sources (stage 0 over the pipe group vs
+        the shared group's lowest rank), and leave is_firstly_shared decided by
+        whichever mechanism happened to run last.
         """
-        return self.named_parameters()
+        for name, param in self.named_parameters():
+            if name.startswith("mtp_embed."):
+                continue
+            yield name, param
 
     def _concat_embeddings(
         self,

@@ -284,8 +284,14 @@ class GPTModel(PipelineLayer):
         ):
             return super()._alias_shared_layer(dest_layer, src_layer)
 
-        source_params = dict(src_layer.named_parameters())
-        dest_named = list(dest_layer.named_parameters())
+        # Drive the alias scope off all_weights so it stays identical to what
+        # shared_comm syncs. In particular mtp_embed is excluded there (GPTModel
+        # owns it through _tie_mtp_embed_weights_intra_rank and the
+        # _mtp_embed_global_group broadcast), and aliasing something shared_comm
+        # does not sync is exactly the silent cross-stage divergence this override
+        # exists to avoid.
+        source_params = dict(src_layer.all_weights)
+        dest_named = list(dest_layer.all_weights)
         aliased = missing = shape_mismatch = 0
         for name, dest_param in dest_named:
             src_param = source_params.get(name)

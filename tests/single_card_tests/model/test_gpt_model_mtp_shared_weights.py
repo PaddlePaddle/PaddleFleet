@@ -254,6 +254,29 @@ class TestMTPSharedWeights(unittest.TestCase):
         PADDLE_SUPPORTS_SHARED_SUBMODULE,
         "installed paddle's SharedLayerDesc lacks shared_submodule_weight_only",
     )
+    def test_all_weights_excludes_mtp_embed(self):
+        """mtp_embed must stay out of the shared key: GPTModel syncs it through
+        _tie_mtp_embed_weights_intra_rank + _mtp_embed_global_group, so letting it
+        into shared_comm too would allreduce its gradient twice."""
+        config = GPTConfig(
+            **self._base_kwargs(),
+            mtp_shared_weights=True,
+        )
+        model = gpt_builder(config, num_stages=1)
+        mtp = _mtp_layers(model)
+        names = [n for n, _ in mtp[0].all_weights]
+        assert names, "all_weights should not be empty"
+        assert not [n for n in names if n.startswith("mtp_embed.")], (
+            f"mtp_embed must be excluded from all_weights, got {names}"
+        )
+        # Sanity: the body and the fusion modules ARE covered.
+        assert any(n.startswith("transformer_layer.") for n in names)
+        assert "enorm.weight" in names
+
+    @unittest.skipUnless(
+        PADDLE_SUPPORTS_SHARED_SUBMODULE,
+        "installed paddle's SharedLayerDesc lacks shared_submodule_weight_only",
+    )
     def test_forward_backward_with_shared_weights(self):
         """Sharing must not break the training step."""
         config = GPTConfig(
