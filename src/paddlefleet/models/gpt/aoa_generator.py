@@ -87,16 +87,22 @@ def build_aoa_context(model, config) -> AOAContext:
 def _iter_pipeline_units(model) -> Iterator[tuple[str, object]]:
     """Yields ``(structured_prefix, unit)`` for every live top-level layer.
 
-    Descends one level into VPP :class:`PipelineLayerChunk` containers so a
-    chunk's inner layer surfaces with its real two-segment prefix
-    (``f"{chunk}.{local}."``); every other entry surfaces directly. Like the
+    Descends exactly one level into the containers the pipeline layer uses for
+    naming only -- VPP :class:`PipelineLayerChunk` and the
+    :class:`paddle.nn.LayerDict` holding shared layers -- so the layer inside
+    surfaces as a unit of its own with its real two-segment prefix
+    (``f"{container}.{local}."``); every other entry surfaces directly. Neither
+    container owns parameters, and descending is what lets the callers see a
+    layer registered under two of these paths as one instance: a shared layer's
+    pivot is reachable both as ``shared_layers.<key>`` and as its position in a
+    chunk, and both paths resolve to the same single name. Like the
     ``fp8_quant_weight`` live-layer idiom, it does not special-case cudagraph /
     PipelineSublayers wrapping.
     """
     for name, unit in model._sub_layers.items():
         if unit is None:
             continue
-        if isinstance(unit, PipelineLayerChunk):
+        if isinstance(unit, (PipelineLayerChunk, paddle.nn.LayerDict)):
             for local_name, sub in unit._sub_layers.items():
                 if sub is not None:
                     yield f"{name}.{local_name}.", sub
@@ -142,6 +148,27 @@ def _globalize_statements(config, local_statements: list[str]) -> list[str]:
     return local_statements
 
 
+def _iter_unique_units(units) -> Iterator[tuple[str, object]]:
+    """Drops the second registration of a layer the pipeline registered twice.
+
+    A shared layer's pivot instance is registered both under its
+    ``shared_layers`` alias and at its position in the layer list, and the walk
+    would otherwise generate its whole subtree twice. Both paths resolve to the
+    same single name, so the duplicate statements are exact repeats -- but AOA
+    statements are an ordered program that may rewrite a name in place, so a
+    repeat is not guaranteed to be a no-op and is never safe to remove after the
+    fact. Skipping the second registration at the source keeps every statement
+    the components emit and is rank-local, before the pipeline gather, so it
+    never hides a genuine cross-stage duplicate.
+    """
+    visited: set[int] = set()
+    for structured_prefix, unit in units:
+        if id(unit) in visited:
+            continue
+        visited.add(id(unit))
+        yield structured_prefix, unit
+
+
 def gen_whole_model_aoa(model, ctx) -> dict[str, list[str]]:
     """Whole-model checkpoint->model generation.
 
@@ -151,7 +178,9 @@ def gen_whole_model_aoa(model, ctx) -> dict[str, list[str]]:
     """
     statements = []
     # The boundary owns no parameters, so recursion starts one level down.
-    for structured_prefix, unit in _iter_pipeline_units(model):
+    for structured_prefix, unit in _iter_unique_units(
+        _iter_pipeline_units(model)
+    ):
         statements += unit.gen_aoa_statements(
             ctx, structured_name_prefix=structured_prefix
         )
@@ -166,7 +195,9 @@ def gen_whole_model_inv_aoa(model, ctx) -> dict[str, list[str]]:
     """
     statements = []
     # Reverse order mirrors the checkpoint->model pass; cosmetic for statements.
-    for structured_prefix, unit in reversed(list(_iter_pipeline_units(model))):
+    for structured_prefix, unit in reversed(
+        list(_iter_unique_units(_iter_pipeline_units(model)))
+    ):
         statements += unit.gen_inv_aoa_statements(
             ctx, structured_name_prefix=structured_prefix
         )

@@ -228,6 +228,48 @@ class TestWholeModelWalk(unittest.TestCase):
             ["hf.layers.5.weight -> model.layers.5.weight"],
         )
 
+    def test_shared_layer_dict_surfaces_the_layer_it_holds(self):
+        """The container the pipeline holds shared layers in owns no params."""
+        model = _FakeWholeModel(
+            {"shared_layers": paddle.nn.LayerDict({"embed": _Leaf()})},
+            {"shared_layers.embed.weight": "model.embed_tokens.weight"},
+        )
+        ctx = gen.build_aoa_context(model, _Cfg())
+        self.assertEqual(
+            gen.gen_whole_model_aoa(model, ctx)["aoa_statements"],
+            ["hf.embed_tokens.weight -> model.embed_tokens.weight"],
+        )
+
+    def test_a_layer_registered_twice_is_generated_once(self):
+        """A shared layer's pivot sits under its alias and in the layer list.
+
+        Both paths resolve to the same single name, so generating the subtree
+        twice would repeat every statement -- and repeats are not safe to
+        remove after the fact, since statements are an ordered program.
+        """
+        pivot = _Leaf()
+        chunk = PipelineLayerChunk()
+        chunk.append(pivot)
+        model = _FakeWholeModel(
+            {
+                "shared_layers": paddle.nn.LayerDict({"embed": pivot}),
+                "0": chunk,
+            },
+            {
+                "shared_layers.embed.weight": "model.embed_tokens.weight",
+                "0.0.weight": "model.embed_tokens.weight",
+            },
+        )
+        ctx = gen.build_aoa_context(model, _Cfg())
+        self.assertEqual(
+            gen.gen_whole_model_aoa(model, ctx)["aoa_statements"],
+            ["hf.embed_tokens.weight -> model.embed_tokens.weight"],
+        )
+        self.assertEqual(
+            gen.gen_whole_model_inv_aoa(model, ctx)["aoa_statements"],
+            ["model.embed_tokens.weight -> hf.embed_tokens.weight"],
+        )
+
     def test_statement_list_is_mutable(self):
         # The consumer contract hands the list on to callers that extend it.
         out = gen.gen_whole_model_aoa(self.model, self.ctx)
@@ -311,19 +353,15 @@ class _HeadLeaf(paddle.nn.Layer):
 
 
 def _head_mapping_ctx(model):
-    """Context whose only mapping entries are the output head's.
+    """Context whose only mapping entry is the output head.
 
     The head's off-root value (a top-level ``lm_head`` sibling of the backbone)
-    is what these tests exercise, so a small fixture stands in for a full model
-    layout; every other name resolves through the identity fallback. Both head
-    spellings the pipeline uses are listed, mirroring the in-house layout.
+    is what these tests exercise, so a one-entry fixture stands in for a full
+    model layout; every other name resolves through the identity fallback.
     """
     cfg = _Cfg(
         aoa_checkpoint_name_prefix="model",
-        aoa_checkpoint_name_mapping={
-            "model.lm_head.weight": "lm_head.weight",
-            "model.shared_head.weight": "lm_head.weight",
-        },
+        aoa_checkpoint_name_mapping={"model.lm_head.weight": "lm_head.weight"},
     )
     return gen.build_aoa_context(model, cfg)
 
@@ -354,15 +392,6 @@ class TestOutputHeadThroughTheMapping(unittest.TestCase):
         self.assertIn(
             "lm_head.weight -> model.lm_head.weight",
             self._statements("model.lm_head"),
-        )
-
-    def test_the_tied_head_spelling_maps_to_the_same_checkpoint_name(self):
-        # ``get_layer_desc_list`` names the head ``shared_head`` once the
-        # embedding is tied or an MTP head exists; both spellings are one
-        # checkpoint tensor.
-        self.assertIn(
-            "lm_head.weight -> model.shared_head.weight",
-            self._statements("model.shared_head"),
         )
 
     def test_multimax_extras_keep_the_backbone_root(self):
