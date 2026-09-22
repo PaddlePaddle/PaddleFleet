@@ -165,48 +165,26 @@ class TestIndexCacheGradientNumerics(unittest.TestCase):
 
 
 class TestIndexCacheConfig(unittest.TestCase):
-    def test_pattern_alias_normalization_and_roundtrip(self):
-        common = {
-            "num_hidden_layers": 4,
-            "experimental_attention_variant": "dsv4_hybrid",
-            "csa_compress_ratios": [4, 128, 4, 128],
-        }
-        for fields in (
-            {"indexcache_topk_pattern": " fs "},
-            {"index_topk_pattern": " fs "},
-            {"indexcache_topk_pattern": "FS", "index_topk_pattern": "fs"},
-            {"indexcache_topk_pattern": "FS", "index_topk_pattern": None},
-            {"index_topk_pattern": "FS", "indexcache_topk_pattern": None},
-        ):
-            for factory in (
-                lambda d: TransformerConfig(**d),
-                lambda d: TransformerConfig.from_config(SimpleNamespace(**d)),
-            ):
-                with self.subTest(fields=fields, factory=factory):
-                    config = factory({**common, **fields})
-                    self.assertEqual(config.indexcache_topk_pattern, "FS")
-                    self.assertEqual(config.index_topk_pattern, "FS")
-                    restored = TransformerConfig.from_config(
-                        SimpleNamespace(**vars(config))
-                    )
-                    self.assertEqual(restored.indexcache_topk_pattern, "FS")
+    def test_canonical_pattern_roundtrip(self):
+        config = _config_for_pattern("FS", indexcache_topk_pattern=" fs ")
+        self.assertEqual(config.indexcache_topk_pattern, "FS")
+        self.assertFalse(hasattr(config, "index_topk_pattern"))
+        restored = TransformerConfig.from_config(
+            SimpleNamespace(**vars(config))
+        )
+        self.assertEqual(restored.indexcache_topk_pattern, "FS")
+        self.assertFalse(hasattr(restored, "index_topk_pattern"))
 
-    def test_pattern_alias_conflicts_are_rejected_in_either_order(self):
-        common = {
-            "num_hidden_layers": 4,
-            "experimental_attention_variant": "dsv4_hybrid",
-            "csa_compress_ratios": [4, 128, 4, 128],
-        }
-        for fields in (
-            {"indexcache_topk_pattern": "FS", "index_topk_pattern": "FF"},
-            {"index_topk_pattern": "FF", "indexcache_topk_pattern": "FS"},
-        ):
-            with self.subTest(fields=fields):
-                with self.assertRaisesRegex(ValueError, "disagree"):
-                    TransformerConfig(**common, **fields)
-                with self.assertRaisesRegex(ValueError, "disagree"):
+    def test_legacy_field_is_rejected_even_when_disabled(self):
+        for value in (None, "", "FS"):
+            with self.subTest(value=value):
+                with self.assertRaises(TypeError):
+                    TransformerConfig(index_topk_pattern=value)
+                with self.assertRaisesRegex(
+                    ValueError, "Use indexcache_topk_pattern"
+                ):
                     TransformerConfig.from_config(
-                        SimpleNamespace(**common, **fields)
+                        SimpleNamespace(index_topk_pattern=value)
                     )
 
     def test_pattern_disabled_and_invalid_input(self):

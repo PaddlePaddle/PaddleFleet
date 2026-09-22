@@ -1942,13 +1942,6 @@ class TransformerConfig(ModelParallelConfig):
       - "S": skip the local indexer and reuse the previous cached top-k indices
     """
 
-    index_topk_pattern: str | None = None
-    """Compatibility alias for HF/SGLang configs; prefer indexcache_topk_pattern.
-
-    Both names use Fleet's C4-only pattern semantics. Supplying conflicting
-    nonempty values is an error; this is not a separate feature switch.
-    """
-
     indexcache_multi_layer_distill: bool = False
     """Train retained IndexCache indexers with targets from all served layers.
 
@@ -2058,7 +2051,6 @@ class TransformerConfig(ModelParallelConfig):
         "csa_share_docmask_meta": "csa_share_docmask_meta",
         "mqa_share_docmask_meta": "mqa_share_docmask_meta",
         "indexcache_topk_pattern": "indexcache_topk_pattern",
-        "index_topk_pattern": "index_topk_pattern",
         "indexcache_multi_layer_distill": "indexcache_multi_layer_distill",
         "o_groups": "o_groups",
         "o_lora_rank": "o_lora_rank",
@@ -2075,6 +2067,7 @@ class TransformerConfig(ModelParallelConfig):
     # switch on would silently stay off. Same intent as the
     # ``sonicmoe_quant_format`` guard below.
     renamed_config_keys = {
+        "index_topk_pattern": "Use indexcache_topk_pattern for training; index_topk_pattern is inference-only.",
         "indexcache_stall_trace_layers": "IndexCache diagnostics now use standard DEBUG logging; remove this field.",
         "indexcache_stall_trace": "IndexCache diagnostics now use standard DEBUG logging; remove this field.",
         "indexcache_train_debug": "IndexCache diagnostics now use standard DEBUG logging; remove this field.",
@@ -2262,17 +2255,9 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError("indexcache_topk_pattern must start with 'F'.")
             return pattern
 
-        canonical = normalize_pattern(self.indexcache_topk_pattern)
-        legacy = normalize_pattern(self.index_topk_pattern)
-        if canonical is not None and legacy is not None and canonical != legacy:
-            raise ValueError(
-                "indexcache_topk_pattern and legacy index_topk_pattern disagree."
-            )
-        self.indexcache_topk_pattern = (
-            canonical if canonical is not None else legacy
+        self.indexcache_topk_pattern = normalize_pattern(
+            self.indexcache_topk_pattern
         )
-        # Keep the checkpoint spelling readable by existing RL/inference integrations.
-        self.index_topk_pattern = self.indexcache_topk_pattern
 
         indexcache_requested = bool(
             self.indexcache_topk_pattern or self.indexcache_multi_layer_distill
