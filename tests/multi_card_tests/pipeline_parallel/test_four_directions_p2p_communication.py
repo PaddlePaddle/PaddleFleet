@@ -97,28 +97,51 @@ def test_send_partial_recv_partial_forward():
     hcg = fleet.get_hybrid_communicate_group()
     pp_rank = hcg.get_stage_id()
     peer = 1 - pp_rank
+    send_next_group, _send_prev_group, _recv_next_group, recv_prev_group = (
+        hcg.get_p2p_groups()
+    )
 
     shape = [2, 4]
     send_tensor = _tagged_payload(pp_rank * 1000, shape)
     recv_tensor = paddle.empty(shape, dtype="float32").cuda()
 
-    # Both ranks send to next (dst=1 -> _get_p2p_next_rank) and recv from prev
-    # (src=0 -> _get_p2p_prev_rank) in the same step -- a 2-stage ring. If every
-    # rank issued the ops in the same order the NCCL kernels serialize on one
-    # comm stream and circular-wait (every send waits for a peer recv that is
-    # queued behind that peer's own send) -> deadlock. Break the symmetry by
-    # parity: even ranks send then recv, odd ranks recv then send, so each
-    # send is matched by an already-posted recv. PP=2 pairs perfectly.
+    # Send to next (dst=1 -> _get_p2p_next_rank) over the send_next group and
+    # recv from prev (src=0 -> _get_p2p_prev_rank) over the recv_prev group --
+    # the dedicated four-directions communicators, NOT the default world group
+    # (group=None over the world group hangs here: the directional peer ranks
+    # are meant to pair on the direction groups). If every rank issued the ops
+    # in the same order the NCCL kernels would circular-wait; break the symmetry
+    # by parity so each send meets an already-posted recv. PP=2 pairs perfectly.
     send_task = None
     if pp_rank % 2 == 0:
         send_task = send_partial(
-            send_tensor, dst=1, nranks=1, use_calc_stream=False
+            send_tensor,
+            dst=1,
+            nranks=1,
+            group=send_next_group,
+            use_calc_stream=False,
         )
-        recv_partial(recv_tensor, src=0, nranks=1, use_calc_stream=True)
+        recv_partial(
+            recv_tensor,
+            src=0,
+            nranks=1,
+            group=recv_prev_group,
+            use_calc_stream=True,
+        )
     else:
-        recv_partial(recv_tensor, src=0, nranks=1, use_calc_stream=True)
+        recv_partial(
+            recv_tensor,
+            src=0,
+            nranks=1,
+            group=recv_prev_group,
+            use_calc_stream=True,
+        )
         send_task = send_partial(
-            send_tensor, dst=1, nranks=1, use_calc_stream=False
+            send_tensor,
+            dst=1,
+            nranks=1,
+            group=send_next_group,
+            use_calc_stream=False,
         )
     if send_task is not None:
         send_task.wait()
@@ -140,24 +163,47 @@ def test_send_partial_recv_partial_backward():
     hcg = fleet.get_hybrid_communicate_group()
     pp_rank = hcg.get_stage_id()
     peer = 1 - pp_rank
+    _send_next_group, send_prev_group, recv_next_group, _recv_prev_group = (
+        hcg.get_p2p_groups()
+    )
 
     shape = [3, 2]
     send_tensor = _tagged_payload(pp_rank * 1000 + 7, shape)
     recv_tensor = paddle.empty(shape, dtype="float32").cuda()
 
-    # Same parity-ordered ring as the forward case, mirrored: send to prev
-    # (dst=0 -> _get_p2p_prev_rank), recv from next (src=1 ->
-    # _get_p2p_next_rank). Even ranks send then recv, odd ranks recv then send.
+    # Mirror of the forward case over the mirrored direction groups: send to
+    # prev (dst=0) via send_prev, recv from next (src=1) via recv_next. Same
+    # parity ordering; even ranks send then recv, odd ranks recv then send.
     send_task = None
     if pp_rank % 2 == 0:
         send_task = send_partial(
-            send_tensor, dst=0, nranks=1, use_calc_stream=False
+            send_tensor,
+            dst=0,
+            nranks=1,
+            group=send_prev_group,
+            use_calc_stream=False,
         )
-        recv_partial(recv_tensor, src=1, nranks=1, use_calc_stream=True)
+        recv_partial(
+            recv_tensor,
+            src=1,
+            nranks=1,
+            group=recv_next_group,
+            use_calc_stream=True,
+        )
     else:
-        recv_partial(recv_tensor, src=1, nranks=1, use_calc_stream=True)
+        recv_partial(
+            recv_tensor,
+            src=1,
+            nranks=1,
+            group=recv_next_group,
+            use_calc_stream=True,
+        )
         send_task = send_partial(
-            send_tensor, dst=0, nranks=1, use_calc_stream=False
+            send_tensor,
+            dst=0,
+            nranks=1,
+            group=send_prev_group,
+            use_calc_stream=False,
         )
     if send_task is not None:
         send_task.wait()
