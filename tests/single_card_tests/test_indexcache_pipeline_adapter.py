@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import unittest
-from contextlib import redirect_stdout
+from contextlib import contextmanager
 from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -40,12 +41,10 @@ from paddlefleet.pipeline_parallel.indexcache_adapter import (
 )
 
 _EMPTY_CONFIG = SimpleNamespace(
-    index_topk_pattern=None,
-    indexcache_train_debug=False,
+    indexcache_topk_pattern=None,
 )
 _ADAPTER_CONFIG = SimpleNamespace(
-    index_topk_pattern="FS",
-    indexcache_train_debug=False,
+    indexcache_topk_pattern="FS",
 )
 _EMPTY_PATTERN_REGISTRATION = register_indexcache_pipeline_adapter(
     _EMPTY_CONFIG
@@ -65,6 +64,30 @@ def _make_distill_state(offset):
         paddle.to_tensor([offset], dtype="int64"),
         paddle.to_tensor([0], dtype="int64"),
     )
+
+
+@contextmanager
+def _debug_logging(stream=None):
+    loggers = [
+        logging.getLogger(name)
+        for name in (
+            "paddlefleet.pipeline_parallel.indexcache_adapter",
+            "paddlefleet.transformer.csa_attention",
+        )
+    ]
+    levels = [logger.level for logger in loggers]
+    handler = logging.StreamHandler(stream) if stream is not None else None
+    try:
+        for logger in loggers:
+            logger.setLevel(logging.DEBUG)
+            if handler is not None:
+                logger.addHandler(handler)
+        yield
+    finally:
+        for logger, level in zip(loggers, levels):
+            if handler is not None:
+                logger.removeHandler(handler)
+            logger.setLevel(level)
 
 
 class TestIndexCachePipelineBackward(unittest.TestCase):
@@ -99,6 +122,25 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
             paddle.equal_all(value.grad, paddle.ones_like(value)).item()
         )
 
+    def test_info_logging_does_not_scan_gradient_tensors(self):
+        logger = logging.getLogger(
+            "paddlefleet.pipeline_parallel.indexcache_adapter"
+        )
+        old_level = logger.level
+        try:
+            logger.setLevel(logging.INFO)
+            with patch(
+                "paddlefleet.transformer.indexcache_state.summarize_indexcache_gradients",
+                side_effect=AssertionError(
+                    "INFO logging must not scan GPU tensors"
+                ),
+            ):
+                _debug_state5_gradient(
+                    "indexcache_state 5", paddle.ones([2]), "test", 2
+                )
+        finally:
+            logger.setLevel(old_level)
+
     def test_state5_debug_marker_reports_finite_and_nonzero(self):
         cases = (
             ("normal", paddle.to_tensor([0.0, 2.0]), True, True),
@@ -110,10 +152,8 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
             with self.subTest(name=name):
                 output = StringIO()
                 with (
-                    patch.object(
-                        _ADAPTER_CONFIG, "indexcache_train_debug", True
-                    ),
-                    redirect_stdout(output),
+                    _debug_logging(),
+                    _debug_logging(output),
                 ):
                     _debug_state5_gradient(
                         "indexcache_state 5", grad, "test", 2
@@ -124,7 +164,7 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
                 self.assertIn(f"grad_nonzero={nonzero}", marker)
 
     def test_pipeline_metadata_recovers_state5_producer_layer(self):
-        with patch.object(_ADAPTER_CONFIG, "indexcache_train_debug", True):
+        with _debug_logging():
             pipeline_inputs = _dict_to_tuple_helper(
                 {
                     "hidden_states": paddle.to_tensor(
@@ -137,7 +177,7 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
             self.assertEqual(_indexcache_producer_layer(pipeline_inputs), 7)
 
     def test_pipeline_metadata_avoids_item_after_dataptr_clear(self):
-        with patch.object(_ADAPTER_CONFIG, "indexcache_train_debug", True):
+        with _debug_logging():
             pipeline_inputs = _dict_to_tuple_helper(
                 {
                     "hidden_states": paddle.to_tensor(
@@ -161,7 +201,7 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
             producer_tensor._clear_dataptr()
 
             output = StringIO()
-            with redirect_stdout(output):
+            with _debug_logging(output):
                 gradients = _normalize_pipeline_input_gradients(
                     pipeline_inputs,
                     (paddle.ones([1]), paddle.ones([1])),
@@ -172,7 +212,7 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
             self.assertIn("producer_layer=7", output.getvalue())
 
     def test_missing_metadata_skips_released_producer_tensor(self):
-        with patch.object(_ADAPTER_CONFIG, "indexcache_train_debug", True):
+        with _debug_logging():
             state = _make_distill_state(7)
             state[6]._clear_dataptr()
             pipeline_inputs = _dict_to_tuple_helper({"indexcache_state": state})
@@ -185,7 +225,7 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
             def apply(value):
                 return value.clone()
 
-        with patch.object(_ADAPTER_CONFIG, "indexcache_train_debug", True):
+        with _debug_logging():
             pipeline_inputs = _dict_to_tuple_helper(
                 {"indexcache_state": _make_distill_state(7)}
             )
@@ -201,7 +241,7 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
             self.assertEqual(_indexcache_producer_layer((cloned,)), 7)
 
     def test_fresh_state_dict_captures_metadata_before_detach(self):
-        with patch.object(_ADAPTER_CONFIG, "indexcache_train_debug", True):
+        with _debug_logging():
             inputs = {"indexcache_state": _make_distill_state(7)}
             detached = _detach_and_requires_grad(inputs)
             detached_state = detached["indexcache_state"]
@@ -217,7 +257,7 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
             def apply(_value):
                 raise AssertionError("allocating FakeClone must not run")
 
-        with patch.object(_ADAPTER_CONFIG, "indexcache_train_debug", True):
+        with _debug_logging():
             cloned = _clone_and_clear_dataptr(
                 {"indexcache_state": _make_distill_state(7)},
                 ForbiddenAllocatingClone,
@@ -236,8 +276,8 @@ class TestIndexCachePipelineBackward(unittest.TestCase):
         )
         output = StringIO()
         with (
-            patch.object(_ADAPTER_CONFIG, "indexcache_train_debug", True),
-            redirect_stdout(output),
+            _debug_logging(),
+            _debug_logging(output),
         ):
             outputs = node.forward({"indexcache_state": _make_distill_state(7)})
             node.backward(paddle.ones_like(outputs["score"]))

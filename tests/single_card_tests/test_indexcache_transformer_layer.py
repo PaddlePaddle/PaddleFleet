@@ -23,8 +23,6 @@ import paddle
 from paddlefleet.transformer.transformer_layer import (
     HyperConnectionTransformerLayer,
     TransformerLayer,
-    _emit_indexcache_stall_trace,
-    _indexcache_stall_trace_enabled,
 )
 
 _STATE_NOT_UPDATED = object()
@@ -162,8 +160,7 @@ class TestIndexCacheTransformerLayerStateTransitions(unittest.TestCase):
                         mtp_load_weight_only=False,
                         enable_mtp_magic_send=True,
                         block_attention_residuals=False,
-                        indexcache_train_debug=True,
-                        index_topk_pattern="FS",
+                        indexcache_topk_pattern="FS",
                     ),
                     layer_number=1,
                     full_recompute=False,
@@ -191,28 +188,6 @@ class TestIndexCacheTransformerLayerStateTransitions(unittest.TestCase):
                     self.assertNotIn("indexcache_state", result)
                 else:
                     self.assertIs(result["indexcache_state"], state)
-
-    def test_stall_trace_is_driven_by_normalized_config(self):
-        disabled = SimpleNamespace(
-            indexcache_stall_trace=False,
-            indexcache_stall_trace_layers=(2,),
-        )
-        enabled = SimpleNamespace(
-            indexcache_stall_trace=True,
-            indexcache_stall_trace_layers=(2, 4),
-        )
-
-        self.assertFalse(_indexcache_stall_trace_enabled(disabled, 2))
-        self.assertTrue(_indexcache_stall_trace_enabled(enabled, 2))
-        self.assertFalse(_indexcache_stall_trace_enabled(enabled, 3))
-
-        output = StringIO()
-        with redirect_stdout(output):
-            _emit_indexcache_stall_trace(enabled, 2, "attention", "enter")
-            _emit_indexcache_stall_trace(enabled, 3, "attention", "enter")
-        marker = output.getvalue()
-        self.assertIn("layer=2 phase=attention edge=enter", marker)
-        self.assertNotIn("layer=3", marker)
 
     def test_forward_attention_preserves_no_update_replace_and_clear(self):
         hidden_states = paddle.ones([1, 1, 4], dtype="float32")

@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import unittest
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, contextmanager
 from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -51,13 +52,37 @@ from paddlefleet.transformer.indexcache_state import (
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 
+@contextmanager
+def _debug_logging(stream=None):
+    loggers = [
+        logging.getLogger(name)
+        for name in (
+            "paddlefleet.pipeline_parallel.indexcache_adapter",
+            "paddlefleet.transformer.csa_attention",
+        )
+    ]
+    levels = [logger.level for logger in loggers]
+    handler = logging.StreamHandler(stream) if stream is not None else None
+    try:
+        for logger in loggers:
+            logger.setLevel(logging.DEBUG)
+            if handler is not None:
+                logger.addHandler(handler)
+        yield
+    finally:
+        for logger, level in zip(loggers, levels):
+            if handler is not None:
+                logger.removeHandler(handler)
+            logger.setLevel(level)
+
+
 def _config_for_pattern(pattern, **overrides):
     ratios = [item for _ in pattern for item in (4, 128)]
     kwargs = {
         "num_hidden_layers": len(ratios),
         "experimental_attention_variant": "dsv4_hybrid",
         "csa_compress_ratios": ratios,
-        "index_topk_pattern": pattern,
+        "indexcache_topk_pattern": pattern,
     }
     kwargs.update(overrides)
     return TransformerConfig(**kwargs)
@@ -65,9 +90,8 @@ def _config_for_pattern(pattern, **overrides):
 
 def _layer_config(pattern, **overrides):
     config = SimpleNamespace(
-        index_topk_pattern=pattern,
+        indexcache_topk_pattern=pattern,
         indexcache_multi_layer_distill=False,
-        indexcache_train_debug=False,
         recompute_granularity=None,
         pipeline_model_parallel_size=1,
         context_parallel_size=1,
@@ -141,58 +165,93 @@ class TestIndexCacheGradientNumerics(unittest.TestCase):
 
 
 class TestIndexCacheConfig(unittest.TestCase):
-    def test_debug_config_defaults_and_normalizes_trace_layers(self):
-        default = _config_for_pattern("F")
-        self.assertFalse(default.indexcache_train_debug)
-        self.assertFalse(default.indexcache_stall_trace)
-        self.assertEqual(default.indexcache_stall_trace_layers, (2,))
+    def test_pattern_alias_normalization_and_roundtrip(self):
+        common = {
+            "num_hidden_layers": 4,
+            "experimental_attention_variant": "dsv4_hybrid",
+            "csa_compress_ratios": [4, 128, 4, 128],
+        }
+        for fields in (
+            {"indexcache_topk_pattern": " fs "},
+            {"index_topk_pattern": " fs "},
+            {"indexcache_topk_pattern": "FS", "index_topk_pattern": "fs"},
+            {"indexcache_topk_pattern": "FS", "index_topk_pattern": None},
+            {"index_topk_pattern": "FS", "indexcache_topk_pattern": None},
+        ):
+            for factory in (
+                lambda d: TransformerConfig(**d),
+                lambda d: TransformerConfig.from_config(SimpleNamespace(**d)),
+            ):
+                with self.subTest(fields=fields, factory=factory):
+                    config = factory({**common, **fields})
+                    self.assertEqual(config.indexcache_topk_pattern, "FS")
+                    self.assertEqual(config.index_topk_pattern, "FS")
+                    restored = TransformerConfig.from_config(
+                        SimpleNamespace(**vars(config))
+                    )
+                    self.assertEqual(restored.indexcache_topk_pattern, "FS")
 
-        configured = _config_for_pattern(
-            "F",
-            indexcache_train_debug=True,
-            indexcache_stall_trace=True,
-            indexcache_stall_trace_layers=[2, 1, 2],
-        )
-        self.assertTrue(configured.indexcache_train_debug)
-        self.assertTrue(configured.indexcache_stall_trace)
-        self.assertEqual(configured.indexcache_stall_trace_layers, (1, 2))
+    def test_pattern_alias_conflicts_are_rejected_in_either_order(self):
+        common = {
+            "num_hidden_layers": 4,
+            "experimental_attention_variant": "dsv4_hybrid",
+            "csa_compress_ratios": [4, 128, 4, 128],
+        }
+        for fields in (
+            {"indexcache_topk_pattern": "FS", "index_topk_pattern": "FF"},
+            {"index_topk_pattern": "FF", "indexcache_topk_pattern": "FS"},
+        ):
+            with self.subTest(fields=fields):
+                with self.assertRaisesRegex(ValueError, "disagree"):
+                    TransformerConfig(**common, **fields)
+                with self.assertRaisesRegex(ValueError, "disagree"):
+                    TransformerConfig.from_config(
+                        SimpleNamespace(**common, **fields)
+                    )
 
-    def test_debug_config_defaults_survive_from_config(self):
-        config = TransformerConfig.from_config(
-            SimpleNamespace(
-                num_hidden_layers=2,
-                experimental_attention_variant="dsv4_hybrid",
-                csa_compress_ratios=[4, 128],
-                index_topk_pattern="F",
-            )
-        )
-        self.assertFalse(config.indexcache_train_debug)
-        self.assertFalse(config.indexcache_stall_trace)
-        self.assertEqual(config.indexcache_stall_trace_layers, (2,))
+    def test_pattern_disabled_and_invalid_input(self):
+        for value in (None, "", "  "):
+            config = TransformerConfig(indexcache_topk_pattern=value)
+            self.assertIsNone(config.indexcache_topk_pattern)
+        with self.assertRaises(TypeError):
+            TransformerConfig(indexcache_topk_pattern=1)
+        with self.assertRaisesRegex(TypeError, "must be a bool"):
+            _config_for_pattern("F", indexcache_multi_layer_distill=1)
 
-    def test_debug_config_rejects_invalid_values(self):
-        cases = (
-            ({"indexcache_multi_layer_distill": 1}, TypeError),
-            ({"indexcache_train_debug": 1}, TypeError),
-            ({"indexcache_stall_trace": "true"}, TypeError),
-            ({"indexcache_stall_trace_layers": "2"}, TypeError),
-            ({"indexcache_stall_trace_layers": [0]}, ValueError),
-            ({"indexcache_stall_trace_layers": [True]}, ValueError),
-            (
-                {
-                    "indexcache_stall_trace": True,
-                    "indexcache_stall_trace_layers": [],
-                },
-                ValueError,
-            ),
-        )
-        for overrides, error in cases:
-            with self.subTest(overrides=overrides), self.assertRaises(error):
-                _config_for_pattern("F", **overrides)
+    def test_removed_diagnostics_are_not_silently_accepted(self):
+        for field in (
+            "indexcache_train_debug",
+            "indexcache_stall_trace",
+            "indexcache_stall_trace_layers",
+        ):
+            with self.subTest(field=field):
+                with self.assertRaises(TypeError):
+                    TransformerConfig(**{field: False})
+                with self.assertRaisesRegex(
+                    ValueError, "standard DEBUG logging"
+                ):
+                    TransformerConfig.from_config(
+                        SimpleNamespace(**{field: False})
+                    )
+
+    def test_diagnostics_use_module_logger(self):
+        layer = _make_layer(_layer_config("F"), 1)
+        with self.assertLogs(
+            "paddlefleet.transformer.csa_attention", level="DEBUG"
+        ) as captured:
+            layer._indexcache_debug("action=test")
+        self.assertIn("action=test", captured.output[0])
+        logger = logging.getLogger("paddlefleet.transformer.csa_attention")
+        old_level = logger.level
+        try:
+            logger.setLevel(logging.INFO)
+            self.assertFalse(layer._indexcache_debug_enabled())
+        finally:
+            logger.setLevel(old_level)
 
     def test_indexcache_fields_reject_non_dsv4_variants(self):
         for overrides in (
-            {"index_topk_pattern": "F"},
+            {"indexcache_topk_pattern": "F"},
             {"indexcache_multi_layer_distill": True},
         ):
             with (
@@ -207,7 +266,7 @@ class TestIndexCacheConfig(unittest.TestCase):
     def test_common_patterns_are_normalized_and_accepted(self):
         for pattern in ("F", "FSF", "FSSF"):
             config = _config_for_pattern(pattern.lower())
-            self.assertEqual(config.index_topk_pattern, pattern)
+            self.assertEqual(config.indexcache_topk_pattern, pattern)
 
     def test_distill_and_supported_recompute_are_accepted(self):
         distill = _config_for_pattern(
@@ -306,7 +365,7 @@ class TestIndexCacheConfig(unittest.TestCase):
             (
                 {
                     "pattern": "FS",
-                    "index_topk_pattern": None,
+                    "indexcache_topk_pattern": None,
                     "indexcache_multi_layer_distill": True,
                 },
                 ValueError,
@@ -696,20 +755,6 @@ class TestIndexCacheCoreState(unittest.TestCase):
         self.assertEqual(fallback_args[3], layer.softmax_scale)
         cudnn_target.assert_not_called()
         self.assertIs(actual, expected)
-
-    def test_train_debug_is_driven_by_config(self):
-        config = _layer_config("F", indexcache_train_debug=True)
-        layer = _make_layer(config, 1)
-        output = StringIO()
-        with redirect_stdout(output):
-            layer._indexcache_debug("action=test")
-        self.assertIn("action=test", output.getvalue())
-
-        config.indexcache_train_debug = False
-        output = StringIO()
-        with redirect_stdout(output):
-            layer._indexcache_debug("action=disabled")
-        self.assertEqual(output.getvalue(), "")
 
     def test_cp_indexer_helper_preserves_legacy_and_extended_contracts(self):
         config = _layer_config(
@@ -1222,7 +1267,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
         previous_scale = DSAIndexerLossAutoScaler._main_loss_backward_scale
         DSAIndexerLossAutoScaler._main_loss_backward_scale = None
         marker_output = StringIO()
-        with redirect_stdout(marker_output):
+        with _debug_logging(marker_output):
             try:
                 bridged_probs = TileLangCSAIndexerDistillBridge.apply(
                     q,

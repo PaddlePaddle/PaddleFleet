@@ -26,12 +26,15 @@ Components:
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import warnings
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple
 
 import paddle
+
+logger = logging.getLogger(__name__)
 import paddle.nn.functional as F
 from paddle import Tensor, framework, nn
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
@@ -1609,14 +1612,13 @@ class TileLangCSAIndexerDistillBridge(paddle.autograd.PyLayer):
         ctx.producer_layer = int(producer_layer)
         ctx.debug_enabled = bool(debug_enabled)
         if ctx.debug_enabled:
-            print(
+            logger.debug(
                 "[INDEXCACHE_DISTILL_GRAD] "
                 "boundary=producer_bridge_apply "
                 f"producer_layer={ctx.producer_layer} "
                 "producer_loss_combined="
                 f"{ctx.has_producer_score_delta} "
-                f"score_shape={list(topk_probs.shape)}",
-                flush=True,
+                f"score_shape={list(topk_probs.shape)}"
             )
         ctx.producer_score_delta_device_id = None
         if producer_score_delta is not None:
@@ -1658,13 +1660,12 @@ class TileLangCSAIndexerDistillBridge(paddle.autograd.PyLayer):
             score_summary = summarize_indexcache_gradients(
                 [("score", grad_index_scores)]
             )["score"]
-            print(
+            logger.debug(
                 "[INDEXCACHE_DISTILL_GRAD] "
                 "boundary=producer_bridge_backward_enter "
                 f"producer_layer={ctx.producer_layer} "
                 f"score_grad_shape={list(grad_index_scores.shape) if grad_index_scores is not None else None} "
-                f"{format_indexcache_gradient_summary('score_grad', score_summary)}",
-                flush=True,
+                f"{format_indexcache_gradient_summary('score_grad', score_summary)}"
             )
 
         from paddlefleet.tilelang_ops import csa_indexer_bwd
@@ -1677,14 +1678,13 @@ class TileLangCSAIndexerDistillBridge(paddle.autograd.PyLayer):
             grad_index_scores,
         )
         if debug_enabled:
-            print(
+            logger.debug(
                 "[INDEXCACHE_DISTILL_GRAD] "
                 "boundary=producer_bridge_kernel_done "
                 f"producer_layer={ctx.producer_layer} "
                 f"q_grad_shape={list(grad_q.shape)} "
                 f"weights_grad_shape={list(grad_weights.shape)} "
-                f"k_grad_shape={list(grad_k.shape)}",
-                flush=True,
+                f"k_grad_shape={list(grad_k.shape)}"
             )
         if grad_q.dtype != index_q.dtype:
             grad_q = grad_q.cast(index_q.dtype)
@@ -1702,7 +1702,7 @@ class TileLangCSAIndexerDistillBridge(paddle.autograd.PyLayer):
             grad_summaries = summarize_indexcache_gradients(
                 list(zip(("q", "weights", "k"), grads))
             )
-            print(
+            logger.debug(
                 "[INDEXCACHE_DISTILL_GRAD] "
                 "boundary=producer_bridge_grad_ready "
                 f"producer_layer={ctx.producer_layer} "
@@ -1713,8 +1713,7 @@ class TileLangCSAIndexerDistillBridge(paddle.autograd.PyLayer):
                 f"k_grad_shape={list(grad_k.shape)} "
                 f"{format_indexcache_gradient_summary('q_grad', grad_summaries['q'])} "
                 f"{format_indexcache_gradient_summary('weights_grad', grad_summaries['weights'])} "
-                f"{format_indexcache_gradient_summary('k_grad', grad_summaries['k'])}",
-                flush=True,
+                f"{format_indexcache_gradient_summary('k_grad', grad_summaries['k'])}"
             )
 
         output_grads = (*grads, None, None)
@@ -1785,7 +1784,7 @@ class IndexCacheServedDistillLossAutoScaler(paddle.autograd.PyLayer):
             score_summary = summarize_indexcache_gradients(
                 [("score", grad_index_scores)]
             )["score"]
-            print(
+            logger.debug(
                 "[INDEXCACHE_DISTILL_GRAD] boundary=served_score_backward "
                 f"served_layer={ctx.served_layer} "
                 f"producer_layer={ctx.producer_layer} "
@@ -1794,8 +1793,7 @@ class IndexCacheServedDistillLossAutoScaler(paddle.autograd.PyLayer):
                 "saved_delta_offloaded="
                 f"{getattr(ctx, 'score_delta_device_id', None) is not None} "
                 f"has_loss_mask={getattr(ctx, 'has_loss_mask', False)} "
-                f"{format_indexcache_gradient_summary('score_grad', score_summary)}",
-                flush=True,
+                f"{format_indexcache_gradient_summary('score_grad', score_summary)}"
             )
 
         grads = (grad_output, grad_index_scores, None)
@@ -2891,7 +2889,7 @@ class CompressedSparseAttention(FleetLayer):
         )
 
     def _indexcache_pattern(self) -> str | None:
-        pattern = getattr(self.config, "index_topk_pattern", None)
+        pattern = getattr(self.config, "indexcache_topk_pattern", None)
         if pattern is None:
             return None
         pattern = str(pattern).strip().upper()
@@ -2900,15 +2898,15 @@ class CompressedSparseAttention(FleetLayer):
         invalid_chars = sorted(set(pattern) - {"F", "S"})
         if invalid_chars:
             raise ValueError(
-                "index_topk_pattern may only contain 'F' and 'S', "
+                "indexcache_topk_pattern may only contain 'F' and 'S', "
                 f"got invalid chars: {invalid_chars}."
             )
         if pattern[0] != "F":
-            raise ValueError("index_topk_pattern must start with 'F'.")
+            raise ValueError("indexcache_topk_pattern must start with 'F'.")
         return pattern
 
-    def _indexcache_train_debug_enabled(self) -> bool:
-        return bool(getattr(self.config, "indexcache_train_debug", False))
+    def _indexcache_debug_enabled(self) -> bool:
+        return logger.isEnabledFor(logging.DEBUG)
 
     def _indexcache_recompute_enabled(self) -> bool:
         return bool(getattr(self.config, "recompute_granularity", None))
@@ -2975,7 +2973,7 @@ class CompressedSparseAttention(FleetLayer):
         return state_kind
 
     def _indexcache_debug(self, msg: str) -> None:
-        if self._indexcache_train_debug_enabled():
+        if self._indexcache_debug_enabled():
             cp_msg = (
                 f" cp_rank={self.cp_rank} cp_size={self.cp_size}"
                 if self.cp_enabled
@@ -2989,22 +2987,20 @@ class CompressedSparseAttention(FleetLayer):
                 " grad_enabled="
                 f"{paddle.is_grad_enabled()}"
             )
-            print(
+            logger.debug(
                 f"[INDEXCACHE_TRAIN] layer={self.layer_number}{cp_msg}"
-                f"{recompute_msg} {msg}",
-                flush=True,
+                f"{recompute_msg} {msg}"
             )
 
     def _indexcache_distill_debug(self, msg: str) -> None:
-        if self._indexcache_train_debug_enabled():
+        if self._indexcache_debug_enabled():
             cp_msg = (
                 f" cp_rank={self.cp_rank} cp_size={self.cp_size}"
                 if self.cp_enabled
                 else ""
             )
-            print(
-                f"[INDEXCACHE_DISTILL] layer={self.layer_number}{cp_msg} {msg}",
-                flush=True,
+            logger.debug(
+                f"[INDEXCACHE_DISTILL] layer={self.layer_number}{cp_msg} {msg}"
             )
 
     def _indexcache_multi_layer_distill_enabled(self) -> bool:
@@ -3099,7 +3095,7 @@ class CompressedSparseAttention(FleetLayer):
         c4_ordinal = c4_layers.index(self.layer_number)
         if c4_ordinal >= len(pattern):
             raise ValueError(
-                "index_topk_pattern must cover every C4 layer in this "
+                "indexcache_topk_pattern must cover every C4 layer in this "
                 f"configuration. pattern={pattern}, c4_layers={c4_layers}, "
                 f"current_c4_ordinal={c4_ordinal}."
             )
@@ -3184,13 +3180,12 @@ class CompressedSparseAttention(FleetLayer):
                     # gradients to one bridge/backward kernel. Saving one
                     # FP16 delta preserves the producer loss without retaining
                     # a second full TileLang backward context.
-                    if self._indexcache_train_debug_enabled():
-                        print(
+                    if self._indexcache_debug_enabled():
+                        logger.debug(
                             "[INDEXCACHE_DISTILL_GRAD] "
                             "boundary=producer_bridge_forward "
                             "producer_loss_combined=True "
-                            f"score_shape={list(topk_probs.shape)}",
-                            flush=True,
+                            f"score_shape={list(topk_probs.shape)}"
                         )
                     distill_topk_probs = TileLangCSAIndexerDistillBridge.apply(
                         q_indexer_bf,
@@ -3202,7 +3197,7 @@ class CompressedSparseAttention(FleetLayer):
                         producer_loss_coeff,
                         producer_num_rows,
                         self.layer_number,
-                        self._indexcache_train_debug_enabled(),
+                        self._indexcache_debug_enabled(),
                     )
                 else:
                     distill_topk_probs = TileLangCSAIndexerDistillBridge.apply(
@@ -3215,7 +3210,7 @@ class CompressedSparseAttention(FleetLayer):
                         0.0,
                         None,
                         self.layer_number,
-                        self._indexcache_train_debug_enabled(),
+                        self._indexcache_debug_enabled(),
                     )
             else:
                 distill_topk_probs = topk_probs.detach()
@@ -3400,7 +3395,7 @@ class CompressedSparseAttention(FleetLayer):
                 state_kind = "config_fallback"
         if cached is None:
             raise RuntimeError(
-                "index_topk_pattern requested reuse before an explicit "
+                "indexcache_topk_pattern requested reuse before an explicit "
                 "producer top-k state exists. "
                 f"state_kind={state_kind}. "
                 + self._indexcache_context_msg(c4_ordinal, pattern)
@@ -3581,7 +3576,7 @@ class CompressedSparseAttention(FleetLayer):
             loss_mask,
             self.layer_number,
             int(producer_layer if producer_layer is not None else -1),
-            self._indexcache_train_debug_enabled(),
+            self._indexcache_debug_enabled(),
         )
 
     def _postprocess_indexer_replay(

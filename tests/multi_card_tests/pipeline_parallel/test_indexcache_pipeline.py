@@ -144,8 +144,7 @@ class TestIndexCachePipeline(unittest.TestCase):
         fleet.init(is_collective=True, strategy=strategy)
         register_indexcache_pipeline_adapter(
             SimpleNamespace(
-                index_topk_pattern="FS",
-                indexcache_train_debug=False,
+                indexcache_topk_pattern="FS",
             )
         )
 

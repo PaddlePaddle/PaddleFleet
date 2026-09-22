@@ -15,8 +15,11 @@
 from __future__ import annotations
 
 import functools
+import logging
 
 import paddle
+
+logger = logging.getLogger(__name__)
 
 _PATCH_FLAG = "_indexcache_pipeline_adapter_registered"
 _INDEXCACHE_STATE_KEY = "indexcache_state"
@@ -24,11 +27,10 @@ _PIPELINE_KEY_ATTR = "_paddlefleet_pipeline_key"
 _PIPELINE_SHAPE_ATTR = "_paddlefleet_pipeline_shape"
 _PIPELINE_DTYPE_ATTR = "_paddlefleet_pipeline_dtype"
 _INDEXCACHE_PRODUCER_LAYER_ATTR = "_paddlefleet_indexcache_producer_layer"
-_INDEXCACHE_CONFIG = None
 
 
 def _debug_enabled() -> bool:
-    return bool(getattr(_INDEXCACHE_CONFIG, "indexcache_train_debug", False))
+    return logger.isEnabledFor(logging.DEBUG)
 
 
 def _is_indexcache_key(key) -> bool:
@@ -151,12 +153,11 @@ def _debug_state5_gradient(key, grad, source, producer_layer):
     )
 
     summary = summarize_indexcache_gradients([("grad", grad)])["grad"]
-    print(
+    logger.debug(
         "[INDEXCACHE_PP_GRAD] boundary=state5_grad_present "
         f"source={source} "
         f"producer_layer={producer_layer} "
-        f"{format_indexcache_gradient_summary('grad', summary)}",
-        flush=True,
+        f"{format_indexcache_gradient_summary('grad', summary)}"
     )
 
 
@@ -260,10 +261,9 @@ def _convert_tensor_dict_to_tuple(output_tensor_dict):
 
     output_tensor = tuple(output_tensor)
     if _debug_enabled() and _has_indexcache_key(output_tensor):
-        print(
+        logger.debug(
             "[INDEXCACHE_PP_FLOW] dict_to_tuple "
-            f"tensors={_describe_tensor_keys(output_tensor)}",
-            flush=True,
+            f"tensors={_describe_tensor_keys(output_tensor)}"
         )
     return output_tensor
 
@@ -296,12 +296,11 @@ def _convert_tensor_tuple_to_dict(input_tensor_tuple):
         )
     if _debug_enabled() and _INDEXCACHE_STATE_KEY in input_tensor_dict:
         state = input_tensor_dict[_INDEXCACHE_STATE_KEY]
-        print(
+        logger.debug(
             "[INDEXCACHE_PP_FLOW] tuple_to_dict "
             f"keys={list(input_tensor_dict.keys())} "
             f"state_type={type(state).__name__} "
-            f"state={_describe_tensor_keys(state)}",
-            flush=True,
+            f"state={_describe_tensor_keys(state)}"
         )
     return input_tensor_dict
 
@@ -345,9 +344,8 @@ def _collect_input_gradients(inputs):
             zero_filled_keys.append(key)
         gradients.append(grad)
     if _debug_enabled() and zero_filled_keys:
-        print(
-            f"[INDEXCACHE_PP_GRAD] zero_filled_keys={zero_filled_keys}",
-            flush=True,
+        logger.debug(
+            f"[INDEXCACHE_PP_GRAD] zero_filled_keys={zero_filled_keys}"
         )
     return tuple(gradients)
 
@@ -420,10 +418,9 @@ def _normalize_pipeline_input_gradients(input_tensor, input_tensor_grad):
             )
 
     if _debug_enabled() and zero_filled_keys:
-        print(
+        logger.debug(
             "[INDEXCACHE_PP_GRAD] boundary=pipeline zero_filled_keys="
-            f"{zero_filled_keys}",
-            flush=True,
+            f"{zero_filled_keys}"
         )
     return tuple(gradients) if is_tuple_input else gradients[0]
 
@@ -497,19 +494,15 @@ def register_indexcache_pipeline_adapter(config) -> bool:
     The adapter is process-global because Paddle exposes the relevant Pipeline
     hooks as module functions and class methods. Registration is nevertheless
     explicit, conditional, and idempotent: a config with an empty
-    ``index_topk_pattern`` is a no-op and a second registration does not wrap
-    methods again. Pipeline diagnostics read ``indexcache_train_debug`` from
-    this normalized TransformerConfig instead of process environment state.
+    ``indexcache_topk_pattern`` is a no-op and a second registration does not wrap
+    methods again. Diagnostics use the module logger at DEBUG level.
 
     Returns:
         ``True`` only when this call installs the adapter.
     """
-    index_topk_pattern = getattr(config, "index_topk_pattern", None)
-    if not index_topk_pattern:
+    indexcache_topk_pattern = getattr(config, "indexcache_topk_pattern", None)
+    if not indexcache_topk_pattern:
         return False
-
-    global _INDEXCACHE_CONFIG
-    _INDEXCACHE_CONFIG = config
 
     import paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils as fbo
     import paddle.distributed.fleet.meta_parallel.pp_utils.utils as pp_utils
