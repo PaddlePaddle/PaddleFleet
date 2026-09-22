@@ -75,6 +75,53 @@ def _decoder_view():
     return _build_decoder_view(cfg)
 
 
+def _decoder_view_with(decoder_overrides):
+    cfg = HyperBodyConfig(
+        decoder_config={**_DECODER_GEOMETRY, **decoder_overrides},
+        encoder_config={**_ENCODER_GEOMETRY},
+    )
+    return _build_decoder_view(cfg)
+
+
+def _mlp_names(specs):
+    """Per-layer MLP class name: 'MLP' (dense) vs 'MoELayer' (expert)."""
+    return [s.sublayers_spec.mlp.layer.__name__ for s in specs]
+
+
+# Full geometry for the DSV4-hybrid attention family (CSA + hybrid-MLA).
+_DSV4_OVERRIDES = {
+    "num_hidden_layers": 3,
+    "num_attention_heads": 8,
+    "experimental_attention_variant": "dsv4_hybrid",
+    "gated_attention": True,
+    "use_qk_norm": True,
+    "q_lora_rank": 32,
+    "kv_lora_rank": 16,
+    "qk_rope_head_dim": 8,
+    "qk_nope_head_dim": 24,
+    "v_head_dim": 32,
+    "hybrid_mla_q_lora_rank": 32,
+    "hybrid_mla_kv_lora_rank": 16,
+    "hybrid_mla_qk_nope_head_dim": 24,
+    "hybrid_mla_qk_rope_head_dim": 8,
+    "hybrid_mla_v_head_dim": 16,
+    "hybrid_mla_num_attention_heads": 8,
+    "hybrid_mla_num_key_value_heads": 8,
+    # ratio -2 marks the hybrid-MLA layer; 128 marks the CSA layers.
+    "csa_compress_ratios": [128, 128, -2],
+    "csa_window_size": 128,
+}
+# Multi-latent-attention (MLA) geometry.
+_MLA_OVERRIDES = {
+    "multi_latent_attention": True,
+    "q_lora_rank": 32,
+    "kv_lora_rank": 16,
+    "qk_rope_head_dim": 8,
+    "qk_nope_head_dim": 8,
+    "v_head_dim": 16,
+}
+
+
 def test_is_moe_layer_reads_per_layer_list():
     """Per-layer 0/1 list: element i decides dense(0)/MoE(1)."""
     cfg = SimpleNamespace(moe_layer_freq=[0, 1, 1, 1], num_hidden_layers=4)
@@ -107,51 +154,59 @@ def test_is_moe_layer_rejects_int_and_bad_values():
     assert raised == 3, raised
 
 
-def test_pure_mha_asserts_removed():
-    """The old pure-MHA guards must be gone (decoder now supports dsv4/MLA/VHA).
+def test_supports_dsv4_hybrid_variant():
+    """Decoder now BUILDS the dsv4_hybrid family (old code hard-raised on it).
 
-    We flip each previously-forbidden attribute and assert the function no longer
-    raises the old pure-MHA ValueError. Any *downstream* geometry error (from
-    building an attention variant without full geometry) is unrelated to the
-    removed guards and is tolerated here.
+    Positively assert a real build: ``num_hidden_layers`` specs with the
+    dense-first MLP pattern (layer 0 dense, rest MoE). This is the change's goal
+    -- not merely the absence of the old error string.
     """
-    old_markers = (
-        "must be False",
-        "must be None",
-        "pure MHA",
-    )
-    for attr, val in (
-        ("multi_latent_attention", True),
-        ("experimental_attention_variant", "dsv4_hybrid"),
-        ("use_vha_attention", True),
-    ):
-        view = _decoder_view()
-        setattr(view, attr, val)
-        try:
-            get_hyperbody_decoder_layer_specs(view)
-        except ValueError as e:
-            assert not any(m in str(e) for m in old_markers), (
-                f"old pure-MHA guard still present for {attr}: {e}"
-            )
-        except Exception:
-            pass  # unrelated downstream geometry error is fine
+    view = _decoder_view_with(_DSV4_OVERRIDES)
+    specs = get_hyperbody_decoder_layer_specs(view)
+    assert len(specs) == view.num_hidden_layers == 3
+    assert _mlp_names(specs) == ["MLP"] + ["MoELayer"] * 2
+
+
+def test_supports_multi_latent_attention():
+    """Decoder now BUILDS with multi_latent_attention=True (old code raised)."""
+    view = _decoder_view_with(_MLA_OVERRIDES)
+    specs = get_hyperbody_decoder_layer_specs(view)
+    assert len(specs) == view.num_hidden_layers == 4
 
 
 def test_len_and_pattern_match_gpt_spec():
-    """Same length + same per-layer dense/MoE pattern as the shared GPT spec."""
-    view = _decoder_view()
-    hb = get_hyperbody_decoder_layer_specs(view)
-    gpt = get_gpt_decoder_layers_spec(view)
-    assert len(hb) == view.num_hidden_layers == len(gpt), (len(hb), len(gpt))
-    # moe_layer_freq is expanded to the [0] + [1]*(L-1) dense-first list.
-    assert list(view.moe_layer_freq) == [0] + [1] * (view.num_hidden_layers - 1)
+    """Same length AND same per-layer dense/MoE MLP class as the shared GPT spec.
+
+    Locks the core equivalence claim: HyperBody's spec builds the *same layers*
+    as ``get_gpt_decoder_layers_spec`` -- compared per layer by MLP class
+    (dense ``MLP`` vs expert ``MoELayer``), not just by list length.
+    """
+    for overrides in ({}, _DSV4_OVERRIDES):
+        view = _decoder_view_with(overrides)
+        hb = get_hyperbody_decoder_layer_specs(view)
+        gpt = get_gpt_decoder_layers_spec(view)
+        assert len(hb) == view.num_hidden_layers == len(gpt), (
+            overrides,
+            len(hb),
+            len(gpt),
+        )
+        assert _mlp_names(hb) == _mlp_names(gpt), (
+            overrides,
+            _mlp_names(hb),
+            _mlp_names(gpt),
+        )
+        # dense-first: layer 0 dense, the rest MoE.
+        assert _mlp_names(hb) == ["MLP"] + ["MoELayer"] * (
+            view.num_hidden_layers - 1
+        )
 
 
 if __name__ == "__main__":
     try:
         test_is_moe_layer_reads_per_layer_list()
         test_is_moe_layer_rejects_int_and_bad_values()
-        test_pure_mha_asserts_removed()
+        test_supports_dsv4_hybrid_variant()
+        test_supports_multi_latent_attention()
         test_len_and_pattern_match_gpt_spec()
     except AssertionError:
         import traceback
