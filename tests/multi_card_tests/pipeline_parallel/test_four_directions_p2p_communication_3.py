@@ -129,9 +129,13 @@ def test_forward_ring_send_next_recv_prev():
     send_tensor = base + stage_id * 100.0
     recv_tensor = paddle.empty([2, 4], dtype="float32").cuda()
 
-    # Post the async isend to the next stage first, then the blocking recv from
-    # the previous stage. With mp_degree==1 send_partial issues a non-blocking
-    # whole-tensor isend, so the full 4-stage ring cannot deadlock.
+    # Every stage sends to the next and receives from the previous in the same
+    # step, so both ops must be posted non-blocking before either is waited.
+    # ``use_calc_stream=False`` makes send_partial issue an isend and
+    # recv_partial an irecv whose NCCL kernels are only driven on ``.wait()``.
+    # A blocking recv here would hang the whole 4-stage ring: every rank would
+    # sit in the recv before any rank reached ``send_task.wait()``, so no send
+    # would launch. Posting both async ops first lets NCCL match the ring.
     send_task = send_partial(
         send_tensor,
         dst=1,
@@ -140,14 +144,16 @@ def test_forward_ring_send_next_recv_prev():
         group=send_next_group,
         use_calc_stream=False,
     )
-    recv_partial(
+    recv_task = recv_partial(
         recv_tensor,
         src=0,
         nranks=MP_DEGREE,
         rank_id=mp_rank,
         group=recv_prev_group,
-        use_calc_stream=True,
+        use_calc_stream=False,
     )
+    if recv_task is not None:
+        recv_task.wait()
     if send_task is not None:
         send_task.wait()
     dist.barrier()
@@ -175,6 +181,8 @@ def test_backward_ring_send_prev_recv_next():
     send_tensor = base + stage_id * 100.0 + 7.0
     recv_tensor = paddle.empty([2, 4], dtype="float32").cuda()
 
+    # Same simultaneous-exchange constraint as the forward ring: post the isend
+    # (dst=0 -> prev) and the irecv (src=1 -> next) before waiting either.
     send_task = send_partial(
         send_tensor,
         dst=0,
@@ -183,14 +191,16 @@ def test_backward_ring_send_prev_recv_next():
         group=send_prev_group,
         use_calc_stream=False,
     )
-    recv_partial(
+    recv_task = recv_partial(
         recv_tensor,
         src=1,
         nranks=MP_DEGREE,
         rank_id=mp_rank,
         group=recv_next_group,
-        use_calc_stream=True,
+        use_calc_stream=False,
     )
+    if recv_task is not None:
+        recv_task.wait()
     if send_task is not None:
         send_task.wait()
     dist.barrier()

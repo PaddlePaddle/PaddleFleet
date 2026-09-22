@@ -101,13 +101,24 @@ def test_send_partial_recv_partial_forward():
     shape = [2, 4]
     send_tensor = _tagged_payload(pp_rank * 1000, shape)
 
-    # Non-blocking send to the next peer (dst=1 -> _get_p2p_next_rank), then a
-    # blocking recv from the prev peer (src=0 -> _get_p2p_prev_rank).
+    # Both ranks send and receive in the same step (a 2-stage ring), so both
+    # the send (dst=1 -> _get_p2p_next_rank) and the recv (src=0 ->
+    # _get_p2p_prev_rank) must be posted non-blocking *before* either is waited.
+    # ``use_calc_stream=False`` makes send_partial issue an isend and
+    # recv_partial an irecv; the NCCL kernels are only driven forward on
+    # ``.wait()``. If the recv were blocking instead, every rank would enter it
+    # before any rank reached ``send_task.wait()``, so no send would ever launch
+    # and all recvs would block forever -- a real deadlock. Posting both async
+    # ops first lets NCCL match the send/recv pair on every rank.
     send_task = send_partial(
         send_tensor, dst=1, nranks=1, use_calc_stream=False
     )
     recv_tensor = paddle.empty(shape, dtype="float32").cuda()
-    recv_partial(recv_tensor, src=0, nranks=1, use_calc_stream=True)
+    recv_task = recv_partial(
+        recv_tensor, src=0, nranks=1, use_calc_stream=False
+    )
+    if recv_task is not None:
+        recv_task.wait()
     if send_task is not None:
         send_task.wait()
 
@@ -132,11 +143,18 @@ def test_send_partial_recv_partial_backward():
     shape = [3, 2]
     send_tensor = _tagged_payload(pp_rank * 1000 + 7, shape)
 
+    # Same simultaneous-exchange constraint as the forward case: post the isend
+    # (dst=0 -> _get_p2p_prev_rank) and the irecv (src=1 -> _get_p2p_next_rank)
+    # before waiting either, so both NCCL kernels are in flight and can match.
     send_task = send_partial(
         send_tensor, dst=0, nranks=1, use_calc_stream=False
     )
     recv_tensor = paddle.empty(shape, dtype="float32").cuda()
-    recv_partial(recv_tensor, src=1, nranks=1, use_calc_stream=True)
+    recv_task = recv_partial(
+        recv_tensor, src=1, nranks=1, use_calc_stream=False
+    )
+    if recv_task is not None:
+        recv_task.wait()
     if send_task is not None:
         send_task.wait()
 
