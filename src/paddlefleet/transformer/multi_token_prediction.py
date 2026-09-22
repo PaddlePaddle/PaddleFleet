@@ -1414,6 +1414,14 @@ class MultiTokenPredictionLayer(FleetLayer):
         layer, while src=0 sits on the first stage and never joins the
         collective. A private Generator is used (not np.random.*) so the global
         RNG stream used elsewhere is untouched.
+
+        The counter only advances outside a recompute replay, mirroring the
+        magic-count handling further down this file. The caller's primary guard is
+        ``"mtp_sampled_depth" not in dict_args``, which relies on the replay seeing
+        the dict this layer already wrote into; if a replay ever arrives with a
+        fresh dict instead, not advancing the counter makes the re-draw return the
+        SAME K rather than a new one, so the backward still matches the depths the
+        forward actually ran.
         """
         d = self.config.num_nextn_predict_layers
         ratio = getattr(self.config, "mtp_depth_sampling", None)
@@ -1425,7 +1433,8 @@ class MultiTokenPredictionLayer(FleetLayer):
             self._mtp_sampling_counter = 0
         base = int(getattr(self.config, "seed", 0) or 0)
         seed = base * 1_000_003 + self._mtp_sampling_counter
-        self._mtp_sampling_counter += 1
+        if paddle.is_grad_enabled() or not self.training:
+            self._mtp_sampling_counter += 1
         rng = np.random.default_rng(seed)
         k = int(rng.choice(len(probs), p=probs)) + 1
         return max(1, min(k, d))

@@ -536,6 +536,39 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
         ):
             self._colocation_check([[0], [1]])
 
+    def test_sampling_is_idempotent_under_recompute(self):
+        """A recompute replay must reuse the forward's K, not draw a new one.
+
+        Otherwise the backward would be computed for a different set of depths
+        than the forward ran -- silently wrong gradients rather than a crash. Two
+        things protect this: the caller's `"mtp_sampled_depth" not in dict_args`
+        guard, and _sample_mtp_depth only advancing its counter outside a replay.
+        The counter is the observable: one step over one micro-batch must advance
+        it exactly once no matter how many times forward is entered.
+        """
+        config = GPTConfig(
+            **_base_kwargs(num_nextn=3),
+            use_dense_mtp=False,
+            mtp_depth_sampling=[0.0, 1.0, 0.0],
+            recompute_granularity="full",
+            recompute_method="uniform",
+            recompute_num_layers=1,
+        )
+        model = gpt_builder(config, num_stages=1)
+        depth0 = next(la for la in _mtp_layers(model) if la.layer_number == 0)
+
+        loss = _run_step(model, config, self.strategy)
+        assert loss is not None and not paddle.isnan(loss).any(), (
+            "recompute + sampling step did not produce a usable loss"
+        )
+        assert depth0._mtp_sampling_counter == 1, (
+            "one micro-batch must draw K exactly once; counter="
+            f"{depth0._mtp_sampling_counter} means a recompute replay re-drew it"
+        )
+        assert depth0._last_sampled_depth == 2, (
+            f"P(K=2)=1 was configured, got {depth0._last_sampled_depth}"
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
