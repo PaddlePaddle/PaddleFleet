@@ -18,6 +18,7 @@ import functools
 import inspect
 import random
 import unittest
+from unittest import mock
 
 import numpy as np
 import paddle
@@ -117,41 +118,45 @@ def _run_step(model, config, strategy):
     )
 
 
+def _base_kwargs(num_nextn=2):
+    return {
+        "num_hidden_layers": 2,
+        "hidden_size": 512,
+        "vocab_size": 100,
+        "max_sequence_length": 64,
+        "num_attention_heads": 4,
+        "moe_expert_fusion": False,
+        "intermediate_size": 1024,
+        "normalization": "RMSNorm",
+        "hidden_dropout_prob": 0.0,
+        "attention_dropout": 0.0,
+        "n_routed_experts": 8,
+        "moe_intermediate_size": 1024,
+        "moe_token_dispatcher_type": "alltoall",
+        "n_shared_experts": 1,
+        "use_bias": False,
+        "rotary_percent": 1.0,
+        "rotary_base": 10000,
+        "rope_scaling": 1.0,
+        "init_method": functools.partial(
+            paddle.nn.init.xavier_uniform_, gain=1.0
+        ),
+        "output_layer_init_method": functools.partial(
+            paddle.nn.init.xavier_uniform_, gain=1.0
+        ),
+        "tie_word_embeddings": True,
+        "use_qk_norm": True,
+        "num_nextn_predict_layers": num_nextn,
+    }
+
+
 class TestMTPSharedWeights(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.strategy = _init_fleet()
 
     def _base_kwargs(self, num_nextn=2):
-        return {
-            "num_hidden_layers": 2,
-            "hidden_size": 512,
-            "vocab_size": 100,
-            "max_sequence_length": 64,
-            "num_attention_heads": 4,
-            "moe_expert_fusion": False,
-            "intermediate_size": 1024,
-            "normalization": "RMSNorm",
-            "hidden_dropout_prob": 0.0,
-            "attention_dropout": 0.0,
-            "n_routed_experts": 8,
-            "moe_intermediate_size": 1024,
-            "moe_token_dispatcher_type": "alltoall",
-            "n_shared_experts": 1,
-            "use_bias": False,
-            "rotary_percent": 1.0,
-            "rotary_base": 10000,
-            "rope_scaling": 1.0,
-            "init_method": functools.partial(
-                paddle.nn.init.xavier_uniform_, gain=1.0
-            ),
-            "output_layer_init_method": functools.partial(
-                paddle.nn.init.xavier_uniform_, gain=1.0
-            ),
-            "tie_word_embeddings": True,
-            "use_qk_norm": True,
-            "num_nextn_predict_layers": num_nextn,
-        }
+        return _base_kwargs(num_nextn)
 
     def test_off_by_default(self):
         """Without mtp_shared_weights every MTP depth keeps its own parameters."""
@@ -435,6 +440,101 @@ class TestMTPDepthSampling(unittest.TestCase):
         assert logits[2] is None and logits[3] is None, (
             "depths >= K must be None placeholders"
         )
+
+
+@unittest.skipUnless(
+    PADDLE_SUPPORTS_SHARED_SUBMODULE,
+    "installed paddle's SharedLayerDesc lacks shared_submodule_weight_only",
+)
+class TestMTPSharedWeightsGuards(unittest.TestCase):
+    """The defensive branches of the sharing machinery.
+
+    These paths only fire on a malformed build (diverged specs, MTP depths split
+    across pipeline stages), so they are driven directly rather than through a
+    real multi-card run.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.strategy = _init_fleet()
+
+    def _independent_model(self, num_nextn=2):
+        """A model whose MTP depths are NOT shared, with the flag flipped on
+        afterwards so _alias_shared_layer takes the widened branch when called
+        by hand."""
+        config = GPTConfig(**_base_kwargs(num_nextn))
+        model = gpt_builder(config, num_stages=1)
+        model.config.mtp_shared_weights = True
+        mtp = _mtp_layers(model)
+        assert len(mtp) == num_nextn
+        return model, mtp
+
+    def test_alias_raises_on_shape_mismatch(self):
+        """A diverged spec must fail loudly, and via raise rather than assert so
+        `python -O` cannot strip it."""
+        model, mtp = self._independent_model()
+        mtp[1].enorm.weight = paddle.create_parameter(
+            shape=[mtp[0].enorm.weight.shape[0] + 1], dtype="float32"
+        )
+        with self.assertRaisesRegex(RuntimeError, r"shape_mismatch=1"):
+            model._alias_shared_layer(mtp[1], mtp[0])
+
+    def test_alias_raises_on_missing_param(self):
+        """A parameter present on the destination depth but absent from the pivot
+        is counted as missing and reported."""
+        model, mtp = self._independent_model()
+        mtp[1].add_parameter(
+            "probe_only_on_dest",
+            paddle.create_parameter(shape=[2], dtype="float32"),
+        )
+        with self.assertRaisesRegex(RuntimeError, r"missing=1"):
+            model._alias_shared_layer(mtp[1], mtp[0])
+
+    def test_all_weights_skips_mtp_embed_sublayer(self):
+        """all_weights must drop mtp_embed even when it exists. Attached by hand
+        here because a real mtp_embed needs enable_mtp_magic_send, which in turn
+        requires pipeline_model_parallel_size > 1."""
+        _, mtp = self._independent_model()
+        layer = mtp[0]
+        assert layer.mtp_embed is None, (
+            "expected no mtp_embed without magic send"
+        )
+        layer.add_sublayer("mtp_embed", paddle.nn.Linear(4, 4))
+        names = [n for n, _ in layer.all_weights]
+        assert names, "all_weights should not be empty"
+        assert not [n for n in names if n.startswith("mtp_embed.")], (
+            f"mtp_embed must be filtered out, got {names}"
+        )
+        assert "mtp_embed.weight" in dict(layer.named_parameters()), (
+            "the probe sublayer should be visible to named_parameters"
+        )
+
+    def _colocation_check(self, layout):
+        """Run the co-location check with a faked pipe-group layout."""
+        model, _ = self._independent_model()
+
+        def _fake_all_gather_object(object_list, obj, group=None):
+            object_list.extend(layout)
+
+        with mock.patch.object(
+            paddle.distributed,
+            "all_gather_object",
+            side_effect=_fake_all_gather_object,
+        ):
+            model._assert_mtp_depths_colocated_for_sampling()
+
+    def test_colocation_accepts_single_stage(self):
+        """All depths on one stage is the supported layout."""
+        self._colocation_check([[0, 1]])
+
+    def test_colocation_rejects_split_depths(self):
+        """Split depths must raise: K rides in dict_args and does not cross a
+        stage boundary, so the off-stage depths would silently run in full while
+        the loss still normalises over K."""
+        with self.assertRaisesRegex(
+            RuntimeError, r"requires every MTP depth to live on ONE"
+        ):
+            self._colocation_check([[0], [1]])
 
 
 if __name__ == "__main__":
