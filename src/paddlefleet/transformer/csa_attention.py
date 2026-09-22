@@ -67,12 +67,10 @@ from paddlefleet.transformer.indexcache_state import (
     INDEXCACHE_DISTILL_STATE_SERVED_COUNT,
     INDEXCACHE_DISTILL_STATE_TOPK_INDICES,
     INDEXCACHE_DISTILL_STATE_TOPK_PROBS,
-    INDEXCACHE_STATE_KIND_DISTILL,
-    INDEXCACHE_STATE_KIND_INVALID,
-    INDEXCACHE_STATE_KIND_TOPK_ONLY,
     INDEXCACHE_STATE_TOPK_IDXS,
     INDEXCACHE_TOPK_ONLY_STATE_LEN,
     INDEXCACHE_TOPK_ONLY_STATE_PRODUCER_LAYER,
+    IndexCacheStateKind,
     apply_stop_gradient_mask,
     detach_stop_gradient_tensor,
     format_indexcache_gradient_summary,
@@ -2941,7 +2939,9 @@ class CompressedSparseAttention(FleetLayer):
         )
 
     @staticmethod
-    def _indexcache_state_kind(indexcache_state: tuple | list | None) -> str:
+    def _indexcache_state_kind(
+        indexcache_state: tuple | list | None,
+    ) -> IndexCacheStateKind:
         return state_kind(indexcache_state)
 
     def _indexcache_validate_state_for_reuse(
@@ -2949,9 +2949,9 @@ class CompressedSparseAttention(FleetLayer):
         indexcache_state: tuple | list | None,
         c4_ordinal: int,
         pattern: str,
-    ) -> str:
+    ) -> IndexCacheStateKind:
         state_kind = self._indexcache_state_kind(indexcache_state)
-        if state_kind == INDEXCACHE_STATE_KIND_INVALID:
+        if state_kind == IndexCacheStateKind.INVALID:
             raise ValueError(
                 "IndexCache state must be either topk-only "
                 f"({INDEXCACHE_TOPK_ONLY_STATE_LEN} tensors) or distill "
@@ -2960,14 +2960,14 @@ class CompressedSparseAttention(FleetLayer):
                 + self._indexcache_context_msg(c4_ordinal, pattern)
             )
         if (
-            state_kind == INDEXCACHE_STATE_KIND_DISTILL
+            state_kind == IndexCacheStateKind.DISTILL
             and not self._indexcache_multi_layer_distill_enabled()
         ):
             raise RuntimeError(
                 "IndexCache reuse-only expects a topk-only indexcache_state; "
                 "distill-state tensors require "
                 "indexcache_multi_layer_distill=True. "
-                f"state_kind={state_kind}. "
+                f"state_kind={state_kind.value}. "
                 + self._indexcache_context_msg(c4_ordinal, pattern)
             )
         return state_kind
@@ -3305,11 +3305,11 @@ class CompressedSparseAttention(FleetLayer):
         if not indexcache_state:
             return None, None, state_kind
         producer_layer = None
-        if state_kind == INDEXCACHE_STATE_KIND_DISTILL:
+        if state_kind == IndexCacheStateKind.DISTILL:
             producer_layer = self._indexcache_tensor_to_int(
                 indexcache_state[INDEXCACHE_DISTILL_STATE_PRODUCER_LAYER]
             )
-        elif state_kind == INDEXCACHE_STATE_KIND_TOPK_ONLY:
+        elif state_kind == IndexCacheStateKind.TOPK_ONLY:
             producer_layer = self._indexcache_tensor_to_int(
                 indexcache_state[INDEXCACHE_TOPK_ONLY_STATE_PRODUCER_LAYER]
             )
@@ -3346,7 +3346,7 @@ class CompressedSparseAttention(FleetLayer):
             self._indexcache_multi_layer_distill_enabled()
             and tilelang_indexer_loss_state is not None
         ):
-            state_kind = INDEXCACHE_STATE_KIND_DISTILL
+            state_kind = IndexCacheStateKind.DISTILL
             if use_config_fallback:
                 self.config._indexcache_last_served_count = served_count
             self._indexcache_distill_debug(
@@ -3355,11 +3355,11 @@ class CompressedSparseAttention(FleetLayer):
                 f"loss_scale={loss_scale:.8g}"
             )
         else:
-            state_kind = INDEXCACHE_STATE_KIND_TOPK_ONLY
+            state_kind = IndexCacheStateKind.TOPK_ONLY
         self._indexcache_debug(
             "action=produce "
             f"c4_ordinal={c4_ordinal} pattern={pattern} "
-            f"state_kind={state_kind} "
+            f"state_kind={state_kind.value} "
             f"topk_shape={list(compress_topk_idxs.shape)}"
         )
         packed_state = self._indexcache_pack_state(
@@ -3368,7 +3368,7 @@ class CompressedSparseAttention(FleetLayer):
             served_count,
             fuse_producer_loss,
         )
-        if state_kind == INDEXCACHE_STATE_KIND_DISTILL and use_config_fallback:
+        if state_kind == IndexCacheStateKind.DISTILL and use_config_fallback:
             self.config._indexcache_last_distill_state = (
                 packed_state[INDEXCACHE_DISTILL_STATE_TOPK_INDICES],
                 packed_state[INDEXCACHE_DISTILL_STATE_TOPK_PROBS],
@@ -3397,7 +3397,7 @@ class CompressedSparseAttention(FleetLayer):
             raise RuntimeError(
                 "indexcache_topk_pattern requested reuse before an explicit "
                 "producer top-k state exists. "
-                f"state_kind={state_kind}. "
+                f"state_kind={state_kind.value}. "
                 + self._indexcache_context_msg(c4_ordinal, pattern)
             )
         cached_shape = list(cached.shape)
@@ -3415,7 +3415,7 @@ class CompressedSparseAttention(FleetLayer):
             producer_layer = self._indexcache_infer_producer_layer(
                 c4_ordinal, pattern
             )
-        if state_kind == INDEXCACHE_STATE_KIND_DISTILL:
+        if state_kind == IndexCacheStateKind.DISTILL:
             original_width = int(
                 indexcache_state[INDEXCACHE_DISTILL_STATE_TOPK_PROBS].shape[-1]
             )
@@ -3443,7 +3443,7 @@ class CompressedSparseAttention(FleetLayer):
         self._indexcache_debug(
             "action=reuse "
             f"c4_ordinal={c4_ordinal} pattern={pattern} "
-            f"producer_layer={producer_layer} state_kind={state_kind} "
+            f"producer_layer={producer_layer} state_kind={state_kind.value} "
             f"topk_shape={cached_shape}"
         )
         return cached
@@ -3470,7 +3470,7 @@ class CompressedSparseAttention(FleetLayer):
         served_count = None
         if indexcache_state is not None:
             state_kind = self._indexcache_state_kind(indexcache_state)
-            if state_kind == INDEXCACHE_STATE_KIND_DISTILL:
+            if state_kind == IndexCacheStateKind.DISTILL:
                 producer_state = (
                     indexcache_state[INDEXCACHE_DISTILL_STATE_TOPK_INDICES],
                     indexcache_state[INDEXCACHE_DISTILL_STATE_TOPK_PROBS],

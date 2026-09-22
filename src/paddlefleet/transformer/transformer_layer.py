@@ -59,9 +59,8 @@ from paddlefleet.transformer.identity_op import IdentityFuncOp, IdentityOp
 from paddlefleet.transformer.indexcache_state import (
     INDEXCACHE_DISTILL_STATE_LEN,
     INDEXCACHE_RECOMPUTE_STATE_MAX_LEN,
-    INDEXCACHE_STATE_KIND_DISTILL,
-    INDEXCACHE_STATE_KIND_TOPK_ONLY,
     INDEXCACHE_TOPK_ONLY_STATE_LEN,
+    IndexCacheStateKind,
     apply_stop_gradient_mask,
     clone_state_outputs,
     state_from_slots,
@@ -164,8 +163,8 @@ def _is_indexcache_recompute_state(value):
     ):
         return False
     return state_kind(value) in (
-        INDEXCACHE_STATE_KIND_TOPK_ONLY,
-        INDEXCACHE_STATE_KIND_DISTILL,
+        IndexCacheStateKind.TOPK_ONLY,
+        IndexCacheStateKind.DISTILL,
     )
 
 

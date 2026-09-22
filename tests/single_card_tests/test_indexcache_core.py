@@ -40,8 +40,7 @@ from paddlefleet.transformer.dsa_attention import (
 from paddlefleet.transformer.indexcache_state import (
     INDEXCACHE_DISTILL_GRAD_INDICES,
     INDEXCACHE_DISTILL_STATE_TOPK_INDICES_PLACEHOLDER,
-    INDEXCACHE_STATE_KIND_DISTILL,
-    INDEXCACHE_STATE_KIND_TOPK_ONLY,
+    IndexCacheStateKind,
     apply_stop_gradient_mask,
     format_indexcache_gradient_summary,
     state_from_slots,
@@ -120,6 +119,22 @@ def _make_layer(config, layer_number):
     object.__setattr__(layer, "cp_size", 1)
     object.__setattr__(layer, "training", True)
     return layer
+
+
+class TestIndexCacheStateKind(unittest.TestCase):
+    def test_layout_classification_returns_enum_members(self):
+        cases = (
+            (None, IndexCacheStateKind.NONE),
+            ((), IndexCacheStateKind.NONE),
+            ([], IndexCacheStateKind.NONE),
+            ((None,) * 3, IndexCacheStateKind.TOPK_ONLY),
+            ([None] * 8, IndexCacheStateKind.DISTILL),
+            ((None,), IndexCacheStateKind.INVALID),
+            ((None,) * 9, IndexCacheStateKind.INVALID),
+        )
+        for state, expected in cases:
+            with self.subTest(state=state):
+                self.assertIs(state_kind(state), expected)
 
 
 class TestIndexCacheGradientNumerics(unittest.TestCase):
@@ -906,7 +921,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
         topk = paddle.arange(6, dtype="int32").reshape([1, 2, 3])
         state = producer._indexcache_cache_topk(topk, 0, pattern)
 
-        self.assertEqual(state_kind(state), INDEXCACHE_STATE_KIND_TOPK_ONLY)
+        self.assertEqual(state_kind(state), IndexCacheStateKind.TOPK_ONLY)
         served = _make_layer(config, 1)
         reused = served._indexcache_reuse_topk(1, 2, 1, pattern, state)
         self.assertTrue(paddle.equal_all(reused, topk).item())
@@ -939,7 +954,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
             loss_scale=0.015,
         )
 
-        self.assertEqual(state_kind(state), INDEXCACHE_STATE_KIND_DISTILL)
+        self.assertEqual(state_kind(state), IndexCacheStateKind.DISTILL)
         self.assertEqual(INDEXCACHE_DISTILL_GRAD_INDICES, (5,))
         self.assertEqual(
             [state[idx].numel() for idx in (1, 2, 3, 4)], [1, 1, 1, 1]
@@ -961,7 +976,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
         slots = state_to_slots(state)
         self.assertEqual(len(slots), 8)
         restored = state_from_slots(slots)
-        self.assertEqual(state_kind(restored), INDEXCACHE_STATE_KIND_DISTILL)
+        self.assertEqual(state_kind(restored), IndexCacheStateKind.DISTILL)
         self.assertEqual(producer._indexcache_served_count(pattern, 0), 3)
         self.assertAlmostEqual(producer._indexcache_scaled_loss_coeff(2), 0.015)
 
@@ -1139,7 +1154,7 @@ class TestIndexCacheCoreState(unittest.TestCase):
             loss_scale=0.03,
         )
 
-        self.assertEqual(state_kind(state), INDEXCACHE_STATE_KIND_DISTILL)
+        self.assertEqual(state_kind(state), IndexCacheStateKind.DISTILL)
         self.assertIsNone(config._indexcache_last_topk_idxs)
         self.assertIsNone(config._indexcache_last_layer_number)
         self.assertIsNone(config._indexcache_last_distill_state)

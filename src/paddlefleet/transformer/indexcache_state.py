@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import math
+from enum import Enum
 from typing import TYPE_CHECKING
 
 import paddle
@@ -23,10 +24,14 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 
-INDEXCACHE_STATE_KIND_NONE = "none"
-INDEXCACHE_STATE_KIND_TOPK_ONLY = "topk_only"
-INDEXCACHE_STATE_KIND_DISTILL = "distill"
-INDEXCACHE_STATE_KIND_INVALID = "invalid"
+class IndexCacheStateKind(Enum):
+    """Supported IndexCache tensor-state layouts and invalid-state sentinel."""
+
+    NONE = "none"
+    TOPK_ONLY = "topk_only"
+    DISTILL = "distill"
+    INVALID = "invalid"
+
 
 INDEXCACHE_TOPK_ONLY_STATE_LEN = 3
 INDEXCACHE_DISTILL_STATE_LEN = 8
@@ -139,22 +144,22 @@ def format_indexcache_gradient_summary(
     )
 
 
-def state_kind(indexcache_state: tuple | list | None) -> str:
+def state_kind(indexcache_state: tuple | list | None) -> IndexCacheStateKind:
     if not indexcache_state:
-        return INDEXCACHE_STATE_KIND_NONE
+        return IndexCacheStateKind.NONE
     state_len = len(indexcache_state)
     if state_len == INDEXCACHE_TOPK_ONLY_STATE_LEN:
-        return INDEXCACHE_STATE_KIND_TOPK_ONLY
+        return IndexCacheStateKind.TOPK_ONLY
     if state_len == INDEXCACHE_DISTILL_STATE_LEN:
-        return INDEXCACHE_STATE_KIND_DISTILL
-    return INDEXCACHE_STATE_KIND_INVALID
+        return IndexCacheStateKind.DISTILL
+    return IndexCacheStateKind.INVALID
 
 
 def is_valid_state(indexcache_state: tuple | list | None) -> bool:
     return state_kind(indexcache_state) in (
-        INDEXCACHE_STATE_KIND_NONE,
-        INDEXCACHE_STATE_KIND_TOPK_ONLY,
-        INDEXCACHE_STATE_KIND_DISTILL,
+        IndexCacheStateKind.NONE,
+        IndexCacheStateKind.TOPK_ONLY,
+        IndexCacheStateKind.DISTILL,
     )
 
 
@@ -169,9 +174,9 @@ def apply_stop_gradient_mask(
 ) -> tuple | None:
     indexcache_state = _as_state_tuple(indexcache_state)
     kind = state_kind(indexcache_state)
-    if kind == INDEXCACHE_STATE_KIND_NONE:
+    if kind == IndexCacheStateKind.NONE:
         return None
-    if kind == INDEXCACHE_STATE_KIND_INVALID:
+    if kind == IndexCacheStateKind.INVALID:
         raise ValueError(
             "IndexCache state must be either topk-only "
             f"({INDEXCACHE_TOPK_ONLY_STATE_LEN} tensors) or distill "
@@ -186,7 +191,7 @@ def apply_stop_gradient_mask(
                 f"type={type(tensor).__name__} at index={idx}."
             )
         tensor.stop_gradient = not (
-            kind == INDEXCACHE_STATE_KIND_DISTILL
+            kind == IndexCacheStateKind.DISTILL
             and idx in INDEXCACHE_DISTILL_GRAD_INDICES
         )
     return indexcache_state
