@@ -350,6 +350,17 @@ class TestTwoLevelPreGateOverlap(_TwoLevelBase):
         out.sum().backward()
         self.assertIsNotNone(x.grad)
 
+    def test_bf16_ring_requires_pre_gate(self):
+        # The two-level bf16 ring has no inline fallback either: a direct
+        # ring_forward without the pre-gate prefetch must raise (a real
+        # RuntimeError, so it survives ``python -O``), not read a None handle.
+        disp = _dispatcher(self.ep_group, self.num_experts)
+        idx, w = self._routing()
+        with self.assertRaisesRegex(RuntimeError, "pre-gate prefetch"):
+            disp.ring_forward(
+                self._tokens(), w, idx, _scale_expert_fn(2.0), w.dtype
+            )
+
     def test_stale_pre_gate_is_drained_on_next_call(self):
         # A pre_gate not consumed by ring_forward must be waited out by the next
         # pre_gate_token_ag (drops the in-flight round-0 gather/hop safely).
@@ -384,7 +395,7 @@ class TestTwoLevelFp8Ring(_TwoLevelBase):
     def test_fp8_ring_requires_pre_gate(self):
         disp = self._fp8_dispatcher()
         idx, w = self._routing()
-        with self.assertRaisesRegex(AssertionError, "pre-gate prefetch"):
+        with self.assertRaisesRegex(RuntimeError, "pre-gate prefetch"):
             disp.ring_forward(
                 self._tokens128(), w, idx, _fp8_expert_fn(), w.dtype
             )

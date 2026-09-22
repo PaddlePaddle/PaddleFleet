@@ -2802,9 +2802,9 @@ class _FP8TokenPack(paddle.autograd.PyLayer):
 class _FP8TokenShift(paddle.autograd.PyLayer):
     """One cyclic inter-node hop of the fp8 token, data and scale side by side.
 
-    Two non-blocking all-to-alls rather than one over a fused buffer: packing
-    them together would cost a full copy of the data every hop, which is more
-    than the second launch costs. Both tasks land in ``handle`` so the caller can
+    Two non-blocking all-to-all collectives rather than one over a fused buffer:
+    packing them together would cost a full copy of the data every hop, which is
+    more than the second launch costs. Both tasks land in ``handle`` so the caller can
     drain them after the expert call is enqueued; that deferred wait is what lets
     the hop run underneath the GEMM. The returned buffers are valid only after
     that drain, exactly like :class:`_InterRingShift`.
@@ -3557,10 +3557,13 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
         if fp8_ring:
             # The fp8 ring has exactly one entry point: pre_gate_token_ag packed
             # the token and started round 0's gather and hop before the gate.
-            assert pre is not None, (
-                "RingMoE fp8 dispatch requires the pre-gate prefetch: MoELayer "
-                "must call pre_gate_token_ag() before ring_forward()."
-            )
+            # A real raise (not assert) so the invariant survives ``python -O``
+            # instead of degenerating into a None subscript.
+            if pre is None:
+                raise RuntimeError(
+                    "RingMoE fp8 dispatch requires the pre-gate prefetch: "
+                    "MoELayer must call pre_gate_token_ag() before ring_forward()."
+                )
             meta = pre["meta"]
             cur_data, cur_scale = pre["data"], pre["scale"]
         elif intra_on:
@@ -3569,10 +3572,11 @@ class RingMoETokenDispatcher(AllGatherTokenDispatcher):
             # moe_allgather_gate_overlap), so round 0's gather and hop are already
             # in flight. Adopt the pre-gate's reshaped copy as the carrier so the
             # tensor whose bytes are on the wire is the one carrying the gradient.
-            assert pre is not None, (
-                "RingMoE dispatch requires the pre-gate prefetch: MoELayer must "
-                "call pre_gate_token_ag() before ring_forward()."
-            )
+            if pre is None:
+                raise RuntimeError(
+                    "RingMoE dispatch requires the pre-gate prefetch: MoELayer "
+                    "must call pre_gate_token_ag() before ring_forward()."
+                )
             cur_tok = pre["data"]
         # else: degenerate single-node ring (no intra level) -- nothing was
         # pre-gated, cur_tok stays the local token and round 0 gathers nothing.
