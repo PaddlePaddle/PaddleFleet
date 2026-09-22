@@ -104,6 +104,9 @@ def _run_pp(mtp_depth_sampling, seed=46, **extra_config):
 
     # Count transformer_layer invocations per MTP depth so the tests can observe
     # that depths >= K were actually skipped, not merely that the step survived.
+    # A forward pre-hook is used rather than replacing layer.transformer_layer:
+    # paddle's Layer.__setattr__ raises TypeError when a name already bound to a
+    # sublayer is assigned a non-Layer value.
     mtp_layers = [
         layer
         for layer in model.run_function
@@ -113,11 +116,10 @@ def _run_pp(mtp_depth_sampling, seed=46, **extra_config):
     for layer in mtp_layers:
         body_calls[layer.layer_number] = 0
 
-        def _counting(dict_args, _layer=layer, _orig=layer.transformer_layer):
-            body_calls[_layer.layer_number] += 1
-            return _orig(dict_args)
+        def _count(_mod, _inp, _depth=layer.layer_number):
+            body_calls[_depth] += 1
 
-        layer.transformer_layer = _counting
+        layer.transformer_layer.register_forward_pre_hook(_count)
 
     data = paddle.randint(low=0, high=128, shape=(micro, 64 + MTP_DEGREE + 1))
     input_ids = data[:, :-1]
@@ -204,7 +206,11 @@ class TestMTPDepthSamplingPP(unittest.TestCase):
         assert all(n == 0 for n in skipped.values()), (
             f"K=1 must skip every depth >= 1, body_calls={body_calls}"
         )
-        depth0 = next(la for la in mtp_layers if la.layer_number == 0)
+        depth0 = next((la for la in mtp_layers if la.layer_number == 0), None)
+        assert depth0 is not None, (
+            "co-location is enforced for sampling, so a rank holding MTP layers "
+            f"must hold depth 0; got {sorted(body_calls)}"
+        )
         assert getattr(depth0, "_last_sampled_depth", None) == 1, (
             f"expected K=1, got {getattr(depth0, '_last_sampled_depth', None)}"
         )
