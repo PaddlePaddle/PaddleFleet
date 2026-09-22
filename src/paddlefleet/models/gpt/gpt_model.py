@@ -259,16 +259,23 @@ class GPTModel(PipelineLayer):
             self._assert_mtp_depths_colocated_for_sampling()
 
     def _assert_mtp_depths_colocated_for_sampling(self):
-        """Require all MTP depths on a single pipeline stage when sampling is on.
+        """Require all MTP depths on the LAST pipeline stage when sampling is on.
 
         ``_sample_mtp_depth`` draws K in the depth-0 layer and publishes it as
         ``dict_args["mtp_sampled_depth"]``; deeper depths and the LM head read it
         back with ``dict_args.get("mtp_sampled_depth", D)``. That carrier is a plain
         Python int passed between layers within a stage -- p2p only ships tensors, so
-        it does not cross a stage boundary. If the depths were split across stages,
-        the later stages would fall back to D, run every depth, and the loss's
-        normalisation over K would no longer match the depths actually computed: a
-        silent shift of the training objective rather than a crash.
+        it does not cross a stage boundary. Two consumers therefore have to sit on
+        the same stage as the draw:
+
+        * the deeper MTP depths -- otherwise they fall back to D and run in full;
+        * the MTP LM head -- otherwise it projects the skipped depths' (stale)
+          hidden slices and the loss normalises over D instead of K.
+
+        The LM head and the loss always land on the last stage, so requiring the
+        depths to be there covers both. Either way the failure mode is a silent
+        shift of the training objective rather than a crash, which is why this is
+        checked rather than documented.
 
         Collective: all PP ranks must reach the all_gather, so this runs whenever
         sampling is on and pipeline_model_parallel_size > 1, on every rank.
@@ -283,18 +290,23 @@ class GPTModel(PipelineLayer):
         paddle.distributed.all_gather_object(
             gathered, local_depths, group=hcg.get_pipe_parallel_group()
         )
-        holders = [depths for depths in gathered if depths]
+        # gathered is indexed by pipe-group rank, i.e. by stage.
+        holder_stages = [i for i, depths in enumerate(gathered) if depths]
+        last_stage = len(gathered) - 1
         expected = list(range(self.config.num_nextn_predict_layers))
-        if len(holders) != 1 or sorted(holders[0]) != expected:
+        if holder_stages != [last_stage] or sorted(gathered[last_stage]) != (
+            expected
+        ):
             raise RuntimeError(
-                "mtp_depth_sampling requires every MTP depth to live on ONE "
-                f"pipeline stage, but the depths are laid out as {gathered} across "
-                f"the pipe group (expected a single stage holding {expected}). K is "
-                "published through dict_args, which does not cross a stage boundary, "
-                "so the off-stage depths would silently ignore the sampled K and run "
-                "in full while the loss still normalises over K. Either keep the MTP "
-                "layers on one stage (adjust seg_method) or disable "
-                "mtp_depth_sampling."
+                "mtp_depth_sampling requires every MTP depth to live on the LAST "
+                f"pipeline stage ({last_stage}), but the depths are laid out as "
+                f"{gathered} across the pipe group (expected stage {last_stage} to "
+                f"hold {expected} and no other stage to hold any). K is published "
+                "through dict_args, which does not cross a stage boundary, so "
+                "off-stage depths would silently ignore the sampled K and run in "
+                "full, and an off-stage MTP LM head would project the skipped "
+                "depths anyway. Either keep the MTP layers on the last stage "
+                "(adjust seg_method) or disable mtp_depth_sampling."
             )
 
     def _alias_shared_layer(self, dest_layer, src_layer):

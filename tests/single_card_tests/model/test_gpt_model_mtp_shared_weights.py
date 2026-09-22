@@ -523,18 +523,27 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
         ):
             model._assert_mtp_depths_colocated_for_sampling()
 
-    def test_colocation_accepts_single_stage(self):
-        """All depths on one stage is the supported layout."""
-        self._colocation_check([[0, 1]])
+    def test_colocation_accepts_depths_on_last_stage(self):
+        """All depths on the last stage is the supported layout."""
+        self._colocation_check([[], [0, 1]])
 
     def test_colocation_rejects_split_depths(self):
         """Split depths must raise: K rides in dict_args and does not cross a
         stage boundary, so the off-stage depths would silently run in full while
         the loss still normalises over K."""
         with self.assertRaisesRegex(
-            RuntimeError, r"requires every MTP depth to live on ONE"
+            RuntimeError, r"requires every MTP depth to live on the LAST"
         ):
             self._colocation_check([[0], [1]])
+
+    def test_colocation_rejects_depths_off_last_stage(self):
+        """Depths co-located but NOT on the last stage must also raise: the MTP LM
+        head and the loss live on the last stage, so they would never see K and
+        would project the skipped depths anyway."""
+        with self.assertRaisesRegex(
+            RuntimeError, r"requires every MTP depth to live on the LAST"
+        ):
+            self._colocation_check([[0, 1], []])
 
     def test_sampling_is_idempotent_under_recompute(self):
         """A recompute replay must reuse the forward's K, not draw a new one.
