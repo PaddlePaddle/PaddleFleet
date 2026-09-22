@@ -684,7 +684,7 @@ class SonicMoEExpert(GroupedMLPExpert):
         self.sonic_moe_config.enabled = self.config.fp8 is not None
         self.sonic_moe_config.fp8_wgrad = self.config.fp8_wgrad
         self.sonic_moe_config.fuse_y1_quant = True
-        self.sonic_moe_config.fuse_y1_bf16_trunc = True
+        self.sonic_moe_config.fuse_y1_bf16_trunc = False
         self.sonic_moe_config.recompute_z = False
         clamp_value = self.config.activation_func_clamp_value
         self.sonic_moe_config.swiglu_clamp_value = (
