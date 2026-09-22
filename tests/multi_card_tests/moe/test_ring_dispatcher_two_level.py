@@ -93,12 +93,15 @@ def _ensure_fleet():
     return _pg_collection
 
 
-def _dispatcher(ep_group, num_experts, gpus_per_node=2):
+def _dispatcher(ep_group, num_experts, gpus_per_node=2, fp8_dispatch=False):
     from paddlefleet.transformer.moe import token_dispatcher as td
 
     with mock.patch.object(td, "_RING_GPUS_PER_NODE", gpus_per_node):
         return td.RingMoETokenDispatcher(
-            ep_group, ep_group.nranks, num_experts=num_experts
+            ep_group,
+            ep_group.nranks,
+            num_experts=num_experts,
+            fp8_dispatch=fp8_dispatch,
         )
 
 
@@ -120,7 +123,9 @@ def _weighted_expert_fn():
     return expert_fn
 
 
-class TestTwoLevelRing(unittest.TestCase):
+class _TwoLevelBase(unittest.TestCase):
+    """Fleet once per process, fresh seeds and a two-level EP group per test."""
+
     @classmethod
     def setUpClass(cls):
         cls.pg_collection = _ensure_fleet()
@@ -166,6 +171,8 @@ class TestTwoLevelRing(unittest.TestCase):
         w.stop_gradient = False
         return idx, w
 
+
+class TestTwoLevelRing(_TwoLevelBase):
     def test_topology_is_two_level(self):
         disp = _dispatcher(self.ep_group, self.num_experts)
         self.assertEqual((disp.G, disp.N), (2, self.ep_size // 2))
@@ -277,6 +284,129 @@ class TestTwoLevelRing(unittest.TestCase):
         # Draining a taskless handle (degenerate group) must be a no-op.
         self.assertIs(disp._rs_async(part, None, {}), part)
         td.RingMoETokenDispatcher._drain([{}])
+
+
+class _Fp8StraightThrough(paddle.autograd.PyLayer):
+    """Stand-in for the fp8 expert GEMM: e4m3 in, bf16 out, bf16 grad back.
+
+    The gather PyLayers hand the expert an e4m3 tensor and expect a bf16 dx back
+    (their ReduceScatter would otherwise trip NCCL's "float8 not supported for
+    reductions"). Reproducing that dtype contract lets the fp8 ring run without
+    the real SonicMoE grouped GEMM.
+    """
+
+    @staticmethod
+    def forward(ctx, tok_fp8):
+        ctx.set_grad_in_dtype_consistent(False)
+        ctx.set_materialize_grads(False)
+        return tok_fp8.astype("bfloat16")
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad
+
+
+def _fp8_expert_fn():
+    """Expert fn with the real ring call signature; consumes the gathered e4m3
+    tokens straight-through so the fp8 ring is exercised end to end."""
+
+    def expert_fn(
+        g_tok,
+        g_idx,
+        g_w,
+        use_fp8,
+        tokens_per_expert=None,
+        fp8_scale=None,
+        recompute_moe_gate_up=False,
+        fp8_combine_grad_handle=None,
+        sync_free_sizing=False,
+    ):
+        return _Fp8StraightThrough.apply(g_tok)
+
+    return expert_fn
+
+
+class TestTwoLevelPreGateOverlap(_TwoLevelBase):
+    """bf16 gate-overlap: pre_gate_token_ag() then ring_forward() must match the
+    inline path and drive the prefetch / gather-ahead / _order_after code."""
+
+    def test_pre_gate_matches_inline_forward(self):
+        disp = _dispatcher(self.ep_group, self.num_experts)
+        idx, w = self._routing()
+        x = self._tokens()
+        disp.pre_gate_token_ag(x)  # round-0 gather + hop issued before the gate
+        out = disp.ring_forward(x, w, idx, _scale_expert_fn(2.0), w.dtype)
+        np.testing.assert_allclose(
+            out.numpy(),
+            (x.detach() * 2.0 * self.ep_size).numpy(),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        out.sum().backward()
+        self.assertIsNotNone(x.grad)
+
+    def test_stale_pre_gate_is_drained_on_next_call(self):
+        # A pre_gate not consumed by ring_forward must be waited out by the next
+        # pre_gate_token_ag (drops the in-flight round-0 gather/hop safely).
+        disp = _dispatcher(self.ep_group, self.num_experts)
+        disp.pre_gate_token_ag(self._tokens(requires_grad=False))
+        disp.pre_gate_token_ag(self._tokens(requires_grad=False))
+        idx, w = self._routing()
+        out = disp.ring_forward(
+            self._tokens(), w, idx, _scale_expert_fn(2.0), w.dtype
+        )
+        self.assertEqual(out.shape, [self.T_local, self.d_latent])
+
+
+class TestTwoLevelFp8Ring(_TwoLevelBase):
+    """fp8 dispatch on the two-level ring: needs a 128-aligned hidden width and
+    the pre-gate entry point. Expert GEMM is stubbed straight-through."""
+
+    def setUp(self):
+        super().setUp()
+        self.H = 128  # fp8 block-scale tile alignment
+
+    def _fp8_dispatcher(self):
+        return _dispatcher(self.ep_group, self.num_experts, fp8_dispatch=True)
+
+    def _tokens128(self, requires_grad=True):
+        x = paddle.full(
+            [self.T_local, self.H], float(self.rank + 1), dtype="bfloat16"
+        )
+        x.stop_gradient = not requires_grad
+        return x
+
+    def test_fp8_ring_requires_pre_gate(self):
+        disp = self._fp8_dispatcher()
+        idx, w = self._routing()
+        with self.assertRaisesRegex(AssertionError, "pre-gate prefetch"):
+            disp.ring_forward(
+                self._tokens128(), w, idx, _fp8_expert_fn(), w.dtype
+            )
+
+    def test_fp8_rejects_unaligned_hidden(self):
+        disp = self._fp8_dispatcher()
+        idx, w = self._routing()
+        x = paddle.full([self.T_local, 8], 1.0, dtype="bfloat16")
+        disp.pre_gate_token_ag(x)
+        with self.assertRaisesRegex(ValueError, "multiple of 128"):
+            disp.ring_forward(x, w, idx, _fp8_expert_fn(), w.dtype)
+
+    def test_fp8_pre_gate_then_ring_forward(self):
+        from paddlefleet.transformer.moe import token_dispatcher as td
+
+        disp = self._fp8_dispatcher()
+        idx, w = self._routing()
+        x = self._tokens128()
+        before = td._PREFETCH_CONSUMED
+        disp.pre_gate_token_ag(x)
+        out = disp.ring_forward(x, w, idx, _fp8_expert_fn(), w.dtype)
+        self.assertEqual(out.shape, [self.T_local, self.H])
+        # The prefetched fp8 gather actually ran (not silently skipped).
+        self.assertGreater(td._PREFETCH_CONSUMED, before)
+        out.sum().backward()
+        self.assertIsNotNone(x.grad)
+        self.assertEqual(x.grad.shape, [self.T_local, self.H])
 
 
 if __name__ == "__main__":
