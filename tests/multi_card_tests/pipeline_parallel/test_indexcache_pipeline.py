@@ -27,11 +27,19 @@ import paddle.distributed as dist
 import paddle.nn.functional as F
 from paddle import nn
 from paddle.distributed import fleet
-from paddle.distributed.fleet import distributed_model
-from paddle.distributed.fleet.meta_parallel import LayerDesc, PipelineLayer
+from paddle.distributed.fleet.meta_parallel import (
+    LayerDesc,
+    PipelineLayer,
+    PipelineParallel,
+)
+from paddle.distributed.fleet.meta_parallel.pp_utils import (
+    forward_backward_overlap_utils as fbo,
+    utils as paddle_utils,
+)
 
+from paddlefleet.distributed.model import distributed_model
 from paddlefleet.pipeline_parallel.indexcache_adapter import (
-    register_indexcache_pipeline_adapter,
+    IndexCachePipelineLayer,
 )
 from paddlefleet.transformer.indexcache_state import apply_stop_gradient_mask
 
@@ -46,11 +54,12 @@ class _IndexCacheProducer(nn.Layer):
         )
 
     def forward(self, inputs):
-        hidden_states = inputs["hidden_states"]
+        return self._outputs(self.producer_scale, inputs["hidden_states"])
+
+    @staticmethod
+    def _outputs(scale, hidden_states):
         batch, seq = hidden_states.shape
-        logits = paddle.stack(
-            [self.producer_scale, -self.producer_scale], axis=-1
-        ).reshape([1, 1, 2])
+        logits = paddle.stack([scale, -scale], axis=-1).reshape([1, 1, 2])
         topk_probs = F.softmax(logits, axis=-1).expand([batch, seq, 2])
         topk_indices = paddle.arange(batch * seq * 2, dtype="int32").reshape(
             [batch, seq, 2]
@@ -120,6 +129,41 @@ class _IndexCacheServed(nn.Layer):
         return hidden_states * 0.0 + state[5][..., 0]
 
 
+class _RecomputedProducer(_IndexCacheProducer):
+    def forward(self, inputs):
+        from paddle.distributed.fleet.recompute import recompute
+
+        def body(scale, hidden):
+            result = self._outputs(scale, hidden)
+            return tuple(
+                t.clone()
+                for t in (result["hidden_states"], *result["indexcache_state"])
+            )
+
+        result = recompute(
+            body,
+            self.producer_scale,
+            inputs["hidden_states"],
+            use_reentrant=True,
+        )
+        return {
+            "hidden_states": result[0],
+            "indexcache_state": apply_stop_gradient_mask(result[1:]),
+        }
+
+
+class _ReplacingProducer(nn.Layer):
+    def __init__(self):
+        super().__init__()
+        self.local_scale = self.create_parameter(
+            [1], default_initializer=nn.initializer.Constant(1.0)
+        )
+
+    def forward(self, inputs):
+        # A new producer ends the upstream producer's gradient lifetime.
+        return inputs["hidden_states"] * 0 + self.local_scale
+
+
 class _MeanLoss(nn.Layer):
     def forward(self, output, _labels):
         return output.mean()
@@ -138,28 +182,41 @@ class TestIndexCachePipeline(unittest.TestCase):
             "pp_degree": 2,
         }
         strategy.pipeline_configs = {
-            "accumulate_steps": 1,
+            "accumulate_steps": 2,
             "micro_batch_size": 1,
         }
         fleet.init(is_collective=True, strategy=strategy)
-        register_indexcache_pipeline_adapter(
-            SimpleNamespace(
-                indexcache_topk_pattern="FS",
-            )
-        )
 
     def test_f_to_s_state_and_gradient_cross_stage(self):
-        model = PipelineLayer(
+        self._run_case(_IndexCacheProducer, _IndexCacheServed, False)
+
+    def test_recomputed_producer_gradient_cross_stage(self):
+        self._run_case(_RecomputedProducer, _IndexCacheServed, False)
+
+    def test_replaced_producer_sends_zero_gradient(self):
+        self._run_case(_IndexCacheProducer, _ReplacingProducer, True)
+
+    def _run_case(self, producer_type, served_type, zero_gradient):
+        originals = (
+            paddle_utils.dict_to_tuple_helper,
+            paddle_utils.tuple_to_dict_helper,
+            PipelineParallel._backward_step,
+            fbo.ScheduleNode.backward,
+            fbo.detach_and_requires_grad,
+            fbo.clone_and_clear_dataptr,
+        )
+        model = IndexCachePipelineLayer(
             layers=[
-                LayerDesc(_IndexCacheProducer),
-                LayerDesc(_IndexCacheServed),
+                LayerDesc(producer_type),
+                LayerDesc(served_type),
             ],
             num_stages=2,
             loss_fn=_MeanLoss(),
         )
+        model.config = SimpleNamespace(indexcache_topk_pattern="FS")
         pipeline = distributed_model(model)
-        inputs = {"hidden_states": paddle.ones([1, 2], dtype="float32")}
-        labels = paddle.zeros([1, 1], dtype="float32")
+        inputs = {"hidden_states": paddle.ones([2, 2], dtype="float32")}
+        labels = paddle.zeros([2, 1], dtype="float32")
 
         loss = pipeline.forward_backward_pipeline((inputs, labels))
         self.assertIsInstance(loss, paddle.Tensor)
@@ -174,10 +231,47 @@ class TestIndexCachePipeline(unittest.TestCase):
             self.assertEqual(len(producer_parameters), 1)
             producer_grad = producer_parameters[0].grad
             self.assertIsNotNone(producer_grad)
-            self.assertGreater(abs(float(producer_grad.item())), 0.0)
+            reference = paddle.to_tensor([0.0], stop_gradient=False)
+            # forward_backward_pipeline accumulates the two micro-batch losses.
+            reference_loss = (
+                2
+                * F.softmax(
+                    paddle.stack([reference, -reference], axis=-1), axis=-1
+                )[..., 0].mean()
+            )
+            reference_loss.backward()
+            self.assertAlmostEqual(
+                float(producer_grad.item()),
+                0.0 if zero_gradient else float(reference.grad.item()),
+                places=5,
+            )
 
+        evaluated = pipeline.eval_batch((inputs, labels), compute_loss=True)
+        self.assertTrue(bool(paddle.isfinite(evaluated).all()))
+        baseline = PipelineLayer(
+            layers=[LayerDesc(nn.Linear, 2, 2), LayerDesc(nn.Linear, 2, 2)],
+            num_stages=2,
+            loss_fn=_MeanLoss(),
+        )
+        ordinary = distributed_model(baseline)
+        self.assertIs(type(ordinary), PipelineParallel)
+        baseline_loss = ordinary.forward_backward_pipeline(
+            (paddle.ones([2, 2]), labels)
+        )
+        self.assertTrue(bool(paddle.isfinite(baseline_loss).all()))
+        self.assertEqual(
+            originals,
+            (
+                paddle_utils.dict_to_tuple_helper,
+                paddle_utils.tuple_to_dict_helper,
+                PipelineParallel._backward_step,
+                fbo.ScheduleNode.backward,
+                fbo.detach_and_requires_grad,
+                fbo.clone_and_clear_dataptr,
+            ),
+        )
         dist.barrier()
 
 
 if __name__ == "__main__":
-    unittest.main()
+    unittest.main(failfast=True)

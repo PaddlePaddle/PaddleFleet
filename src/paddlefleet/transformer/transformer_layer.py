@@ -347,12 +347,6 @@ class TransformerLayer(nn.Layer):
         # scheduler, so install here rather than in one subclass: the base is the
         # only place every transformer variant passes through.
         install_recompute_p2p_overlap(config)
-        if getattr(config, "indexcache_topk_pattern", None):
-            from paddlefleet.pipeline_parallel.indexcache_adapter import (
-                register_indexcache_pipeline_adapter,
-            )
-
-            register_indexcache_pipeline_adapter(config)
         TransformerLayer._gpt_model_use_experimental_version = (
             config.gpt_model_use_experimental_version
         )

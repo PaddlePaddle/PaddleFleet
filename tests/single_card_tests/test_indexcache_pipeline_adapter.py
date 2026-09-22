@@ -12,443 +12,192 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import logging
+"""Instance-scoped IndexCache pipeline boundaries and gradient contracts."""
+
 import unittest
-from contextlib import contextmanager
-from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import paddle
 from paddle.distributed.fleet.meta_parallel import pipeline_parallel
-from paddle.distributed.fleet.meta_parallel.pp_utils.forward_backward_overlap_utils import (
-    ScheduleNode,
-)
-from paddle.distributed.fleet.meta_parallel.pp_utils.p2p_communication import (
-    SendRecvMeta,
+from paddle.distributed.fleet.meta_parallel.pp_utils import (
+    forward_backward_overlap_utils as fbo,
+    utils as paddle_utils,
 )
 
+from paddlefleet.distributed.model import distributed_model
 from paddlefleet.pipeline_parallel.indexcache_adapter import (
-    _clone_and_clear_dataptr,
-    _debug_state5_gradient,
-    _detach_and_requires_grad,
-    _dict_to_tuple_helper,
-    _get_pipeline_key,
-    _indexcache_producer_layer,
+    IndexCachePipelineLayer,
+    IndexCachePipelineParallel,
     _normalize_pipeline_input_gradients,
-    _tuple_to_dict_helper,
-    register_indexcache_pipeline_adapter,
+    prepare_indexcache_pipeline_boundary,
 )
 
-_EMPTY_CONFIG = SimpleNamespace(
-    indexcache_topk_pattern=None,
-)
-_ADAPTER_CONFIG = SimpleNamespace(
-    indexcache_topk_pattern="FS",
-)
-_EMPTY_PATTERN_REGISTRATION = register_indexcache_pipeline_adapter(
-    _EMPTY_CONFIG
-)
-_FIRST_REGISTRATION = register_indexcache_pipeline_adapter(_ADAPTER_CONFIG)
-_SECOND_REGISTRATION = register_indexcache_pipeline_adapter(_ADAPTER_CONFIG)
 
-
-def _make_distill_state(offset):
-    return (
-        paddle.to_tensor([offset], dtype="int64"),
-        paddle.zeros([1]),
-        paddle.zeros([1]),
-        paddle.zeros([1]),
-        paddle.to_tensor([offset], dtype="int64"),
-        paddle.to_tensor([0.5 + offset], stop_gradient=False),
-        paddle.to_tensor([offset], dtype="int64"),
-        paddle.to_tensor([0], dtype="int64"),
+def make_state(distill=True):
+    if not distill:
+        return (
+            paddle.zeros([1, 2], dtype="int32"),
+            paddle.ones([1], dtype="int64"),
+            paddle.ones([1], dtype="int64"),
+        )
+    return tuple(
+        paddle.ones([1, 2], dtype="float32")
+        if i == 5
+        else paddle.ones([1], dtype="int64")
+        for i in range(8)
     )
 
 
-@contextmanager
-def _debug_logging(stream=None):
-    loggers = [
-        logging.getLogger(name)
-        for name in (
-            "paddlefleet.pipeline_parallel.indexcache_adapter",
-            "paddlefleet.transformer.csa_attention",
-        )
-    ]
-    levels = [logger.level for logger in loggers]
-    handler = logging.StreamHandler(stream) if stream is not None else None
-    try:
-        for logger in loggers:
-            logger.setLevel(logging.DEBUG)
-            if handler is not None:
-                logger.addHandler(handler)
-        yield
-    finally:
-        for logger, level in zip(loggers, levels):
-            if handler is not None:
-                logger.removeHandler(handler)
-            logger.setLevel(level)
-
-
-class TestIndexCachePipelineBackward(unittest.TestCase):
-    def test_adapter_registration_is_explicit_and_idempotent(self):
-        self.assertFalse(_EMPTY_PATTERN_REGISTRATION)
-        self.assertTrue(_FIRST_REGISTRATION)
-        self.assertFalse(_SECOND_REGISTRATION)
-        self.assertIs(
-            pipeline_parallel.dict_to_tuple_helper,
-            _dict_to_tuple_helper,
-        )
-        self.assertIs(
-            pipeline_parallel.tuple_to_dict_helper,
-            _tuple_to_dict_helper,
-        )
-
-    def test_clear_dataptr_clone_uses_zero_allocation_alias_gradient(self):
-        class ForbiddenAllocatingClone:
-            @staticmethod
-            def apply(_value):
-                raise AssertionError("allocating FakeClone must not run")
-
-        value = paddle.to_tensor([1.0, 2.0], stop_gradient=False)
-        cloned = _clone_and_clear_dataptr(
-            value,
-            ForbiddenAllocatingClone,
-            clear_dataptr=True,
-        )
-        paddle.autograd.backward(cloned, paddle.ones_like(value))
-
-        self.assertTrue(
-            paddle.equal_all(value.grad, paddle.ones_like(value)).item()
-        )
-
-    def test_info_logging_does_not_scan_gradient_tensors(self):
-        logger = logging.getLogger(
-            "paddlefleet.pipeline_parallel.indexcache_adapter"
-        )
-        old_level = logger.level
-        try:
-            logger.setLevel(logging.INFO)
-            with patch(
-                "paddlefleet.transformer.indexcache_state.summarize_indexcache_gradients",
-                side_effect=AssertionError(
-                    "INFO logging must not scan GPU tensors"
-                ),
-            ):
-                _debug_state5_gradient(
-                    "indexcache_state 5", paddle.ones([2]), "test", 2
+class TestIndexCachePipelineBoundary(unittest.TestCase):
+    def test_native_codec_roundtrip_preserves_leaves_and_masks(self):
+        for distill in (False, True):
+            with self.subTest(distill=distill):
+                state = make_state(distill)
+                source = {
+                    "hidden": paddle.ones([1]),
+                    "indexcache_state": state,
+                    "unused": None,
+                }
+                encoded = paddle_utils.dict_to_tuple_helper(
+                    prepare_indexcache_pipeline_boundary(source)
                 )
-        finally:
-            logger.setLevel(old_level)
-
-    def test_state5_debug_marker_reports_finite_and_nonzero(self):
-        cases = (
-            ("normal", paddle.to_tensor([0.0, 2.0]), True, True),
-            ("zero", paddle.zeros([2]), True, False),
-            ("nan", paddle.to_tensor([float("nan")]), False, False),
-            ("missing", None, False, False),
-        )
-        for name, grad, finite, nonzero in cases:
-            with self.subTest(name=name):
-                output = StringIO()
-                with (
-                    _debug_logging(),
-                    _debug_logging(output),
-                ):
-                    _debug_state5_gradient(
-                        "indexcache_state 5", grad, "test", 2
+                decoded, is_dict = paddle_utils.tuple_to_dict_helper(encoded)
+                self.assertTrue(is_dict)
+                result = prepare_indexcache_pipeline_boundary(decoded)
+                self.assertNotIn("unused", result)
+                self.assertIsInstance(result["indexcache_state"], tuple)
+                for index, tensor in enumerate(result["indexcache_state"]):
+                    self.assertIs(tensor, state[index])
+                    self.assertEqual(
+                        tensor.stop_gradient, not (distill and index == 5)
                     )
-                marker = output.getvalue()
-                self.assertIn("producer_layer=2", marker)
-                self.assertIn(f"grad_finite={finite}", marker)
-                self.assertIn(f"grad_nonzero={nonzero}", marker)
+                self.assertIn("unused", source)
 
-    def test_pipeline_metadata_recovers_state5_producer_layer(self):
-        with _debug_logging():
-            pipeline_inputs = _dict_to_tuple_helper(
-                {
-                    "hidden_states": paddle.to_tensor(
-                        [4.0], stop_gradient=False
-                    ),
-                    "indexcache_state": _make_distill_state(7),
-                }
-            )
-            _tuple_to_dict_helper(pipeline_inputs)
-            self.assertEqual(_indexcache_producer_layer(pipeline_inputs), 7)
-
-    def test_pipeline_metadata_avoids_item_after_dataptr_clear(self):
-        with _debug_logging():
-            pipeline_inputs = _dict_to_tuple_helper(
-                {
-                    "hidden_states": paddle.to_tensor(
-                        [4.0], stop_gradient=False
-                    ),
-                    "indexcache_state": _make_distill_state(7),
-                }
-            )
-            state5 = next(
-                tensor
-                for tensor in pipeline_inputs
-                if _get_pipeline_key(tensor) == "indexcache_state 5"
-            )
-            producer_tensor = next(
-                tensor
-                for tensor in pipeline_inputs
-                if _get_pipeline_key(tensor) == "indexcache_state 6"
-            )
-            delattr(state5, "_paddlefleet_indexcache_producer_layer")
-            _tuple_to_dict_helper(pipeline_inputs)
-            producer_tensor._clear_dataptr()
-
-            output = StringIO()
-            with _debug_logging(output):
-                gradients = _normalize_pipeline_input_gradients(
-                    pipeline_inputs,
-                    (paddle.ones([1]), paddle.ones([1])),
-                )
-
-            self.assertEqual(len(gradients), 2)
-            self.assertEqual(_indexcache_producer_layer(pipeline_inputs), 7)
-            self.assertIn("producer_layer=7", output.getvalue())
-
-    def test_missing_metadata_skips_released_producer_tensor(self):
-        with _debug_logging():
-            state = _make_distill_state(7)
-            state[6]._clear_dataptr()
-            pipeline_inputs = _dict_to_tuple_helper({"indexcache_state": state})
-
-            self.assertIsNone(_indexcache_producer_layer(pipeline_inputs))
-
-    def test_producer_metadata_survives_detach_and_clone(self):
-        class SimpleClone:
-            @staticmethod
-            def apply(value):
-                return value.clone()
-
-        with _debug_logging():
-            pipeline_inputs = _dict_to_tuple_helper(
-                {"indexcache_state": _make_distill_state(7)}
-            )
-            state5 = next(
-                tensor
-                for tensor in pipeline_inputs
-                if _get_pipeline_key(tensor) == "indexcache_state 5"
-            )
-            detached = _detach_and_requires_grad(state5)
-            cloned = _clone_and_clear_dataptr(state5, SimpleClone)
-
-            self.assertEqual(_indexcache_producer_layer((detached,)), 7)
-            self.assertEqual(_indexcache_producer_layer((cloned,)), 7)
-
-    def test_fresh_state_dict_captures_metadata_before_detach(self):
-        with _debug_logging():
-            inputs = {"indexcache_state": _make_distill_state(7)}
-            detached = _detach_and_requires_grad(inputs)
-            detached_state = detached["indexcache_state"]
-            detached_state[6]._clear_dataptr()
-
-            self.assertEqual(
-                _indexcache_producer_layer((detached_state[5],)), 7
-            )
-
-    def test_fresh_state_dict_captures_metadata_before_alias_clear(self):
-        class ForbiddenAllocatingClone:
-            @staticmethod
-            def apply(_value):
-                raise AssertionError("allocating FakeClone must not run")
-
-        with _debug_logging():
-            cloned = _clone_and_clear_dataptr(
-                {"indexcache_state": _make_distill_state(7)},
-                ForbiddenAllocatingClone,
-                clear_dataptr=True,
-            )
-            cloned_state = cloned["indexcache_state"]
-
-            self.assertEqual(_indexcache_producer_layer((cloned_state[5],)), 7)
-
-    def test_schedule_node_marker_uses_captured_producer_metadata(self):
-        node = ScheduleNode(
-            lambda inputs: {
-                "score": inputs["indexcache_state"][5] * 2,
-            },
-            name="indexcache_state5_gradient",
+    def test_missing_state_gradient_uses_preserved_metadata(self):
+        state = make_state()
+        encoded = paddle_utils.dict_to_tuple_helper(
+            prepare_indexcache_pipeline_boundary({"indexcache_state": state})
         )
-        output = StringIO()
+        decoded, _ = paddle_utils.tuple_to_dict_helper(encoded)
+        prepare_indexcache_pipeline_boundary(decoded)
+        state[5]._clear_dataptr()
+        grads = _normalize_pipeline_input_gradients(encoded, (None,))
+        self.assertEqual(list(grads[0].shape), [1, 2])
+        self.assertEqual(grads[0].dtype, paddle.float32)
+        self.assertEqual(float(grads[0].sum()), 0.0)
+
+    def test_missing_regular_gradient_still_raises(self):
+        hidden = paddle.ones([1])
+        hidden.stop_gradient = False
+        encoded = paddle_utils.dict_to_tuple_helper(
+            prepare_indexcache_pipeline_boundary(
+                {"hidden": hidden, "indexcache_state": make_state()}
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "outside IndexCache"):
+            _normalize_pipeline_input_gradients(encoded, (None, None))
+
+    def test_bad_gradient_arity_is_rejected(self):
+        encoded = paddle_utils.dict_to_tuple_helper(
+            prepare_indexcache_pipeline_boundary(
+                {"indexcache_state": make_state()}
+            )
+        )
+        with self.assertRaisesRegex(RuntimeError, "arity"):
+            _normalize_pipeline_input_gradients(encoded, ())
+
+    def test_standard_model_factory_delegates_without_patching(self):
+        original = (
+            paddle_utils.dict_to_tuple_helper,
+            paddle_utils.tuple_to_dict_helper,
+            pipeline_parallel.PipelineParallel._backward_step,
+            fbo.ScheduleNode.backward,
+            fbo.detach_and_requires_grad,
+            fbo.clone_and_clear_dataptr,
+        )
+        model = SimpleNamespace(
+            config=SimpleNamespace(indexcache_topk_pattern=None)
+        )
+        with patch(
+            "paddlefleet.distributed.model.fleet.distributed_model",
+            return_value=model,
+        ) as delegate:
+            self.assertIs(distributed_model(model), model)
+            delegate.assert_called_once_with(model)
+        self.assertEqual(
+            original,
+            (
+                paddle_utils.dict_to_tuple_helper,
+                paddle_utils.tuple_to_dict_helper,
+                pipeline_parallel.PipelineParallel._backward_step,
+                fbo.ScheduleNode.backward,
+                fbo.detach_and_requires_grad,
+                fbo.clone_and_clear_dataptr,
+            ),
+        )
+
+    def test_enabled_factory_selects_a_local_wrapper_and_rejects_unsupported_modes(
+        self,
+    ):
+        model = object.__new__(IndexCachePipelineLayer)
+        paddle.nn.Layer.__init__(model)
+        model.config = SimpleNamespace(indexcache_topk_pattern="FS")
+        model._num_virtual_pipeline_stages = 1
+        pp_config = SimpleNamespace(
+            use_dualpipev=False, forward_backward_overlap_scheduler=False
+        )
+        strategy = SimpleNamespace(
+            amp=False, hybrid_configs={"pp_configs": pp_config}
+        )
+        hcg = SimpleNamespace(get_pipe_parallel_world_size=lambda: 2)
+        marker = object()
         with (
-            _debug_logging(),
-            _debug_logging(output),
+            patch(
+                "paddlefleet.distributed.model.fleet.fleet._user_defined_strategy",
+                strategy,
+                create=True,
+            ),
+            patch(
+                "paddlefleet.distributed.model.fleet.get_hybrid_communicate_group",
+                return_value=hcg,
+            ),
+            patch(
+                "paddlefleet.distributed.model.IndexCachePipelineParallel",
+                return_value=marker,
+            ) as build,
         ):
-            outputs = node.forward({"indexcache_state": _make_distill_state(7)})
-            node.backward(paddle.ones_like(outputs["score"]))
+            self.assertIs(distributed_model(model), marker)
+            build.assert_called_once_with(model, hcg, strategy=strategy)
+            self.assertTrue(model._indexcache_instance_wrapper)
+            for attribute in (
+                "use_dualpipev",
+                "forward_backward_overlap_scheduler",
+            ):
+                setattr(pp_config, attribute, True)
+                with self.assertRaises(NotImplementedError):
+                    distributed_model(model)
+                setattr(pp_config, attribute, False)
+            model._num_virtual_pipeline_stages = 2
+            with self.assertRaisesRegex(NotImplementedError, "VPP=1"):
+                distributed_model(model)
+            model._num_virtual_pipeline_stages = 1
+            strategy.amp = True
+            with self.assertRaisesRegex(
+                NotImplementedError, "Trainer-managed AMP"
+            ):
+                distributed_model(model)
 
-        marker = output.getvalue()
-        self.assertIn("source=schedule_node", marker)
-        self.assertIn("producer_layer=7", marker)
-        self.assertIn("grad_finite=True", marker)
-        self.assertIn("grad_nonzero=True", marker)
-
-    def test_replaced_distill_state_uses_sendable_zero_gradients(self):
-        old_state = _make_distill_state(0)
-        new_state = _make_distill_state(10)
-        node = ScheduleNode(
-            lambda inputs: {
-                "hidden": inputs["hidden"] * 2,
-                "indexcache_state": new_state,
-            },
-            name="replace_indexcache_producer",
-        )
-
-        outputs = node.forward(
-            {
-                "hidden": paddle.to_tensor([4.0], stop_gradient=False),
-                "indexcache_state": old_state,
-            }
-        )
-        output_grads = tuple(
-            paddle.ones_like(tensor)
-            for tensor in _dict_to_tuple_helper(outputs)
-            if not tensor.stop_gradient
-        )
-        input_grads = node.backward(output_grads)
-
-        self.assertEqual(len(input_grads), 2)
-        self.assertTrue(
-            all(isinstance(grad, paddle.Tensor) for grad in input_grads)
-        )
-        self.assertTrue(all(not grad.stop_gradient for grad in input_grads))
-        self.assertEqual(input_grads[0].item(), 2.0)
-        self.assertEqual(input_grads[1].item(), 0.0)
-
-        meta = SendRecvMeta()
-        meta.set_send_message(input_grads)
-        self.assertEqual(len(meta.send_shape_message), 2)
-
-    def test_missing_non_indexcache_gradient_fails_fast(self):
-        node = ScheduleNode(
-            lambda inputs: {"hidden": inputs["hidden"] * 2},
-            name="drop_regular_pipeline_input",
-        )
-        outputs = node.forward(
-            {
-                "hidden": paddle.to_tensor([4.0], stop_gradient=False),
-                "unused": paddle.to_tensor([5.0], stop_gradient=False),
-            }
-        )
-        output_grads = tuple(
-            paddle.ones_like(tensor)
-            for tensor in _dict_to_tuple_helper(outputs)
-            if not tensor.stop_gradient
-        )
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "missing a gradient outside IndexCache state",
+    def test_backward_override_calls_parent_and_preserves_regular_result(self):
+        value = paddle.ones([1])
+        with patch.object(
+            pipeline_parallel.PipelineParallel,
+            "_backward_step",
+            return_value=value,
         ):
-            node.backward(output_grads)
-
-    def test_outer_pipeline_boundary_uses_sendable_zero_gradients(self):
-        pipeline_inputs = _dict_to_tuple_helper(
-            {
-                "hidden_states": paddle.to_tensor([4.0], stop_gradient=False),
-                "indexcache_state": _make_distill_state(0),
-            }
-        )
-        converted_inputs, use_dict = _tuple_to_dict_helper(pipeline_inputs)
-
-        self.assertTrue(use_dict)
-        self.assertIn("indexcache_state", converted_inputs)
-        self.assertTrue(
-            all(not hasattr(tensor, "key") for tensor in pipeline_inputs)
-        )
-
-        hidden_grad = paddle.ones_like(pipeline_inputs[0])
-        hidden_grad.stop_gradient = False
-        input_grads = _normalize_pipeline_input_gradients(
-            pipeline_inputs,
-            (hidden_grad, None),
-        )
-
-        self.assertEqual(len(input_grads), 2)
-        self.assertTrue(
-            all(isinstance(grad, paddle.Tensor) for grad in input_grads)
-        )
-        self.assertTrue(all(not grad.stop_gradient for grad in input_grads))
-        self.assertEqual(input_grads[0].item(), 1.0)
-        self.assertEqual(input_grads[1].item(), 0.0)
-
-        meta = SendRecvMeta()
-        meta.set_send_message(input_grads)
-        self.assertEqual(len(meta.send_shape_message), 2)
-
-    def test_outer_pipeline_boundary_preserves_baseline_none_gradient(self):
-        hidden = paddle.to_tensor([4.0], stop_gradient=False)
-        unused = paddle.to_tensor([5.0], stop_gradient=False)
-        input_grads = (paddle.ones_like(hidden), None)
-
-        normalized = _normalize_pipeline_input_gradients(
-            (hidden, unused),
-            input_grads,
-        )
-
-        self.assertIs(normalized, input_grads)
-
-    def test_outer_pipeline_boundary_handles_released_state(self):
-        pipeline_inputs = _dict_to_tuple_helper(
-            {
-                "hidden_states": paddle.to_tensor([4.0], stop_gradient=False),
-                "indexcache_state": _make_distill_state(0),
-            }
-        )
-        _tuple_to_dict_helper(pipeline_inputs)
-        released_inputs = [
-            tensor
-            for tensor in pipeline_inputs
-            if _get_pipeline_key(tensor) == "indexcache_state 5"
-        ]
-        expected_metadata = [
-            (list(tensor.shape), tensor.dtype) for tensor in released_inputs
-        ]
-        for tensor in released_inputs:
-            tensor._clear_dataptr()
-
-        hidden_grad = paddle.ones_like(pipeline_inputs[0])
-        hidden_grad.stop_gradient = False
-        input_grads = _normalize_pipeline_input_gradients(
-            pipeline_inputs,
-            (hidden_grad, None),
-        )
-
-        self.assertEqual(len(released_inputs), 1)
-        self.assertEqual(len(input_grads), 2)
-        for grad, (shape, dtype) in zip(input_grads[1:], expected_metadata):
-            self.assertEqual(list(grad.shape), shape)
-            self.assertEqual(grad.dtype, dtype)
-            self.assertFalse(grad.stop_gradient)
-            self.assertEqual(float(grad.sum().item()), 0.0)
-
-        meta = SendRecvMeta()
-        meta.set_send_message(input_grads)
-        self.assertEqual(len(meta.send_shape_message), 2)
-
-    def test_outer_pipeline_boundary_rejects_missing_hidden_gradient(self):
-        pipeline_inputs = _dict_to_tuple_helper(
-            {
-                "hidden_states": paddle.to_tensor([4.0], stop_gradient=False),
-                "indexcache_state": _make_distill_state(0),
-            }
-        )
-        _tuple_to_dict_helper(pipeline_inputs)
-
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "missing a gradient outside IndexCache state",
-        ):
-            _normalize_pipeline_input_gradients(
-                pipeline_inputs,
-                (None, None),
+            self.assertIs(
+                IndexCachePipelineParallel._backward_step(
+                    object.__new__(IndexCachePipelineParallel), None
+                ),
+                value,
             )
-
-
-if __name__ == "__main__":
-    unittest.main()
