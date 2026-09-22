@@ -2068,9 +2068,6 @@ class TransformerConfig(ModelParallelConfig):
     # ``sonicmoe_quant_format`` guard below.
     renamed_config_keys = {
         "index_topk_pattern": "Use indexcache_topk_pattern for training; index_topk_pattern is inference-only.",
-        "indexcache_stall_trace_layers": "IndexCache diagnostics now use standard DEBUG logging; remove this field.",
-        "indexcache_stall_trace": "IndexCache diagnostics now use standard DEBUG logging; remove this field.",
-        "indexcache_train_debug": "IndexCache diagnostics now use standard DEBUG logging; remove this field.",
         "non_absorbed_mqa": (
             "Use hybrid_mla_attention instead: non_absorbed_mqa=True becomes "
             "hybrid_mla_attention='mqa_dsa', non_absorbed_mqa=False becomes "

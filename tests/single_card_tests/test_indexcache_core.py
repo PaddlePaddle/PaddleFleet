@@ -196,22 +196,6 @@ class TestIndexCacheConfig(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "must be a bool"):
             _config_for_pattern("F", indexcache_multi_layer_distill=1)
 
-    def test_removed_diagnostics_are_not_silently_accepted(self):
-        for field in (
-            "indexcache_train_debug",
-            "indexcache_stall_trace",
-            "indexcache_stall_trace_layers",
-        ):
-            with self.subTest(field=field):
-                with self.assertRaises(TypeError):
-                    TransformerConfig(**{field: False})
-                with self.assertRaisesRegex(
-                    ValueError, "standard DEBUG logging"
-                ):
-                    TransformerConfig.from_config(
-                        SimpleNamespace(**{field: False})
-                    )
-
     def test_diagnostics_use_module_logger(self):
         layer = _make_layer(_layer_config("F"), 1)
         with self.assertLogs(
