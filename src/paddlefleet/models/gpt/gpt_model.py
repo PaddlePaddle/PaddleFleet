@@ -249,6 +249,53 @@ class GPTModel(PipelineLayer):
 
         # Tie GPTMTPLMHead weight to GPTMainLMHead weight on the same stage.
         self._tie_mtp_lm_head_weight()
+        # mtp_depth_sampling carries K in dict_args, which never crosses a stage
+        # boundary, so it requires every MTP depth on one stage. Checked here
+        # because __post_init__ cannot see the segmentation.
+        if (
+            getattr(self.config, "mtp_depth_sampling", None)
+            and self.config.pipeline_model_parallel_size > 1
+        ):
+            self._assert_mtp_depths_colocated_for_sampling()
+
+    def _assert_mtp_depths_colocated_for_sampling(self):
+        """Require all MTP depths on a single pipeline stage when sampling is on.
+
+        ``_sample_mtp_depth`` draws K in the depth-0 layer and publishes it as
+        ``dict_args["mtp_sampled_depth"]``; deeper depths and the LM head read it
+        back with ``dict_args.get("mtp_sampled_depth", D)``. That carrier is a plain
+        Python int passed between layers within a stage -- p2p only ships tensors, so
+        it does not cross a stage boundary. If the depths were split across stages,
+        the later stages would fall back to D, run every depth, and the loss's
+        normalisation over K would no longer match the depths actually computed: a
+        silent shift of the training objective rather than a crash.
+
+        Collective: all PP ranks must reach the all_gather, so this runs whenever
+        sampling is on and pipeline_model_parallel_size > 1, on every rank.
+        """
+        import paddle.distributed
+
+        local_depths = sorted(
+            layer.layer_number for layer in self._get_all_mtp_layers()
+        )
+        hcg = fleet.get_hybrid_communicate_group()
+        gathered = []
+        paddle.distributed.all_gather_object(
+            gathered, local_depths, group=hcg.get_pipe_parallel_group()
+        )
+        holders = [depths for depths in gathered if depths]
+        expected = list(range(self.config.num_nextn_predict_layers))
+        if len(holders) != 1 or sorted(holders[0]) != expected:
+            raise RuntimeError(
+                "mtp_depth_sampling requires every MTP depth to live on ONE "
+                f"pipeline stage, but the depths are laid out as {gathered} across "
+                f"the pipe group (expected a single stage holding {expected}). K is "
+                "published through dict_args, which does not cross a stage boundary, "
+                "so the off-stage depths would silently ignore the sampled K and run "
+                "in full while the loss still normalises over K. Either keep the MTP "
+                "layers on one stage (adjust seg_method) or disable "
+                "mtp_depth_sampling."
+            )
 
     def _alias_shared_layer(self, dest_layer, src_layer):
         """Alias a whole MTP layer, not just its ``transformer_layer``.
@@ -315,13 +362,20 @@ class GPTModel(PipelineLayer):
                 setattr(owner, leaf, src_param)
             aliased += 1
 
-        assert aliased == len(dest_named), (
-            f"MTP depth {dest_layer.layer_number} cannot be fully aliased onto "
-            f"depth {src_layer.layer_number}: aliased={aliased}/{len(dest_named)}, "
-            f"missing={missing}, shape_mismatch={shape_mismatch}. All MTP depths are "
-            "built from the same spec, so a mismatch means the specs diverged "
-            "(e.g. use_dense_mtp differing across depths)."
-        )
+        # Raise, not assert: ``python -O`` strips assertions, and this guards a
+        # correctness-critical invariant. If a spec really diverged, an assert-less
+        # run would continue with a partially aliased depth while shared_comm still
+        # syncs the full all_weights set -- the silent cross-stage divergence this
+        # override exists to prevent.
+        if aliased != len(dest_named):
+            raise RuntimeError(
+                f"MTP depth {dest_layer.layer_number} cannot be fully aliased onto "
+                f"depth {src_layer.layer_number}: aliased={aliased}/"
+                f"{len(dest_named)}, missing={missing}, "
+                f"shape_mismatch={shape_mismatch}. All MTP depths are built from the "
+                "same spec, so a mismatch means the specs diverged (e.g. "
+                "use_dense_mtp differing across depths)."
+            )
 
     def _get_weight_only_params(self):
         """Get all parameters marked with is_weight_only_mtp flag."""

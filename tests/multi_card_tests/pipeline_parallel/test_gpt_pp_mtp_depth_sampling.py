@@ -25,7 +25,11 @@ step finishes with a finite loss for:
   * mixed distribution (varying K)      -> K changes per micro-batch, must stay
                                            rank-consistent (else MoE all-to-all
                                            on the last stage would deadlock)
-It also works alongside the mtp_shared_last_layer weight-sharing mechanism.
+  * mtp_shared_weights + sampling       -> the combination the config layer allows
+
+Each case also counts transformer_layer invocations per MTP depth, so a
+regression that stopped skipping is caught: the old assertions only checked that
+the loss was finite, which stays true when every depth runs.
 """
 
 import functools
@@ -40,6 +44,9 @@ from paddle.distributed.fleet import distributed_model
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.training.initialize import initialize_fleet
+from paddlefleet.transformer.multi_token_prediction import (
+    MultiTokenPredictionLayer,
+)
 
 PP_DEGREE = 2
 MTP_DEGREE = 3
@@ -47,7 +54,7 @@ REPO_FLAG = os.getenv("repo_flag")
 SKIP_TESTS = REPO_FLAG != "paddlefleet"
 
 
-def _run_pp(mtp_depth_sampling, mtp_shared_last_layer=False, seed=46):
+def _run_pp(mtp_depth_sampling, seed=46, **extra_config):
     config = GPTConfig(
         moe_expert_fusion=False,
         vocab_size=128,
@@ -79,8 +86,8 @@ def _run_pp(mtp_depth_sampling, mtp_shared_last_layer=False, seed=46):
         moe_intermediate_size=512,
         gated_linear_unit=True,
         num_nextn_predict_layers=MTP_DEGREE,
-        mtp_shared_last_layer=mtp_shared_last_layer,
         mtp_depth_sampling=mtp_depth_sampling,
+        **extra_config,
     )
 
     micro = 1
@@ -95,6 +102,23 @@ def _run_pp(mtp_depth_sampling, mtp_shared_last_layer=False, seed=46):
     )
     pipe = distributed_model(model)
 
+    # Count transformer_layer invocations per MTP depth so the tests can observe
+    # that depths >= K were actually skipped, not merely that the step survived.
+    mtp_layers = [
+        layer
+        for layer in model.run_function
+        if isinstance(layer, MultiTokenPredictionLayer)
+    ]
+    body_calls = {}
+    for layer in mtp_layers:
+        body_calls[layer.layer_number] = 0
+
+        def _counting(dict_args, _layer=layer, _orig=layer.transformer_layer):
+            body_calls[_layer.layer_number] += 1
+            return _orig(dict_args)
+
+        layer.transformer_layer = _counting
+
     data = paddle.randint(low=0, high=128, shape=(micro, 64 + MTP_DEGREE + 1))
     input_ids = data[:, :-1]
     labels = data[:, 1:]
@@ -106,7 +130,8 @@ def _run_pp(mtp_depth_sampling, mtp_shared_last_layer=False, seed=46):
         },
         [labels] * num_acc,
     )
-    return pipe.forward_backward_pipeline(inputs, None)
+    loss = pipe.forward_backward_pipeline(inputs, None)
+    return loss, mtp_layers, body_calls
 
 
 @unittest.skipIf(SKIP_TESTS, "requires repo_flag=paddlefleet multi-card env")
@@ -155,17 +180,68 @@ class TestMTPDepthSamplingPP(unittest.TestCase):
         assert not paddle.isinf(loss).any(), "loss has Inf"
 
     def test_pp_sampling_disabled(self):
-        self._assert_finite(_run_pp(None))
+        loss, mtp_layers, body_calls = _run_pp(None)
+        self._assert_finite(loss)
+        # Baseline: with sampling off every depth this rank holds must run.
+        if mtp_layers:
+            assert all(n > 0 for n in body_calls.values()), (
+                f"sampling off must run every depth, body_calls={body_calls}"
+            )
 
     def test_pp_sampling_fixed_k1(self):
         # Depths >= 1 skipped on the last stage every step; the collective-free
         # sampler must not hang (the old broadcast(src=0) deadlocked here).
-        self._assert_finite(_run_pp([1.0, 0.0, 0.0]))
+        loss, mtp_layers, body_calls = _run_pp([1.0, 0.0, 0.0])
+        self._assert_finite(loss)
+        if not mtp_layers:
+            return
+        # The step surviving is not enough: a regression that stopped skipping
+        # would also produce a finite loss. Assert the skip actually happened.
+        assert body_calls.get(0, 0) > 0, (
+            f"depth 0 must always run, body_calls={body_calls}"
+        )
+        skipped = {d: n for d, n in body_calls.items() if d >= 1}
+        assert all(n == 0 for n in skipped.values()), (
+            f"K=1 must skip every depth >= 1, body_calls={body_calls}"
+        )
+        depth0 = next(la for la in mtp_layers if la.layer_number == 0)
+        assert getattr(depth0, "_last_sampled_depth", None) == 1, (
+            f"expected K=1, got {getattr(depth0, '_last_sampled_depth', None)}"
+        )
 
     def test_pp_sampling_mixed(self):
         # K varies per micro-batch; every rank running the MTP layer must draw
         # the same K deterministically or the MoE all-to-all deadlocks.
-        self._assert_finite(_run_pp([0.34, 0.33, 0.33]))
+        loss, mtp_layers, body_calls = _run_pp([0.34, 0.33, 0.33])
+        self._assert_finite(loss)
+        if mtp_layers:
+            assert body_calls.get(0, 0) > 0, (
+                f"depth 0 must always run, body_calls={body_calls}"
+            )
+
+    def test_pp_sampling_with_shared_weights(self):
+        """The combination the config layer now allows: cross-depth full sharing
+        plus sampling. All MTP depths stay on one stage, which
+        _assert_mtp_depths_colocated_for_sampling requires."""
+        loss, mtp_layers, body_calls = _run_pp(
+            [1.0, 0.0, 0.0], mtp_shared_weights=True
+        )
+        self._assert_finite(loss)
+        if not mtp_layers:
+            return
+        skipped = {d: n for d, n in body_calls.items() if d >= 1}
+        assert all(n == 0 for n in skipped.values()), (
+            f"K=1 must skip every depth >= 1, body_calls={body_calls}"
+        )
+        # Sharing must still hold: depth 1 sees depth 0's parameters.
+        if len(mtp_layers) >= 2:
+            d0 = dict(mtp_layers[0].all_weights)
+            not_shared = [
+                n for n, p in mtp_layers[1].all_weights if d0.get(n) is not p
+            ]
+            assert not not_shared, (
+                f"depths must share all_weights, not_shared={not_shared[:5]}"
+            )
 
 
 if __name__ == "__main__":

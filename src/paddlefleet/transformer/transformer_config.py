@@ -205,7 +205,14 @@ class TransformerConfig(ModelParallelConfig):
     broadcast and gradient allreduce work at pipeline_model_parallel_size > 1.
     Parameter identity is shared, so the LayerDesc tree is preserved and AOA still
     emits per-MTP checkpoint keys; on load, whichever depth's keys are read last
-    wins.
+    wins. mtp_embed is deliberately left out of the shared set -- GPTModel already
+    syncs it through _tie_mtp_embed_weights_intra_rank and the
+    _mtp_embed_global_group broadcast (see all_weights).
+
+    The cross-stage path means this flag alone tolerates MTP depths split across
+    stages. Combining it with mtp_depth_sampling does NOT: sampling additionally
+    requires the depths to be co-located, enforced by
+    GPTModel._assert_mtp_depths_colocated_for_sampling.
 
     Mutually exclusive with mtp_shared_last_layer (see __post_init__): one LayerDesc
     carries one key, and the two want different pivots. Requires
@@ -225,8 +232,13 @@ class TransformerConfig(ModelParallelConfig):
       sampled once per micro-batch from a private RNG seeded by a per-call
       counter, so every rank running the MTP layers derives the same K with no
       collective; MoE expert-parallel all-to-all therefore stays consistent.
-    Works under pipeline_model_parallel_size > 1 (covered by
-    tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_depth_sampling.py).
+    Works under pipeline_model_parallel_size > 1, but requires all MTP depths to
+    sit on a SINGLE pipeline stage: K is published as an int in dict_args, which
+    never crosses a stage boundary (p2p ships tensors only), so depths on a later
+    stage would fall back to D and run in full while the loss still normalises
+    over K. GPTModel._assert_mtp_depths_colocated_for_sampling enforces this at
+    build time, since the segmentation is not visible here. Covered by
+    tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_depth_sampling.py.
     Not yet validated at expert_model_parallel_size > 1."""
 
     separate_mtp_headloss: bool = False
