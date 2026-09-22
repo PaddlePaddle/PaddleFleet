@@ -67,6 +67,12 @@ from paddle.distributed.fleet.meta_parallel import (
     ScheduleNode,
 )
 from paddle.distributed.fleet.utils import recompute
+from paddle.distributed.flex_checkpoint.aoa.generation import (
+    join_name,
+    resolve_checkpoint_name_from_anchor,
+    resolve_single_name,
+    strip_name_suffix,
+)
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
@@ -79,6 +85,51 @@ from paddlefleet.tensor_parallel.layers import (
 )
 from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.utils import use_dsv4_accuracy_compatible
+
+# Model-side head segment every LM head instance normalizes to before its
+# checkpoint name is looked up. A model has at most one LM head tensor in the
+# checkpoint, but the live tree names the head after the role it plays --
+# ``lm_head``, ``shared_head`` once pipeline sharing splits it off, or
+# ``shared_mtp_lm_head`` when MTP gets a head of its own -- and those are Fleet
+# wiring facts, not checkpoint layout. Collapsing them here keeps the layout
+# question ("what is the head called in the checkpoint?") answerable by one
+# ``checkpoint_name_mapping`` entry per tensor instead of one per alias, and the
+# collapsed name is a model-side name, so it stays a mapping key rather than a
+# checkpoint name hardcoded in a component.
+_AOA_CANONICAL_HEAD_SEGMENT = "lm_head"
+
+# Model-side name of the token embedding weight relative to the root
+# ``model_name_prefix`` declares. This is the live name the embedding leaf
+# itself is resolved under, so a replica of that weight looks its checkpoint
+# name up with the very same key and the two cannot drift apart.
+CANONICAL_EMBEDDING_LOCAL_NAME = "embedding.embed_tokens.weight"
+
+
+def resolve_embedding_checkpoint_name(ctx) -> str:
+    """Resolves the checkpoint name of the token embedding weight.
+
+    A replica of the embedding -- a tied LM head, an MTP block's own embedding
+    -- has to name the single checkpoint tensor it is filled from, and that
+    tensor is named after the embedding itself, not after the replica's position
+    in the tree. Resolving it from the embedding's own model name keeps every
+    replica on whatever layout ``checkpoint_name_mapping`` declares, so a model
+    whose checkpoint calls it something else states that once, in the same entry
+    the embedding leaf goes through, and every replica follows.
+
+    Both directions call this: it only computes a name, so neither direction's
+    statements are derived from the other's.
+    """
+    single_name = join_name(
+        ctx.model_name_prefix, CANONICAL_EMBEDDING_LOCAL_NAME
+    )
+    return resolve_checkpoint_name_from_anchor(
+        single_name,
+        CANONICAL_EMBEDDING_LOCAL_NAME,
+        CANONICAL_EMBEDDING_LOCAL_NAME,
+        ctx.checkpoint_name_prefix,
+        ctx.checkpoint_name_mapping,
+        model_name_prefix=ctx.model_name_prefix,
+    )
 
 
 def SegLU(x, ranges, ts):
@@ -123,6 +174,14 @@ def SegLU(x, ranges, ts):
 
 
 class GPTLMHead(ColumnParallelLinear):
+    # Whether this head is the one that writes the head tensor to the
+    # checkpoint. Several heads can hold the same tensor (``GPTMainLMHead`` and
+    # ``GPTMTPLMHead`` under ``separate_mtp_headloss``) and the checkpoint keeps
+    # one copy, so exactly one of them writes it. Loading is unaffected: every
+    # head reads that one tensor. This head is the sole one on its own, so it
+    # writes; the two roles that come as a pair elect their writer below.
+    _aoa_writes_checkpoint_tensor = True
+
     def __init__(self, **kwargs):
         # Force-disable FP8 on the LM head.
         kwargs["disable_fp8"] = True
@@ -381,9 +440,133 @@ class GPTLMHead(ColumnParallelLinear):
             state_dict, shard_rules, structured_name_prefix
         )
 
+    def _resolve_aoa_names(
+        self,
+        ctx,
+        local_name,
+        structured_name_prefix,
+        checkpoint_lookup_drop_segment,
+    ):
+        """Resolves one head tensor to its ``(checkpoint_name, model_name)``.
+
+        The model side is the real live name, so a statement targets the key
+        this rank actually holds. The checkpoint side is resolved from the
+        alias-collapsed name instead (see ``_AOA_CANONICAL_HEAD_SEGMENT``),
+        which is what lets the three head aliases share one mapping entry.
+
+        Both directions call this: it only computes names, so neither
+        direction's statements are derived from the other's.
+        """
+        model_name = resolve_single_name(
+            local_name,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            ctx.model_name_prefix,
+        )
+        # A head sits one segment under its model root, so the segment right
+        # before the tensor name is the alias to collapse.
+        head_segment = strip_name_suffix(model_name, local_name).rsplit(".", 1)[
+            -1
+        ]
+        checkpoint_name = resolve_checkpoint_name_from_anchor(
+            model_name,
+            join_name(head_segment, local_name),
+            join_name(_AOA_CANONICAL_HEAD_SEGMENT, local_name),
+            ctx.checkpoint_name_prefix,
+            ctx.checkpoint_name_mapping,
+            model_name_prefix=ctx.model_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+        return checkpoint_name, model_name
+
+    def gen_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Checkpoint->model AOA for an LM head.
+
+        No ``^T``, unlike the rest of the ``ColumnParallelLinear`` family: this
+        head stores ``weight`` as ``[output_size_per_partition, input_size]``
+        and transposes it in ``forward``, which is already the checkpoint
+        layout.
+
+        With ``tie_word_embeddings`` the head has no tensor of its own in the
+        checkpoint: ``weight`` comes from the embedding's, and everything else
+        the head carries comes from nothing, mirroring the inverse direction,
+        which writes none of it. Otherwise every tensor is read from the head's
+        checkpoint name -- by each head that holds it, which is how two heads
+        sharing one tensor both get filled.
+        """
+        statements = []
+        own_state_dict = self.state_dict(
+            structured_name_prefix="", include_sublayers=False
+        )
+        for local_name in own_state_dict:
+            checkpoint_name, model_name = self._resolve_aoa_names(
+                ctx,
+                local_name,
+                structured_name_prefix,
+                checkpoint_lookup_drop_segment,
+            )
+            if not ctx.config.tie_word_embeddings:
+                statements.append(f"{checkpoint_name} -> {model_name}")
+            elif local_name == "weight":
+                statements.append(
+                    f"{resolve_embedding_checkpoint_name(ctx)} -> {model_name}"
+                )
+            else:
+                statements.append(f"_ -> {model_name}")
+        return statements
+
+    def gen_inv_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Inverse (model -> checkpoint) AOA, independently generated.
+
+        Same reason as the forward direction for carrying no ``^T``. A tied head
+        is not written at all -- the embedding already wrote that tensor -- and
+        when several heads hold the same tensor only the writer emits it, so the
+        checkpoint ends up with exactly one copy.
+        """
+        writes_checkpoint = (
+            self._aoa_writes_checkpoint_tensor
+            and not ctx.config.tie_word_embeddings
+        )
+        statements = []
+        own_state_dict = self.state_dict(
+            structured_name_prefix="", include_sublayers=False
+        )
+        for local_name in own_state_dict:
+            checkpoint_name, model_name = self._resolve_aoa_names(
+                ctx,
+                local_name,
+                structured_name_prefix,
+                checkpoint_lookup_drop_segment,
+            )
+            if writes_checkpoint:
+                statements.append(f"{model_name} -> {checkpoint_name}")
+            else:
+                statements.append(f"{model_name} -> _")
+        return statements
+
 
 class GPTMainLMHead(GPTLMHead):
     """Main LM Head, single prediction."""
+
+    # This role only exists under ``separate_mtp_headloss``, i.e. never without
+    # a ``GPTMTPLMHead`` beside it, so it is always the one that can be given
+    # up. And it has to be: both roles are pipeline-registered under the one
+    # shared key ``"embed"``, so when they land on the same rank only the first
+    # desc in the list -- the MTP one -- is ever instantiated, and a writer flag
+    # on this class would then belong to an object that does not exist.
+    _aoa_writes_checkpoint_tensor = False
 
     def __init__(self, **kwargs):
         kwargs.pop("block_attn_res", None)
@@ -428,6 +611,14 @@ class GPTMainLMHead(GPTLMHead):
 
 class GPTMTPLMHead(GPTLMHead):
     """MTP LM Head: splits concatenated hidden_states and computes per-MTP logits."""
+
+    # Under ``separate_mtp_headloss`` this head and ``GPTMainLMHead`` hold the
+    # same head tensor, and this one writes it. The choice is not free: both are
+    # pipeline-registered under the one shared key ``"embed"``, whose earlier
+    # desc wins per rank, and this head's desc comes first. So whenever the two
+    # land on the same rank this is the only head object that exists, and
+    # electing it keeps exactly one writer in every layout.
+    _aoa_writes_checkpoint_tensor = True
 
     def __init__(self, **kwargs):
         kwargs.pop("block_attn_res", None)

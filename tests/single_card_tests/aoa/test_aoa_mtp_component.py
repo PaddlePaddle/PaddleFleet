@@ -14,10 +14,11 @@
 #
 # Scope: an MTP block's AOA contract. The block declares one checkpoint lookup
 # drop segment (``transformer_layer``) for its whole subtree and enumerates
-# nothing itself, so this test pins: the inner transformer's tensors reach the
-# ordinary-layer mapping entries while the model side keeps the segment; direct
-# children are unaffected by the drop; ``eh_proj`` is transposed; and
-# ``mtp_embed`` gets no rule of its own.
+# nothing else itself, so this test pins: the inner transformer's tensors reach
+# the ordinary-layer mapping entries while the model side keeps the segment;
+# direct children are unaffected by the drop; ``eh_proj`` is transposed; and a
+# private ``mtp_embed`` copy is filled from the one embedding tensor the
+# checkpoint holds and is never written back.
 import os
 import sys
 
@@ -35,9 +36,10 @@ import unittest
 import paddle
 from paddle.distributed.flex_checkpoint.aoa.generation import AOAContext
 
-# Two entries of the shape a real model declares: both are written for an
-# ordinary layer, and the drop segment is what lets the second one also cover
-# an MTP block's inner transformer.
+# Three entries of the shape a real model declares: the first two are written
+# for an ordinary layer, and the drop segment is what lets the second one also
+# cover an MTP block's inner transformer. The third is the entry the embedding
+# leaf itself goes through, which is what a private embedding copy has to follow.
 _MAPPING = {
     "model.layers.$LAYER_ID.norm.weight": (
         "model.layers.$LAYER_ID.shared_head.norm.weight"
@@ -45,6 +47,7 @@ _MAPPING = {
     "model.layers.$LAYER_ID.mlp.down_proj.weight": (
         "model.layers.$LAYER_ID.block_sparse_moe.experts.w2.weight"
     ),
+    "model.embedding.embed_tokens.weight": "model.embed_tokens.weight",
 }
 
 # An MTP block is registered as a top-level pipeline layer at
@@ -123,8 +126,9 @@ def _make_mtp_stand_in(*, mtp_embed=False):
             self.eh_proj = _fused_linear_leaf()
             self.norm = _ParamLeaf()
             self.transformer_layer = _InnerTransformer()
-            if mtp_embed:
-                self.mtp_embed = _ParamLeaf()
+            # The real layer leaves this ``None`` unless
+            # ``enable_mtp_magic_send`` asks for a private copy.
+            self.mtp_embed = _ParamLeaf() if mtp_embed else None
 
     return _MTPStandIn()
 
@@ -134,6 +138,8 @@ _INNER_MD = "model.layers.3.transformer_layer.mlp.down_proj.weight"
 _NORM_CK = "model.layers.3.shared_head.norm.weight"
 _NORM_MD = "model.layers.3.norm.weight"
 _EH_MD = "model.layers.3.eh_proj.weight"
+_EMBED_CK = "model.embed_tokens.weight"
+_EMBED_MD = "model.layers.3.mtp_embed.weight"
 
 
 class TestMTPClassContract(unittest.TestCase):
@@ -197,8 +203,17 @@ class TestMTPForward(unittest.TestCase):
         )
         self.assertIn(f"{_EH_MD}^T -> {_EH_MD}", stmts)
 
-    def test_mtp_embed_gets_no_rule(self):
+    def test_mtp_embed_is_filled_from_the_one_embedding_tensor(self):
+        # The copy has model keys of its own, but the checkpoint holds a single
+        # embedding tensor, named by the entry the embedding leaf itself goes
+        # through -- not by the copy's position in the tree.
         stmts = _make_mtp_stand_in(mtp_embed=True).gen_aoa_statements(
+            _ctx(), structured_name_prefix=_PFX
+        )
+        self.assertIn(f"{_EMBED_CK} -> {_EMBED_MD}", stmts)
+
+    def test_a_block_without_a_copy_says_nothing_about_it(self):
+        stmts = _make_mtp_stand_in().gen_aoa_statements(
             _ctx(), structured_name_prefix=_PFX
         )
         self.assertFalse(any("mtp_embed" in s for s in stmts))
@@ -214,6 +229,7 @@ class TestMTPForward(unittest.TestCase):
                     f"{_INNER_CK} -> {_INNER_MD}",
                     f"{_NORM_CK} -> {_NORM_MD}",
                     f"{_EH_MD}^T -> {_EH_MD}",
+                    f"{_EMBED_CK} -> {_EMBED_MD}",
                 ]
             ),
         )
@@ -231,12 +247,9 @@ class TestMTPForward(unittest.TestCase):
         self.assertIn(
             "hf.layers.3.hnorm.weight -> model.layers.3.hnorm.weight", stmts
         )
-        self.assertIn(
-            "hf.layers.3.mtp_embed.weight -> model.layers.3.mtp_embed.weight",
-            stmts,
-        )
         # A mapping hit is a complete checkpoint name, so it ignores the root.
         self.assertIn(f"{_INNER_CK} -> {_INNER_MD}", stmts)
+        self.assertIn(f"{_EMBED_CK} -> {_EMBED_MD}", stmts)
 
 
 class TestMTPInverse(unittest.TestCase):
@@ -251,12 +264,24 @@ class TestMTPInverse(unittest.TestCase):
                     f"{_INNER_MD} -> {_INNER_CK}",
                     f"{_NORM_MD} -> {_NORM_CK}",
                     f"{_EH_MD}^T -> {_EH_MD}",
+                    f"{_EMBED_MD} -> _",
                 ]
             ),
         )
 
-    def test_mtp_embed_gets_no_rule(self):
+    def test_mtp_embed_is_discarded_rather_than_written(self):
+        # The checkpoint keeps one embedding tensor and the model root's
+        # embedding is what writes it, so the copy is dropped explicitly --
+        # without a statement the identity fallback would export it under a
+        # name of its own.
         stmts = _make_mtp_stand_in(mtp_embed=True).gen_inv_aoa_statements(
+            _ctx(), structured_name_prefix=_PFX
+        )
+        self.assertIn(f"{_EMBED_MD} -> _", stmts)
+        self.assertFalse(any(s.endswith(_EMBED_CK) for s in stmts))
+
+    def test_a_block_without_a_copy_says_nothing_about_it(self):
+        stmts = _make_mtp_stand_in().gen_inv_aoa_statements(
             _ctx(), structured_name_prefix=_PFX
         )
         self.assertFalse(any("mtp_embed" in s for s in stmts))

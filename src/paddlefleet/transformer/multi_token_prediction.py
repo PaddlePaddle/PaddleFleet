@@ -31,6 +31,9 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     ScatterOp,
     mark_as_sequence_parallel_parameter,
 )
+from paddle.distributed.flex_checkpoint.aoa.generation import (
+    resolve_single_name,
+)
 
 from paddlefleet import tensor_parallel
 from paddlefleet.context_parallel_utils import ContextParallelScatterOp
@@ -1018,6 +1021,32 @@ class MultiTokenPredictionLayer(FleetLayer):
     def transformer_layer_weights(self):
         return self.transformer_layer.named_parameters()
 
+    def _mtp_embed_model_names(self, ctx, structured_name_prefix):
+        """Yields the model-side name of every tensor ``mtp_embed`` owns.
+
+        ``enable_mtp_magic_send`` gives this block a private copy of the token
+        embedding, so the copy has model keys of its own while the checkpoint
+        still holds a single embedding tensor. The standard recursion resolves
+        those keys to themselves and so emits nothing for them, which is why
+        both directions state the copy's rule here. Yields nothing when the
+        block has no copy.
+
+        Both directions call this: it only computes names, so neither
+        direction's statements are derived from the other's.
+        """
+        if self.mtp_embed is None:
+            return
+        own_state_dict = self.mtp_embed.state_dict(
+            structured_name_prefix="", include_sublayers=False
+        )
+        for local_name in own_state_dict:
+            yield resolve_single_name(
+                local_name,
+                f"{structured_name_prefix}mtp_embed.",
+                ctx.pp_to_single_mapping,
+                ctx.model_name_prefix,
+            )
+
     def gen_aoa_statements(
         self,
         ctx,
@@ -1032,12 +1061,28 @@ class MultiTokenPredictionLayer(FleetLayer):
         components emit their own rules and nothing here enumerates them. An
         MTP block is always registered as a top-level pipeline layer, never
         inside another subtree, so there is no inherited segment to keep.
+
+        A private embedding copy is filled from the one embedding tensor the
+        checkpoint holds, the same tensor the model root's embedding reads.
         """
-        return super().gen_aoa_statements(
+        # Function-local: the GPT model package imports this module, so a
+        # module-level import back into it would be circular.
+        from paddlefleet.models.gpt.lm_head import (
+            resolve_embedding_checkpoint_name,
+        )
+
+        statements = super().gen_aoa_statements(
             ctx,
             structured_name_prefix=structured_name_prefix,
             checkpoint_lookup_drop_segment=_AOA_DROP_SEGMENT,
         )
+        for model_name in self._mtp_embed_model_names(
+            ctx, structured_name_prefix
+        ):
+            statements.append(
+                f"{resolve_embedding_checkpoint_name(ctx)} -> {model_name}"
+            )
+        return statements
 
     def gen_inv_aoa_statements(
         self,
@@ -1046,12 +1091,21 @@ class MultiTokenPredictionLayer(FleetLayer):
         structured_name_prefix="",
         checkpoint_lookup_drop_segment=None,
     ):
-        """Inverse (model -> checkpoint) AOA, independently generated."""
-        return super().gen_inv_aoa_statements(
+        """Inverse (model -> checkpoint) AOA, independently generated.
+
+        A private embedding copy is not written: the checkpoint keeps one
+        embedding tensor and the model root's embedding is what writes it.
+        """
+        statements = super().gen_inv_aoa_statements(
             ctx,
             structured_name_prefix=structured_name_prefix,
             checkpoint_lookup_drop_segment=_AOA_DROP_SEGMENT,
         )
+        for model_name in self._mtp_embed_model_names(
+            ctx, structured_name_prefix
+        ):
+            statements.append(f"{model_name} -> _")
+        return statements
 
     def _concat_embeddings(
         self,
