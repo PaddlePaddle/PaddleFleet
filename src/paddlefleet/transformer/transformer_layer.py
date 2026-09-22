@@ -1285,9 +1285,9 @@ class TransformerLayer(nn.Layer):
         else:
             dict_args.pop("indexcache_state", None)
         rst = {**dict_args, **rst}
-        if getattr(
-            self.config, "indexcache_train_debug", False
-        ) and getattr(self.config, "index_topk_pattern", None):
+        if getattr(self.config, "indexcache_train_debug", False) and getattr(
+            self.config, "index_topk_pattern", None
+        ):
             state = rst.get("indexcache_state", None)
             if isinstance(state, (tuple, list)):
                 state_len = len(state)
