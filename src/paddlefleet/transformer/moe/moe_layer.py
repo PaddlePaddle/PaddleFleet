@@ -1148,10 +1148,10 @@ class MoELayer(nn.Layer):
         Needs ``moe_allgather_gate_overlap``, EP>1 and the 'allgather'
         dispatcher, whose ``dispatch_preprocess`` is what consumes the handle.
         'ringmoe' historically did not prefetch, since the only thing it can hide
-        behind the gate is round 0's intra-node AllGather and, before zero-SM,
-        issuing that early cost more in SM/comm contention than the gate was
-        worth. With the zero-SM (SM-free) intra AllGather that objection is gone,
-        so a ringmoe branch -- gated on the SAME ``moe_allgather_gate_overlap``
+        behind the gate is round 0's intra-node AllGather, and issuing that early
+        was thought to cost more in SM/comm contention than the gate was worth.
+        It does not: the gather goes out on its own comm stream, so a ringmoe
+        branch -- gated on the SAME ``moe_allgather_gate_overlap``
         config flag as the allgather path -- now pre-issues round 0's token gather
         here via ``pre_gate_token_ag``. Only the tokens can be prefetched; the
         routing idx/weight AllGathers need the gate output.
@@ -1168,7 +1168,7 @@ class MoELayer(nn.Layer):
             # RingMoE gate-overlap: hoist round 0's intra token AllGather onto the
             # comm stream ahead of the gate. Mirrors the allgather branch below
             # (reuse the latent projection via self._latent_hidden), but the
-            # handle is consumed as round 0's prefetch in _RingRoundsFold. Gated
+            # handle is consumed as round 0's prefetch in ring_forward. Gated
             # on the dispatcher flag so nothing changes when the opt-in is off.
             if self.use_latent_moe:
                 self._latent_hidden = deferrable_linear_bare(
@@ -1592,7 +1592,7 @@ class MoELayer(nn.Layer):
         # One scope for the whole ring: it interleaves the rounds' collectives
         # with their GEMMs, so there is no point where dispatch ends and combine
         # begins. Compare against dispatch + fusion_mlp + combine on the other
-        # dispatchers. ``fusion_mlp`` is timed inside (see _node_slice), so
+        # dispatchers. ``fusion_mlp`` is timed inside ring_forward, so
         # ringmoe - fusion_mlp is the ring's exposed communication.
         with profile("ringmoe"):
             hidden_states = self.token_dispatcher.ring_forward(
