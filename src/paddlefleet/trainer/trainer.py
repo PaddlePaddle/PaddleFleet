@@ -1308,7 +1308,7 @@ class Trainer:
         ):
             # Pass tensor_refs to manager so it can keep them alive until workers consume
             tensor_refs = getattr(self, "_ema_shared_tensor_refs", None)
-            shm_filenames = getattr(self, "_ema_shm_filenames", [])
+            shm_handles = getattr(self, "_ema_shm_handles", None)
             num_refs = len(tensor_refs) if tensor_refs else 0
             logger.info(
                 f"[EMA Reshard] Transferring {num_refs} shared memory refs to manager"
@@ -1316,12 +1316,12 @@ class Trainer:
             self.zcc_manager.set_ema_shared_memory(
                 self._ema_reshard_result,
                 tensor_refs=tensor_refs,
-                shm_filenames=shm_filenames,
+                shm_handles=shm_handles,
             )
             # Clear local refs (manager now owns them, refcount NOT zero yet)
             self._ema_shared_tensor_refs = None
+            self._ema_shm_handles = None
             self._ema_reshard_result = None
-            self._ema_shm_filenames = None
             logger.info(
                 "[EMA Reshard] Local refs cleared, manager holds ownership until workers consume"
             )
@@ -2110,38 +2110,46 @@ class Trainer:
             model_sharded_state_dict
         )
         ema_target = {}
+        ema_shared_result = {}
+        self._ema_shared_tensor_refs = {}
+        self._ema_shm_handles = []
+        from multiprocessing import shared_memory
+
+        def _add_shm_target(key, sw, view_shape):
+            # Allocate the reshard target DIRECTLY in /dev/shm (no relocation copy):
+            # reshard writes straight into shm. Released explicitly once the worker
+            # finishes consuming (worker closes its map, main closes+unlinks).
+            numel = int(np.prod(view_shape)) if len(view_shape) else 1
+            shm = shared_memory.SharedMemory(create=True, size=numel * 4)
+            arr = np.ndarray(view_shape, dtype=np.float32, buffer=shm.buf)
+            local_tensor = paddle.base.core.eager.Tensor(
+                arr, place=paddle.CPUPlace(), zero_copy=True
+            )
+            ema_target[key] = ShardedWeight(
+                key=sw.key,
+                local_tensor=local_tensor,
+                local_shape=sw.local_shape,
+                global_shape=sw.global_shape,
+                global_offset=sw.global_offset,
+                is_flattened=getattr(sw, "is_flattened", False),
+                flattened_range=getattr(sw, "flattened_range", None),
+            )
+            ema_shared_result[key] = {
+                "shm_name": shm.name,
+                "shape": list(view_shape),
+            }
+            self._ema_shm_handles.append(shm)
+            self._ema_shared_tensor_refs[key] = (local_tensor, arr)
 
         # master_weights portion: use .w_0 keys directly (same as optimizer master_weights key format)
         for k, sw in opt_sharded.items():
             if k.endswith(".w_0"):
-                local_tensor = paddle.zeros(
-                    sw.local_tensor.shape, dtype=paddle.float32
-                )
-                ema_target[k] = ShardedWeight(
-                    key=sw.key,
-                    local_tensor=local_tensor,
-                    local_shape=sw.local_shape,
-                    global_shape=sw.global_shape,
-                    global_offset=sw.global_offset,
-                    is_flattened=sw.is_flattened,
-                    flattened_range=sw.flattened_range,
-                )
+                _add_shm_target(k, sw, list(sw.local_tensor.shape))
 
-        # model_params portion: float32 items from model sharded state dict (no suffix change)
+        # model_params portion: float32 items from model sharded state dict
         for k, sw in model_sharded_state_dict.items():
             if sw.local_tensor.dtype == paddle.float32:
-                local_tensor = paddle.zeros(
-                    sw.local_shape, dtype=paddle.float32
-                )
-                ema_target[k] = ShardedWeight(
-                    key=sw.key,
-                    local_tensor=local_tensor,
-                    local_shape=sw.local_shape,
-                    global_shape=sw.global_shape,
-                    global_offset=sw.global_offset,
-                    is_flattened=getattr(sw, "is_flattened", False),
-                    flattened_range=getattr(sw, "flattened_range", None),
-                )
+                _add_shm_target(k, sw, list(sw.local_shape))
 
         logger.info(
             f"[EMA Reshard] Loading {len(ema_target)} EMA tensors via dist.load_state_dict..."
@@ -2156,28 +2164,10 @@ class Trainer:
         )
         logger.info("[EMA Reshard] dist.load_state_dict completed")
 
-        # Move to CPU shared memory for subprocess consumption
-        ema_shared_result = {}
-        self._ema_shared_tensor_refs = {}
-        self._ema_shm_filenames = []  # Track specific shm files for leak detection
-
-        for k, sw in ema_target.items():
-            cpu_tensor = sw.local_tensor.cpu().flatten()
-            shared_meta = cpu_tensor.value().get_tensor()._share_filename(False)
-            ema_shared_result[k] = {
-                "shared_meta": shared_meta,
-                "shape": list(sw.local_tensor.shape),
-            }
-            # shared_meta[0] is the shm filename (e.g. "/dev/shm/paddle_12345_0_xxx")
-            if shared_meta and len(shared_meta) > 0:
-                self._ema_shm_filenames.append(shared_meta[0])
-            # Keep reference to prevent GC before subprocess reads the data
-            self._ema_shared_tensor_refs[k] = cpu_tensor
-            sw.local_tensor._clear()
-
+        # reshard wrote straight into the /dev/shm targets (no relocation copy);
+        # segments are explicitly closed+unlinked after the worker consumes them.
         logger.info(
-            f"[EMA Reshard] Created shared memory for {len(ema_shared_result)} EMA tensors, "
-            f"shm files tracked: {len(self._ema_shm_filenames)}"
+            f"[EMA Reshard] published {len(ema_shared_result)} shm EMA tensors"
         )
         return ema_shared_result
 

@@ -1161,18 +1161,18 @@ class ZeroCostCheckpointManager:
         logger.info("[ZCC manager] done setting EMA state dict")
 
     def set_ema_shared_memory(
-        self, ema_shared_metas, tensor_refs=None, shm_filenames=None
+        self, ema_shared_metas, tensor_refs=None, shm_handles=None
     ):
         """Store EMA reshard results (shared memory metas) to be sent to workers after first UPDATE.
-        tensor_refs: keep alive until workers consume the shared memory to prevent GC.
-        shm_filenames: list of specific shm file paths for leak detection.
+        tensor_refs / shm_handles: keep the shm alive until workers consume it; the
+        segments are explicitly closed+unlinked once workers signal consumption done.
         """
         logger.info(
             "[EMA Reshard] Shared memory metas received from main process"
         )
         self.ema_shared_metas = ema_shared_metas
         self._ema_tensor_refs = tensor_refs
-        self._ema_shm_filenames = shm_filenames or []
+        self._ema_shm_handles = shm_handles or []
 
     @staticmethod
     def _check_shm_files_released(shm_filenames):
@@ -1240,24 +1240,25 @@ class ZeroCostCheckpointManager:
             num_refs = (
                 len(self._ema_tensor_refs) if self._ema_tensor_refs else 0
             )
-            num_files = len(self._ema_shm_filenames)
+            handles = getattr(self, "_ema_shm_handles", []) or []
             logger.info(
-                f"[EMA Reshard] Releasing {num_refs} tensor refs ({num_files} tracked shm files)..."
+                f"[EMA Reshard] Releasing {num_refs} tensor refs, "
+                f"{len(handles)} shm segments..."
             )
             self.ema_shared_metas = None
             self._ema_tensor_refs = None
-            # Verify specific shm files are gone
-            leaked = self._check_shm_files_released(self._ema_shm_filenames)
-            if leaked:
-                logger.warning(
-                    f"[EMA Reshard] LEAK DETECTED: {len(leaked)}/{num_files} shm files still exist! "
-                    f"Examples: {leaked[:5]}"
-                )
-            else:
-                logger.info(
-                    f"[EMA Reshard] All {num_files} shm files released successfully, no leak"
-                )
-            self._ema_shm_filenames = []
+            released = 0
+            for _shm in handles:
+                try:
+                    _shm.close()
+                    _shm.unlink()
+                    released += 1
+                except Exception as e:
+                    logger.debug(f"[EMA Reshard] shm release skipped: {e}")
+            self._ema_shm_handles = []
+            logger.info(
+                f"[EMA Reshard] Released {released}/{len(handles)} shm segments"
+            )
 
         self.ready_to_save = True
 
@@ -3568,13 +3569,25 @@ class ZeroCostCheckpointWorkerFcBased(ZeroCostCheckpointWorker):
         master_weights = {}
         model_params = {}
 
+        import numpy as np
+        from multiprocessing import resource_tracker, shared_memory
+
+        self._ema_worker_shm = []  # attached shm maps; closed after consuming
         for unified_key, info in ema_shared_metas.items():
-            meta = info["shared_meta"]
-            shape = info["shape"]
-
-            shared_lod = paddle.base.core.LoDTensor._new_shared_filename(meta)
-            tensor = paddle.to_tensor(shared_lod).reshape(shape)
-
+            shm = shared_memory.SharedMemory(name=info["shm_name"])
+            # main process owns the shm lifetime + unlink; keep this worker's
+            # resource_tracker from unlinking it on exit.
+            try:
+                resource_tracker.unregister(shm._name, "shared_memory")
+            except Exception as e:
+                logger.debug(
+                    f"[ZCC Worker] resource_tracker.unregister skipped: {e}"
+                )
+            self._ema_worker_shm.append(shm)
+            arr = np.ndarray(info["shape"], dtype=np.float32, buffer=shm.buf)
+            tensor = paddle.base.core.eager.Tensor(
+                arr, place=paddle.CPUPlace(), zero_copy=True
+            )
             if unified_key.endswith(".w_0"):
                 # master_weight key: reverse lookup using .w_0 key directly
                 original_key = inv_name_mapping[unified_key]
@@ -3609,4 +3622,12 @@ class ZeroCostCheckpointWorkerFcBased(ZeroCostCheckpointWorker):
             )
 
         self.zcc_ema_processor.load_ema_state_dict(state_dict)
+        # data copied into the resident EMA buffer; release worker-side shm maps
+        # (main process then closes+unlinks the segments).
+        for _shm in getattr(self, "_ema_worker_shm", []):
+            try:
+                _shm.close()
+            except Exception as e:
+                logger.debug(f"[ZCC Worker] ema shm.close skipped: {e}")
+        self._ema_worker_shm = []
         logger.info("[ZCC Worker] EMA loaded from shared memory successfully")
