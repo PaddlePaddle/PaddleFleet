@@ -243,7 +243,9 @@ class TransformerConfig(ModelParallelConfig):
     over K. GPTModel._assert_mtp_depths_colocated_for_sampling enforces this at
     build time, since the segmentation is not visible here. Covered by
     tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_depth_sampling.py.
-    Not yet validated at expert_model_parallel_size > 1."""
+    Works under expert_model_parallel_size > 1: every EP rank derives the same K,
+    so the MoE all-to-all of each computed depth stays matched; covered by
+    tests/multi_card_tests/moe/test_gpt_mtp_depth_sampling_ep.py."""
 
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
