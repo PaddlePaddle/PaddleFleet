@@ -46,6 +46,7 @@ from ..utils import (
     get_pg_size,
     get_tensor_model_parallel_group_if_none,
     prepare_input_tensors_for_wgrad_compute,
+    use_dsv4_accuracy_compatible,
 )
 from .mappings import (
     copy_to_tensor_model_parallel_region,
@@ -501,7 +502,12 @@ class LinearWithFrozenWeight(paddle.autograd.Function):
     def backward(ctx, grad_output):
         """Backward with frozen weight."""
         (weight, bias) = ctx.saved_tensor()
-        grad_input = grad_output.matmul(weight.t())
+        if use_dsv4_accuracy_compatible():
+            from paddlefleet.accuracy_compatible_patch import te_matmul
+
+            grad_input = te_matmul(grad_output, weight)
+        else:
+            grad_input = grad_output.matmul(weight.t())
 
         if ctx.allreduce_dgrad:
             # All-reduce. Note: here async and sync are effectively the same.
@@ -1028,6 +1034,10 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                         ctx.use_pow2_scale, ctx.use_ue8m0
                     ),
                 )
+            elif use_dsv4_accuracy_compatible():
+                from paddlefleet.accuracy_compatible_patch import te_matmul
+
+                grad_input = te_matmul(grad_output, weight)
             else:
                 dgrad_groups = ctx.hf_dgrad_groups
                 if dgrad_groups:
@@ -1087,6 +1097,20 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         if ctx.sequence_parallel and wgrad_compute:
             # pylint: disable=possibly-used-before-assignment
             handle.wait()
+
+        seqfirst_grad_weight = None
+        if (
+            wgrad_compute
+            and input is not None
+            and use_dsv4_accuracy_compatible()
+        ):
+            from paddlefleet.accuracy_compatible_patch import (
+                linear_seqfirst_wgrad,
+            )
+
+            seqfirst_grad_weight = linear_seqfirst_wgrad(
+                input, grad_output, weight
+            )
 
         if wgrad_compute:
             if total_input is not None:
@@ -1159,7 +1183,11 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
 
         elif ctx.gradient_accumulation_fusion:
             if wgrad_compute:
-                if weight.main_grad.dtype == paddle.float32:
+                if seqfirst_grad_weight is not None:
+                    weight.main_grad.add_(
+                        seqfirst_grad_weight.cast(weight.main_grad.dtype)
+                    )
+                elif weight.main_grad.dtype == paddle.float32:
                     fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
                         total_input, grad_output, weight.main_grad
                     )
@@ -1196,7 +1224,9 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             else:
                 grad_weight = None
         else:
-            if (
+            if seqfirst_grad_weight is not None:
+                grad_weight = seqfirst_grad_weight
+            elif (
                 wgrad_compute
                 and ctx.use_accuracy_compatible
                 and getattr(weight, "is_expert_param", False)

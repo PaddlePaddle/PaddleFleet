@@ -794,6 +794,9 @@ class P2pHelper:
                 ]
 
     def clear_meta_cache(self):
+        if self._dynamic_shape:
+            self._send_recv_meta_list = []
+            self._dynamic_cnt = 0
         self._send_recv_meta.init_or_erase_meta()
 
     def recv_forward(self, pp_first_stage, sync_recv=True, batch_p2p_comm=True):

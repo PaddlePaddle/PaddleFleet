@@ -139,6 +139,8 @@ if TYPE_CHECKING:
 
 from paddle.framework.recall_error import LOSS_INF_ERROR, LOSS_NAN_ERROR
 
+from paddlefleet.utils import use_dsv4_accuracy_compatible
+
 from ..transformers.context_parallel_utils import (
     auto_split_sequence_dim_load_balance,
 )
@@ -390,6 +392,7 @@ class Trainer:
                 isinstance(model, LoRAModel)
                 and isinstance(model.model, FleetGPTModel)
             )
+            or getattr(model, "is_fleet", False)
         ):
             self.using_fleet_model = True
         else:
@@ -1679,24 +1682,9 @@ class Trainer:
                     and self.args.zcc_save_ema_coef is not None
                     and self._is_fc_format_ema(ema_state_path)
                 ):
-                    same_strategy, err_msg = DistInfoCollectorValidator(
-                        self.args, self.hcg
-                    ).check_same_strategy(resume_from_checkpoint)
-
-                    if not same_strategy:
-                        logger.info(
-                            f"[EMA Reshard] Parallelism strategy changed ({err_msg}), performing EMA reshard..."
-                        )
-                        self._ema_reshard_result = self._load_ema_with_reshard(
-                            ema_state_path, flex_ckpt_comm_method, worker_groups
-                        )
-                        logger.info(
-                            "[EMA Reshard] EMA reshard completed, results stored for subprocess"
-                        )
-                    else:
-                        logger.info(
-                            "[EMA Reshard] Same strategy, subprocess will load EMA directly from file"
-                        )
+                    self._ema_reshard_result = self._load_ema_with_reshard(
+                        ema_state_path, flex_ckpt_comm_method, worker_groups
+                    )
 
             with _sprof_span("opt_sharded_state_dict"):
                 optimizer_sharded_state_dict = (
@@ -3396,6 +3384,22 @@ class Trainer:
                     else:
                         tr_loss += tr_loss_step
 
+                    should_flush_sequence_first_wgrad = (
+                        step_control + 1
+                    ) % args.gradient_accumulation_steps == 0 or (
+                        steps_in_epoch <= args.gradient_accumulation_steps
+                        and (step + 1) == steps_in_epoch
+                    )
+                    if (
+                        use_dsv4_accuracy_compatible()
+                        and should_flush_sequence_first_wgrad
+                    ):
+                        from paddlefleet.accuracy_compatible_patch import (
+                            flush_sequence_first_wgrad,
+                        )
+
+                        flush_sequence_first_wgrad(model)
+
                     def fused_allreduce_gradients_no_sync(paramlist, hcg):
                         paramlist = list(paramlist)
                         nonmoe_list = [
@@ -3545,6 +3549,7 @@ class Trainer:
                         if (
                             not args.enable_auto_parallel
                             and self.args.gradient_accumulation_steps > 1
+                            and not use_dsv4_accuracy_compatible()
                         ):
                             paddle.device.synchronize()
                             parameters = (
@@ -5101,6 +5106,7 @@ class Trainer:
                 "adam_beta1": args.adam_beta1,
                 "adam_beta2": args.adam_beta2,
                 "adam_epsilon": args.adam_epsilon,
+                "muon_epsilon": args.muon_epsilon,
                 "momentum": args.muon_momentum,
                 "muon_version": args.muon_version,
                 "muon_exclude_patterns": args.muon_exclude_patterns,
@@ -5892,6 +5898,13 @@ class Trainer:
         Return:
             `paddle.Tensor`: The tensor with training loss on this batch.
         """
+        if use_dsv4_accuracy_compatible():
+            from paddlefleet.accuracy_compatible_patch import (
+                set_loss_acc_steps,
+            )
+
+            set_loss_acc_steps(self.args.gradient_accumulation_steps)
+
         # accumulation data
         if data_buffer_prepared:
             if (
@@ -5951,6 +5964,13 @@ class Trainer:
                 # so this span reads near zero. Do not conclude that data preparation
                 # is free.
                 inputs = PipelineDatasetPreprocessor(_dataset_process_function)
+
+        if use_dsv4_accuracy_compatible():
+            from paddlefleet.accuracy_compatible_patch import (
+                set_pipeline_loss_scale,
+            )
+
+            set_pipeline_loss_scale(self.args.gradient_accumulation_steps)
 
         with (
             self.autocast_smart_context_manager(),

@@ -23,7 +23,6 @@ import dataclasses
 import json
 import os
 import random
-import sys
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
@@ -66,6 +65,7 @@ from tqdm.auto import tqdm
 
 from ..transformers.moe_gate import PretrainedMoEGate
 from ..transformers.moe_utils import offload, reload
+from ..utils import use_dsv4_accuracy_compatible
 from ..utils.log import logger
 from .trainer_utils import (
     IntervalStrategy,
@@ -1061,6 +1061,13 @@ class MoECorrectionBiasAdjustCallback(TrainerCallback):
         usages_tensor = paddle.stack(
             usages, 0
         )  # [num_layers, num_local_experts]
+        if use_dsv4_accuracy_compatible():
+            # Preserve the frozen DSv4 path: its Fleet runtime does not expose
+            # ``fleet._hcg`` here, so the callback only performs this
+            # all-reduce and returns without updating correction bias or
+            # clearing usage.
+            dist.all_reduce(usages_tensor)
+            return
         if not hasattr(fleet, "_hcg"):
             dist.all_reduce(usages_tensor)
             return
@@ -1270,30 +1277,9 @@ class InternalMedicineCallback(TrainerCallback):
 
         self._maybe_truncate_on_resume(state)
 
-        # internal_medicine declares requires-python >= 3.10.
-        if sys.version_info < (3, 10):
-            logger.warning(
-                "[InternalMedicine/pfleet] internal_medicine requires Python >= 3.10 but this "
-                "interpreter is %d.%d; skipping monitor setup. Disable internal_medicine_monitors "
-                "to silence this warning.",
-                sys.version_info[0],
-                sys.version_info[1],
-            )
-            return
-
-        try:
-            from internal_medicine.backends.paddlefleet import setup_monitors
-            from internal_medicine.core.metric_families import exclusions_for
-            from internal_medicine.core.training_logs import training_logs
-        except (ImportError, TypeError, SyntaxError) as exc:
-            logger.warning(
-                "[InternalMedicine/pfleet] internal_medicine_monitors is enabled, but the optional "
-                "internal_medicine package is not importable. Add third_party/llm-internal-medicine/src "
-                "to PYTHONPATH or disable internal_medicine_monitors. (%s: %s)",
-                type(exc).__name__,
-                exc,
-            )
-            return
+        from ..internal_medicine.backends.paddlefleet import setup_monitors
+        from ..internal_medicine.core.metric_families import exclusions_for
+        from ..internal_medicine.core.training_logs import training_logs
 
         # Which families a non-debug run leaves out is the library's call, not a
         # yaml string: one bit here, the set itself lives next to the taxonomy.
