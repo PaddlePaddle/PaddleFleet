@@ -673,6 +673,15 @@ class TestMTPDepthSamplingValidation(unittest.TestCase):
         self.assertEqual(config.mtp_depth_sampling, [0.6, 0.3, 0.1])
         self.assertTrue(config.mtp_shared_weights)
 
+    def test_shared_weights_can_combine_with_shared_last_layer(self):
+        config = TransformerConfig(
+            num_nextn_predict_layers=2,
+            mtp_shared_weights=True,
+            mtp_shared_last_layer=True,
+        )
+        self.assertTrue(config.mtp_shared_weights)
+        self.assertTrue(config.mtp_shared_last_layer)
+
     def test_length_must_match_num_nextn_predict_layers(self):
         with self.assertRaisesRegex(
             ValueError, r"num_nextn_predict_layers=3"

@@ -206,17 +206,44 @@ class TestMTPSharedWeights(unittest.TestCase):
                 f"fusion {fusion} not shared across depths"
             )
 
-    def test_mutually_exclusive_with_shared_last_layer(self):
-        """One LayerDesc carries one SharedLayerDesc key, and the two flags want
-        different pivots for the same MTP layers, so the combination is refused."""
-        with self.assertRaisesRegex(
-            ValueError,
-            r"mtp_shared_weights and mtp_shared_last_layer cannot both be True",
-        ):
-            GPTConfig(
-                **self._base_kwargs(),
-                mtp_shared_last_layer=True,
-                mtp_shared_weights=True,
+    @unittest.skipUnless(
+        PADDLE_SUPPORTS_SHARED_SUBMODULE,
+        "installed paddle's SharedLayerDesc lacks shared_submodule_weight_only",
+    )
+    def test_combines_with_shared_last_layer(self):
+        """Combined mode shares the MTP body with the backbone last layer and
+        shares each MTP depth's fusion parameters across depths."""
+        config = GPTConfig(
+            **self._base_kwargs(),
+            mtp_shared_last_layer=True,
+            mtp_shared_weights=True,
+        )
+        model = gpt_builder(config, num_stages=1)
+
+        backbone_layers = [
+            layer
+            for layer in model.run_function
+            if isinstance(layer, TransformerLayer)
+        ]
+        mtp_layers = _mtp_layers(model)
+        assert len(backbone_layers) == 2
+        assert len(mtp_layers) == 2
+
+        backbone_params = dict(backbone_layers[-1].transformer_layer_weights)
+        for mtp_layer in mtp_layers:
+            mtp_body_params = dict(mtp_layer.transformer_layer_weights)
+            for name, mtp_param in mtp_body_params.items():
+                assert mtp_param is backbone_params[name], (
+                    f"MTP body param {name} must share the backbone last layer"
+                )
+
+        d0 = dict(mtp_layers[0].all_weights)
+        d1 = dict(mtp_layers[1].all_weights)
+        for name, p0 in d0.items():
+            if name.startswith("transformer_layer."):
+                continue
+            assert p0 is d1[name], (
+                f"MTP fusion param {name} must share across depths"
             )
 
     def test_single_depth_rejected(self):
@@ -522,6 +549,35 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
             side_effect=_fake_all_gather_object,
         ):
             model._assert_mtp_depths_colocated_for_sampling()
+
+    def _combined_sharing_colocation_check(self, layout):
+        """Run the combined-sharing placement check with a faked PP layout."""
+        model, _ = self._independent_model()
+
+        def _fake_all_gather_object(object_list, obj, group=None):
+            object_list.extend(layout)
+
+        with mock.patch.object(
+            paddle.distributed,
+            "all_gather_object",
+            side_effect=_fake_all_gather_object,
+        ):
+            model._assert_mtp_depths_colocated_for_combined_sharing()
+
+    def test_combined_sharing_accepts_depths_on_one_stage(self):
+        """Combined sharing only needs MTP depths co-located, not necessarily on
+        the last stage; sampling has the stronger last-stage requirement."""
+        self._combined_sharing_colocation_check([[0, 1], []])
+        self._combined_sharing_colocation_check([[], [0, 1]])
+
+    def test_combined_sharing_rejects_split_depths(self):
+        """Fusion params in the combined mode are rank-local aliases, so split
+        MTP depths would leave them unshared across PP stages."""
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"mtp_shared_weights \+ mtp_shared_last_layer requires all MTP",
+        ):
+            self._combined_sharing_colocation_check([[0], [1]])
 
     def test_colocation_accepts_depths_on_last_stage(self):
         """All depths on the last stage is the supported layout."""
