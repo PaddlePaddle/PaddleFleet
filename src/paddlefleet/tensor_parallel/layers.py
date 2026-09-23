@@ -46,6 +46,7 @@ from ..utils import (
     get_tensor_model_parallel_group_if_none,
     prepare_input_tensors_for_wgrad_compute,
     use_dsv4_accuracy_compatible,
+    use_kimik2_accuracy_compatible,
 )
 from .mappings import (
     copy_to_tensor_model_parallel_region,
@@ -1293,6 +1294,27 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                             grad_weight = _index_put_columns(
                                 grad_weight, columns, part_t.t()
                             )
+                    elif use_kimik2_accuracy_compatible():
+                        # Same reasoning as the grouped branch above, applied to
+                        # a weight the reference does not split: Megatron forms
+                        # the wgrad as grad_output.t() @ total_input (M=out,
+                        # N=in), while feeding total_input.t() to a GEMM here
+                        # swaps M and N, and for narrow projections cuBLAS then
+                        # reaches for a split-K variant the reference never
+                        # selects -- a K-direction split is not associative in
+                        # BF16. Compute in the reference's orientation and
+                        # transpose the exact result. MLA's projections carry no
+                        # hf_dgrad_groups, so they only ever reach this path.
+                        # .contiguous() because downstream collectives reject
+                        # non-contiguous tensors; transpose + copy is exact, so
+                        # the values are unchanged.
+                        grad_weight = (
+                            paddle.matmul(
+                                grad_output, total_input, transpose_x=True
+                            )
+                            .t()
+                            .contiguous()
+                        )
                     else:
                         grad_weight, _ = general_gemm(
                             total_input.t(), grad_output

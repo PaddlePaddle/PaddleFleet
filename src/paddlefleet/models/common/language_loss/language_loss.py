@@ -45,7 +45,10 @@ from paddlefleet.recompute_utils import module_needs_recompute
 from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
-from paddlefleet.utils import use_dsv4_accuracy_compatible
+from paddlefleet.utils import (
+    use_dsv4_accuracy_compatible,
+    use_kimik2_accuracy_compatible,
+)
 
 # A replay must not notify either the original observer or one installed by a
 # later micro-batch. Context-local state also keeps nested calls isolated.
@@ -207,6 +210,74 @@ def subbatch(
     return wrapper
 
 
+class _MegatronCE(PyLayer):
+    """Megatron's vocab cross-entropy, forward AND backward, op for op.
+
+    Paddle's fused ``CrossEntropyLoss`` matches Megatron on the forward logits
+    but not on the backward: autograd differentiates ``log(sum_exp) -
+    predicted`` as ``exp(z) * (g / sum_exp)`` plus a scatter, whereas Megatron
+    hand-writes ``(softmax - onehot) * g``. The values are equal but the operand
+    ordering is not (``(a/b)*c != a*(c/b)``, ``(s-1)*g != s*g - g``), so the two
+    differ in the last bit -- measured 259 of 8,355,840 elements at 9.3e-10.
+    Spelling out Megatron's steps makes autograd reproduce its exact backward.
+
+    The intermediate ``z`` / ``exp`` / ``softmax`` tensors are materialized at
+    ``[batch, seq, vocab]``, so this path costs more activation memory than the
+    fused kernel and is only selected for alignment runs.
+    """
+
+    @staticmethod
+    def forward(ctx, logits, labels, ignore_index):
+        if logits.dtype != paddle.float32:
+            logits = logits.astype("float32")
+        z = logits - logits.max(axis=-1, keepdim=True)
+        mask = labels == ignore_index
+        # Megatron zeroes the masked targets before gathering, so the gather
+        # never sees an out-of-range index.
+        safe = paddle.where(mask, paddle.zeros_like(labels), labels).unsqueeze(
+            -1
+        )
+        predicted = paddle.take_along_axis(z, safe, axis=-1).squeeze(-1)
+        predicted = paddle.where(mask, paddle.zeros_like(predicted), predicted)
+        exp_logits = z.exp()
+        sum_exp = exp_logits.sum(axis=-1)
+        loss = paddle.log(sum_exp) - predicted
+        # Megatron divides in place after forming the loss and keeps the result
+        # as the softmax it reuses in the backward.
+        softmax = exp_logits / sum_exp.unsqueeze(-1)
+        ctx.save_for_backward(softmax, mask, safe)
+        return paddle.where(mask, paddle.zeros_like(loss), loss)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        softmax, mask, safe = ctx.saved_tensor()
+        # Megatron: softmax_update = 1 - target_mask, then
+        # grad_2d[arange, target] -= softmax_update.
+        update = paddle.logical_not(mask).astype(softmax.dtype).unsqueeze(-1)
+        onehot = paddle.put_along_axis(
+            paddle.zeros_like(softmax), safe, update, axis=-1
+        )
+        # The ignored rows were zeroed on the output, so their incoming
+        # gradient is zero.
+        g = paddle.where(mask, paddle.zeros_like(grad_output), grad_output)
+        return (softmax - onehot) * g.unsqueeze(-1)
+
+
+class _MegatronStyleCrossEntropy(nn.Layer):
+    """Layer wrapper so it can replace the ``CrossEntropyLoss`` sublayer.
+
+    ``loss_func`` is a sublayer on :class:`LanguageLoss` and paddle refuses to
+    replace a sublayer with a plain function, so the composition is wrapped.
+    """
+
+    def __init__(self, ignore_index):
+        super().__init__()
+        self.ignore_index = ignore_index
+
+    def forward(self, logits, labels):
+        return _MegatronCE.apply(logits, labels, self.ignore_index)
+
+
 class LanguageLoss(FleetLayer):
     """Language loss with an optional ``_eval_token_loss_hook(loss, labels)``.
 
@@ -265,6 +336,11 @@ class LanguageLoss(FleetLayer):
             self.loss_func = (
                 paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy()
             )
+        elif use_kimik2_accuracy_compatible():
+            # Non-tensor-parallel path only: ParallelCrossEntropy additionally
+            # reduces partial logits across the TP group, which this
+            # composition deliberately does not do.
+            self.loss_func = _MegatronStyleCrossEntropy(self.ignored_index)
         else:
             self.loss_func = paddle.nn.CrossEntropyLoss(
                 reduction="none",
