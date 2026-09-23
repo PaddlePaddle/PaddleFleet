@@ -194,7 +194,9 @@ jobs:
             finish skipped "Coverage approval job has no conclusion."
           fi
 
-          if [[ "${coverage_status}" == "queued" || "${coverage_status}" == "not_started" ]]; then
+          if [[ "${coverage_status}" == "queued" || "${coverage_status}" == "not_started" ||
+                "${coverage_status}" == "waiting" || "${coverage_status}" == "pending" ||
+                "${coverage_status}" == "requested" ]]; then
             echo "Coverage check has not started (${coverage_status}); rerunning coverage approval without cancelling Test-release."
             api POST "/repos/${REPO}/actions/jobs/${approval_job_id}/rerun" >/dev/null
             finish success "Submitted coverage approval job rerun; coverage check will be reevaluated."
@@ -207,13 +209,13 @@ jobs:
             for attempt in {1..60}; do
               run=$(api GET "/repos/${REPO}/actions/runs/${run_id}")
               status=$(jq -r '.status' <<<"${run}")
-              if [[ "${status}" != "queued" && "${status}" != "in_progress" ]]; then
+              if [[ "${status}" == "completed" ]]; then
                 break
               fi
               sleep 5
             done
 
-            if [[ "${status}" == "queued" || "${status}" == "in_progress" ]]; then
+            if [[ "${status}" != "completed" ]]; then
               echo "Test-release run ${run_id} did not finish cancelling in time."
               exit 1
             fi
@@ -223,7 +225,12 @@ jobs:
             finish success "Cancelled Test-release and submitted coverage approval job rerun; coverage check will be reevaluated."
           fi
 
-          finish skipped "Coverage check is already terminal (${coverage_status}); no rerun requested."
+          if [[ "${coverage_status}" == "completed" ]]; then
+            finish skipped "Coverage check is already terminal (${coverage_status}); no rerun requested."
+          fi
+
+          echo "Unexpected coverage check status: ${coverage_status}; no rerun requested." >&2
+          exit 1
 
       - name: Complete coverage rerun check
         if: ${{ always() && steps.schedule.outputs.check_run_id != '' }}
