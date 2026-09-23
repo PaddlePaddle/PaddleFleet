@@ -28,16 +28,18 @@ only when a rank's shard does not line up with the checkpoint, so an unchanged
 layout skips the ~30-40s collective entirely and the subprocess reads its shard
 straight from file.
 
-Three things are pinned:
-  * resharding lands the right values whether or not the layout moved;
+Pinned here:
+  * ``Trainer._load_flex_checkpoint`` reshards an FC-format EMA resume only when
+    the layout moved (the call site this PR changed, trainer.py:1677-1699) -- an
+    identity resume leaves ``_ema_reshard_result`` None, a rotated one sets it --
+    and when it does reshard, each rank still ends up with its own block;
   * a real ZCC worker consumes the resulting shared memory -- which now happens
     in ``_maybe_prepare_ema`` on the offload after the first UPDATE, not in the
     LOAD_EMA handler -- without hanging;
-  * ``Trainer._load_flex_checkpoint`` reshards an FC-format EMA resume only when
-    the layout moved (the call site this PR changed, trainer.py:1677-1699):
-    an identity resume leaves ``_ema_reshard_result`` None, a rotated one sets
-    it. The other two exercise ``_load_ema_with_reshard`` directly and so never
-    reach that call site.
+  * the two paths the mocked-worker single-card units never reach are covered
+    directly on bypass-constructed instances: ``_release_ema_shm`` (release once
+    all workers consume) and ``_maybe_prepare_ema`` Path B (subprocess loads EMA
+    from file when no reshard happened).
 
 A rank-rotated ownership map stands in for the flag -- same global tensors, same
 degrees, different ``global_offset``, which is what the change looks like to
@@ -53,10 +55,11 @@ import multiprocessing
 import os
 import shutil
 import sys
+import tempfile
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(
     0,
@@ -75,6 +78,8 @@ from paddlefleet.trainer.trainer import Trainer
 from paddlefleet.trainer.utils.zero_cost_checkpoint import (
     ZCCTaskType,
     ZCCWorkerStatus,
+    ZeroCostCheckpointManager,
+    ZeroCostCheckpointWorker,
     ZeroCostCheckpointWorkerFcBased,
     worker_loop,
 )
@@ -319,6 +324,19 @@ def _flex_harness():
     return harness
 
 
+class _Consumed:
+    """Minimal stand-in for a worker's ``multiprocessing.Event``."""
+
+    def __init__(self, done):
+        self._done = done
+
+    def set(self):
+        self._done = True
+
+    def is_set(self):
+        return self._done
+
+
 class TestZCCEMAReshardLayout(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -367,21 +385,6 @@ class TestZCCEMAReshardLayout(unittest.TestCase):
         self.assertEqual(sorted(result.keys()), sorted([MASTER_KEY, MODEL_KEY]))
         dist.barrier()
         return trainer, result
-
-    def test_reshard_lands_the_right_shard(self):
-        """Layout moved or not, a rank must end up with its own block."""
-        for layout in ("rotated", "identity"):
-            trainer, result = self._reshard_from(layout)
-            loaded = _read_shared_memory(result)
-            for key in (MASTER_KEY, MODEL_KEY):
-                np.testing.assert_array_equal(
-                    loaded[key],
-                    _global_reference(key)[_rows_of(self.rank), :],
-                    err_msg=(
-                        f"rank {self.rank} got the wrong EMA shard for {key} "
-                        f"from a {layout} checkpoint"
-                    ),
-                )
 
     def _update_payload(self):
         """Smallest UPDATE a worker accepts before it can consume EMA.
@@ -534,14 +537,15 @@ class TestZCCEMAReshardLayout(unittest.TestCase):
                 process.join(30)
         dist.barrier()
 
-    def test_resume_routes_fc_ema_through_reshard(self):
-        """Drive the real _load_flex_checkpoint: reshard only when the layout moved.
+    def test_resume_gates_reshard_and_lands_right_shard(self):
+        """Drive the real _load_flex_checkpoint end to end.
 
-        This is the call site the PR changed (trainer.py:1677-1699). The gate is
-        Trainer.ema_weight_reshard, which reuses paddle's check_resumable_locally
-        -- the same per-rank shard-alignment check dist.load_state_dict runs. An
-        identity EMA resume aligns with the checkpoint and skips the reshard
-        (_ema_reshard_result stays None); a rotated one does not and reshards.
+        Folds two concerns into one drive of the call site this PR changed
+        (trainer.py:1677-1699): the gate (Trainer.ema_weight_reshard, reusing
+        paddle's check_resumable_locally) reshards only when a rank's shard moved,
+        and when it does the reshard has to land each rank's own block. So an
+        identity resume leaves _ema_reshard_result None; a rotated one sets it and
+        the resulting shared memory must carry the right values.
         """
         for ema_layout, expect_reshard in (
             ("identity", False),
@@ -570,6 +574,18 @@ class TestZCCEMAReshardLayout(unittest.TestCase):
                     sorted(harness._ema_reshard_result.keys()),
                     sorted([MASTER_KEY, MODEL_KEY]),
                 )
+                # A reshard must also land each rank's own block -- this is the
+                # value check the standalone reshard test used to own.
+                loaded = _read_shared_memory(harness._ema_reshard_result)
+                for key in (MASTER_KEY, MODEL_KEY):
+                    np.testing.assert_array_equal(
+                        loaded[key],
+                        _global_reference(key)[_rows_of(self.rank), :],
+                        err_msg=(
+                            f"rank {self.rank} got the wrong resharded EMA "
+                            f"shard for {key}"
+                        ),
+                    )
             else:
                 self.assertIsNone(
                     harness._ema_reshard_result,
@@ -577,6 +593,85 @@ class TestZCCEMAReshardLayout(unittest.TestCase):
                     "but _ema_reshard_result is set",
                 )
             dist.barrier()
+
+    def test_release_ema_shm_and_maybe_prepare_ema_path_b(self):
+        """Cover two paths the mocked-worker single-card units never reach.
+
+        Both run only in states those units never build, so they are driven
+        directly on bypass-constructed instances -- no real worker subprocess
+        needed. (Path A of _maybe_prepare_ema is already covered by the
+        worker-consume test above.)
+        """
+        # --- ZeroCostCheckpointManager._release_ema_shm body ----------------
+        # Runs only after an EMA-reshard resume, once every worker has consumed
+        # the shm; drive the still-consuming wait, then the leak and no-leak ends.
+        fd, leaked_path = tempfile.mkstemp(prefix="zcc_ema_shm_")
+        os.close(fd)
+        self.addCleanup(
+            lambda: os.path.exists(leaked_path) and os.remove(leaked_path)
+        )
+        gone_path = leaked_path + "_absent"
+
+        m = ZeroCostCheckpointManager.__new__(ZeroCostCheckpointManager)
+        done, pending = _Consumed(True), _Consumed(False)
+        m.workers = [
+            SimpleNamespace(ema_shm_consumed=done),
+            SimpleNamespace(ema_shm_consumed=pending),
+        ]
+        m._ema_shm_release_pending = True
+        m._ema_tensor_refs = {"ema": object()}
+        m._ema_shm_filenames = [leaked_path]
+
+        m._release_ema_shm()  # a worker still consuming -> early return
+        self.assertTrue(m._ema_shm_release_pending)
+        self.assertIsNotNone(m._ema_tensor_refs)
+
+        pending.set()
+        m._release_ema_shm()  # all consumed, file still there -> leak branch
+        self.assertFalse(m._ema_shm_release_pending)
+        self.assertIsNone(m._ema_tensor_refs)
+        self.assertEqual(m._ema_shm_filenames, [])
+
+        m._ema_shm_release_pending = True
+        m._ema_tensor_refs = {"ema": object()}
+        m._ema_shm_filenames = [gone_path]
+        m._release_ema_shm()  # files already gone -> no-leak branch
+        self.assertFalse(m._ema_shm_release_pending)
+        self.assertEqual(m._ema_shm_filenames, [])
+
+        # --- ZeroCostCheckpointWorker._maybe_prepare_ema Path B -------------
+        # No reshard: the subprocess (re)builds the processor, then loads EMA
+        # straight from file.
+        fd, ckpt = tempfile.mkstemp(suffix=".pdparams", prefix="zcc_ema_")
+        os.close(fd)
+        self.addCleanup(lambda: os.path.exists(ckpt) and os.remove(ckpt))
+        paddle.save({"master_weights": {}}, ckpt)
+
+        worker = ZeroCostCheckpointWorker.__new__(ZeroCostCheckpointWorker)
+        worker.ema_coef = 0.99
+        worker.pending_ema_rebuild = True  # exercise the processor (re)build
+        worker.pending_ema_shared_metas = None  # skip Path A
+        worker.pending_ema_ckpt_path = ckpt  # take Path B
+        worker.optimizer_fusion_storage_helper = object()
+        worker.param_fusion_storage_helper = object()
+        worker.unified_name_mapping = (
+            None  # _reverse_unified_name_for_ema no-op
+        )
+        worker.use_expert_parallel = False
+        worker.dp_rank = 0
+        worker.zcc_ema_processor = None
+
+        with patch(
+            "paddlefleet.trainer.utils.zero_cost_checkpoint."
+            "ZeroCostCheckpointEMAProcessor"
+        ) as mock_proc_cls:
+            mock_proc_cls.return_value = MagicMock()
+            worker._maybe_prepare_ema()
+
+        self.assertFalse(worker.pending_ema_rebuild)
+        self.assertIsNone(worker.pending_ema_ckpt_path)  # consumed
+        worker.zcc_ema_processor.load_ema_state_dict.assert_called_once()
+        dist.barrier()
 
     @classmethod
     def tearDownClass(cls):
