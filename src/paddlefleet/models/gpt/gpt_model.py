@@ -255,9 +255,8 @@ class GPTModel(PipelineLayer):
             and self.config.pipeline_model_parallel_size > 1
         ):
             self._assert_mtp_depths_colocated_for_combined_sharing()
-        if (
-            getattr(self.config, "mtp_shared_weights", False)
-            and getattr(self.config, "mtp_shared_last_layer", False)
+        if getattr(self.config, "mtp_shared_weights", False) and getattr(
+            self.config, "mtp_shared_last_layer", False
         ):
             self._alias_mtp_fusion_weights()
         # mtp_depth_sampling carries K in dict_args, which never crosses a stage
