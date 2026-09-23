@@ -1736,6 +1736,7 @@ class IndexCacheServedDistillLossAutoScaler(paddle.autograd.PyLayer):
         producer_layer: int = -1,
         debug_enabled: bool = False,
     ) -> Tensor:
+        ctx.output_needs_grad = not output.stop_gradient
         ctx.topk_probs_stop_gradient = bool(topk_probs.stop_gradient)
         ctx.served_layer = int(served_layer)
         ctx.producer_layer = int(producer_layer)
@@ -1760,7 +1761,8 @@ class IndexCacheServedDistillLossAutoScaler(paddle.autograd.PyLayer):
             ctx.num_rows = num_rows_override
         else:
             ctx.num_rows = float(target.shape[0] * target.shape[1])
-        return output
+        # Frozen backbone outputs must not alias a differentiable PyLayer output.
+        return output if ctx.output_needs_grad else output.clone()
 
     @staticmethod
     def backward(ctx, grad_output: Tensor):
@@ -1794,7 +1796,8 @@ class IndexCacheServedDistillLossAutoScaler(paddle.autograd.PyLayer):
                 f"{format_indexcache_gradient_summary('score_grad', score_summary)}"
             )
 
-        grads = (grad_output, grad_index_scores, None)
+        grad_main = grad_output if ctx.output_needs_grad else None
+        grads = (grad_main, grad_index_scores, None)
         if getattr(ctx, "has_loss_mask", False):
             return (*grads, None)
         return grads
@@ -3386,13 +3389,15 @@ class CompressedSparseAttention(FleetLayer):
         cached, producer_layer, state_kind = self._indexcache_state_topk(
             indexcache_state, c4_ordinal, pattern
         )
+        state_source = "explicit"
         if cached is None and not self._indexcache_requires_explicit_state():
             cached = getattr(self.config, "_indexcache_last_topk_idxs", None)
             producer_layer = getattr(
                 self.config, "_indexcache_last_layer_number", None
             )
             if cached is not None:
-                state_kind = "config_fallback"
+                state_kind = IndexCacheStateKind.TOPK_ONLY
+                state_source = "config_fallback"
         if cached is None:
             raise RuntimeError(
                 "indexcache_topk_pattern requested reuse before an explicit "
@@ -3444,7 +3449,7 @@ class CompressedSparseAttention(FleetLayer):
             "action=reuse "
             f"c4_ordinal={c4_ordinal} pattern={pattern} "
             f"producer_layer={producer_layer} state_kind={state_kind.value} "
-            f"topk_shape={cached_shape}"
+            f"state_source={state_source} topk_shape={cached_shape}"
         )
         return cached
 

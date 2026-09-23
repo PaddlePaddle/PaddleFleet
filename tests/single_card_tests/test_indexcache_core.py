@@ -1210,6 +1210,95 @@ class TestIndexCacheCoreState(unittest.TestCase):
         self.assertEqual(list(state[0].shape), [1, 1, 3])
         self.assertTrue(paddle.equal_all(state[0], raw_topk).item())
 
+    def test_config_fallback_reuses_topk_with_debug_disabled_or_enabled(self):
+        logger = logging.getLogger("paddlefleet.transformer.csa_attention")
+        previous_level = logger.level
+        try:
+            for level in (logging.INFO, logging.DEBUG):
+                with self.subTest(level=level):
+                    logger.setLevel(level)
+                    config = _layer_config("FS")
+                    producer = _make_layer(config, 1)
+                    served = _make_layer(config, 2)
+                    topk = paddle.to_tensor([[[0, 1], [1, -1]]], dtype="int32")
+                    producer._indexcache_cache_topk(topk, 0, "FS")
+                    reused = served._indexcache_reuse_topk(1, 2, 1, "FS", None)
+                    self.assertTrue(paddle.equal_all(reused, topk).item())
+        finally:
+            logger.setLevel(previous_level)
+
+    def test_frozen_served_output_preserves_probability_gradient(self):
+        previous_scale = DSAIndexerLossAutoScaler._main_loss_backward_scale
+        DSAIndexerLossAutoScaler._main_loss_backward_scale = None
+        try:
+            for masked in (False, True):
+                with self.subTest(masked=masked):
+                    probabilities = paddle.to_tensor(
+                        [[[0.25, 0.75], [0.75, 0.25]]], stop_gradient=False
+                    )
+                    target = paddle.full_like(probabilities, 0.5)
+                    frozen_output = paddle.ones([1])
+                    mask = paddle.to_tensor([[1.0, 0.0]]) if masked else None
+                    output = IndexCacheServedDistillLossAutoScaler.apply(
+                        frozen_output, probabilities, target, 0.4, 2.0, mask
+                    )
+                    self.assertTrue(frozen_output.stop_gradient)
+                    self.assertFalse(output.stop_gradient)
+                    self.assertIsNot(output, frozen_output)
+                    self.assertTrue(
+                        paddle.equal_all(output, frozen_output).item()
+                    )
+                    output.sum().backward()
+                    self.assertIsNone(frozen_output.grad)
+                    expected = (probabilities.detach() - target) * 0.2
+                    if masked:
+                        expected[:, 1, :] = 0.0
+                    self.assertTrue(
+                        paddle.allclose(probabilities.grad, expected).item()
+                    )
+        finally:
+            DSAIndexerLossAutoScaler._main_loss_backward_scale = previous_scale
+
+    @patch("paddlefleet.tilelang_ops.csa_indexer_bwd")
+    def test_frozen_served_output_routes_gradient_through_producer_bridge(
+        self, mock_bwd
+    ):
+        q = paddle.ones([1, 2])
+        weights = paddle.ones([1, 1])
+        k = paddle.ones([1, 2])
+        for tensor in (q, weights, k):
+            tensor.stop_gradient = False
+        indices = paddle.to_tensor([[[0, 1]]], dtype="int32")
+        probabilities = paddle.to_tensor([[[0.25, 0.75]]])
+        target = paddle.to_tensor([[[0.5, 0.5]]])
+        mock_bwd.return_value = tuple(
+            paddle.ones_like(t) for t in (q, weights, k)
+        )
+        previous_scale = DSAIndexerLossAutoScaler._main_loss_backward_scale
+        DSAIndexerLossAutoScaler._main_loss_backward_scale = None
+        try:
+            bridge = TileLangCSAIndexerDistillBridge.apply(
+                q, weights, k, indices, probabilities
+            )
+            frozen_output = paddle.ones([1])
+            output = IndexCacheServedDistillLossAutoScaler.apply(
+                frozen_output, bridge, target, 0.4
+            )
+            output.sum().backward()
+        finally:
+            DSAIndexerLossAutoScaler._main_loss_backward_scale = previous_scale
+        mock_bwd.assert_called_once()
+        self.assertTrue(
+            paddle.allclose(
+                mock_bwd.call_args.args[4], (probabilities - target) * 0.4
+            ).item()
+        )
+        self.assertIsNone(frozen_output.grad)
+        for tensor in (q, weights, k):
+            self.assertTrue(
+                paddle.equal_all(tensor.grad, paddle.ones_like(tensor)).item()
+            )
+
     def test_missing_explicit_state_fails_for_pipeline_or_recompute(self):
         pattern = "FS"
         config = _layer_config(pattern, pipeline_model_parallel_size=2)
