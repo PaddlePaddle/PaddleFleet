@@ -446,11 +446,7 @@ class GPTModel(PipelineLayer):
             owner = dest_layer
             for p in parts[:-1]:
                 owner = getattr(owner, p)
-            leaf = parts[-1]
-            if leaf in owner._parameters:
-                owner._parameters[leaf] = src_param
-            else:
-                setattr(owner, leaf, src_param)
+            owner._parameters[parts[-1]] = src_param
             aliased += 1
 
         # Raise, not assert: ``python -O`` strips assertions, and this guards a
