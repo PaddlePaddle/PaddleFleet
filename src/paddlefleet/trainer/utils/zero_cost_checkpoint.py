@@ -1235,14 +1235,11 @@ class ZeroCostCheckpointManager:
 
         self.ready_to_save = True
 
-    def _release_ema_shm(self, block=False):
-        if not self._ema_shm_release_pending:
+    def _release_ema_shm(self):
+        if not getattr(self, "_ema_shm_release_pending", False):
             return
-        for worker in self.workers:
-            if block:
-                worker.ema_shm_consumed.wait()
-            elif not worker.ema_shm_consumed.is_set():
-                return  # some worker still consuming; retry at next poll
+        if not all(w.ema_shm_consumed.is_set() for w in self.workers):
+            return  # some worker still consuming; retry at next poll
         num_refs = len(self._ema_tensor_refs) if self._ema_tensor_refs else 0
         num_files = len(self._ema_shm_filenames)
         logger.info(
@@ -1366,7 +1363,7 @@ class ZeroCostCheckpointManager:
             for i in range(self.pipeline_hooks_steps):
                 self.zcc_pipeline_hook(i)
             self.sync_offload_status()
-        self._release_ema_shm(block=True)
+        self._release_ema_shm()
         self.ready_to_save = False
         self.terminate_workers()
 

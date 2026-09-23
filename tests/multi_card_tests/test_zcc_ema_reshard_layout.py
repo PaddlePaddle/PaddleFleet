@@ -13,28 +13,36 @@
 # limitations under the License.
 
 """
-Multi-card regression test for ZCC EMA resume after a 2D shard layout change.
+Multi-card regression test for ZCC EMA resume across a 2D shard layout change.
 
 Resume used to be gated on ``check_same_strategy``, which compares nothing but
 the pp/mp/sharding/ep/moe_sharding degrees in ``model_meta.json``.
 ``machine_balanced_2d_partition`` moves which rank owns which 2D param without
 touching any of those, so the gate reported "same strategy" and the ZCC
-subprocess read shards laid out for the previous owner map. FC-format EMA is
-therefore now always routed through ``Trainer._load_ema_with_reshard``.
+subprocess read shards laid out for the previous owner map.
+
+FC-format EMA resume is now gated on ``Trainer.ema_weight_reshard``, which
+reuses paddle's ``check_resumable_locally`` -- the same per-rank shard-alignment
+check ``dist.load_state_dict`` runs for its own fast path. The EMA reshard fires
+only when a rank's shard does not line up with the checkpoint, so an unchanged
+layout skips the ~30-40s collective entirely and the subprocess reads its shard
+straight from file.
 
 Three things are pinned:
   * resharding lands the right values whether or not the layout moved;
-  * a real ZCC worker consumes the resulting shared memory after its first
-    UPDATE, without hanging;
-  * ``Trainer._load_flex_checkpoint`` actually routes an FC-format EMA resume
-    through the reshard (the call site this PR changed, trainer.py:1677-1684) --
-    the other two exercise ``_load_ema_with_reshard`` directly and so never
+  * a real ZCC worker consumes the resulting shared memory -- which now happens
+    in ``_maybe_prepare_ema`` on the offload after the first UPDATE, not in the
+    LOAD_EMA handler -- without hanging;
+  * ``Trainer._load_flex_checkpoint`` reshards an FC-format EMA resume only when
+    the layout moved (the call site this PR changed, trainer.py:1677-1699):
+    an identity resume leaves ``_ema_reshard_result`` None, a rotated one sets
+    it. The other two exercise ``_load_ema_with_reshard`` directly and so never
     reach that call site.
 
 A rank-rotated ownership map stands in for the flag -- same global tensors, same
 degrees, different ``global_offset``, which is what the change looks like to
-``dist.load_state_dict`` -- so the test also runs on paddle wheels that predate
-the flag.
+``check_resumable_locally`` -- so the test also runs on paddle wheels that
+predate the flag.
 
 Run with:
   python -m paddle.distributed.launch --gpus 0,1,2,3 \
@@ -152,7 +160,7 @@ class _Stub:
 
 
 def _stub_trainer():
-    return SimpleNamespace(
+    trainer = SimpleNamespace(
         model=_Stub(
             lambda: {
                 MODEL_KEY: _sharded_weight(MODEL_KEY, "identity"),
@@ -169,6 +177,10 @@ def _stub_trainer():
         ),
         args=SimpleNamespace(aoa_config=None, load_via_cpu=False),
     )
+    # _load_ema_with_reshard now assembles its load target through
+    # _build_ema_target, so the stub has to carry that method too.
+    trainer._build_ema_target = Trainer._build_ema_target.__get__(trainer)
+    return trainer
 
 
 def _read_shared_memory(reshard_result):
@@ -196,13 +208,18 @@ def _save_dir(root, sub, state_dict):
     dist.save_state_dict(state_dict, directory)
 
 
-def _build_flex_checkpoint(root):
-    """Write the four flex-checkpoint subdirs a resume reads (identity layout).
+def _build_flex_checkpoint(root, ema_layout="identity"):
+    """Write the four flex-checkpoint subdirs a resume reads.
 
-    optimizer_state is only scanned for its ``.metadata`` (opt load is skipped
-    via ignore_load_lr_and_optim); model_state, master_weight and ema_state are
-    really loaded and must match their load targets key-for-key -- including the
-    bf16 decoy in the model state.
+    model_state, optimizer_state and master_weight always use the identity
+    layout: optimizer_state is only scanned for its ``.metadata`` (opt load is
+    skipped via ignore_load_lr_and_optim); model_state and master_weight are
+    really loaded by ``_load_flex_checkpoint`` and must match their identity load
+    targets key-for-key -- including the bf16 decoy in the model state.
+
+    Only ema_state varies: saving it under ``ema_layout="rotated"`` gives it a
+    different ``global_offset`` than the identity EMA target, which is what makes
+    ``ema_weight_reshard`` report the shards misaligned and trigger a reshard.
     """
     _save_dir(
         root,
@@ -242,10 +259,10 @@ def _build_flex_checkpoint(root):
         EMA_STATE_DIC,
         {
             MASTER_KEY: _sharded_weight(
-                MASTER_KEY, "identity", fill_reference=True
+                MASTER_KEY, ema_layout, fill_reference=True
             ),
             MODEL_KEY: _sharded_weight(
-                MODEL_KEY, "identity", fill_reference=True
+                MODEL_KEY, ema_layout, fill_reference=True
             ),
         },
     )
@@ -294,6 +311,11 @@ def _flex_harness():
     harness._load_ema_with_reshard = Trainer._load_ema_with_reshard.__get__(
         harness
     )
+    # The reshard is now gated: _load_flex_checkpoint asks ema_weight_reshard
+    # first, and both it and _load_ema_with_reshard build their target via
+    # _build_ema_target -- so the harness needs all three bound.
+    harness.ema_weight_reshard = Trainer.ema_weight_reshard.__get__(harness)
+    harness._build_ema_target = Trainer._build_ema_target.__get__(harness)
     return harness
 
 
@@ -421,10 +443,14 @@ class TestZCCEMAReshardLayout(unittest.TestCase):
         static = dict.fromkeys(
             ["model_config", "training_args", "model_meta", "user_file"]
         )
+        # The offload that drives the consume runs ema_accumulate, which reads
+        # training_args.zcc_ema_loss_threshold; the high loss the PREPARE carries
+        # keeps it on the skip branch so no real accumulation math is exercised.
+        static["training_args"] = SimpleNamespace(zcc_ema_loss_threshold=0.0)
         return dynamic, static
 
     def test_worker_consumes_shared_memory_after_first_update(self):
-        """Real worker, real handoff: consumed after the first UPDATE, no hang."""
+        """Real worker, real handoff: consumed on the offload after UPDATE, no hang."""
         trainer, reshard_result = self._reshard_from("rotated")
         ctx = multiprocessing.get_context("spawn")
         queue = ctx.Queue()
@@ -451,8 +477,10 @@ class TestZCCEMAReshardLayout(unittest.TestCase):
         process = ctx.Process(target=worker_loop, args=(worker,))
         process.start()
         try:
-            # The EMA processor is built after the first UPDATE, which is why the
-            # manager defers LOAD_EMA until the version has landed.
+            # UPDATE only arms pending_ema_rebuild; the EMA processor is actually
+            # built -- and the shared memory consumed -- inside _maybe_prepare_ema
+            # on the offload below. The manager still defers LOAD_EMA until the
+            # UPDATE version has landed, which is why we wait on it here.
             queue.put((ZCCTaskType.UPDATE, [1, *self._update_payload()]))
             deadline = time.time() + WORKER_TIMEOUT
             while (
@@ -467,7 +495,27 @@ class TestZCCEMAReshardLayout(unittest.TestCase):
                 f"first UPDATE never landed, exitcode={process.exitcode}",
             )
 
+            # LOAD_EMA now only stashes the metas; the consume is deferred to
+            # _maybe_prepare_ema, which runs on the last offload chunk after the
+            # global_step bump. So drive one full PREPARE + OFFLOAD cycle to reach
+            # it. PREPARE carries the trainer_state (a high loss, so ema_accumulate
+            # takes its skip branch) and null save dirs (so the dump is a no-op);
+            # the single-chunk worker offloads everything in one OFFLOAD.
             queue.put((ZCCTaskType.LOAD_EMA_FROM_SHARED_MEM, reshard_result))
+            queue.put(
+                (
+                    ZCCTaskType.PREPARE,
+                    (
+                        (None, None),
+                        (
+                            None,
+                            SimpleNamespace(global_step=1, loss=1.0e9),
+                            None,
+                        ),
+                    ),
+                )
+            )
+            queue.put((ZCCTaskType.OFFLOAD, 1))
             # set() runs after _load_ema_from_shared_memory returns, so this also
             # fails if unpacking raised: the worker dies quietly and the
             # manager's own wait() has no timeout.
@@ -487,34 +535,48 @@ class TestZCCEMAReshardLayout(unittest.TestCase):
         dist.barrier()
 
     def test_resume_routes_fc_ema_through_reshard(self):
-        """Drive the real _load_flex_checkpoint: FC-format EMA resume must reshard.
+        """Drive the real _load_flex_checkpoint: reshard only when the layout moved.
 
-        This is the call site the PR changed (trainer.py:1677-1684). On the
-        parent commit a same-degree resume took the file-read path and left
-        ``_ema_reshard_result`` None; the fix reshards unconditionally.
+        This is the call site the PR changed (trainer.py:1677-1699). The gate is
+        Trainer.ema_weight_reshard, which reuses paddle's check_resumable_locally
+        -- the same per-rank shard-alignment check dist.load_state_dict runs. An
+        identity EMA resume aligns with the checkpoint and skips the reshard
+        (_ema_reshard_result stays None); a rotated one does not and reshards.
         """
-        ckpt = os.path.join(self.tmp_root, "resume")
-        if self.rank == 0:
-            shutil.rmtree(ckpt, ignore_errors=True)
-        dist.barrier()
-        _build_flex_checkpoint(ckpt)
-        dist.barrier()
+        for ema_layout, expect_reshard in (
+            ("identity", False),
+            ("rotated", True),
+        ):
+            ckpt = os.path.join(self.tmp_root, f"resume_{ema_layout}")
+            if self.rank == 0:
+                shutil.rmtree(ckpt, ignore_errors=True)
+            dist.barrier()
+            _build_flex_checkpoint(ckpt, ema_layout=ema_layout)
+            dist.barrier()
 
-        harness = _flex_harness()
-        # init_optimizer would need a real sharding optimizer to build
-        # accumulators; the reshard block under test does not depend on it.
-        with patch("paddlefleet.trainer.trainer.init_optimizer"):
-            harness._load_flex_checkpoint(ckpt)
+            harness = _flex_harness()
+            # init_optimizer would need a real sharding optimizer to build
+            # accumulators; the reshard block under test does not depend on it.
+            with patch("paddlefleet.trainer.trainer.init_optimizer"):
+                harness._load_flex_checkpoint(ckpt)
 
-        self.assertIsNotNone(
-            harness._ema_reshard_result,
-            "FC-format EMA resume did not go through _load_ema_with_reshard",
-        )
-        self.assertEqual(
-            sorted(harness._ema_reshard_result.keys()),
-            sorted([MASTER_KEY, MODEL_KEY]),
-        )
-        dist.barrier()
+            if expect_reshard:
+                self.assertIsNotNone(
+                    harness._ema_reshard_result,
+                    f"{ema_layout} EMA resume should have resharded but "
+                    "_ema_reshard_result is None",
+                )
+                self.assertEqual(
+                    sorted(harness._ema_reshard_result.keys()),
+                    sorted([MASTER_KEY, MODEL_KEY]),
+                )
+            else:
+                self.assertIsNone(
+                    harness._ema_reshard_result,
+                    f"{ema_layout} EMA resume should have skipped the reshard "
+                    "but _ema_reshard_result is set",
+                )
+            dist.barrier()
 
     @classmethod
     def tearDownClass(cls):
