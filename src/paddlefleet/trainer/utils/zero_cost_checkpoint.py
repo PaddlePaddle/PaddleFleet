@@ -1149,6 +1149,7 @@ class ZeroCostCheckpointManager:
         self.ready_to_save = False
         self.ema_shared_metas = None
         self._ema_tensor_refs = None
+        self._ema_shm_release_pending = False
         atexit.register(self.terminate_workers)
 
     def set_ema_state_dict(self, path):
@@ -1214,7 +1215,7 @@ class ZeroCostCheckpointManager:
             )
         logger.info("[ZCC manager] update all zcc workers done")
 
-        # Send EMA shared memory data to workers if pending (from reshard)
+        # Hand the resharded EMA shared-memory metas to workers
         if self.ema_shared_metas is not None:
             for worker in self.workers:
                 worker.ema_shm_consumed.clear()
@@ -1226,40 +1227,40 @@ class ZeroCostCheckpointManager:
                     )
                 )
             logger.info(
-                "[EMA Reshard] Shared memory metas sent to workers, waiting for consumption..."
-            )
-            for worker in self.workers:
-                logger.info(
-                    f"[EMA Reshard] Waiting worker{worker.worker_id} to consume shared memory..."
-                )
-                worker.ema_shm_consumed.wait()
-                logger.info(
-                    f"[EMA Reshard] Worker{worker.worker_id} consumed shared memory."
-                )
-            # Now safe to release shared memory tensor references
-            num_refs = (
-                len(self._ema_tensor_refs) if self._ema_tensor_refs else 0
-            )
-            num_files = len(self._ema_shm_filenames)
-            logger.info(
-                f"[EMA Reshard] Releasing {num_refs} tensor refs ({num_files} tracked shm files)..."
+                "[EMA Reshard] Shared memory metas sent to workers (async); "
+                "refs released once consumed"
             )
             self.ema_shared_metas = None
-            self._ema_tensor_refs = None
-            # Verify specific shm files are gone
-            leaked = self._check_shm_files_released(self._ema_shm_filenames)
-            if leaked:
-                logger.warning(
-                    f"[EMA Reshard] LEAK DETECTED: {len(leaked)}/{num_files} shm files still exist! "
-                    f"Examples: {leaked[:5]}"
-                )
-            else:
-                logger.info(
-                    f"[EMA Reshard] All {num_files} shm files released successfully, no leak"
-                )
-            self._ema_shm_filenames = []
+            self._ema_shm_release_pending = True
 
         self.ready_to_save = True
+
+    def _release_ema_shm(self, block=False):
+        if not self._ema_shm_release_pending:
+            return
+        for worker in self.workers:
+            if block:
+                worker.ema_shm_consumed.wait()
+            elif not worker.ema_shm_consumed.is_set():
+                return  # some worker still consuming; retry at next poll
+        num_refs = len(self._ema_tensor_refs) if self._ema_tensor_refs else 0
+        num_files = len(self._ema_shm_filenames)
+        logger.info(
+            f"[EMA Reshard] Releasing {num_refs} tensor refs ({num_files} tracked shm files)..."
+        )
+        self._ema_tensor_refs = None
+        leaked = self._check_shm_files_released(self._ema_shm_filenames)
+        if leaked:
+            logger.warning(
+                f"[EMA Reshard] LEAK DETECTED: {len(leaked)}/{num_files} shm files still exist! "
+                f"Examples: {leaked[:5]}"
+            )
+        else:
+            logger.info(
+                f"[EMA Reshard] All {num_files} shm files released successfully, no leak"
+            )
+        self._ema_shm_filenames = []
+        self._ema_shm_release_pending = False
 
     def get_idle_worker_for_saving(
         self, save_infos_and_non_cached_objects=None
@@ -1267,6 +1268,7 @@ class ZeroCostCheckpointManager:
         """
         if `save_infos_and_non_cached_objects` is None, do offload without dumping.
         """
+        self._release_ema_shm()
         self.report_error_worker()
         assert self.current_worker is None, (
             "[ZCC manager] current_worker must be None"
@@ -1364,6 +1366,7 @@ class ZeroCostCheckpointManager:
             for i in range(self.pipeline_hooks_steps):
                 self.zcc_pipeline_hook(i)
             self.sync_offload_status()
+        self._release_ema_shm(block=True)
         self.ready_to_save = False
         self.terminate_workers()
 
@@ -1443,6 +1446,7 @@ class ZeroCostCheckpointWorker:
         self.persistent_save_dir = None
         self.zcc_ema_processor = None
         self.pending_ema_ckpt_path = None
+        self.pending_ema_shared_metas = None
         self.pending_ema_rebuild = False
 
     def process_update_task(self, updates):
@@ -1562,6 +1566,15 @@ class ZeroCostCheckpointWorker:
                 self.ema_coef,
             )
             self.pending_ema_rebuild = False
+        # Path A: main process completed EMA reshard, pass via shared memory
+        if self.pending_ema_shared_metas is not None:
+            with device_guard("cpu"):
+                self._load_ema_from_shared_memory(self.pending_ema_shared_metas)
+            self.pending_ema_shared_metas = None
+            self.ema_shm_consumed.set()  # signal main it can release the shm refs
+            return
+
+        # Path B: no reshard needed, subprocess loads from file (existing logic)
         if self.pending_ema_ckpt_path is None:
             return
         ema_ckpt_path = self.pending_ema_ckpt_path
@@ -1810,9 +1823,7 @@ class ZeroCostCheckpointWorker:
                 elif task_type == ZCCTaskType.SET_EMA_STATE_DICT:
                     self.pending_ema_ckpt_path = task_body
                 elif task_type == ZCCTaskType.LOAD_EMA_FROM_SHARED_MEM:
-                    with device_guard("cpu"):
-                        self._load_ema_from_shared_memory(task_body)
-                    self.ema_shm_consumed.set()
+                    self.pending_ema_shared_metas = task_body
                 else:
                     raise ValueError(
                         f"[ZCC Worker{self.worker_id}] Unknown task type: {task_type}"
