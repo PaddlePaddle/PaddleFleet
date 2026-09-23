@@ -49,19 +49,27 @@ class _SingleCardGpuEnv(unittest.TestCase):
     def setUp(self):
         import paddle
 
+        # The capability probe in ``TrainingArguments.__post_init__`` only runs
+        # on CUDA-compiled builds; a pure-CPU build takes the ``fa_version = 2``
+        # branch and never calls ``get_device_capability()``, so these callback
+        # tests are runnable there. Skip ONLY the case that genuinely raises: a
+        # CUDA-compiled build with no usable card (the probe hits a CPU place).
         if (
-            not paddle.is_compiled_with_cuda()
-            or paddle.device.cuda.device_count() == 0
+            paddle.is_compiled_with_cuda()
+            and paddle.device.cuda.device_count() == 0
         ):
             self.skipTest(
                 "TrainingArguments(bf16=True) probes GPU device capability; "
-                "this build has no usable CUDA device"
+                "this CUDA build has no usable card"
             )
-        self._orig_device = paddle.get_device()
-        self._orig_selected_gpus = os.environ.get("FLAGS_selected_gpus")
-        os.environ["FLAGS_selected_gpus"] = "0"
-        paddle.set_device("gpu:0")
-        self.addCleanup(self._restore_gpu_env)
+        # Pin an explicit single card as the launcher would, but only when a
+        # card is actually available; a CPU-only build runs as-is.
+        if paddle.device.cuda.device_count() > 0:
+            self._orig_device = paddle.get_device()
+            self._orig_selected_gpus = os.environ.get("FLAGS_selected_gpus")
+            os.environ["FLAGS_selected_gpus"] = "0"
+            paddle.set_device("gpu:0")
+            self.addCleanup(self._restore_gpu_env)
 
     def _restore_gpu_env(self):
         import paddle

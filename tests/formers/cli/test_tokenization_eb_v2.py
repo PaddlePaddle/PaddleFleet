@@ -165,56 +165,50 @@ class TestErnieBotTokenizerBehavior(unittest.TestCase):
             self.assertEqual(vocab[piece], want_id)
 
     def test_tokenize_preserves_special_tokens_and_delegates_rest(self):
-        # Independent expectation, derived only from the raw SentencePiece
-        # oracle (never from the tokenizer under test).
+        # Exercise the special-token-preserving branch of ``tokenize``
+        # (tokenization_eb_v2.py:185-188): a token is kept atomic only when it
+        # lives in ``unique_no_split_tokens`` / the tokens trie. The SPM model
+        # here has no such entry by construction, so we register one through the
+        # genuine production entry point ``add_special_tokens`` -- a token that
+        # is deliberately NOT in the SentencePiece vocab so that raw SPM would
+        # shatter it, making the preservation observable.
         #
-        # "<mask:1>" is registered as a SentencePiece *user_defined_symbol* (see
-        # _USER_DEFINED / _build_tiny_spm_model), so SentencePiece keeps it as
-        # one atomic piece. ErnieBotTokenizer.tokenize
-        # (src/paddlefleet/cli/train/ernie_pretrain/src/tokenizers/tokenization_eb_v2.py:164)
-        # emits the special token verbatim and delegates the surrounding text to
-        # sp_model.encode_as_pieces (its _tokenize at line 114). SentencePiece's
-        # add_dummy_prefix normalizer inserts the word-start marker "\u2581" only
-        # at the very START of the encoded string, so "hello" before the symbol
-        # receives a marker while "world" after it is segmented mid-string
-        # WITHOUT one (yielding e.g. 'w','orld', not '\u2581world').
-        #
-        # Take the two ordinary segments straight from the oracle's encoding of
-        # the full input: the pieces before the symbol are the word-start
-        # "hello", the pieces after it are the marker-less "world". This is the
-        # exact segmentation SentencePiece applies to each substring in context,
-        # derived without ever calling the tokenizer under test.
-        oracle_pieces = self.oracle.encode_as_pieces("hello<mask:1>world")
-        sep = oracle_pieces.index("<mask:1>")
-        left = oracle_pieces[
-            :sep
-        ]  # ['\u2581hello'] -> string start, word-start marker
-        right = oracle_pieces[
-            sep + 1 :
-        ]  # ['w', 'orld'] -> mid-string, no marker
-        expected = [*left, "<mask:1>", *right]
+        # Use a fresh tokenizer instance so this registration cannot leak into
+        # the shared class-level fixture used by the other tests.
+        tokenizer = ErnieBotTokenizer(self.model_file)
+        added = tokenizer.add_special_tokens(
+            {"additional_special_tokens": ["<|im_start|>"]}
+        )
+        # The token was genuinely new (not already an SPM piece).
+        self.assertEqual(added, 1)
 
-        got = self.tokenizer.tokenize("hello<mask:1>world")
+        text = "hello<|im_start|>world"
+
+        # Independent expectation, derived only from the raw SentencePiece
+        # oracle. ``tokenize`` splits on the registered special token, keeps it
+        # verbatim, and delegates each surrounding substring to
+        # ``sp_model.encode_as_pieces`` INDEPENDENTLY. Each standalone substring
+        # receives the add_dummy_prefix word-start marker "\u2581", so the two
+        # segments are the oracle's per-substring encodings (not slices of the
+        # whole-string encoding).
+        left = self.oracle.encode_as_pieces("hello")  # ['\u2581hello']
+        right = self.oracle.encode_as_pieces("world")  # ['\u2581world']
+        expected = [*left, "<|im_start|>", *right]
+
+        got = tokenizer.tokenize(text)
         self.assertEqual(got, expected)
 
         # The special token survives as exactly one element.
-        self.assertEqual(got.count("<mask:1>"), 1)
+        self.assertEqual(got.count("<|im_start|>"), 1)
 
-        # Non-trivial word-start-marker contract: the chunk that FOLLOWS the
-        # symbol is not the standalone-word segmentation. Encoding "world" on its
-        # own receives the add_dummy_prefix marker (['\u2581world']); the
-        # post-symbol chunk does not, so the two genuinely differ.
-        #
-        # NOTE on the fix: a previous revision asserted ``got != oracle.encode_
-        # as_pieces("hello<mask:1>world")`` and built ``expected`` with
-        # ``encode_as_pieces("world")`` (which adds the dummy prefix). That
-        # premise was wrong. Because "<mask:1>" is an SPM-native user_defined_
-        # symbol, the tokenizer's special-token-preserving output coincides with
-        # the raw whole-string encoding, so ``got == whole`` and only the
-        # trailing chunk (marker vs no marker) is the meaningful distinction.
-        # This is legitimate SentencePiece behavior, not a production defect, so
-        # the oracle derivation is corrected rather than capturing a failure.
-        self.assertNotEqual(right, self.oracle.encode_as_pieces("world"))
+        # The preservation is meaningful: raw whole-string SPM encoding does not
+        # keep "<|im_start|>" atomic (it is not an SPM piece), so the trie-driven
+        # special-token branch produces a genuinely different result. If that
+        # branch were removed, "<|im_start|>" would be delegated to
+        # encode_as_pieces and shattered into sub-pieces, changing ``got``.
+        whole = self.oracle.encode_as_pieces(text)
+        self.assertNotEqual(got, whole)
+        self.assertNotIn("<|im_start|>", whole)
 
     def test_convert_tokens_to_string_keeps_special_tokens_literal(self):
         tokens = [

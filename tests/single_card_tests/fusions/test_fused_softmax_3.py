@@ -170,7 +170,10 @@ class TestSoftmaxOne(unittest.TestCase):
         offset_np = np.array([0.0], dtype=np.float64)
         out = self._run(x_np, offset_np)
         if out is None:  # compat-softmax build: production raised (documented)
-            return
+            self.skipTest(
+                "this build's paddle.softmax rejects axis=; "
+                "SoftmaxOne numerics not verified"
+            )
         self.assertEqual(out.shape, [1, 1, 1, 2])
 
         expected = _ref_softmax_off_by_one(x_np, offset_np)
@@ -195,7 +198,10 @@ class TestSoftmaxOne(unittest.TestCase):
         offset_np = np.array([0.0, 1.0], dtype=np.float64)
         out = self._run(x_np, offset_np)
         if out is None:  # compat-softmax build: production raised (documented)
-            return
+            self.skipTest(
+                "this build's paddle.softmax rejects axis=; "
+                "SoftmaxOne numerics not verified"
+            )
         self.assertEqual(out.shape, [1, 2, 1, 2])
 
         expected = _ref_softmax_off_by_one(x_np, offset_np)
@@ -224,7 +230,10 @@ class TestSoftmaxOne(unittest.TestCase):
         offset_np = np.array([0.0], dtype=np.float64)
         out = self._run(x_np, offset_np)
         if out is None:  # compat-softmax build: production raised (documented)
-            return
+            self.skipTest(
+                "this build's paddle.softmax rejects axis=; "
+                "SoftmaxOne numerics not verified"
+            )
         self.assertEqual(out.shape, [2, 1, 2, 2])
 
         expected = _ref_softmax_off_by_one(x_np, offset_np)
@@ -251,7 +260,10 @@ class TestSoftmaxOne(unittest.TestCase):
         if (
             out_t is None
         ):  # compat-softmax build: production raised (documented)
-            return
+            self.skipTest(
+                "this build's paddle.softmax rejects axis=; "
+                "SoftmaxOne numerics not verified"
+            )
         out = out_t.numpy().reshape(-1)
 
         # Independent plain softmax (sink removed) for the same logits.
@@ -284,7 +296,10 @@ class TestSoftmaxOne(unittest.TestCase):
         out_large = self._run(x_np, np.array([2.0], dtype=np.float64))
         if out_small is None or out_large is None:
             # compat-softmax build: production raised (documented in _run).
-            return
+            self.skipTest(
+                "this build's paddle.softmax rejects axis=; "
+                "SoftmaxOne numerics not verified"
+            )
 
         sum_small = float(out_small.numpy().sum())
         sum_large = float(out_large.numpy().sum())

@@ -30,7 +30,9 @@ from pathlib import Path
 
 import requests
 from huggingface_hub.utils import (
+    BadRequestError,
     EntryNotFoundError,
+    HfHubHTTPError,
 )
 
 from paddlefleet.utils.download import common
@@ -427,8 +429,11 @@ class TestRaiseForStatus(unittest.TestCase):
     requests' own raise_for_status raise the underlying HTTPError, then
     assert how our mapping translates it. Note: with huggingface_hub>=1.x
     the 400/500 branches hit a genuine production defect (response=None
-    passed to error constructors that dereference response.headers); those
-    two tests capture that real behavior rather than the intended mapping."""
+    passed to error constructors that dereference response.headers). The
+    400/500 tests assert the INTENDED mapping (BadRequestError /
+    HfHubHTTPError) and are marked ``@unittest.expectedFailure`` so the defect
+    stays visible without turning CI red; drop the decorator once common.py
+    passes a real response and the intended mapping becomes reachable."""
 
     def _response(self, status_code, url="http://example.com/file"):
         resp = requests.Response()
@@ -446,29 +451,30 @@ class TestRaiseForStatus(unittest.TestCase):
             "Entry Not Found for url: http://example.com/file", message
         )
 
+    @unittest.expectedFailure
     def test_400_maps_to_bad_request_with_endpoint(self):
-        # Intended contract: a 400 is meant to map to BadRequestError. But
-        # production raise_for_status builds it as
-        # ``BadRequestError(message, response=None)`` (common.py:674), and
-        # huggingface_hub>=1.x error constructors unconditionally read
-        # ``response.headers`` for a request id (errors.py:128). With
-        # response=None that dereference raises AttributeError *before* any
-        # BadRequestError is produced, so the intended mapping is currently
-        # unreachable. Capture the genuine behavior on the pinned hub version
-        # without modifying production.
-        with self.assertRaises(AttributeError) as cm:
+        # Intended contract: a 400 maps to BadRequestError. Production
+        # raise_for_status builds it as ``BadRequestError(message,
+        # response=None)`` (common.py:674); with huggingface_hub>=1.x the error
+        # constructor unconditionally reads ``response.headers`` (errors.py:128),
+        # so response=None raises AttributeError *before* BadRequestError is
+        # produced, making the intended mapping currently unreachable. Assert
+        # the CORRECT contract and mark expectedFailure: the test xfails on the
+        # pinned hub today, and flips to a real pass (drop the decorator) once
+        # production passes a genuine response.
+        with self.assertRaises(BadRequestError):
             raise_for_status(self._response(400), endpoint_name="metadata")
-        self.assertIn("headers", str(cm.exception))
 
+    @unittest.expectedFailure
     def test_500_maps_to_generic_hf_http_error(self):
         # Same production defect as the 400 case: the generic branch runs
         # ``HfHubHTTPError(str(e), response=None)`` (common.py:675), which
-        # crashes in the hub's error constructor on ``response.headers``.
-        # The generic HfHubHTTPError mapping is therefore unreachable on the
-        # pinned huggingface_hub; assert the real AttributeError.
-        with self.assertRaises(AttributeError) as cm:
+        # crashes in the hub's error constructor on ``response.headers``. Assert
+        # the INTENDED generic mapping (HfHubHTTPError) and mark expectedFailure
+        # so the defect stays visible; drop the decorator once common.py passes
+        # a real response.
+        with self.assertRaises(HfHubHTTPError):
             raise_for_status(self._response(500))
-        self.assertIn("headers", str(cm.exception))
 
     def test_200_does_not_raise(self):
         self.assertIsNone(raise_for_status(self._response(200)))

@@ -447,6 +447,7 @@ if __name__ == "__main__":
     test_GatherFromModelParallelRegion()
     test_ReduceScatterToSequenceParallelRegion()
     test_GatherFromSequenceParallelRegion()
+    test_ScatterToSequenceParallelRegion()
     test_AllGatherFromTensorParallelRegion()
     test_ReduceScatterToTensorParallelRegion()
     test_AllToAll()

@@ -143,6 +143,32 @@ class TestRMSNorm(unittest.TestCase):
         self.assertAlmostEqual(default.variance_epsilon, 2e-6)
         self.assertEqual(list(default.weight.shape), [16])
 
+    @unittest.expectedFailure
+    def test_default_fused_config_should_fall_back_on_cpu(self):
+        """Expected contract (currently failing): with the default
+        ``fuse_rms_norm=True`` a CPU forward should fall back to the manual
+        RMSNorm and produce correct numerics.
+
+        It fails today because ``detect_device()`` misreports a CPU device as
+        ``"gpu"`` (``paddle.get_device() == "cpu"`` falls through to the else
+        branch in ``src/paddlefleet/cli/utils/process.py``), so
+        ``RMSNorm.forward`` dispatches to the GPU-only ``fused_rms_norm_ext``
+        kernel, which is not registered on CPU and raises ``RuntimeError``.
+        This is device-driven (``setUp`` pins the CPU device), so it triggers
+        even on a machine that physically has a GPU. Marked
+        ``expectedFailure`` to keep the regression visible without turning CI
+        red; drop this decorator once the device detection / fallback is
+        fixed.
+        """
+        norm = RMSNorm(
+            _make_config(fuse_rms_norm=True), hidden_size=_HID, norm_eps=1e-6
+        )
+        _set_param(norm.weight, _W)
+        out = norm(paddle.to_tensor(_X)).numpy()
+        np.testing.assert_allclose(
+            out, _rms_norm_reference(_X, _W, 1e-6), rtol=1e-5, atol=1e-6
+        )
+
     def test_fused_path_matches_reference_on_gpu(self):
         # The fused kernel is GPU-only; on CPU detect_device() reports "gpu"
         # so the default fuse_rms_norm=True path would call it and fail. Only
