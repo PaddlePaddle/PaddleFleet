@@ -1442,6 +1442,7 @@ class ZeroCostCheckpointWorker:
         self.flash_device_save_dir = None
         self.persistent_save_dir = None
         self.zcc_ema_processor = None
+        self.pending_ema_ckpt_path = None
 
     def process_update_task(self, updates):
         """
@@ -1530,6 +1531,7 @@ class ZeroCostCheckpointWorker:
             self.global_step.value = global_step
 
             if self.ema_coef is not None:
+                self._maybe_load_pending_ema()
                 self.zcc_ema_processor.ema_accumulate(
                     self.trainer_state.global_step,
                     self.trainer_state.loss,
@@ -1550,6 +1552,24 @@ class ZeroCostCheckpointWorker:
             )
             return True
         return False
+
+    def _maybe_load_pending_ema(self):
+        if self.pending_ema_ckpt_path is None:
+            return
+        ema_ckpt_path = self.pending_ema_ckpt_path
+        logger.info(f"[ZCC EMA] load state dict from {ema_ckpt_path}")
+        with device_guard("cpu"):
+            state_dict = paddle.load(ema_ckpt_path)
+            # Reverse unified name mapping: saved with unified names, but
+            # load_ema_state_dict expects original param names
+            state_dict = self._reverse_unified_name_for_ema(state_dict)
+            if self.use_expert_parallel and self.dp_rank > 0:
+                state_dict = self._filter_moe_no_sync_optimizer_params(
+                    self.model_meta_content, state_dict
+                )
+            self.zcc_ema_processor.load_ema_state_dict(state_dict)
+        logger.info("[ZCC EMA] done loading")
+        self.pending_ema_ckpt_path = None
 
     def process_dump_task(self):
         """
@@ -1751,7 +1771,6 @@ class ZeroCostCheckpointWorker:
         logger.info(
             f"[ZCC Worker{self.worker_id}] Worker{self.worker_id} started."
         )
-        ema_ckpt_path = None
         save_info_tuple = None  # save dir...
         start_time = None
         try:
@@ -1771,29 +1790,6 @@ class ZeroCostCheckpointWorker:
                             self.param_fusion_storage_helper,
                             self.ema_coef,
                         )
-                        if ema_ckpt_path is not None:  # update ema if needed
-                            logger.info(
-                                f"[ZCC EMA] load state dict from {ema_ckpt_path}"
-                            )
-                            with device_guard("cpu"):
-                                state_dict = paddle.load(ema_ckpt_path)
-                                # Reverse unified name mapping: saved with unified names, but
-                                # load_ema_state_dict expects original param names
-                                state_dict = self._reverse_unified_name_for_ema(
-                                    state_dict
-                                )
-                                if (
-                                    self.use_expert_parallel
-                                    and self.dp_rank > 0
-                                ):
-                                    state_dict = self._filter_moe_no_sync_optimizer_params(
-                                        self.model_meta_content, state_dict
-                                    )
-                                self.zcc_ema_processor.load_ema_state_dict(
-                                    state_dict
-                                )
-                            logger.info("[ZCC EMA] done loading")
-                        ema_ckpt_path = None
                 elif task_type == ZCCTaskType.PREPARE:
                     start_time = time.time()
                     save_info_tuple = task_body
@@ -1808,7 +1804,7 @@ class ZeroCostCheckpointWorker:
                             f"[ZCC Worker{self.worker_id}] used time {used_time:.3f} sec"
                         )
                 elif task_type == ZCCTaskType.SET_EMA_STATE_DICT:
-                    ema_ckpt_path = task_body  # mark ema state dict path
+                    self.pending_ema_ckpt_path = task_body
                 elif task_type == ZCCTaskType.LOAD_EMA_FROM_SHARED_MEM:
                     with device_guard("cpu"):
                         self._load_ema_from_shared_memory(task_body)
