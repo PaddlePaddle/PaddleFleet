@@ -47,11 +47,11 @@ from paddlefleet.transformer.moe.token_dispatcher import (
     quantize_activation_blockscaled_fast as _sonic_fp8_quant,
 )
 
-# fp8 ring tests invoke SonicMoE's block-scaled quantizer; skip (not error) where
-# it is unavailable (build/GPU without it, e.g. non-Blackwell).
+# fp8 ring tests invoke SonicMoE's block-scaled quantizer; skip (not error) on a
+# build/GPU where that kernel is unavailable.
 _needs_sonicmoe_fp8 = unittest.skipUnless(
     _sonic_fp8_quant is not None,
-    "SonicMoE fp8 quantizer (quantize_activation_blockscaled_fast) unavailable",
+    "Sonic-MoE fp8 block-scaled quantizer not available",
 )
 
 _pg_collection = None
