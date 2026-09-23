@@ -214,8 +214,12 @@ class TransformerConfig(ModelParallelConfig):
     requires the depths to be co-located, enforced by
     GPTModel._assert_mtp_depths_colocated_for_sampling.
 
-    Mutually exclusive with mtp_shared_last_layer (see __post_init__): one LayerDesc
-    carries one key, and the two want different pivots. Requires
+    Can be combined with mtp_shared_last_layer. In that mode,
+    mtp_shared_last_layer shares each MTP transformer's body with the last
+    backbone TransformerLayer, while this flag shares the per-depth fusion
+    parameters across MTP depths. Because one SharedLayerDesc key cannot express
+    both pivots, the combined mode requires all MTP depths to be on one pipeline
+    stage; GPTModel validates that placement at build time. Requires
     num_nextn_predict_layers >= 2. Not usable with the dualpipev scheduler, which
     paddle rejects for SharedLayerDesc outright."""
 
@@ -2291,20 +2295,8 @@ class TransformerConfig(ModelParallelConfig):
                 )
 
         if self.mtp_shared_weights:
-            # Raise, not assert: ``python -O`` strips assertions, and both cases
-            # below would otherwise fail deep inside PipelineLayer's shared-layer
-            # bookkeeping, where the cause is no longer visible.
-            if self.mtp_shared_last_layer:
-                raise ValueError(
-                    "mtp_shared_weights and mtp_shared_last_layer cannot both be "
-                    "True. A LayerDesc carries exactly one SharedLayerDesc key, and "
-                    "the two want different pivots for the same MTP layers: "
-                    "mtp_shared_last_layer points the body at the last backbone "
-                    "TransformerLayer, mtp_shared_weights points every depth at MTP "
-                    "depth 0. mtp_shared_weights already shares the body across all "
-                    "depths, so it subsumes the cross-depth half of "
-                    "mtp_shared_last_layer."
-                )
+            # Raise, not assert: ``python -O`` strips assertions, and an invalid
+            # depth count would otherwise fail deep inside shared-layer bookkeeping.
             if self.num_nextn_predict_layers < 2:
                 raise ValueError(
                     "mtp_shared_weights requires num_nextn_predict_layers >= 2, got "
