@@ -780,8 +780,24 @@ class SonicMoEExpert(GroupedMLPExpert):
         # Micro batch tracking for fp8 weight memory optimization.
         # _num_micro_batches: total forward passes per step for this layer.
         # _forward_counter: auto-increments in forward(); reset in quant_weight().
+        # _calls_per_micro_batch: how many times one micro batch calls forward().
+        #   1 for every flat dispatcher, but the RingMoE dispatcher runs the
+        #   expert once per ring round (N times), so the raw call counter would
+        #   reach _num_micro_batches N times too early and release the fp8
+        #   weights mid-step. MoELayer sets this from the dispatcher.
         self._forward_counter = 0
         self._num_micro_batches = 9999
+        self._calls_per_micro_batch = 1
+
+    def set_calls_per_micro_batch(self, calls):
+        """Declare how many ``forward()`` calls one micro batch performs.
+
+        Only the RingMoE dispatcher needs this (it calls the expert once per
+        ring round); everything else leaves it at 1.
+        """
+        if calls < 1:
+            raise ValueError(f"calls_per_micro_batch must be >= 1, got {calls}")
+        self._calls_per_micro_batch = calls
 
     def set_num_micro_batches(self, num_micro_batches):
         """Set total number of forward passes (micro batches) per training step.
@@ -807,7 +823,11 @@ class SonicMoEExpert(GroupedMLPExpert):
 
     @property
     def _is_last_micro_batch(self):
-        return self._forward_counter >= self._num_micro_batches - 1
+        # Compare against total *calls*, not micro batches: a dispatcher that
+        # invokes the expert several times per micro batch (RingMoE, once per
+        # ring round) must not trip the fp8 weight release on its first round.
+        total_calls = self._num_micro_batches * self._calls_per_micro_batch
+        return self._forward_counter >= total_calls - 1
 
     def _release_fp8_weight_after_fwd(self, recompute_moe_gate_up):
         release_fp8_weight_after_fwd = (
@@ -954,6 +974,7 @@ class SonicMoEExpert(GroupedMLPExpert):
         fp8_scale=None,
         recompute_moe_gate_up=False,
         fp8_combine_grad_handle=None,
+        sync_free_sizing=False,
     ):
         self.convert_weights_to_sonic_layout()
         if self.sonic_moe_config.enabled is True and self.need_quant_weight():
@@ -983,6 +1004,9 @@ class SonicMoEExpert(GroupedMLPExpert):
             # TypeError.  SiTU already fails early and clearly on such a build:
             # the encode_situ_activation import in __init__ raises ImportError.
             **self._sonic_activation_kwargs,
+            # Same forward-compat reasoning: only the ring dispatcher asks for
+            # sync-free metadata sizing, so older builds keep seeing the old call.
+            **({"sync_free_sizing": True} if sync_free_sizing else {}),
         )
         # Release fp8 weights on last micro batch to save memory.
         # Only transposed_fp8 is kept for backward computation.

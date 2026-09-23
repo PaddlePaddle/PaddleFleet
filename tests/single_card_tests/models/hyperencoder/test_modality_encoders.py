@@ -14,7 +14,9 @@
 
 """Unit tests for the HyperEncoder image / audio modality towers."""
 
+import os
 import unittest
+from unittest import mock
 
 import paddle
 
@@ -27,6 +29,8 @@ from paddlefleet.models.hyperencoder.modality_encoders import (
     ImageEncoderConv,
     MlpProjector,
     PatchEmbed,
+    _abs_pos_use_legacy_interp,
+    _aligned_bilinear_2d,
     get_abs_pos_1d,
     get_abs_pos_2d,
 )
@@ -103,6 +107,71 @@ class TestAbsPos2d(unittest.TestCase):
         abs_pos = paddle.randn([1, 4, 4, 8])
         out = get_abs_pos_2d(abs_pos, (2, 2))
         self.assertEqual(out.shape, [1, 2, 2, 8])
+
+
+class TestAbsPos2dLegacySwitch(unittest.TestCase):
+    """The ``HYPERBODY_ABS_POS_LEGACY_INTERP`` env switch and its two paths."""
+
+    def test_switch_defaults_to_new_path(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("HYPERBODY_ABS_POS_LEGACY_INTERP", None)
+            self.assertFalse(_abs_pos_use_legacy_interp())
+
+    def test_switch_falsy_values(self):
+        for val in ("", "0", "false", "False"):
+            with mock.patch.dict(
+                os.environ, {"HYPERBODY_ABS_POS_LEGACY_INTERP": val}
+            ):
+                self.assertFalse(_abs_pos_use_legacy_interp())
+
+    def test_switch_truthy_values(self):
+        for val in ("1", "true", "yes", "on"):
+            with mock.patch.dict(
+                os.environ, {"HYPERBODY_ABS_POS_LEGACY_INTERP": val}
+            ):
+                self.assertTrue(_abs_pos_use_legacy_interp())
+
+    def test_legacy_branch_matches_shape(self):
+        abs_pos = paddle.randn([1, 4, 4, 8])
+        with mock.patch.dict(
+            os.environ, {"HYPERBODY_ABS_POS_LEGACY_INTERP": "1"}
+        ):
+            out = get_abs_pos_2d(abs_pos, (2, 2))
+        self.assertEqual(out.shape, [1, 2, 2, 8])
+
+    def test_default_and_legacy_agree_on_non_degenerate_grid(self):
+        # For a normal (non-degenerate) target grid both paths implement the
+        # same align_corners=False bilinear, so results should be very close.
+        abs_pos = paddle.randn([1, 6, 6, 8])
+        with mock.patch.dict(
+            os.environ, {"HYPERBODY_ABS_POS_LEGACY_INTERP": "0"}
+        ):
+            new_path = get_abs_pos_2d(abs_pos, (3, 3))
+        with mock.patch.dict(
+            os.environ, {"HYPERBODY_ABS_POS_LEGACY_INTERP": "1"}
+        ):
+            legacy_path = get_abs_pos_2d(abs_pos, (3, 3))
+        self.assertTrue(
+            paddle.allclose(new_path, legacy_path, atol=1e-5, rtol=1e-5)
+        )
+
+    def test_default_path_handles_degenerate_output_dim(self):
+        # A target grid with a size-1 spatial dim is exactly what makes the
+        # built-in bilinear kernel raise cudaErrorInvalidValue. The default
+        # hand-decomposed path must handle it without crashing.
+        abs_pos = paddle.randn([1, 4, 4, 8])
+        with mock.patch.dict(
+            os.environ, {"HYPERBODY_ABS_POS_LEGACY_INTERP": "0"}
+        ):
+            out = get_abs_pos_2d(abs_pos, (1, 3))
+        self.assertEqual(out.shape, [1, 1, 3, 8])
+
+    def test_aligned_bilinear_2d_short_circuits_on_size_1_axis(self):
+        # _aligned_interp_1d_axis / _aligned_bilinear_2d must produce a size-1
+        # output axis without dividing by zero or launching a bad kernel.
+        old = paddle.randn([1, 8, 4, 4])  # [B, C, H, W]
+        out = _aligned_bilinear_2d(old, out_h=1, out_w=2)
+        self.assertEqual(out.shape, [1, 8, 1, 2])
 
 
 class TestAbsPos1d(unittest.TestCase):

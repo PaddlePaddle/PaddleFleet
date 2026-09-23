@@ -109,44 +109,47 @@ def get_hyperbody_decoder_layer_specs(
 ) -> list[LayerSpec]:
     """Produce a :class:`LayerSpec` list of ``num_hidden_layers`` layers.
 
-    Layer 0 is a dense FFN (``intermediate_size``); the rest are MoE
-    (``n_routed_experts`` x ``moe_intermediate_size`` + shared experts).
+    Behaviorally equivalent to :func:`get_gpt_decoder_layers_spec` (same
+    per-layer ``get_gpt_layer_local_spec`` call), with one HyperBody-specific
+    tightening: the dense/MoE pattern is read from a **per-layer 0/1 list**
+    ``moe_layer_freq`` via :func:`_is_moe_layer` (an int is rejected instead of
+    silently taking the ``i % N`` pattern).
 
-    ``moe_expert_fusion`` only applies to MoE layers -- dense layers pass ``False``,
-    otherwise ``get_mlp_layer_spec_for_backend`` would build the 3-D grouped-GEMM
-    weights.
+    The decoder supports the full ernie5_v2 / DSV4-hybrid attention family
+    (MLA + compressed-sparse attention + gated attention + qk-norm): the
+    attention kind is driven by ``config.experimental_attention_variant`` /
+    per-layer geometry inside ``get_gpt_layer_local_spec``, exactly as the shared
+    GPT decoder spec does -- so there are no attention-variant restrictions here.
     """
-    if config.multi_latent_attention:
-        raise ValueError(
-            "HyperBody decoder is pure MHA (num_query_groups == num_attention_heads). "
-            "multi_latent_attention must be False."
+    # Per-layer attention types; falls back to a homogeneous model
+    # (driven by config.multi_latent_attention) when config.layer_types is unset.
+    # Mirrors get_gpt_decoder_layers_spec so the layers are built identically.
+    layer_types = getattr(config, "layer_types", None)
+    if layer_types is None:
+        attention_layer_type = (
+            "multi_latent_attention"
+            if config.multi_latent_attention
+            else "self_attention"
         )
-    # get_gpt_layer_local_spec would otherwise switch to the DSV4 hybrid
-    # attention path (gpt_layer_specs.py:637-645), which is not pure MHA.
-    if getattr(config, "experimental_attention_variant", None) is not None:
+        layer_types = [attention_layer_type] * config.num_hidden_layers
+    if len(layer_types) != config.num_hidden_layers:
         raise ValueError(
-            "HyperBody decoder is pure MHA; experimental_attention_variant "
-            f"must be None, got {config.experimental_attention_variant!r}."
-        )
-    # use_vha_attention would route self_attention to SelfAttentionVHA
-    # (gpt_layer_specs.py:234-262), again not pure MHA.
-    if getattr(config, "use_vha_attention", False):
-        raise ValueError(
-            "HyperBody decoder is pure MHA; use_vha_attention must be False."
+            f"layer_types must contain {config.num_hidden_layers} entries, "
+            f"but got {len(layer_types)}."
         )
 
     specs: list[LayerSpec] = []
-    for i in range(config.num_hidden_layers):
-        is_moe = _is_moe_layer(config, i)
+    for layer_number, attention_layer_type in enumerate(layer_types):
+        is_moe = _is_moe_layer(config, layer_number)
         specs.append(
             get_gpt_layer_local_spec(
                 config=config,
-                layer_number=i + config.num_empty_layers_add_in_head,
                 num_experts=config.n_routed_experts if is_moe else None,
                 moe_expert_fusion=config.moe_expert_fusion if is_moe else False,
                 use_qk_norm=config.use_qk_norm,
+                layer_number=layer_number + config.num_empty_layers_add_in_head,
+                attention_layer_type=attention_layer_type,
                 normalization=config.normalization,
-                # Standard causal LM.
                 attn_mask_type=AttnMaskType.causal,
             )
         )

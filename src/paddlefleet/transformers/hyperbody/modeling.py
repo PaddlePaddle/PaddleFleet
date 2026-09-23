@@ -60,7 +60,6 @@ from paddle.distributed.fleet.meta_parallel import (
 
 from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
 from paddlefleet.models.gpt.gpt_layer_specs import (
-    get_gpt_decoder_layers_spec,
     get_gpt_spec,
 )
 from paddlefleet.models.hyperbody import (
@@ -1041,10 +1040,11 @@ def build_hyperbody_unified_model(
     gpt_spec = get_gpt_spec(
         config=decoder_view,
         head_empty_layers_spec=[],
-        # Use the SHARED gpt decoder-layers spec (not the hyperbody one, which
-        # raises on MLA / experimental_attention_variant / vha) so the decoder
-        # can be configured into the ernie5_v2 (dsv4_hybrid) architecture.
-        transformer_layers_spec=get_gpt_decoder_layers_spec(decoder_view),
+        # HyperBody's own decoder-layers spec. It builds the same layers as the
+        # shared GPT spec (via get_gpt_layer_local_spec) and supports the full
+        # ernie5_v2 / dsv4_hybrid attention family; it additionally enforces a
+        # per-layer 0/1 list moe_layer_freq (rejecting int i%N semantics).
+        transformer_layers_spec=get_hyperbody_decoder_layer_specs(decoder_view),
         tail_empty_layers_spec=[],
         mtp_layers_spec=None,
         vocab_size=decoder_view.vocab_size,

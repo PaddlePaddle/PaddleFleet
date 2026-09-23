@@ -773,6 +773,19 @@ class MoELayer(nn.Layer):
                     fp8_dispatch=self.fp8_dispatch,
                     use_ue8m0=self.use_ue8m0,
                 )
+                if self.use_ring_moe and hasattr(
+                    getattr(self, "grouped_gemm_experts", None),
+                    "set_calls_per_micro_batch",
+                ):
+                    # The ring runs the expert once per round, so the expert's
+                    # fp8 weight-release counter (which counts forward() calls
+                    # against accumulate_steps) would fire N times too early and
+                    # drop the fp8 weights mid-step. No-op on the bf16 path.
+                    # Only SonicMoEExpert tracks this, and ringmoe already
+                    # requires using_sonic_moe, so the guard is defensive.
+                    self.grouped_gemm_experts.set_calls_per_micro_batch(
+                        self.token_dispatcher.N
+                    )
             else:
                 raise NotImplementedError(
                     f"Unsupported moe_token_dispatcher_type {self.moe_token_dispatcher_type}"
@@ -1160,20 +1173,46 @@ class MoELayer(nn.Layer):
         return self.unpermute(expert_outs)
 
     def _maybe_pre_allgather_overlap(self, hidden_states: paddle.Tensor):
-        """Pre-issue the flat EP token AllGather on the comm stream, before the gate.
+        """Pre-issue round 0's token AllGather on the comm stream, before the gate.
 
-        Needs ``moe_allgather_gate_overlap``, EP>1 and the 'allgather'
-        dispatcher, whose ``dispatch_preprocess`` is what consumes the handle.
-        'ringmoe' deliberately does not prefetch: the only thing it could hide
-        behind the gate is round 0's intra-node AllGather, and issuing that on
-        the comm stream ahead of time cost more in contention with the
-        inter-node shift than the gate was worth. Only the tokens can be
-        prefetched; the routing idx/weight AllGathers need the gate output.
+        Two branches, by dispatcher:
+          * 'allgather': runs only with ``moe_allgather_gate_overlap`` and EP>1;
+            pre-issues the flat EP token gather, consumed by
+            ``dispatch_preprocess``.
+          * 'ringmoe': runs for EVERY forward (EP>1), NOT gated on
+            ``moe_allgather_gate_overlap`` -- the prefetched intra gather is the
+            ring's single, always-on token-gather path, so ``pre_gate_token_ag``
+            must issue round 0's gather here for both fp8 and bf16.
+        Only the tokens can be prefetched; the routing idx/weight AllGathers need
+        the gate output.
 
         For latent MoE, ``fc1_latent_proj`` is hoisted here so the AllGather runs
         in latent space; ``_project_to_latent`` reuses it via
         ``self._latent_hidden``.
         """
+        if (
+            self.expert_model_parallel_size > 1
+            and self.moe_token_dispatcher_type == "ringmoe"
+        ):
+            # RingMoE always prefetches round 0's intra token AllGather onto its
+            # own comm stream ahead of the gate: it is the ring's only
+            # token-gather path (ring_forward has no inline fallback), so this is
+            # unconditional for ringmoe rather than gated on
+            # moe_allgather_gate_overlap. Mirrors the allgather branch below for
+            # the latent projection; the handle is consumed as round 0's prefetch
+            # in ring_forward.
+            if self.use_latent_moe:
+                self._latent_hidden = deferrable_linear_bare(
+                    self.config,
+                    "moe_latent_proj",
+                    self.fc1_latent_proj,
+                    hidden_states,
+                )
+                self.token_dispatcher.pre_gate_token_ag(self._latent_hidden)
+            else:
+                self._latent_hidden = None
+                self.token_dispatcher.pre_gate_token_ag(hidden_states)
+            return
         if not (
             self.expert_model_parallel_size > 1
             and self.moe_allgather_gate_overlap
@@ -1584,7 +1623,7 @@ class MoELayer(nn.Layer):
         # One scope for the whole ring: it interleaves the rounds' collectives
         # with their GEMMs, so there is no point where dispatch ends and combine
         # begins. Compare against dispatch + fusion_mlp + combine on the other
-        # dispatchers. ``fusion_mlp`` is timed inside (see _node_slice), so
+        # dispatchers. ``fusion_mlp`` is timed inside ring_forward, so
         # ringmoe - fusion_mlp is the ring's exposed communication.
         with profile("ringmoe"):
             hidden_states = self.token_dispatcher.ring_forward(
