@@ -1443,6 +1443,7 @@ class ZeroCostCheckpointWorker:
         self.persistent_save_dir = None
         self.zcc_ema_processor = None
         self.pending_ema_ckpt_path = None
+        self.pending_ema_rebuild = False
 
     def process_update_task(self, updates):
         """
@@ -1531,7 +1532,7 @@ class ZeroCostCheckpointWorker:
             self.global_step.value = global_step
 
             if self.ema_coef is not None:
-                self._maybe_load_pending_ema()
+                self._maybe_prepare_ema()
                 self.zcc_ema_processor.ema_accumulate(
                     self.trainer_state.global_step,
                     self.trainer_state.loss,
@@ -1553,7 +1554,14 @@ class ZeroCostCheckpointWorker:
             return True
         return False
 
-    def _maybe_load_pending_ema(self):
+    def _maybe_prepare_ema(self):
+        if self.pending_ema_rebuild:
+            self.zcc_ema_processor = ZeroCostCheckpointEMAProcessor(
+                self.optimizer_fusion_storage_helper,
+                self.param_fusion_storage_helper,
+                self.ema_coef,
+            )
+            self.pending_ema_rebuild = False
         if self.pending_ema_ckpt_path is None:
             return
         ema_ckpt_path = self.pending_ema_ckpt_path
@@ -1785,11 +1793,7 @@ class ZeroCostCheckpointWorker:
                 elif task_type == ZCCTaskType.UPDATE:
                     self.process_update_task(task_body)
                     if self.ema_coef is not None:
-                        self.zcc_ema_processor = ZeroCostCheckpointEMAProcessor(  # 在 update task 后刷新 EMA buffer
-                            self.optimizer_fusion_storage_helper,
-                            self.param_fusion_storage_helper,
-                            self.ema_coef,
-                        )
+                        self.pending_ema_rebuild = True
                 elif task_type == ZCCTaskType.PREPARE:
                     start_time = time.time()
                     save_info_tuple = task_body
