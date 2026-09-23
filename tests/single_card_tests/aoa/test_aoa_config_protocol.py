@@ -14,11 +14,11 @@
 #
 # Scope: pins the whole-model config-field protocol normalization -- the single
 # place that resolves the model-declared AOA name attributes
-# (``build_aoa_context``). An unmigrated model (without an explicit mapping)
-# inherits the shared ERNIE mapping; an external model overrides it via that
-# attribute. Also carries a source-level lint pinning the direction-independence
-# contract (no ``direction`` / ``reverse`` param, no cross-direction call between
-# the two whole-model entries).
+# (``build_aoa_context``). A model that declares no mapping gets an empty one
+# (every name resolves through the identity fallback); a model that declares one
+# has it taken verbatim. Also carries a source-level lint pinning the
+# direction-independence contract (no ``direction`` / ``reverse`` param, no
+# cross-direction call between the two whole-model entries).
 import ast
 import dataclasses
 import inspect
@@ -39,7 +39,6 @@ from paddle.distributed.flex_checkpoint.aoa.generation import AOAContext
 
 from paddlefleet.models.gpt import aoa_generator
 from paddlefleet.models.gpt.aoa_generator import (
-    DEFAULT_CHECKPOINT_NAME_MAPPING,
     DEFAULT_CHECKPOINT_NAME_PREFIX,
     build_aoa_context,
 )
@@ -72,24 +71,27 @@ class _FakeModel:
 
 
 class TestBuildAOAContextDefaults(unittest.TestCase):
-    def test_unmigrated_config_uses_ernie_defaults(self):
+    def test_unmigrated_config_gets_an_empty_mapping(self):
+        # A config that declares no mapping gets an empty one: the generic
+        # boundary carries no model-specific layout, so every name resolves
+        # through the identity fallback. The checkpoint prefix still defaults.
         model = _FakeModel(pp_to_single_mapping={"s": "s"})
         ctx = build_aoa_context(model, _Cfg())
         self.assertIsInstance(ctx, AOAContext)
         self.assertEqual(
             ctx.checkpoint_name_prefix, DEFAULT_CHECKPOINT_NAME_PREFIX
         )
-        self.assertEqual(
-            dict(ctx.checkpoint_name_mapping), DEFAULT_CHECKPOINT_NAME_MAPPING
-        )
+        self.assertEqual(dict(ctx.checkpoint_name_mapping), {})
         self.assertEqual(ctx.model_name_prefix, "model")
         self.assertEqual(dict(ctx.pp_to_single_mapping), {"s": "s"})
 
-    def test_mapping_is_copied_not_aliased(self):
-        ctx = build_aoa_context(_FakeModel(), _Cfg())
-        self.assertIsNot(
-            ctx.checkpoint_name_mapping, DEFAULT_CHECKPOINT_NAME_MAPPING
-        )
+    def test_declared_mapping_is_copied_not_aliased(self):
+        src = {"model.a.weight": "hf.a.weight"}
+        cfg = _Cfg()
+        cfg.aoa_checkpoint_name_mapping = src
+        ctx = build_aoa_context(_FakeModel(), cfg)
+        self.assertIsNot(ctx.checkpoint_name_mapping, src)
+        self.assertEqual(dict(ctx.checkpoint_name_mapping), src)
 
     def test_explicit_empty_checkpoint_mapping_overrides_default(self):
         cfg = _Cfg()

@@ -41,35 +41,10 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
-# The ERNIE-series checkpoint layout, used when a model declares no ``aoa_*``
-# override. Both sides are absolute names carrying their root prefix. Only
-# naming divergences belong here: names the components already emit identically
-# (layernorms, ``model.norm``, an MTP layer's ``enorm`` / ``hnorm`` /
-# ``eh_proj``, the CSA subtree) are absent. The layer root omits
-# ``transformer_layer`` so one entry covers both an ordinary layer and an MTP
-# layer's inner transformer. The output head is the one entry whose value sits
-# outside the checkpoint root: the ``ForCausalLM`` layout keeps ``lm_head`` a
-# top-level sibling of the backbone.
-DEFAULT_CHECKPOINT_NAME_MAPPING = {
-    "model.embedding.embed_tokens.weight": "model.embed_tokens.weight",
-    "model.layers.$LAYER_ID.mlp.gate.weight": "model.layers.$LAYER_ID.block_sparse_moe.gate.weight",
-    "model.layers.$LAYER_ID.mlp.gate.weight_1": "model.layers.$LAYER_ID.block_sparse_moe.gate.weight_1",
-    "model.layers.$LAYER_ID.mlp.gate.routed_scaling_factor_param": "model.layers.$LAYER_ID.block_sparse_moe.gate.routed_scaling_factor_param",
-    "model.layers.$LAYER_ID.mlp.gate.e_score_correction_bias": "model.layers.$LAYER_ID.block_sparse_moe.e_score_correction_bias",
-    "model.layers.$LAYER_ID.mlp.fc1_latent_proj.weight": "model.layers.$LAYER_ID.block_sparse_moe.fc1_latent_proj.weight",
-    "model.layers.$LAYER_ID.mlp.fc2_latent_proj.weight": "model.layers.$LAYER_ID.block_sparse_moe.fc2_latent_proj.weight",
-    "model.layers.$LAYER_ID.mlp.experts.$EXPERT_ID.gate_proj.weight": "model.layers.$LAYER_ID.block_sparse_moe.experts.$EXPERT_ID.w1.weight",
-    "model.layers.$LAYER_ID.mlp.experts.$EXPERT_ID.up_proj.weight": "model.layers.$LAYER_ID.block_sparse_moe.experts.$EXPERT_ID.w3.weight",
-    "model.layers.$LAYER_ID.mlp.experts.$EXPERT_ID.down_proj.weight": "model.layers.$LAYER_ID.block_sparse_moe.experts.$EXPERT_ID.w2.weight",
-    "model.layers.$LAYER_ID.mlp.shared_experts.gate_proj.weight": "model.layers.$LAYER_ID.block_sparse_moe.shared_experts.w1.weight",
-    "model.layers.$LAYER_ID.mlp.shared_experts.up_proj.weight": "model.layers.$LAYER_ID.block_sparse_moe.shared_experts.w3.weight",
-    "model.layers.$LAYER_ID.mlp.shared_experts.down_proj.weight": "model.layers.$LAYER_ID.block_sparse_moe.shared_experts.w2.weight",
-    "model.layers.$LAYER_ID.norm.weight": "model.layers.$LAYER_ID.shared_head.norm.weight",
-    "model.lm_head.weight": "lm_head.weight",
-    "model.lm_head.bias": "lm_head.bias",
-    "model.shared_head.weight": "lm_head.weight",
-    "model.shared_head.bias": "lm_head.bias",
-}
+# The checkpoint root prefix a model inherits when it declares no
+# ``aoa_checkpoint_name_prefix``. Used only by the identity fallback for names a
+# model does not remap; the model-specific name mapping itself is declared by
+# the model through ``aoa_checkpoint_name_mapping`` and is not defaulted here.
 DEFAULT_CHECKPOINT_NAME_PREFIX = "model"
 
 
@@ -84,11 +59,13 @@ def build_aoa_context(model, config) -> AOAContext:
     """
     if model._pipeline_name_mapping is None:
         model._set_pipeline_name_mapping()
-    # An absent or ``None`` attribute falls back to the default; a declared one
-    # is taken verbatim, including a falsy value (an empty checkpoint prefix).
+    # A model declares its own checkpoint-name mapping through
+    # ``aoa_checkpoint_name_mapping``; an absent or ``None`` attribute leaves it
+    # empty, so every name resolves through the identity fallback. The
+    # checkpoint prefix, by contrast, has a shared default.
     name_mapping = getattr(config, "aoa_checkpoint_name_mapping", None)
     if name_mapping is None:
-        name_mapping = DEFAULT_CHECKPOINT_NAME_MAPPING
+        name_mapping = {}
     name_prefix = getattr(config, "aoa_checkpoint_name_prefix", None)
     if name_prefix is None:
         name_prefix = DEFAULT_CHECKPOINT_NAME_PREFIX

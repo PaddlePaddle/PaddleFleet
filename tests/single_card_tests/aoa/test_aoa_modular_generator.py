@@ -179,13 +179,10 @@ class TestAOAContextBuild(unittest.TestCase):
         self.assertEqual(
             ctx.checkpoint_name_prefix, gen.DEFAULT_CHECKPOINT_NAME_PREFIX
         )
-        # A config that declares nothing gets the ERNIE-series checkpoint
-        # layout, not an empty mapping: the defaults describe the in-house
-        # checkpoint and an external model overrides only what diverges.
-        self.assertEqual(
-            dict(ctx.checkpoint_name_mapping),
-            gen.DEFAULT_CHECKPOINT_NAME_MAPPING,
-        )
+        # A config that declares no mapping gets an empty one, never ``None``:
+        # the generic boundary carries no model-specific layout, so every name
+        # resolves through the identity fallback.
+        self.assertEqual(dict(ctx.checkpoint_name_mapping), {})
 
 
 class TestWholeModelWalk(unittest.TestCase):
@@ -313,16 +310,25 @@ class _HeadLeaf(paddle.nn.Layer):
         self.multimax_ranges = self.create_parameter(shape=[4])
 
 
-def _default_mapping_ctx(model):
-    """Context from a config declaring no override, i.e. the shipped defaults."""
+def _head_mapping_ctx(model):
+    """Context whose only mapping entries are the output head's.
 
-    class _Bare:
-        pass
+    The head's off-root value (a top-level ``lm_head`` sibling of the backbone)
+    is what these tests exercise, so a small fixture stands in for a full model
+    layout; every other name resolves through the identity fallback. Both head
+    spellings the pipeline uses are listed, mirroring the in-house layout.
+    """
+    cfg = _Cfg(
+        aoa_checkpoint_name_prefix="model",
+        aoa_checkpoint_name_mapping={
+            "model.lm_head.weight": "lm_head.weight",
+            "model.shared_head.weight": "lm_head.weight",
+        },
+    )
+    return gen.build_aoa_context(model, cfg)
 
-    return gen.build_aoa_context(model, _Bare())
 
-
-class TestOutputHeadThroughTheDefaultMapping(unittest.TestCase):
+class TestOutputHeadThroughTheMapping(unittest.TestCase):
     """The output head is an ordinary mapping entry, not a walk special case.
 
     The ``ForCausalLM`` layout keeps ``lm_head`` a top-level sibling of the
@@ -340,7 +346,7 @@ class TestOutputHeadThroughTheDefaultMapping(unittest.TestCase):
                 ),
             },
         )
-        return gen.gen_whole_model_aoa(model, _default_mapping_ctx(model))[
+        return gen.gen_whole_model_aoa(model, _head_mapping_ctx(model))[
             "aoa_statements"
         ]
 
