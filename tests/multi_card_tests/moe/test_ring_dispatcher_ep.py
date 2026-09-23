@@ -37,6 +37,17 @@ from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.random import model_parallel_cuda_manual_seed
 from paddlefleet.training.initialize import initialize_fleet
 from paddlefleet.transformer.moe import moe_layer
+from paddlefleet.transformer.moe.token_dispatcher import (
+    quantize_activation_blockscaled_fast as _sonic_fp8_quant,
+)
+
+# Tests that actually invoke SonicMoE's fp8 block-scaled quantizer only work on a
+# build/GPU where it is available (e.g. Blackwell); skip (not error) elsewhere.
+# fp8-flag-only tests below do NOT need it and stay unguarded.
+_needs_sonicmoe_fp8 = unittest.skipUnless(
+    _sonic_fp8_quant is not None,
+    "SonicMoE fp8 quantizer (quantize_activation_blockscaled_fast) unavailable",
+)
 
 _fleet_initialised = False
 _pg_collection = None
@@ -258,6 +269,7 @@ class TestRingTopology(_RingTestBase):
         disp = _make_dispatcher(1, self.ep_group, fp8_dispatch=True)
         self.assertTrue(disp.fp8_dispatch)
 
+    @_needs_sonicmoe_fp8
     def test_degenerate_fp8_gather_preserves_input_gradient(self):
         """A degenerate group still quantizes; only the collective is skipped."""
         disp = _make_dispatcher(1, self.ep_group, fp8_dispatch=True)
@@ -346,6 +358,7 @@ class TestRingCollectives(_RingTestBase):
         out.sum().backward()
         self.assertEqual(x.grad.shape, [self.T_local, self.d_latent])
 
+    @_needs_sonicmoe_fp8
     def test_fp8_all_gather_forward_and_backward(self):
         """FP8 gather keeps its collective and ReduceScatter gradient dual.
 
@@ -961,6 +974,7 @@ class TestBuilderInitialisesRingSubgroups(unittest.TestCase):
         self._build("allgather").assert_not_called()
 
 
+@_needs_sonicmoe_fp8
 class TestFp8FusedGatherHelpers(_RingTestBase):
     """The fused (data ++ scale) fp8 AllGather helpers used by the combine
     backward and the flat pre_allgather. 128-aligned hidden for the block tile."""
@@ -1000,6 +1014,7 @@ class TestAllGatherCombineNoOverlapGrad(_RingTestBase):
         out.sum().backward()
         self.assertEqual(x.grad.shape, x.shape)
 
+    @_needs_sonicmoe_fp8
     def test_fp8_backward_populates_handle(self):
         from paddlefleet.transformer.moe import token_dispatcher as td
 

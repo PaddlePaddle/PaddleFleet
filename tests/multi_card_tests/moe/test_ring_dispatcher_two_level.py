@@ -43,6 +43,16 @@ from paddle.distributed import fleet
 
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.training.initialize import initialize_fleet
+from paddlefleet.transformer.moe.token_dispatcher import (
+    quantize_activation_blockscaled_fast as _sonic_fp8_quant,
+)
+
+# fp8 ring tests invoke SonicMoE's block-scaled quantizer; skip (not error) where
+# it is unavailable (build/GPU without it, e.g. non-Blackwell).
+_needs_sonicmoe_fp8 = unittest.skipUnless(
+    _sonic_fp8_quant is not None,
+    "SonicMoE fp8 quantizer (quantize_activation_blockscaled_fast) unavailable",
+)
 
 _pg_collection = None
 
@@ -374,6 +384,7 @@ class TestTwoLevelPreGateOverlap(_TwoLevelBase):
         self.assertEqual(out.shape, [self.T_local, self.d_latent])
 
 
+@_needs_sonicmoe_fp8
 class TestTwoLevelFp8Ring(_TwoLevelBase):
     """fp8 dispatch on the two-level ring: needs a 128-aligned hidden width and
     the pre-gate entry point. Expert GEMM is stubbed straight-through."""
