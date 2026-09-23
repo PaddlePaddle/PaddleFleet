@@ -517,6 +517,47 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, r"missing=1"):
             model._alias_shared_layer(mtp[1], mtp[0])
 
+    def test_fusion_alias_raises_on_missing_param(self):
+        """The combined mode aliases fusion params depth by depth; one the pivot
+        depth lacks must fail loudly instead of staying unshared."""
+        model, mtp = self._independent_model()
+        mtp[1].add_parameter(
+            "probe_only_on_dest",
+            paddle.create_parameter(shape=[2], dtype="float32"),
+        )
+        with self.assertRaisesRegex(RuntimeError, r"is missing at depth 0"):
+            model._alias_mtp_fusion_weights()
+
+    def test_fusion_alias_raises_on_shape_mismatch(self):
+        model, mtp = self._independent_model()
+        mtp[1].enorm.weight = paddle.create_parameter(
+            shape=[mtp[0].enorm.weight.shape[0] + 1], dtype="float32"
+        )
+        with self.assertRaisesRegex(RuntimeError, r"incompatible shapes"):
+            model._alias_mtp_fusion_weights()
+
+    def test_sampler_without_sampling_runs_every_depth(self):
+        model, mtp = self._independent_model(num_nextn=3)
+        self.assertIsNone(model.config.mtp_depth_sampling)
+        self.assertEqual(mtp[0]._sample_mtp_depth(), 3)
+
+    def test_sampler_counter_frozen_without_grad_in_training(self):
+        """A no-grad forward in training mode is a recompute pre-pass: it must not
+        advance the counter, or the replay would draw a different K."""
+        config = GPTConfig(
+            **_base_kwargs(num_nextn=3),
+            use_dense_mtp=False,
+            mtp_depth_sampling=[0.2, 0.3, 0.5],
+        )
+        depth0 = _mtp_layers(gpt_builder(config, num_stages=1))[0]
+        depth0.train()
+        with paddle.no_grad():
+            k_first = depth0._sample_mtp_depth()
+            self.assertEqual(depth0._sample_mtp_depth(), k_first)
+        self.assertEqual(depth0._mtp_sampling_counter, 0)
+        self.assertEqual(depth0._sample_mtp_depth(), k_first)
+        self.assertEqual(depth0._mtp_sampling_counter, 1)
+
     def test_all_weights_skips_mtp_embed_sublayer(self):
         """all_weights must drop mtp_embed even when it exists. Attached by hand
         here because a real mtp_embed needs enable_mtp_magic_send, which in turn
