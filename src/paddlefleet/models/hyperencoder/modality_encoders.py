@@ -42,6 +42,8 @@ Numerical details:
 
 from __future__ import annotations
 
+import os
+
 import paddle
 import paddle.nn.functional as F
 from paddle import nn
@@ -119,6 +121,62 @@ class PatchEmbed(nn.Layer):
         return x.transpose([0, 2, 3, 1])
 
 
+def _aligned_interp_1d_axis(
+    x: paddle.Tensor, axis: int, dst_size: int
+) -> paddle.Tensor:
+    """1-D ``align_corners=False`` linear interpolation along ``axis``.
+
+    Hand-decomposed as ``v0 + (v1 - v0) * lambda`` in fp32 (matching PyTorch's
+    ``_upsample_linear``): ``src(d) = max((d+0.5)*src/dst - 0.5, 0)``,
+    ``i0 = floor(src)``, ``i1 = min(i0+1, src-1)``, ``lambda = src - i0``.
+    Uses ``index_select`` + elementwise ops so it never launches the built-in
+    bilinear kernel (which builds an invalid CUDA launch config for output
+    dim == 1); its gradient is provided by autograd.
+    """
+    src_size = int(x.shape[axis])
+    scale = src_size / dst_size
+    d = paddle.arange(dst_size, dtype="float32")
+    src = paddle.clip((d + 0.5) * scale - 0.5, min=0.0)
+    i0f = paddle.floor(src)
+    lam = src - i0f
+    i0 = i0f.astype("int64")
+    i1 = paddle.clip(i0 + 1, max=src_size - 1)
+    v0 = paddle.index_select(x, i0, axis=axis)
+    v1 = paddle.index_select(x, i1, axis=axis)
+    shp = [1] * x.ndim
+    shp[axis] = dst_size
+    lam_b = lam.reshape(shp)
+    return v0 + (v1 - v0) * lam_b
+
+
+def _aligned_bilinear_2d(
+    old: paddle.Tensor, out_h: int, out_w: int
+) -> paddle.Tensor:
+    """``[1,C,Hs,Ws]`` fp32 -> ``[1,C,out_h,out_w]``, separable W then H."""
+    x = _aligned_interp_1d_axis(old, axis=3, dst_size=out_w)  # W
+    x = _aligned_interp_1d_axis(x, axis=2, dst_size=out_h)  # H
+    return x
+
+
+def _abs_pos_use_legacy_interp() -> bool:
+    """Whether to resample the 2-D position embedding with the *original*
+    ``F.interpolate`` bilinear kernel instead of the default hand-decomposed
+    path.
+
+    Default (env unset / ``0``) is ``_aligned_bilinear_2d``, which avoids the
+    ``cudaErrorInvalidValue`` that ``F.interpolate`` raises when an output
+    spatial dim is 1 (e.g. a ``(1, 3)`` grid from a tiny image). Set
+    ``HYPERBODY_ABS_POS_LEGACY_INTERP=1`` to restore the original
+    ``F.interpolate(mode="bilinear", align_corners=False)`` call.
+    """
+    return os.environ.get("HYPERBODY_ABS_POS_LEGACY_INTERP", "0") not in (
+        "",
+        "0",
+        "false",
+        "False",
+    )
+
+
 def get_abs_pos_2d(
     abs_pos: paddle.Tensor, tgt_size: tuple[int, int]
 ) -> paddle.Tensor:
@@ -126,18 +184,28 @@ def get_abs_pos_2d(
 
     When the source grid size already equals ``tgt_size`` the input is returned
     unchanged (short-circuit). Otherwise the embedding is transposed to
-    channel-first, cast to fp32, resized with bilinear interpolation
-    (``align_corners=False``), cast back and transposed to channel-last.
+    channel-first, cast to fp32, resized with a hand-decomposed bilinear
+    (``_aligned_bilinear_2d``, ``align_corners=False``) by default, cast back
+    and transposed to channel-last. The manual decomposition replaces
+    ``F.interpolate``, which raises ``cudaErrorInvalidValue`` when an output
+    spatial dim is 1 (e.g. a (1,3) grid from a tiny image). Setting
+    ``HYPERBODY_ABS_POS_LEGACY_INTERP=1`` switches back to the original
+    ``F.interpolate`` bilinear kernel.
     """
     src_size = (int(abs_pos.shape[1]), int(abs_pos.shape[2]))
     if src_size != tuple(int(v) for v in tgt_size):
         old = abs_pos.transpose([0, 3, 1, 2]).astype("float32")
-        new = F.interpolate(
-            old,
-            size=[int(tgt_size[0]), int(tgt_size[1])],
-            mode="bilinear",
-            align_corners=False,
-        ).astype(abs_pos.dtype)
+        if _abs_pos_use_legacy_interp():
+            new = F.interpolate(
+                old,
+                size=[int(tgt_size[0]), int(tgt_size[1])],
+                mode="bilinear",
+                align_corners=False,
+            ).astype(abs_pos.dtype)
+        else:
+            new = _aligned_bilinear_2d(
+                old, int(tgt_size[0]), int(tgt_size[1])
+            ).astype(abs_pos.dtype)
         return new.transpose([0, 2, 3, 1])
     return abs_pos
 

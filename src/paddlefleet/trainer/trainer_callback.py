@@ -1128,6 +1128,12 @@ class MoEQuantileBalancingCallback(TrainerCallback):
         self._callback = FleetQuantileBalancingCallback()
 
     def on_optimizer_end(self, args, state, control, **kwargs):
+        # Skip bias update when freeze_training is enabled
+        if getattr(args, "freeze_training", False):
+            logger.warning(
+                "freeze_training is enabled! MoE e_score_correction_bias will NOT be updated."
+            )
+            return control
         self._callback.on_optimizer_end(args, state, control, **kwargs)
         return control
 
