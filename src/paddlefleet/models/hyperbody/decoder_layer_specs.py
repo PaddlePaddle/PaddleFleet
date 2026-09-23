@@ -53,6 +53,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from paddlefleet.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
+from paddlefleet.transformer.enums import AttnMaskType
 from paddlefleet.transformer.transformer_block import (
     LayerNormImpl,
     TransformerBlockSublayersSpec,
@@ -148,6 +149,8 @@ def get_hyperbody_decoder_layer_specs(
                 use_qk_norm=config.use_qk_norm,
                 layer_number=layer_number + config.num_empty_layers_add_in_head,
                 attention_layer_type=attention_layer_type,
+                normalization=config.normalization,
+                attn_mask_type=AttnMaskType.causal,
             )
         )
     return specs
