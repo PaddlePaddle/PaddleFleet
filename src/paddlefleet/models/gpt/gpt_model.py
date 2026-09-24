@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 from paddle.distributed.fleet.meta_parallel import (
     LayerDesc,
+    PipelineLayer,
     SharedLayerDesc,
     dict_to_tuple_helper,
 )
@@ -35,9 +36,6 @@ from paddlefleet.models.gpt.lm_head import (
     GPTLMHead,
     GPTMainLMHead,
     GPTMTPLMHead,
-)
-from paddlefleet.pipeline_parallel.indexcache_adapter import (
-    IndexCachePipelineLayer,
 )
 from paddlefleet.transformer.multi_token_prediction import (
     MultiTokenPredictionLayer,
@@ -181,7 +179,7 @@ class GPTSublayersSpec:
     mtp_loss: LayerDesc | None = None
 
 
-class GPTModel(IndexCachePipelineLayer):
+class GPTModel(PipelineLayer):
     """GPT Transformer language model.
 
     Args:

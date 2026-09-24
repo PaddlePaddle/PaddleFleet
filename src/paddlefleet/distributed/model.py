@@ -12,25 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Explicit distributed wrappers; never mutate Paddle's global factories."""
+"""Validate IndexCache scheduling before using Paddle's native wrappers."""
 
 from paddle.distributed import fleet
-
-from paddlefleet.pipeline_parallel.indexcache_adapter import (
-    IndexCachePipelineLayer,
-    IndexCachePipelineParallel,
-)
+from paddle.distributed.fleet.meta_parallel import PipelineLayer
 
 
 def distributed_model(model):
-    """Select the IndexCache 1F1B wrapper, or delegate unchanged to Paddle."""
+    """Use native Paddle PP; keep the validated IndexCache scheduling limits."""
     config = getattr(model, "config", None)
     if not getattr(config, "indexcache_topk_pattern", None):
         return fleet.distributed_model(model)
-    if not isinstance(model, IndexCachePipelineLayer):
-        raise TypeError(
-            "IndexCache requires a model with IndexCachePipelineLayer boundaries"
-        )
+    if not isinstance(model, PipelineLayer):
+        raise TypeError("IndexCache requires a PipelineLayer model")
     if model.get_num_virtual_stages() != 1:
         raise NotImplementedError(
             "IndexCache supports only ordinary 1F1B (VPP=1)"
@@ -48,6 +42,4 @@ def distributed_model(model):
         raise NotImplementedError(
             "IndexCache PP requires Trainer-managed AMP/scaler rather than strategy.amp"
         )
-    wrapper = IndexCachePipelineParallel(model, hcg, strategy=strategy)
-    model._indexcache_instance_wrapper = True
-    return wrapper
+    return fleet.distributed_model(model)
