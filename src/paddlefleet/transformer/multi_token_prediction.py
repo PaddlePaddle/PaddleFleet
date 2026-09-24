@@ -62,6 +62,34 @@ SUPPORTED_ATTN_MASK = [
 ]
 
 
+def _apply_mtp_layer_masks(dict_args, depth, config):
+    mtp_startend_row_indices_all = dict_args.pop(
+        "mtp_startend_row_indices_all", None
+    )
+    mtp_attn_mask = dict_args.pop("mtp_attn_mask", None)
+    assert not (
+        mtp_startend_row_indices_all is not None and mtp_attn_mask is not None
+    ), "MTP compressed and dense attention masks are mutually exclusive"
+    mtp_hidden_inputs_mask_all = dict_args.pop(
+        "mtp_hidden_inputs_mask_all", None
+    )
+    if mtp_startend_row_indices_all is not None:
+        if config.gpt_model_use_experimental_version:
+            dict_args["attn_mask_startend_row_indices"] = (
+                mtp_startend_row_indices_all[:, depth : depth + 1, :, :]
+            )
+        else:
+            dict_args["attn_mask_startend_row_indices"] = (
+                mtp_startend_row_indices_all[:, depth : depth + 1, :, :1]
+            )
+    if mtp_attn_mask is not None:
+        dict_args["attention_mask"] = mtp_attn_mask[:, depth : depth + 1, :, :]
+    if mtp_hidden_inputs_mask_all is not None:
+        dict_args["mtp_hidden_inputs_mask"] = mtp_hidden_inputs_mask_all[
+            :, depth : depth + 1, :
+        ]
+
+
 # ============================================================================
 # roll_tensor (Paddle port of MCore multi_token_prediction.roll_tensor, `8c4df6b07`)
 #
@@ -1544,28 +1572,17 @@ class MultiTokenPredictionLayer(FleetLayer):
                 else:
                     dict_args[rk] = rv[:, :seq_len]
 
-            # Per-depth attention mask
             mtp_startend_row_indices_all = dict_args.get(
                 "mtp_startend_row_indices_all", None
             )
+            mtp_attn_mask = dict_args.get("mtp_attn_mask", None)
             mtp_hidden_inputs_mask_all = dict_args.get(
                 "mtp_hidden_inputs_mask_all", None
             )
-
-            mtp_mask = None
-            if mtp_startend_row_indices_all is not None:
-                if self.config.gpt_model_use_experimental_version:
-                    mtp_mask = mtp_startend_row_indices_all[
-                        :, depth : depth + 1, :, :
-                    ]
-                else:
-                    mtp_mask = mtp_startend_row_indices_all[
-                        :, depth : depth + 1, :, :1
-                    ]
-            mtp_hidden_inputs_mask = (
-                mtp_hidden_inputs_mask_all[:, depth : depth + 1, :]
-                if mtp_hidden_inputs_mask_all is not None
-                else None
+            _apply_mtp_layer_masks(dict_args, depth, self.config)
+            mtp_mask = dict_args.get("attn_mask_startend_row_indices", None)
+            mtp_hidden_inputs_mask = dict_args.get(
+                "mtp_hidden_inputs_mask", None
             )
 
             # Update dict_args for _proj_and_transformer_layer call
@@ -1636,6 +1653,8 @@ class MultiTokenPredictionLayer(FleetLayer):
                 new_args["mtp_startend_row_indices_all"] = (
                     mtp_startend_row_indices_all.contiguous()
                 )
+            if mtp_attn_mask is not None:
+                new_args["mtp_attn_mask"] = mtp_attn_mask.contiguous()
             if mtp_hidden_inputs_mask_all is not None:
                 new_args["mtp_hidden_inputs_mask_all"] = (
                     mtp_hidden_inputs_mask_all.contiguous()

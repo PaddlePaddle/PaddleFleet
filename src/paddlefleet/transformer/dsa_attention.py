@@ -228,9 +228,53 @@ def _normalize_dsa_mask(mask: Tensor | None) -> Tensor | None:
     if mask.ndim == 4:
         assert mask.shape[1] == 1, "DSA mask must have singleton head dimension"
         mask = mask.squeeze(1)
-    if mask.ndim == 3 and mask.shape[0] == 1:
-        mask = mask.squeeze(0)
+    # Keep a leading batch axis so sequence-parallel local masks [1, sq, sk_local]
+    # are not flattened into [sq, sk_local] and then added onto gathered scores.
     return mask
+
+
+def _align_dsa_indexer_mask(
+    mask: Tensor | None,
+    score_sk: int,
+    *,
+    sequence_parallel: bool = False,
+    tp_group=None,
+) -> Tensor | None:
+    """Match a DSA indexer mask onto gathered index scores.
+
+    Indexer Q/K are all-gathered under sequence parallel, so scores are
+    ``[..., s, s]``. The dense ``attention_mask`` often stays sharded on the
+    last dim (``[..., s, s/TP]``). Adding those ranks fail-closes with a
+    broadcast error. Gather that last dim when it is the SP shard; otherwise
+    leave a last-dim mismatch as ``None`` so the caller can use the
+    already-sized causal mask.
+    """
+    mask = _normalize_dsa_mask(mask)
+    if mask is None:
+        return None
+    mask_sk = int(mask.shape[-1])
+    if mask_sk == int(score_sk):
+        return mask
+    tp_size = (
+        int(tp_group.nranks)
+        if tp_group is not None and getattr(tp_group, "nranks", 1) > 1
+        else 1
+    )
+    if not (
+        sequence_parallel and tp_size > 1 and mask_sk * tp_size == int(score_sk)
+    ):
+        return None
+    if mask.ndim == 2:
+        gathered = gather_from_sequence_parallel_region(
+            mask.transpose([1, 0]).contiguous(), group=tp_group
+        )
+        return gathered.transpose([1, 0]).contiguous()
+    if mask.ndim == 3:
+        gathered = gather_from_sequence_parallel_region(
+            mask.transpose([2, 0, 1]).contiguous(), group=tp_group
+        )
+        return gathered.transpose([1, 2, 0]).contiguous()
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -640,7 +684,20 @@ class DSAIndexer(paddle.nn.Layer):
         index_scores = (weights.unsqueeze(-1) * F.relu(scores)).sum(axis=2)
 
         if mask is not None:
-            index_scores = index_scores + _normalize_dsa_mask(mask)
+            aligned = _align_dsa_indexer_mask(
+                mask,
+                int(index_scores.shape[-1]),
+                sequence_parallel=bool(
+                    getattr(self.config, "sequence_parallel", False)
+                ),
+                tp_group=(
+                    self.pg_collection.tp
+                    if self.pg_collection is not None
+                    else None
+                ),
+            )
+            if aligned is not None:
+                index_scores = index_scores + aligned
 
         topk_k = min(self.index_topk, index_scores.shape[-1])
         topk_indices = paddle.topk(index_scores, k=topk_k, axis=-1)[1]
@@ -706,7 +763,7 @@ def _compute_index_scores_and_topk(
     index_scores = _compute_index_scores_fused(q, weights, k)
 
     mask = _normalize_dsa_mask(mask)
-    if mask is not None:
+    if mask is not None and int(mask.shape[-1]) == int(index_scores.shape[-1]):
         index_scores = index_scores + mask
 
     topk_k = min(index_topk, index_scores.shape[-1])
@@ -830,14 +887,14 @@ def _compute_dsa_indexer_loss(
 
     # Handle fully-masked rows (all -inf) to prevent NaN in softmax
     if causal_mask_override is not None:
-        if causal_mask.ndim == 2:
-            row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [sq]
+        row_valid = (causal_mask > float("-inf")).any(axis=-1)
+        if row_valid.ndim == 1:
             attn_row_mask = row_valid.reshape([1, 1, sq, 1])
             idx_row_mask = row_valid.reshape([1, sq, 1])
         else:
-            row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [b, sq]
-            attn_row_mask = row_valid.reshape([b, 1, sq, 1])
-            idx_row_mask = row_valid.reshape([b, sq, 1])
+            mask_b = int(row_valid.shape[0])
+            attn_row_mask = row_valid.reshape([mask_b, 1, sq, 1])
+            idx_row_mask = row_valid.reshape([mask_b, sq, 1])
 
         attention_scores = paddle.where(
             attn_row_mask, attention_scores, paddle.zeros_like(attention_scores)
@@ -966,14 +1023,14 @@ def _bwd_fused_indexer_loss(
 
     # Handle fully-masked rows (all -inf) to prevent NaN in softmax
     if causal_mask_override is not None:
-        if causal_mask.ndim == 2:
-            row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [sq]
+        row_valid = (causal_mask > float("-inf")).any(axis=-1)
+        if row_valid.ndim == 1:
             attn_row_mask = row_valid.reshape([1, 1, sq, 1])
             idx_row_mask = row_valid.reshape([1, sq, 1])
         else:
-            row_valid = (causal_mask > float("-inf")).any(axis=-1)  # [b, sq]
-            attn_row_mask = row_valid.reshape([b, 1, sq, 1])
-            idx_row_mask = row_valid.reshape([b, sq, 1])
+            mask_b = int(row_valid.shape[0])
+            attn_row_mask = row_valid.reshape([mask_b, 1, sq, 1])
+            idx_row_mask = row_valid.reshape([mask_b, sq, 1])
 
         attention_scores = paddle.where(
             attn_row_mask, attention_scores, paddle.zeros_like(attention_scores)
@@ -1861,13 +1918,28 @@ class DSAttention(FleetLayer):
             f"DSAttention: qr must be bfloat16, got {qr.dtype}"
         )
 
-        # Layout: batch-first [b, sq, np, hn]
+        # Layout: batch-first [b, sq, np, hn]. Indexer Q/K are gathered under
+        # sequence parallel, so index scores are [b, s, s]. Size the causal
+        # mask to that gathered length; a Q/K-shaped [s/TP, s/TP] mask cannot
+        # be added onto [s, s] scores.
         b, sq, np, hn = query.shape
         sk = key.shape[1]
+        indexer_sq, indexer_sk = sq, sk
+        if (
+            self.config.sequence_parallel
+            and self.pg_collection.tp is not None
+            and self.pg_collection.tp.nranks > 1
+            and x.ndim == 3
+        ):
+            gathered = int(x.shape[0]) * int(self.pg_collection.tp.nranks)
+            indexer_sq = gathered
+            indexer_sk = gathered
 
         # Build causal mask
         causal_mask = paddle.triu(
-            paddle.full([sq, sk], float("-inf"), dtype="float32"),
+            paddle.full(
+                [indexer_sq, indexer_sk], float("-inf"), dtype="float32"
+            ),
             diagonal=1,
         )  # [sq, sk]
 
@@ -1877,10 +1949,18 @@ class DSAttention(FleetLayer):
                 0
             )  # [1, 1, sq, sk]
         elif attention_mask is not None:
-            mask = attention_mask.squeeze(1)
-            indexer_float_mask = paddle.zeros_like(
-                mask, dtype="float32"
-            ).masked_fill(mask.cast("bool"), float("-inf"))
+            aligned = _align_dsa_indexer_mask(
+                attention_mask.squeeze(1),
+                indexer_sk,
+                sequence_parallel=bool(self.config.sequence_parallel),
+                tp_group=self.pg_collection.tp,
+            )
+            if aligned is None:
+                indexer_float_mask = causal_mask.unsqueeze(0).unsqueeze(0)
+            else:
+                indexer_float_mask = paddle.zeros_like(
+                    aligned, dtype="float32"
+                ).masked_fill(aligned.cast("bool"), float("-inf"))
 
         else:
             indexer_float_mask = causal_mask.unsqueeze(0).unsqueeze(
@@ -1927,9 +2007,10 @@ class DSAttention(FleetLayer):
         if self.index_share and not self.skip_topk:
             self._publish_index_share_topk(topk_holder, topk_indices)
 
-        # Build sparse mask
+        # Build sparse mask. Use the indexer-gathered sequence so top-k
+        # indices (full seq under SP) and the causal mask share a layout.
         index_mask = paddle.full(
-            [b, sq, sk],
+            [b, indexer_sq, indexer_sk],
             fill_value=float("-inf"),
             dtype="float32",
         )
@@ -1949,7 +2030,16 @@ class DSAttention(FleetLayer):
         combined_mask = index_mask.unsqueeze(1)  # [b, 1, sq, sk]
 
         if attention_mask is not None:
-            combined_mask = attention_mask.cast("float32") + combined_mask
+            aligned_attn = _align_dsa_indexer_mask(
+                attention_mask,
+                indexer_sk,
+                sequence_parallel=bool(self.config.sequence_parallel),
+                tp_group=self.pg_collection.tp,
+            )
+            if aligned_attn is not None:
+                if aligned_attn.ndim == 3:
+                    aligned_attn = aligned_attn.unsqueeze(1)
+                combined_mask = aligned_attn.cast("float32") + combined_mask
 
         # Run sparse attention (batch-first layout)
         core_attn_out = _unfused_dsa_attention(
