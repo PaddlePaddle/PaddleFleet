@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import paddle
+import paddle.nn.functional as F
 from paddle import Tensor, nn
 from paddle.distributed.fleet.meta_parallel import (
     LayerSpec,
@@ -60,6 +61,20 @@ SUPPORTED_ATTN_MASK = [
     AttnMaskType.no_mask,
     AttnMaskType.padding_causal,
 ]
+
+
+def _mtp_eh_projection(
+    projection,
+    hidden_states,
+    tensor_parallel_size,
+    *,
+    use_accuracy_compatible: bool = False,
+):
+    if use_accuracy_compatible and tensor_parallel_size == 1:
+        output_bias = projection.bias if projection.skip_bias_add else None
+        bias = None if projection.skip_bias_add else projection.bias
+        return F.linear(hidden_states, projection.weight, bias), output_bias
+    return projection(hidden_states)
 
 
 def _apply_mtp_layer_masks(dict_args, depth, config):
@@ -1138,7 +1153,8 @@ class MultiTokenPredictionLayer(FleetLayer):
             hidden_states = e_out.unsqueeze(-2) + h_out
             if self.tensor_parallel > 1:
                 hidden_states = gather_from_tensor_model_parallel_region(
-                    hidden_states
+                    hidden_states,
+                    use_accuracy_compatible=self.config.use_accuracy_compatible,
                 )
             # Flatten back to [.., n*h]
             *leading, n, h = hidden_states.shape
@@ -1151,6 +1167,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                 )
         else:
             hidden_states = self.hnorm(hidden_states)
+            if self.config.use_accuracy_compatible:
+                # Reference MTP masks the loss, not this hidden-state edge.
+                mtp_hidden_inputs_mask = None
             # Apply mtp_hidden_inputs_mask to mask out hidden state contributions
             # at specific positions (e.g. EOS boundaries) in MTP.
             # mask shape: [B, 1, S] -> [B, S, 1] to broadcast with hidden_states [B, S, H]
@@ -1197,7 +1216,14 @@ class MultiTokenPredictionLayer(FleetLayer):
             # At the (k - 1)-th MTP layer, concatenates the i-th token's hidden_states
             # and the (i + K)-th token's embedding, and combine them with linear projection.
             hidden_states = paddle.cat((decoder_input, hidden_states), -1)
-            hidden_states = self.eh_proj(hidden_states)
+            # Keep the accuracy-compatible eh_proj entry point, and keep
+            # upstream's tuple tolerance for projections that return a bias.
+            hidden_states = _mtp_eh_projection(
+                self.eh_proj,
+                hidden_states,
+                self.tensor_parallel,
+                use_accuracy_compatible=self.config.use_accuracy_compatible,
+            )
             if isinstance(hidden_states, tuple):
                 hidden_states, _ = hidden_states
             # For tensor parallel we need to gather the tensor across the model-parallel
@@ -1208,7 +1234,8 @@ class MultiTokenPredictionLayer(FleetLayer):
             if not self.config.gpt_model_use_experimental_version:
                 if self.tensor_parallel > 1:
                     hidden_states = gather_from_tensor_model_parallel_region(
-                        hidden_states
+                        hidden_states,
+                        use_accuracy_compatible=self.config.use_accuracy_compatible,
                     )
                 # For sequence parallel, scatter after linear_fc and before transformer layer.
                 if self.sequence_parallel:
@@ -1267,6 +1294,10 @@ class MultiTokenPredictionLayer(FleetLayer):
                 "attn_mask_startend_row_indices": attn_mask_startend_row_indices,
                 "is_mtp": True,
                 "input_ids": input_ids,
+                # IEEE e468: pass the unshifted carrier. MLA already
+                # wrap-rolls the arange RoPE table under UAC. Rolling
+                # position_ids here sets start_pos=1 in
+                # qkv_up_proj_and_rope_apply and slices off that wrap.
                 "position_ids": position_ids,
             }
             rst_dict = self.transformer_layer(input_dict)

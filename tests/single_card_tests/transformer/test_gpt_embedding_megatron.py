@@ -63,6 +63,7 @@ def _make_embedding(
 ):
     emb = GPTEmbedding.__new__(GPTEmbedding)
     cfg = MagicMock()
+    cfg.use_accuracy_compatible = False
     cfg.gpt_model_use_experimental_version = True
     cfg.max_sequence_length = 128
     cfg.sequence_parallel = False
