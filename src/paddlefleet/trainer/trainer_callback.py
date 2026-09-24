@@ -69,6 +69,7 @@ from ..transformers.moe_utils import offload, reload
 from ..utils.log import logger
 from .trainer_utils import (
     IntervalStrategy,
+    ShardingOption,
     get_last_checkpoint,
     get_lr_ratio_fn,
     has_length,
@@ -951,6 +952,20 @@ def enable_in_dict_config(config, key):
 skip_count = 0
 
 
+def _fsdp_owns_param_storage(args):
+    """Whether paddle-native FSDP (``--sharding fsdp``) owns parameter storage.
+
+    ``fully_shard`` flattens every unit's parameters into a sharded buffer and
+    only materializes the unsharded weight inside that unit's forward/backward.
+    Outside of it a ``.weight`` is an empty shell, and the optimizer is a plain
+    optimizer (``_wrap_distributed_optimizer`` is skipped in fsdp mode), so it
+    has neither ``clear_param_storage`` nor tensor-fusion comm buffers. Any
+    callback that touches expert weights or comm buffers between steps must
+    therefore stand down under fsdp.
+    """
+    return ShardingOption.FSDP in args.sharding
+
+
 class FP8QuantWeightCallback(TrainerCallback):
     """
     Callback for FP8 weight quantization during training
@@ -961,6 +976,17 @@ class FP8QuantWeightCallback(TrainerCallback):
         Quantize expert weights to FP8 before each training step
         """
         if args.using_sonic_moe:
+            return
+        # Under fsdp the per-step pre-quantization is both impossible (the
+        # weights have no storage here) and unnecessary: the fp8 expert path
+        # quantizes lazily in forward, where the unit's weight is gathered --
+        # ``fp8_utils.fused_stack_quant`` falls back to
+        # ``fused_stack_quant_without_cache`` when a weight carries no
+        # ``fp8_weight_stacked`` cache, and the split-group-gemm path has the
+        # same fallback (``fusion_layer_utils.py`` ~line 1135). Cost of skipping:
+        # the expert weights are re-quantized once per micro-batch forward
+        # instead of once per step, and expert master weights are not offloaded.
+        if _fsdp_owns_param_storage(args):
             return
         model = kwargs["model"]
         optimizer = kwargs["optimizer"]
@@ -1002,6 +1028,9 @@ class FP8QuantWeightCallback(TrainerCallback):
         Reload weights before optimizer step
         """
         if args.using_sonic_moe:
+            return
+        if _fsdp_owns_param_storage(args):
+            # Symmetric to on_step_begin: nothing was quantized or offloaded.
             return
         model = kwargs["model"]
         optimizer = kwargs["optimizer"]
@@ -1558,8 +1587,32 @@ class SonicMoELayoutSwitchCallback(TrainerCallback):
             and self._cached_expert_param_name in optimizer._master_weights
         )
 
+    def _reject_fsdp(self, args):
+        """SonicMoE is not supported together with paddle-native FSDP yet.
+
+        Unlike the plain fp8 expert path, SonicMoE cannot simply drop this
+        callback under fsdp: ``convert_weights_to_sonic_layout`` /
+        ``convert_weights_to_grouped_layout`` *write* parameter storage, so they
+        can only run while the owning unit's weight is gathered (i.e. inside
+        forward, which ``SonicMoEExpert.forward`` already does). That leaves the
+        weights in sonic layout everywhere outside forward, which both the
+        optimizer (Muon's 2D slice specs are expressed on the grouped layout)
+        and ``sharded_state_dict`` (calls ``convert_weights_to_grouped_layout``
+        outside forward) would silently mis-read. Fail loudly instead.
+        """
+        if _fsdp_owns_param_storage(args):
+            raise NotImplementedError(
+                "using_sonic_moe=True is not supported with sharding=fsdp yet: "
+                "the sonic<->grouped weight layout switch writes parameter "
+                "storage outside forward, which fully_shard does not allow, and "
+                "the optimizer / sharded_state_dict expect the grouped layout. "
+                "Use sharding=stage1 for SonicMoE, or set using_sonic_moe=False "
+                "to run fp8 experts under fsdp."
+            )
+
     def on_step_begin(self, args, state, control, **kwargs):
         if args.using_sonic_moe:
+            self._reject_fsdp(args)
             model = kwargs["model"]
             optimizer = kwargs["optimizer"]
             if args.fp8:
@@ -1575,6 +1628,7 @@ class SonicMoELayoutSwitchCallback(TrainerCallback):
 
     def on_optimizer_begin(self, args, state, control, **kwargs):
         if args.using_sonic_moe:
+            self._reject_fsdp(args)
             if args.fp8:
                 self._apply_to_sonic_moe_experts(
                     kwargs["model"], "clear_fp8_weights"
