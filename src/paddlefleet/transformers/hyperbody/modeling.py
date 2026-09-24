@@ -1130,9 +1130,10 @@ class HyperBodyPretrainedModel(PretrainedModel):
         ``^T`` transposes HF ``nn.Linear`` ``(out,in)`` to Paddle ``(in,out)``;
         embedding / query / gate / norm keep the same axis order (no ``^T``).
         The dense-layer set is derived from ``moe_layer_freq[i]==0`` (decoder)
-        and ``first_k_dense_replace`` leading layers (encoder). Routed-expert
-        up/gate fusion follows each region's OWN standalone reference: the
-        decoder concatenates with ``axis=1``, the encoder with ``fused_ffn``.
+        and ``first_k_dense_replace`` leading layers (encoder). Both regions
+        concatenate routed-expert up/gate with ``axis=1`` (matching each
+        region's standalone reference), so the subsequent ``axis=0`` pack into
+        ``grouped_gemm_experts.weight1`` stays consistent across pools.
         """
         st = []
 
@@ -1283,7 +1284,7 @@ class HyperBodyPretrainedModel(PretrainedModel):
             st.append(
                 f"{hf}.mlp.experts.$EXPERT_ID.gate_proj.weight^T, "
                 f"{hf}.mlp.experts.$EXPERT_ID.up_proj.weight^T "
-                f"-> {pd}.mlp.experts.$EXPERT_ID.up_gate_proj.weight, fused_ffn"
+                f"-> {pd}.mlp.experts.$EXPERT_ID.up_gate_proj.weight, axis=1"
             )
             st.append(
                 f"{hf}.mlp.experts.$EXPERT_ID.down_proj.weight^T "
@@ -1519,13 +1520,14 @@ class HyperBodyPretrainedModel(PretrainedModel):
                 f"{pd}.mlp.shared_experts.down_proj.weight^T "
                 f"-> {hf}.mlp.shared_experts.down_proj.weight",
             ]
-            # Encoder routed experts fuse up/gate with ``fused_ffn`` (matching the
-            # forward encoder branch), unlike the decoder which uses ``axis=1``.
+            # Encoder routed experts de-fuse up/gate with ``axis=1`` (matching
+            # the forward encoder branch and the decoder), the exact inverse of
+            # the forward ``axis=1`` concat.
             for e in range(enc_experts):
                 st += [
                     f"{pd}.mlp.experts.{e}.up_gate_proj.weight "
                     f"-> {pd}.mlp.experts.{e}.gate_proj.weight, "
-                    f"{pd}.mlp.experts.{e}.up_proj.weight, fused_ffn",
+                    f"{pd}.mlp.experts.{e}.up_proj.weight, axis=1",
                     f"{pd}.mlp.experts.{e}.gate_proj.weight^T "
                     f"-> {hf}.mlp.experts.{e}.gate_proj.weight",
                     f"{pd}.mlp.experts.{e}.up_proj.weight^T "
