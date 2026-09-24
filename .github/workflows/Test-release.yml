@@ -318,6 +318,7 @@ jobs:
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e repo_flag="paddlefleet" \
+            -e NCCL_NVLS_ENABLE=0 \
             -w /paddle --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -424,6 +425,7 @@ jobs:
             -e GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e repo_flag="paddlefleet" \
+            -e NCCL_NVLS_ENABLE=0 \
             -w /paddle --network host ${docker_image}
 
       - name: Clone PaddleFleet
@@ -442,7 +444,7 @@ jobs:
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
           echo "paddle commit:"
           python -c "import paddle; print(paddle.version.commit)"
-          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
 
@@ -540,6 +542,7 @@ jobs:
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
+            -e NCCL_NVLS_ENABLE=0 \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -557,7 +560,7 @@ jobs:
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -743,6 +746,7 @@ jobs:
             -e GITHUB_RUN_ID="${{ github.run_id }}" \
             -e PR_USER="${{ github.event.pull_request.user.login }}" \
             -e PP="rel" \
+            -e NCCL_NVLS_ENABLE=0 \
             -w /workspace --network host ${docker_image}
 
       - name: Install PaddleFleet
@@ -759,7 +763,7 @@ jobs:
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
@@ -1125,7 +1129,7 @@ jobs:
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install dist/${{ needs.build_whl.outputs.root_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
           pip install dist/${{ needs.build_whl.outputs.ops_whl_name }} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
-          wget https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -O /usr/local/bin/yq
+          wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           echo "paddlefleet commit:"
           python -c "import paddlefleet; print(paddlefleet.version.commit)"
