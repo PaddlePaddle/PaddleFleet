@@ -867,13 +867,40 @@ class MultiLatentAttention(Attention):
             q_compressed,
             kv_compressed,
             k_pos_emb,
-            indexer_rotary_pos_emb,
         ) = self.get_query_key_value_tensors(
             hidden_states,
             key_value_states,
             position_ids,
             packed_seq_params,
             is_decode=is_decode,
+        )
+        # Main-path RoPE freqs stashed on self by get_query_key_value_tensors
+        # (reused by the DSA indexer under use_accuracy_compatible); read via
+        # attribute so the return arity stays 6 for all callers/subclasses.
+        indexer_rotary_pos_emb = getattr(self, "_indexer_rotary_pos_emb", None)
+        # Only forward rotary_pos_emb to core attentions that accept it (DSA /
+        # dot-product cores do; latent-MQA cores do not).
+        if not hasattr(self, "_core_attn_accepts_rope"):
+            import inspect as _inspect
+
+            try:
+                _sig = _inspect.signature(self.core_attention.forward)
+                self._core_attn_accepts_rope = (
+                    "rotary_pos_emb" in _sig.parameters
+                    or any(
+                        p.kind == p.VAR_KEYWORD
+                        for p in _sig.parameters.values()
+                    )
+                )
+            except (ValueError, TypeError):
+                self._core_attn_accepts_rope = False
+        _rope_kw = (
+            {"rotary_pos_emb": indexer_rotary_pos_emb}
+            if (
+                indexer_rotary_pos_emb is not None
+                and self._core_attn_accepts_rope
+            )
+            else {}
         )
 
         layer_num = getattr(self, "layer_number", -1)
@@ -1031,7 +1058,7 @@ class MultiLatentAttention(Attention):
                 # ``DSv4HybridAttention``'s ``full_attn`` one.
                 x=keep_indexer_grad_path(hidden_states, self.config),
                 qr=q_compressed,
-                rotary_pos_emb=indexer_rotary_pos_emb,
+                **_rope_kw,
                 # fastdeploy support
                 kv_compressed=kv_compressed,
                 k_pos_emb=k_pos_emb,
@@ -1058,7 +1085,7 @@ class MultiLatentAttention(Attention):
                 # DSA-specific parameters
                 x=hidden_states,
                 qr=q_compressed,
-                rotary_pos_emb=indexer_rotary_pos_emb,
+                **_rope_kw,
                 # fastdeploy support
                 kv_compressed=kv_compressed,
                 k_pos_emb=k_pos_emb,
@@ -2606,6 +2633,7 @@ class MLASelfAttention(MultiLatentAttention):
                 position_ids,
             )
 
+        self._indexer_rotary_pos_emb = rotary_pos_emb
         return (
             query,
             key,
@@ -2613,7 +2641,6 @@ class MLASelfAttention(MultiLatentAttention):
             q_compressed,
             kv_compressed,
             k_pos_emb,
-            rotary_pos_emb,
         )
 
     def backward_dw(self) -> NoReturn:
@@ -2827,7 +2854,6 @@ class MQASelfAttention(MLASelfAttention):
             q_compressed,
             kv_compressed,
             k_pos_emb,
-            _indexer_rotary_pos_emb,
         ) = self.get_query_key_value_tensors(
             hidden_states,
             key_value_states,
@@ -3316,6 +3342,7 @@ class MQASelfAttention(MLASelfAttention):
             position_ids,
         )
 
+        self._indexer_rotary_pos_emb = rotary_pos_emb
         return (
             query,
             key,
@@ -3323,5 +3350,4 @@ class MQASelfAttention(MLASelfAttention):
             q_compressed,
             kv_compressed,
             k_pos_emb,
-            rotary_pos_emb,
         )
