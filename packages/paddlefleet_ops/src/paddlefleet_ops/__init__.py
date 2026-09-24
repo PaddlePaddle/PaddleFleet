@@ -332,6 +332,88 @@ def _safe_load_ecosystem_lib(
             ) from e
 
 
+_SONIC_MOE_LOADED = False
+_QUACK_LOADED = False
+
+SONIC_MOE_NOT_LOADED = (
+    "paddlefleet_ops.sonicmoe has not been loaded yet. It is imported on "
+    "demand (sonicmoe + the CuTe DSL type system cost seconds of import time "
+    "and are only reachable behind `using_sonic_moe`).\n"
+    "Call `paddlefleet_ops.load_sonic_moe()` once you know SonicMoE is in use, "
+    "then import paddlefleet_ops.sonicmoe... as usual. paddlefleet's MoELayer "
+    "does this in its constructor."
+)
+
+
+def load_quack():
+    """Import the vendored quack kernels under their bare top-level name.
+
+    quack is a dependency of sonicmoe, but *not only* of sonicmoe:
+    ``paddle.optimizer.Muon(use_symmetric_gemm=True)`` resolves it with a bare
+    ``from quack.gemm_interface import gemm_symmetric`` and relies on importing
+    paddlefleet_ops having registered it, so there is no call site where a
+    deferred load could be triggered. It is therefore loaded eagerly while
+    sonicmoe stays deferred -- quack costs ~1s against sonicmoe's several
+    seconds, which is where the startup time actually goes.
+
+    Imported inside the same compat guard sonicmoe used to import it under, so
+    quack still sees paddle's torch proxy rather than a real torch. Keeps the
+    bare ``quack`` name (no patch_module_namespace) because that is the name its
+    own 203 absolute imports -- and Muon -- use. Idempotent.
+    """
+    global _QUACK_LOADED
+    if _QUACK_LOADED:
+        return sys.modules.get("quack")
+    with (
+        paddle.use_compat_guard(
+            enable=True, scope={"quack", "triton"}, silent=True
+        ),
+        ModuleContext(["quack"], ops_dir),
+    ):
+        # gemm_interface is the submodule Muon needs; importing it pulls the
+        # package too, so both end up guard-imported as they were before.
+        importlib.import_module("quack.gemm_interface")
+    _QUACK_LOADED = True
+    logger.info("Successfully loaded ecosystem library: quack")
+    return sys.modules.get("quack")
+
+
+def load_sonic_moe():
+    """Import the sonicmoe ecosystem library. Idempotent.
+
+    Must run before any `import paddlefleet_ops.sonicmoe...`; until then that
+    import is blocked (SONIC_MOE_NOT_LOADED) so it cannot fall through to the
+    path finders and execute a second copy out of the vendored directory.
+    """
+    global _SONIC_MOE_LOADED
+    if _SONIC_MOE_LOADED:
+        return globals()["sonicmoe"]
+    if not is_sonic_moe_available():
+        # .get(): the blocked_import_messages entry is only registered on CUDA
+        # builds, so a CPU-only build would otherwise raise KeyError here.
+        raise RuntimeError(
+            blocked_import_messages.get(
+                "paddlefleet_ops.sonicmoe",
+                "paddlefleet_ops.sonicmoe is not available in this build. "
+                + SONIC_MOE_HINT,
+            )
+        )
+    load_quack()
+    with paddle.use_compat_guard(
+        enable=True, scope={"sonicmoe", "quack", "triton"}, silent=True
+    ):
+        # No ["quack"]: quack is already loaded above and must stay the *same*
+        # module objects sonicmoe closes over. Listing it here would make
+        # ModuleContext stash it, let sonicmoe import a second copy, and then
+        # restore the stashed one over it, leaving two live quacks.
+        _safe_load_ecosystem_lib("sonicmoe", ops_dir, globals())
+    # sonicmoe is now in this namespace and in sys.modules, so plain
+    # `import paddlefleet_ops.sonicmoe...` resolves from here on.
+    blocked_import_messages.pop("paddlefleet_ops.sonicmoe", None)
+    _SONIC_MOE_LOADED = True
+    return globals()["sonicmoe"]
+
+
 import_custom_ops(
     package="paddlefleet_ops._extensions",
     module_name=".ops",
@@ -381,10 +463,20 @@ if paddle.is_compiled_with_cuda():
         blocked_import_messages["paddlefleet_ops.hybrid_ep"] = error
 
     if is_sonic_moe_available():
-        with paddle.use_compat_guard(
-            enable=True, scope={"sonicmoe", "quack", "triton"}, silent=True
-        ):
-            _safe_load_ecosystem_lib("sonicmoe", ops_dir, globals(), ["quack"])
+        # sonicmoe (and with it the CuTe DSL type system) costs several seconds
+        # of import time but is only reachable behind `using_sonic_moe`. Defer
+        # the load to the first real use via load_sonic_moe(); until then block a
+        # bare `import paddlefleet_ops.sonicmoe...` so it cannot fall through to
+        # the path finders and execute a second, differently-wired copy out of
+        # the vendored directory (which would re-register ops).
+        #
+        # quack is loaded now, not deferred: paddle.optimizer.Muon reaches for it
+        # by its bare name with no hook to trigger a deferred load, and it is the
+        # cheap part of what sonicmoe used to drag in. See load_quack().
+        load_quack()
+        blocked_import_messages["paddlefleet_ops.sonicmoe"] = (
+            SONIC_MOE_NOT_LOADED
+        )
     else:
         warning, error = _sonic_moe_requirement(
             "paddlefleet_ops.sonicmoe", hint=SONIC_MOE_HINT
