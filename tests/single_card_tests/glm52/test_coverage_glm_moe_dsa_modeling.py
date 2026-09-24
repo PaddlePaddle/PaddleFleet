@@ -32,8 +32,9 @@ class ModelingExportsTests(unittest.TestCase):
     def test_all_contains_expected_classes(self):
         self.assertIn("GlmMoeDsaForCausalLM", modeling.__all__)
         self.assertIn("GlmMoeDsaForCausalLMPipe", modeling.__all__)
-        # PreTrainedModel is an internal building block.
+        # PreTrainedModel and Provider are internal building blocks.
         self.assertNotIn("GlmMoeDsaPreTrainedModel", modeling.__all__)
+        self.assertNotIn("GlmMoeDsaModelProvider", modeling.__all__)
 
     def test_module_logger_is_named_after_module(self):
         self.assertIsInstance(modeling.logger, logging.Logger)
@@ -226,7 +227,7 @@ class CausalLmEntrypointTests(unittest.TestCase):
     def setUp(self):
         _RecordingProvider.last = None
         patcher = patch.object(
-            modeling.GLMMoEModelProvider,
+            modeling.GlmMoeDsaModelProvider,
             "from_config",
             _fake_from_config,
         )
@@ -296,7 +297,7 @@ class CausalLmPipeEntrypointTests(unittest.TestCase):
     def setUp(self):
         _RecordingProvider.last = None
         patcher = patch.object(
-            modeling.GLMMoEModelProvider,
+            modeling.GlmMoeDsaModelProvider,
             "from_config",
             _fake_from_config,
         )
