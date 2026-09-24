@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import logging
+from dataclasses import dataclass
 
 from ...nn.pp_model import CriterionLayerPipe, GeneralModelForCausalLMPipe
 from ..aoa_config_base import MoEAOAConfigGenerator
@@ -21,6 +22,13 @@ from ..model_utils import PretrainedModel
 from .configuration import GlmMoeDsaConfig
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class GlmMoeDsaModelProvider(GLMMoEModelProvider):
+    """GLM-5.2 defaults that differ from GLM-4 MoE."""
+
+    moe_router_use_fp32_master: bool = True
 
 
 class GlmMoeDsaPreTrainedModel(PretrainedModel):
@@ -463,7 +471,7 @@ class GlmMoeDsaForCausalLM(GlmMoeDsaPreTrainedModel):
         )
         config.fuse_rms_norm = True
         config.multi_latent_attention = True
-        model_provider_class = GLMMoEModelProvider
+        model_provider_class = GlmMoeDsaModelProvider
         model_provider = model_provider_class.from_config(config)
         loss_fn = None
         if getattr(config, "dpo_config", None):
@@ -499,7 +507,7 @@ class GlmMoeDsaForCausalLMPipe(
         )
         config.fuse_rms_norm = True
         config.multi_latent_attention = True
-        model_provider_class = GLMMoEModelProvider
+        model_provider_class = GlmMoeDsaModelProvider
         model_provider = model_provider_class.from_config(config)
         loss_fn = None
         if getattr(config, "dpo_config", None):

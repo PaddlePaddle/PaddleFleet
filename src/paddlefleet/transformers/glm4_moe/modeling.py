@@ -1065,6 +1065,12 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                     f"{prefix}.self_attn.q_proj.bias, {prefix}.self_attn.k_proj.bias, {prefix}.self_attn.v_proj.bias -> {prefix_offset}.self_attn.qkv_proj.bias, fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups={config.num_key_value_heads}, axis=0",
                 ]
         # layer1 - layer_num_hidden_layers
+        gate_dtype = (
+            "bfloat16"
+            if getattr(config, "use_accuracy_compatible", False)
+            and not getattr(config, "moe_router_use_fp32_master", False)
+            else "float32"
+        )
         for layer_idx in reversed(
             range(
                 config.first_k_dense_replace,
@@ -1077,22 +1083,11 @@ class Glm4MoePreTrainedModel(PretrainedModel):
             if layer_idx >= num_hidden_layers:
                 # for mtp
                 prefix_offset += ".transformer_layer"
-            use_accuracy_compatible = getattr(
-                config, "use_accuracy_compatible", False
-            )
-
-            if use_accuracy_compatible:
-                aoa_config["aoa_statements"] += [
-                    f"{prefix}.mlp.gate.e_score_correction_bias -> {prefix_offset}.mlp.gate.e_score_correction_bias",
-                    f"{prefix}.mlp.gate.weight -> {prefix_offset}.mlp.gate.weight, dtype='bfloat16'",
-                    f"{prefix}.mlp.shared_experts.down_proj.weight^T -> {prefix_offset}.mlp.shared_experts.down_proj.weight",
-                ]
-            else:
-                aoa_config["aoa_statements"] += [
-                    f"{prefix}.mlp.gate.e_score_correction_bias -> {prefix_offset}.mlp.gate.e_score_correction_bias",
-                    f"{prefix}.mlp.gate.weight -> {prefix_offset}.mlp.gate.weight, dtype='float32'",
-                    f"{prefix}.mlp.shared_experts.down_proj.weight^T -> {prefix_offset}.mlp.shared_experts.down_proj.weight",
-                ]
+            aoa_config["aoa_statements"] += [
+                f"{prefix}.mlp.gate.e_score_correction_bias -> {prefix_offset}.mlp.gate.e_score_correction_bias",
+                f"{prefix}.mlp.gate.weight -> {prefix_offset}.mlp.gate.weight, dtype='{gate_dtype}'",
+                f"{prefix}.mlp.shared_experts.down_proj.weight^T -> {prefix_offset}.mlp.shared_experts.down_proj.weight",
+            ]
             if using_sonic_moe:
                 aoa_config["aoa_statements"] += [
                     f"{prefix}.mlp.experts.$EXPERT_ID.down_proj.weight -> {prefix_offset}.mlp.experts.$EXPERT_ID.down_proj.weight",
@@ -1697,6 +1692,7 @@ class Glm4MoeForCausalLM(Glm4MoePreTrainedModel):
         gpt_model._keep_in_fp32_modules = (
             ["e_score_correction_bias"]
             if model_provider.use_accuracy_compatible
+            and not model_provider.moe_router_use_fp32_master
             else cls._keep_in_fp32_modules
         )
         gpt_model._gen_aoa_config = cls._gen_aoa_config
@@ -1905,6 +1901,7 @@ class Glm4MoeForCausalLMPipe(
         gpt_model._keep_in_fp32_modules = (
             ["e_score_correction_bias"]
             if model_provider.use_accuracy_compatible
+            and not model_provider.moe_router_use_fp32_master
             else cls._keep_in_fp32_modules
         )
         gpt_model._gen_aoa_config = cls._gen_aoa_config
