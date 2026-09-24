@@ -19,9 +19,11 @@ MinimaxV2.5, DSV4) keep their numerics, and enabling it must reach
 paths read. The published state is process-global, so every case restores it.
 """
 
+import types
 import unittest
 
 from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.transformers.configuration_utils import LlmMetaConfig
 from paddlefleet.utils import (
     set_kimik2_accuracy_compatible,
     use_kimik2_accuracy_compatible,
@@ -54,6 +56,27 @@ class TestKimiK2AccuracySwitch(unittest.TestCase):
         config._process_attribute("use_kimik2_accuracy", True)
         self.assertTrue(config.use_kimik2_accuracy)
         self.assertTrue(use_kimik2_accuracy_compatible())
+
+    def test_training_args_enable_it(self):
+        """YAML / CLI reach the config through ``set_llm_config`` after
+        ``__post_init__``, so the funnel has to publish too."""
+        config = types.SimpleNamespace()
+        LlmMetaConfig.set_llm_config(
+            config, types.SimpleNamespace(use_kimik2_accuracy=True)
+        )
+        self.assertIs(config.use_kimik2_accuracy, True)
+        self.assertTrue(use_kimik2_accuracy_compatible())
+
+    def test_training_args_default_is_off(self):
+        config = types.SimpleNamespace()
+        LlmMetaConfig.set_llm_config(config, types.SimpleNamespace())
+        self.assertIs(config.use_kimik2_accuracy, False)
+        self.assertFalse(use_kimik2_accuracy_compatible())
+
+    def test_unset_args_keep_the_checkpoint_value(self):
+        config = types.SimpleNamespace(use_kimik2_accuracy=True)
+        LlmMetaConfig.set_llm_config(config, types.SimpleNamespace())
+        self.assertIs(config.use_kimik2_accuracy, True)
 
 
 if __name__ == "__main__":

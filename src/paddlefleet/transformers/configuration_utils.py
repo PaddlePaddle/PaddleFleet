@@ -751,6 +751,16 @@ class LlmMetaConfig:
             "publishes it to the runtime switch and installs the Paddle runtime patches.",
         ),
         (
+            "use_kimik2_accuracy",
+            bool,
+            False,
+            "Enable the Kimi-K2 Megatron-aligned cross-entropy, MoE gradient "
+            "accumulation order and dense wgrad paths. Distinct from "
+            "use_accuracy_compatible for the same reason as use_dsv4_accuracy. "
+            "Turn-on only: leaving it unset keeps a value already carried by the "
+            "checkpoint config.json.",
+        ),
+        (
             "experimental_dataflow",
             bool,
             False,
@@ -866,6 +876,17 @@ class LlmMetaConfig:
                     )
 
                     install_accuracy_compatible_paddle_patches()
+            elif key == "use_kimik2_accuracy":
+                # Published here for the same reason as use_dsv4_accuracy. Unlike
+                # it, an unset (False) value must not switch off a
+                # ``"use_kimik2_accuracy": true`` that arrived with the
+                # checkpoint config.json, which is how the alignment case
+                # enables it.
+                from paddlefleet.utils import set_kimik2_accuracy_compatible
+
+                value = bool(value) or bool(getattr(config, key, False))
+                if value:
+                    set_kimik2_accuracy_compatible(True)
             setattr(config, key, value)
 
 
