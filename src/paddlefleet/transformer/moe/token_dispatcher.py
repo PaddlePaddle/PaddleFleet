@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 from paddlefleet.transformer.utils import profile
 from paddlefleet.utils import use_dsv4_accuracy_compatible
 
+from . import fused_a2a as _fused_a2a
 from .fp8_utils import FP8_ALIGN
 from .fused_a2a import (
     HYBRIDEP_TOKEN_ALIGNMENT,
@@ -39,8 +40,26 @@ from .fused_a2a import (
     get_hybrid_ep_buffer,
     hybrid_ep_combine,
     hybrid_ep_dispatch,
-    quantize_activation_blockscaled_fast,
 )
+
+# SonicMoE's fp8 quantizer is resolved on demand (it lives in fused_a2a and is
+# itself imported lazily there). MoELayer.__init__ preloads it before any
+# dispatch runs.
+quantize_activation_blockscaled_fast = None
+_sonic_symbols_loaded = False
+
+
+def _load_sonic_symbols():
+    global _sonic_symbols_loaded, quantize_activation_blockscaled_fast
+    if _sonic_symbols_loaded:
+        return
+    _fused_a2a._load_sonic_symbols()
+    quantize_activation_blockscaled_fast = (
+        _fused_a2a.quantize_activation_blockscaled_fast
+    )
+    _sonic_symbols_loaded = True
+
+
 from .moe_utils import (
     AllGatherGroupOp,
     ReduceScatterGroupOp,

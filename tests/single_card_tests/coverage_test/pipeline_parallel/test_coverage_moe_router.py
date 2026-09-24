@@ -1920,7 +1920,10 @@ def _sonicmoe_supported():
     except (AttributeError, RuntimeError):
         return False
     try:
-        import paddlefleet_ops.sonicmoe.functional  # noqa: F401
+        import paddlefleet_ops
+
+        paddlefleet_ops.load_sonic_moe()  # sonicmoe is imported on demand
+        import paddlefleet_ops.sonicmoe.functional
     except (ImportError, RuntimeError):
         return False
     return True

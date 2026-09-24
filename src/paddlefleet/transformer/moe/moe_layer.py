@@ -422,6 +422,21 @@ class MoELayer(nn.Layer):
                     "builds the fused grouped_gemm_experts. Please disable one "
                     "of them in the configuration yaml."
                 )
+            # SonicMoE is actually in use: import sonicmoe + quack now (deferred
+            # at module load) and resolve the module-level symbols the MoE files
+            # use, in dependency order (token_dispatcher rebinds from fused_a2a).
+            paddlefleet_ops.load_sonic_moe()
+            from . import (
+                fused_a2a,
+                fusion_layer_utils,
+                moe_expert,
+                token_dispatcher,
+            )
+
+            fused_a2a._load_sonic_symbols()
+            token_dispatcher._load_sonic_symbols()
+            fusion_layer_utils._load_sonic_symbols()
+            moe_expert._load_sonic_symbols()
             # SonicMoE's experts have their own two deferral points; the two
             # defer_expert_*_dw flags above only reach the fp8_utils path.
             install_sonic_moe_dw_deferral(config)

@@ -40,37 +40,75 @@ from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.mlp import MLP, MLPSublayersSpec
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
-if paddlefleet_ops.is_sonic_moe_available():
-    try:
-        from paddlefleet_ops.sonicmoe import run_sonic_moe
-    except ImportError:
-        from .fusion_layer_utils import run_sonic_moe
+# SonicMoE symbols are imported on demand via _load_sonic_symbols(); importing
+# sonicmoe at module load would pull in quack + the CuTe DSL type system for
+# every run, including the ones that never enable SonicMoE. SonicMoEExpert is
+# only constructed under using_sonic_moe, and calls _load_sonic_symbols() in its
+# constructor.
+run_sonic_moe = None
+_refresh_fp8_config = None
+clear_all_fp8_weight_caches = None
+quantize_native_fp8_weights = None
+fused_grouped_w1_to_sonic = None
+fused_sonic_w1_to_grouped = None
+fused_transpose_w2_layout = None
+_sonic_symbols_loaded = False
 
 from .moe_utils import (
     k_grouped_bf16_gemm_tn_contiguous_aligned,
 )
 
+# deep_gemm is a separate ecosystem lib (eagerly loaded, no sonicmoe/quack), so
+# it stays at module level.
 try:
     from paddlefleet_ops import deep_gemm as paddlefleet_deep_gemm
-    from paddlefleet_ops.sonicmoe.functional import (
-        _refresh_fp8_config,
-        clear_all_fp8_weight_caches,
-    )
-    from paddlefleet_ops.sonicmoe.quack_utils import quantize_native_fp8_weights
 except (ImportError, RuntimeError):
-    pass
+    paddlefleet_deep_gemm = None
 
 
-try:
-    from paddlefleet_ops.sonicmoe.ernie_compat.weight_layout_fusion import (
-        fused_grouped_w1_to_sonic,
-        fused_sonic_w1_to_grouped,
-        fused_transpose_w2_layout,
-    )
-except (ImportError, RuntimeError):
-    fused_grouped_w1_to_sonic = None
-    fused_sonic_w1_to_grouped = None
-    fused_transpose_w2_layout = None
+def _load_sonic_symbols():
+    """Resolve the SonicMoE symbols this module uses, once, on demand."""
+    global _sonic_symbols_loaded, run_sonic_moe
+    global _refresh_fp8_config, clear_all_fp8_weight_caches
+    global quantize_native_fp8_weights
+    global fused_grouped_w1_to_sonic, fused_sonic_w1_to_grouped
+    global fused_transpose_w2_layout
+    if _sonic_symbols_loaded:
+        return
+    paddlefleet_ops.load_sonic_moe()
+    try:
+        from paddlefleet_ops.sonicmoe import run_sonic_moe as _run
+    except ImportError:
+        from .fusion_layer_utils import run_sonic_moe as _run
+    run_sonic_moe = _run
+    try:
+        from paddlefleet_ops.sonicmoe.functional import (
+            _refresh_fp8_config as _rf,
+            clear_all_fp8_weight_caches as _cc,
+        )
+        from paddlefleet_ops.sonicmoe.quack_utils import (
+            quantize_native_fp8_weights as _qn,
+        )
+
+        _refresh_fp8_config = _rf
+        clear_all_fp8_weight_caches = _cc
+        quantize_native_fp8_weights = _qn
+    except (ImportError, RuntimeError):
+        pass
+    try:
+        from paddlefleet_ops.sonicmoe.ernie_compat.weight_layout_fusion import (
+            fused_grouped_w1_to_sonic as _fg,
+            fused_sonic_w1_to_grouped as _fs,
+            fused_transpose_w2_layout as _ft,
+        )
+
+        fused_grouped_w1_to_sonic = _fg
+        fused_sonic_w1_to_grouped = _fs
+        fused_transpose_w2_layout = _ft
+    except (ImportError, RuntimeError):
+        pass
+    _sonic_symbols_loaded = True
+
 
 g_shard_bypass_dygraph_optimizer = int(
     os.environ.get("FLAGS_shard_bypass_dygraph_optimizer", 0)
@@ -723,6 +761,10 @@ class SonicMoEExpert(GroupedMLPExpert):
                 f"{config.activation_func_clamp_value} is not supported with "
                 "hidden_act=situ on SonicMoE: SiTU-GLU has no clamped variant."
             )
+        # Config is valid and SonicMoE is actually in use here; resolve its
+        # symbols now. Kept after the validation above (which only reads config
+        # and must be able to raise without importing sonicmoe, e.g. on CPU).
+        _load_sonic_symbols()
         super().__init__(
             num_local_experts=num_local_experts,
             config=config,

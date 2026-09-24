@@ -33,6 +33,7 @@ from paddlefleet.transformer.moe.moe_layer import MoELayer
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
 if paddlefleet_ops.is_sonic_moe_available():
+    paddlefleet_ops.load_sonic_moe()  # sonicmoe is imported on demand
     from paddlefleet_ops.sonicmoe.functional import (
         clear_all_fp8_weight_caches,
     )
@@ -124,6 +125,11 @@ class TestSonicMoELayerPrecision(unittest.TestCase):
         from paddlefleet_ops import sonicmoe
 
         from paddlefleet.transformer.moe import fusion_layer_utils, moe_expert
+
+        # moe_expert resolves its SonicMoE symbols on demand (MoELayer.__init__
+        # does it in a real run). Trigger it here so this test does not depend
+        # on another test in this class having built a layer first.
+        moe_expert._load_sonic_symbols()
 
         expected_run_sonic_moe = getattr(
             sonicmoe, "run_sonic_moe", fusion_layer_utils.run_sonic_moe
