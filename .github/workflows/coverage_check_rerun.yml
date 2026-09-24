@@ -1,46 +1,67 @@
 name: Coverage-check Re-run
 
 on:
-  workflow_run:
-    workflows: ["Coverage Approval"]
-    types: [completed]
+  pull_request_review:
+    types: [submitted]
 
 permissions:
   actions: write
+  checks: write
   contents: read
   pull-requests: read
 
 concurrency:
-  group: coverage-rerun-${{ github.event.workflow_run.pull_requests[0].number }}-${{ github.event.workflow_run.pull_requests[0].head.sha }}
+  group: coverage-rerun-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
   cancel-in-progress: true
 
 jobs:
   rerun-on-approval:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: >-
+      github.event.review.state == 'approved' &&
+      github.event.review.commit_id == github.event.pull_request.head.sha &&
+      github.event.review.user.login == 'swgu98' &&
+      contains(github.event.review.body, 'lgtm') &&
+      contains(github.event.review.body, 'coverage')
     runs-on:
       group: APPROVAL
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       REPO: ${{ github.repository }}
-      PR_NUMBER: ${{ github.event.workflow_run.pull_requests[0].number }}
-      HEAD_SHA: ${{ github.event.workflow_run.pull_requests[0].head.sha }}
-      TRIGGER_RUN_ID: ${{ github.event.workflow_run.id }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      CONTROLLER_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       API_VERSION: 2022-11-28
     steps:
       - name: Cancel coverage check and rerun approval
+        id: schedule
         shell: bash
         run: |
           set -euo pipefail
 
           api() {
-            local response status body
-            response=$(curl --silent --show-error \
-              --request "$1" \
-              --header "Authorization: Bearer ${GH_TOKEN}" \
-              --header "Accept: application/vnd.github+json" \
-              --header "X-GitHub-Api-Version: ${API_VERSION}" \
-              --write-out $'\n%{http_code}' \
-              "https://api.github.com${2}")
+            local response status body method path payload
+            method="$1"
+            path="$2"
+            payload="${3:-}"
+            if [[ -n "${payload}" ]]; then
+              response=$(curl --silent --show-error \
+                --request "${method}" \
+                --header "Authorization: Bearer ${GH_TOKEN}" \
+                --header "Accept: application/vnd.github+json" \
+                --header "X-GitHub-Api-Version: ${API_VERSION}" \
+                --header "Content-Type: application/json" \
+                --data "${payload}" \
+                --write-out $'\n%{http_code}' \
+                "https://api.github.com${path}")
+            else
+              response=$(curl --silent --show-error \
+                --request "${method}" \
+                --header "Authorization: Bearer ${GH_TOKEN}" \
+                --header "Accept: application/vnd.github+json" \
+                --header "X-GitHub-Api-Version: ${API_VERSION}" \
+                --write-out $'\n%{http_code}' \
+                "https://api.github.com${path}")
+            fi
             status=$(printf '%s\n' "${response}" | tail -n 1)
             body=$(printf '%s\n' "${response}" | sed '$d')
             if [[ "${status}" -lt 200 || "${status}" -ge 300 ]]; then
@@ -50,23 +71,13 @@ jobs:
             printf '%s' "${body}"
           }
 
-          if [[ -z "${PR_NUMBER}" || -z "${HEAD_SHA}" ]]; then
-            echo "The triggering workflow run is not associated with a pull request; nothing to rerun."
-            exit 0
-          fi
-
-          trigger_jobs=$(api GET "/repos/${REPO}/actions/runs/${TRIGGER_RUN_ID}/jobs?filter=latest&per_page=100")
-          signal_conclusion=$(jq -r '
-            [.jobs[] | select(.name == "signal")]
-            | last
-            | .conclusion // empty
-          ' <<<"${trigger_jobs}")
-          if [[ "${signal_conclusion}" != "success" ]]; then
-            echo "Coverage Approval signal did not succeed; nothing to rerun."
-            exit 0
-          fi
+          echo "Review submitted for PR ${PR_NUMBER} at head ${HEAD_SHA}."
 
           pr=$(api GET "/repos/${REPO}/pulls/${PR_NUMBER}")
+          if ! jq -e --arg repo "${REPO}" '.state == "open" and .base.repo.full_name == $repo' <<<"${pr}" >/dev/null; then
+            echo "The PR is not open in ${REPO}; nothing to rerun."
+            exit 0
+          fi
           current_sha=$(jq -r '.head.sha' <<<"${pr}")
           head_repo=$(jq -r '.head.repo.full_name // empty' <<<"${pr}")
           head_ref=$(jq -r '.head.ref // empty' <<<"${pr}")
@@ -79,11 +90,31 @@ jobs:
             exit 0
           fi
 
+          check_payload=$(jq -n \
+            --arg name "Coverage rerun controller" \
+            --arg head_sha "${HEAD_SHA}" \
+            --arg details_url "${CONTROLLER_URL}" \
+            '{name: $name, head_sha: $head_sha, status: "in_progress", details_url: $details_url}')
+          check_run=$(api POST "/repos/${REPO}/check-runs" "${check_payload}")
+          check_run_id=$(jq -r '.id // empty' <<<"${check_run}")
+          if [[ ! "${check_run_id}" =~ ^[0-9]+$ ]]; then
+            echo "GitHub did not return a valid check-run ID."
+            exit 1
+          fi
+          echo "check_run_id=${check_run_id}" >> "${GITHUB_OUTPUT}"
+
+          finish() {
+            local result="$1"
+            local summary="$2"
+            echo "result=${result}" >> "${GITHUB_OUTPUT}"
+            echo "summary=${summary}" >> "${GITHUB_OUTPUT}"
+            exit 0
+          }
+
           workflow=$(api GET "/repos/${REPO}/actions/workflows/Test-release.yml")
           workflow_id=$(jq -r '.id // empty' <<<"${workflow}")
           if [[ -z "${workflow_id}" ]]; then
-            echo "Test-release workflow was not found."
-            exit 0
+            finish skipped "Test-release workflow was not found."
           fi
 
           runs=$(api GET "/repos/${REPO}/actions/workflows/${workflow_id}/runs?event=pull_request&head_sha=${HEAD_SHA}&per_page=100")
@@ -100,8 +131,7 @@ jobs:
           ' <<<"${runs}")
 
           if [[ -z "${run_id}" ]]; then
-            echo "No matching Test-release run found for PR ${PR_NUMBER} at ${HEAD_SHA}."
-            exit 0
+            finish skipped "No matching Test-release run found for PR ${PR_NUMBER} at ${HEAD_SHA}."
           fi
           echo "Selected Test-release run: ${run_id}"
 
@@ -118,8 +148,7 @@ jobs:
           ' <<<"${jobs}")
 
           if [[ -z "${approval_job}" ]]; then
-            echo "Coverage approval job is not available yet."
-            exit 0
+            finish skipped "Coverage approval job is not available yet."
           fi
 
           required_jobs=(
@@ -151,8 +180,7 @@ jobs:
 
           if (( ${#unfinished_jobs[@]} > 0 )); then
             printf 'Previous jobs are not completed yet: %s\n' "${unfinished_jobs[*]}"
-            echo "Leaving the Test-release run intact."
-            exit 0
+            finish skipped "Previous Test-release jobs are not completed yet."
           fi
 
           approval_conclusion=$(jq -r '.conclusion // empty' <<<"${approval_job}")
@@ -163,28 +191,82 @@ jobs:
           approval_job_id=$(jq -r '.id' <<<"${approval_job}")
 
           if [[ -z "${approval_conclusion}" ]]; then
-            echo "Coverage approval job has no conclusion; leaving the Test-release run intact."
-            exit 0
+            finish skipped "Coverage approval job has no conclusion."
           fi
 
-          if [[ "${coverage_status}" == "queued" || "${coverage_status}" == "in_progress" ]]; then
-            echo "Cancelling Test-release run ${run_id} while coverage check is ${coverage_status}."
+          if [[ "${coverage_status}" == "queued" || "${coverage_status}" == "not_started" ||
+                "${coverage_status}" == "waiting" || "${coverage_status}" == "pending" ||
+                "${coverage_status}" == "requested" ]]; then
+            echo "Coverage check has not started (${coverage_status}); rerunning coverage approval without cancelling Test-release."
+            api POST "/repos/${REPO}/actions/jobs/${approval_job_id}/rerun" >/dev/null
+            finish success "Submitted coverage approval job rerun; coverage check will be reevaluated."
+          fi
+
+          if [[ "${coverage_status}" == "in_progress" ]]; then
+            echo "Cancelling Test-release run ${run_id} because coverage check is already in progress."
             api POST "/repos/${REPO}/actions/runs/${run_id}/cancel" >/dev/null
 
             for attempt in {1..60}; do
               run=$(api GET "/repos/${REPO}/actions/runs/${run_id}")
               status=$(jq -r '.status' <<<"${run}")
-              if [[ "${status}" != "queued" && "${status}" != "in_progress" ]]; then
+              if [[ "${status}" == "completed" ]]; then
                 break
               fi
               sleep 5
             done
 
-            if [[ "${status}" == "queued" || "${status}" == "in_progress" ]]; then
+            if [[ "${status}" != "completed" ]]; then
               echo "Test-release run ${run_id} did not finish cancelling in time."
               exit 1
             fi
+
+            echo "Rerunning coverage approval job ${approval_job_id} after cancelling Test-release."
+            api POST "/repos/${REPO}/actions/jobs/${approval_job_id}/rerun" >/dev/null
+            finish success "Cancelled Test-release and submitted coverage approval job rerun; coverage check will be reevaluated."
           fi
 
-          echo "Rerunning coverage approval job ${approval_job_id}."
-          api POST "/repos/${REPO}/actions/jobs/${approval_job_id}/rerun" >/dev/null
+          if [[ "${coverage_status}" == "completed" ]]; then
+            finish skipped "Coverage check is already terminal (${coverage_status}); no rerun requested."
+          fi
+
+          echo "Unexpected coverage check status: ${coverage_status}; no rerun requested." >&2
+          exit 1
+
+      - name: Complete coverage rerun check
+        if: ${{ always() && steps.schedule.outputs.check_run_id != '' }}
+        shell: bash
+        env:
+          CHECK_RUN_ID: ${{ steps.schedule.outputs.check_run_id }}
+          SCHEDULE_OUTCOME: ${{ steps.schedule.outcome }}
+          SCHEDULE_RESULT: ${{ steps.schedule.outputs.result }}
+          SCHEDULE_SUMMARY: ${{ steps.schedule.outputs.summary }}
+          WAS_CANCELLED: ${{ cancelled() }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${WAS_CANCELLED}" == "true" || "${SCHEDULE_OUTCOME}" == "cancelled" ]]; then
+            conclusion="cancelled"
+            summary="Coverage rerun controller was cancelled."
+          elif [[ "${SCHEDULE_OUTCOME}" == "failure" ]]; then
+            conclusion="failure"
+            summary="Coverage rerun controller failed. See the Actions logs for details."
+          elif [[ "${SCHEDULE_OUTCOME}" == "success" && ( "${SCHEDULE_RESULT}" == "success" || "${SCHEDULE_RESULT}" == "skipped" ) ]]; then
+            conclusion="${SCHEDULE_RESULT}"
+            summary="${SCHEDULE_SUMMARY}"
+          else
+            conclusion="failure"
+            summary="Coverage rerun controller did not report a valid result."
+          fi
+
+          payload=$(jq -n \
+            --arg conclusion "${conclusion}" \
+            --arg summary "${summary}" \
+            '{status: "completed", conclusion: $conclusion, output: {title: ("Coverage rerun controller: " + $conclusion), summary: $summary}}')
+          curl --fail --silent --show-error \
+            --request PATCH \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: ${API_VERSION}" \
+            --header "Content-Type: application/json" \
+            --data "${payload}" \
+            "https://api.github.com/repos/${REPO}/check-runs/${CHECK_RUN_ID}" >/dev/null
