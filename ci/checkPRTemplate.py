@@ -19,17 +19,13 @@ import sys
 import httpx
 import requests
 
-PR_checkTemplate = ["PaddleFleet"]
+# GitHub Actions 会自动注入 GITHUB_REPOSITORY=<owner>/<repo>，
+# 这样脚本在任意 fork / 私有仓库下都无需修改即可运行。
+GITHUB_REPOSITORY = os.getenv("GITHUB_REPOSITORY", "PaddlePaddle/PaddleFleet")
 
-BRANCH = os.environ["BRANCH"]
-if BRANCH.startswith("develop"):
-    REPO_TEMPLATE = {
-        "PaddleFleet": r"""### PR Category(.*[^\s].*)### PR Types(.*[^\s].*)### Description(.*[^\s].*)"""
-    }
-elif BRANCH.startswith("release"):
-    REPO_TEMPLATE = {
-        "PaddleFleet": r"""### PR Category(.*[^\s].*)### PR Types(.*[^\s].*)### Description(.*[^\s].*)"""
-    }
+BRANCH = os.getenv("BRANCH", "develop")
+
+CHECK_TEMPLATE = r"""### PR Category(.*[^\s].*)### PR Types(.*[^\s].*)### Description(.*[^\s].*)"""
 
 
 def re_rule(body, CHECK_TEMPLATE):
@@ -110,7 +106,7 @@ def checkComments(url):
     return response
 
 
-def checkPRTemplate(repo, body, CHECK_TEMPLATE):
+def checkPRTemplate(body, CHECK_TEMPLATE):
     """
     Check if PR's description meet the standard of template
     Args:
@@ -138,35 +134,26 @@ def checkPRTemplate(repo, body, CHECK_TEMPLATE):
     return res, message
 
 
-def pull_request_event_template(event, repo, *args, **kwargs):
-    pr_effect_repos = PR_checkTemplate
+def pull_request_event_template(event, *args, **kwargs):
     pr_num = event["number"]
-    url = event["comments_url"]
     BODY = event["body"]
-    sha = event["head"]["sha"]
     title = event["title"]
     pr_user = event["user"]["login"]
     print(f"receive data : pr_num: {pr_num}, title: {title}, user: {pr_user}")
-    if repo in pr_effect_repos:
-        CHECK_TEMPLATE = REPO_TEMPLATE[repo]
-        global check_pr_template
-        global check_pr_template_message
-        check_pr_template, check_pr_template_message = checkPRTemplate(
-            repo, BODY, CHECK_TEMPLATE
-        )
-        print(f"check_pr_template: {check_pr_template} pr: {pr_num}")
-        if check_pr_template is False:
-            print("ERROR MESSAGE:", check_pr_template_message)
-            sys.exit(7)
-        else:
-            print("PR template check passed.")
-            sys.exit(0)
+    check_pr_template, check_pr_template_message = checkPRTemplate(
+        BODY, CHECK_TEMPLATE
+    )
+    print(f"check_pr_template: {check_pr_template} pr: {pr_num}")
+    if check_pr_template is False:
+        print("ERROR MESSAGE:", check_pr_template_message)
+        sys.exit(7)
+    else:
+        print("PR template check passed.")
+        sys.exit(0)
 
 
 def get_a_pull(pull_id):
-    url = "https://api.github.com/repos/PaddlePaddle/PaddleFleet/pulls/" + str(
-        pull_id
-    )
+    url = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/pulls/{pull_id}"
 
     payload = {}
     headers = {
@@ -179,13 +166,19 @@ def get_a_pull(pull_id):
     return response.json()
 
 
-def main(org, repo, pull_id):
+def main(pull_id):
     pull_info = get_a_pull(pull_id)
-    pull_request_event_template(pull_info, repo)
+    pull_request_event_template(pull_info)
 
 
 if __name__ == "__main__":
     AGILE_PULL_ID = os.getenv("AGILE_PULL_ID")
     GITHUB_API_TOKEN = os.getenv("GITHUB_API_TOKEN")
-    print(AGILE_PULL_ID)
-    main("PaddlePaddle", "PaddleFleet", AGILE_PULL_ID)
+    if not AGILE_PULL_ID:
+        print("ERROR: AGILE_PULL_ID is not set.")
+        sys.exit(1)
+    if not GITHUB_API_TOKEN:
+        print("ERROR: GITHUB_API_TOKEN is not set.")
+        sys.exit(1)
+    print(f"repo: {GITHUB_REPOSITORY}, branch: {BRANCH}, pr: {AGILE_PULL_ID}")
+    main(AGILE_PULL_ID)

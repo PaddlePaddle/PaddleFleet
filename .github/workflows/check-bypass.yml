@@ -19,6 +19,7 @@ jobs:
       group: APPROVAL
     permissions:
       contents: read
+      pull-requests: read
     env:
       CI_TEAM_MEMBERS: '["swgu98", "risemeup1" , "XieYunshen", "luotao1", "tianlef", "ooooo-create", "zjjlivein", "liuhao2638"]'
     outputs:

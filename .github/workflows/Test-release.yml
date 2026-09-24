@@ -54,7 +54,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 10
       - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
@@ -63,7 +63,7 @@ jobs:
         if: |
           github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'fleet-models-ci')
         run: |
-          changed_files=$(git diff origin/${{ github.event.pull_request.base.ref }}...HEAD --name-only)
+          changed_files=$(git diff HEAD^1 HEAD --name-only)
           echo "Changed files: $changed_files"
           all_count=0
           md_count=0
@@ -98,7 +98,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 100
+          fetch-depth: 10
       - name: Check if packages directory changed
         id: check
         run: |
@@ -170,8 +170,9 @@ jobs:
           set -x
           source /root/proxy
           clone_ok=0
+          repo_url="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPO_NAME}.git"
           for i in $(seq 1 5); do
-            if git clone https://github.com/PaddlePaddle/PaddleFleet.git .; then clone_ok=1; break; fi
+            if GIT_TERMINAL_PROMPT=0 git clone "${repo_url}" .; then clone_ok=1; break; fi
             echo "git clone attempt $i failed, retrying in 10s..."
             rm -rf * .[^.]* || true
             sleep 10
@@ -182,7 +183,8 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git checkout ${BRANCH}
-          git pull --no-edit origin pull/${PR_ID}/head
+          GIT_TERMINAL_PROMPT=0 git pull --no-edit origin "pull/${PR_ID}/head"
+          git remote set-url origin https://github.com/${GITHUB_REPO_NAME}.git
           export UV_HTTP_TIMEOUT=300
           echo "uv build"
           export LD_LIBRARY_PATH=/opt/_internal/cpython-3.12.0/lib/:${LD_LIBRARY_PATH}
@@ -226,9 +228,8 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           set -x
-          branch_version="${BRANCH//\//.}"
-          OPS_DST=paddlefleet_ops-0.0.0+${branch_version}-cp312-cp312-linux_x86_64.whl
-          wget -q --no-proxy "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlefleet-ops/${OPS_DST}" -O dist/${OPS_DST}
+          OPS_DST=paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl
+          wget -q --no-proxy "https://only-internal-network-support.bj.bcebos.com/PaddleFleet/${BRANCH}/ci/paddlefleet_ops-0.0.0-cp312-cp312-linux_x86_64.whl" -O dist/${OPS_DST}
           echo "OPS_WHL=${OPS_DST}" >> dist/whl_names.txt
           ls -lh dist
           cat dist/whl_names.txt
@@ -259,7 +260,7 @@ jobs:
             mkdir bos
             tar xf bos_new.tar.gz -C bos
           fi
-          target_path="paddle-github-action/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}"
+          target_path="only-internal-network-support/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}"
           tar zcf paddlefleet.tar.gz paddle
           python /bos/BosClient.py paddlefleet.tar.gz ${target_path}
           '
@@ -336,7 +337,7 @@ jobs:
           rm -rf * .[^.]*
           set -x
           source /root/proxy
-          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          wget -q --tries=5 --no-proxy --no-check-certificate https://only-internal-network-support.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
           git checkout ${BRANCH}
@@ -383,7 +384,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /paddle/coveragedata/coverage.xml coverage.xml
-          target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/single-card"
+          target_path="only-internal-network-support/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/single-card"
           python ${push_file} coverage.xml ${target_path}
           '
 
@@ -454,7 +455,7 @@ jobs:
           rm -rf * .[^.]*
           source /root/proxy
           set -x
-          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          wget -q --tries=5 --no-proxy --no-check-certificate https://only-internal-network-support.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /paddle
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest
@@ -501,7 +502,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /paddle/coveragedata/coverage.xml coverage.xml
-          target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/multi-card"
+          target_path="only-internal-network-support/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/multi-card"
           python ${push_file} coverage.xml ${target_path}
           '
 
@@ -584,7 +585,7 @@ jobs:
           set -x
           source /root/proxy
           mkdir PaddleFleet && cd PaddleFleet
-          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          wget -q --tries=5 --no-proxy --no-check-certificate https://only-internal-network-support.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
@@ -712,7 +713,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /workspace/PaddleFleet/coveragedata-single/coverage.xml coverage.xml
-          target_path_single="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-single"
+          target_path_single="only-internal-network-support/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-single"
           python ${push_file} coverage.xml ${target_path_single}
           '
 
@@ -784,7 +785,7 @@ jobs:
           set -x
           source /root/proxy
           mkdir PaddleFleet && cd PaddleFleet
-          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          wget -q --tries=5 --no-proxy --no-check-certificate https://only-internal-network-support.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
@@ -1076,7 +1077,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /workspace/PaddleFleet/coveragedata-multi/coverage.xml coverage.xml
-          target_path_multi="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
+          target_path_multi="only-internal-network-support/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/h20-multi"
           python ${push_file} coverage.xml ${target_path_multi}
           '
 
@@ -1149,7 +1150,7 @@ jobs:
           docker exec -t ${{ env.container_name }} /bin/bash -c '
           source /root/proxy
           mkdir PaddleFleet && cd PaddleFleet
-          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          wget -q --tries=5 --no-proxy --no-check-certificate https://only-internal-network-support.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
@@ -1226,7 +1227,7 @@ jobs:
           source /root/proxy
           set -x
           mkdir PaddleFleet && cd PaddleFleet
-          wget -q --tries=5 --no-proxy --no-check-certificate https://paddle-github-action.cdn.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+          wget -q --tries=5 --no-proxy --no-check-certificate https://only-internal-network-support.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           git checkout ${BRANCH}
@@ -1437,7 +1438,7 @@ jobs:
             -O bos_tools.py
           push_file=$(realpath bos_tools.py)
           cp /workspace/PaddleFleet/coveragedata/coverage.xml coverage.xml
-          target_path="paddle-github-action/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/a100"
+          target_path="only-internal-network-support/${GITHUB_REPO_NAME}/pull/${PR_ID}/${GITHUB_SHA}/a100"
           python ${push_file} coverage.xml ${target_path}
           '
 
@@ -1538,7 +1539,7 @@ jobs:
           h20_single_coverage.xml:h20-single/coverage.xml
           a100_coverage.xml:a100/coverage.xml
           "
-          base_url="https://paddle-github-action.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}"
+          base_url="https://only-internal-network-support.bj.bcebos.com/${GITHUB_REPO_NAME}/pull/${PR_ID}/${COMMIT_ID}"
 
           echo "$coverage_configs" | while IFS= read -r config; do
             if [ -n "$config" ]; then
@@ -1616,22 +1617,22 @@ jobs:
             fi
           done
 
-      - name: Upload coverage to Codecov
-        if: always()
-        uses: codecov/codecov-action@v5
-        with:
-          files: |
-            ./multi_coverage.xml,
-            ./single_coverage.xml,
-            ./h20_multi_coverage.xml,
-            ./h20_single_coverage.xml,
-            ./h20_qwen_coverage.xml,
-            ./a100_coverage.xml
-          flags: coverage_combine
-          name: "${{ env.TASK }}-${{ github.run_id }}"
-          fail_ci_if_error: true
-          use_oidc: true
-          verbose: false
+        # - name: Upload coverage to Codecov
+        #   if: always()
+        #   uses: codecov/codecov-action@v5
+        #   with:
+        #     files: |
+        #       ./multi_coverage.xml,
+        #       ./single_coverage.xml,
+        #       ./h20_multi_coverage.xml,
+        #       ./h20_single_coverage.xml,
+        #       ./h20_qwen_coverage.xml,
+        #       ./a100_coverage.xml
+        #     flags: coverage_combine
+        #     name: "${{ env.TASK }}-${{ github.run_id }}"
+        #     fail_ci_if_error: true
+        #     use_oidc: true
+        #     verbose: false
 
   unittest-gpu-ci:
     needs: [check-bypass, build_whl, check_documents_type]
@@ -1694,7 +1695,7 @@ jobs:
           mkdir PaddleFleet
           cd PaddleFleet
           wget -q --tries=5 --no-proxy --no-check-certificate \
-            https://paddle-github-action.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
+            https://only-internal-network-support.bj.bcebos.com/PaddleFleet/PR/${PR_ID}/${COMMIT_ID}/${BRANCH}/paddlefleet.tar.gz
           tar -xf paddlefleet.tar.gz --strip-components=1
           git config --global --add safe.directory /workspace/PaddleFleet
           DOCKER_EOF
@@ -1826,8 +1827,8 @@ jobs:
           cd /workspace/PaddleFleet/unittest_logs
           for FILE in *; do
             [ -f "$FILE" ] || continue
-            python ${{ env.bos_file }} "$FILE" paddle-github-action/PR/PaddleFleet/ci-unittest-gpu/${bos_prefix}/logs
-            echo "$FILE: https://paddle-github-action.bj.bcebos.com/PR/PaddleFleet/ci-unittest-gpu/${bos_prefix}/logs/$FILE"
+            python ${{ env.bos_file }} "$FILE" only-internal-network-support/PR/PaddleFleet/ci-unittest-gpu/${bos_prefix}/logs
+            echo "$FILE: https://only-internal-network-support.bj.bcebos.com/PR/PaddleFleet/ci-unittest-gpu/${bos_prefix}/logs/$FILE"
           done
           '
       - name: Set pytest execute flag output
