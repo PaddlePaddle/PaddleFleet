@@ -87,6 +87,27 @@ class TestApplyPermutedProbsTargetDispatch(unittest.TestCase):
         ]
         np.testing.assert_array_equal(outs[0], outs[1])
 
+    def test_frozen_operand_preserves_other_operand_gradient(self):
+        for target in ("hf", "megatron"):
+            for frozen_tokens in (False, True):
+                with self.subTest(target=target, frozen_tokens=frozen_tokens):
+                    t = self.tokens.detach()
+                    p = self.probs.detach()
+                    t.stop_gradient = frozen_tokens
+                    p.stop_gradient = not frozen_tokens
+                    out = ApplyPermutedProbs.apply(t, p, target)
+                    out.backward(paddle.ones_like(out))
+                    if frozen_tokens:
+                        expected = t.cast("float32").sum(axis=-1).cast(p.dtype)
+                        actual = p.grad
+                    else:
+                        expected = p.unsqueeze(-1).expand(t.shape)
+                        actual = t.grad
+                    np.testing.assert_array_equal(
+                        actual.cast("float32").numpy(),
+                        expected.cast("float32").numpy(),
+                    )
+
     def test_hf_multiplies_in_activation_dtype(self):
         """HF grad equals a BF16 product reduced with an FP32 accumulator."""
         t = self.tokens.detach()

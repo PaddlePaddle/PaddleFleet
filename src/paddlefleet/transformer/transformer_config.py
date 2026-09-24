@@ -2016,6 +2016,15 @@ class TransformerConfig(ModelParallelConfig):
     ``paddlefleet.accuracy_target.targets_hf`` only where the two references
     require different arithmetic. Normalized in ``__post_init__``."""
 
+    moe_router_use_fp32_master: bool = False
+    """Keep an FP32 router parameter with BF16 reference weights and gradients.
+
+    Applies only in accuracy-compatible mode. The router casts its master to
+    BF16 for each forward and rounds each sequence-local weight gradient before
+    FP32 accumulation. False preserves the existing ``params_dtype`` storage
+    and checkpoint-loading contract; computation still uses FP32.
+    """
+
     use_dsv4_accuracy: bool = False
     """Enable the DSV4 accuracy-compatible replay paths.
 

@@ -22,6 +22,7 @@ from paddlefleet.cli.train.sft.workflow import (
     apply_glm_moe_dsa_training_contract,
     load_tokenizer_and_processor,
 )
+from paddlefleet.transformers.glm4_moe.modeling import Glm4MoePreTrainedModel
 
 
 def test_load_tokenizer_uses_independent_source():
@@ -146,6 +147,59 @@ def test_load_processor_reraises_missing_processor_on_glm4_checkpoint():
             raise AssertionError(
                 "GLM-4 AutoProcessor failure must not fall back to tokenizer"
             )
+
+
+@pytest.mark.parametrize(
+    "enabled,master,expected_dtype",
+    [
+        (True, False, "bfloat16"),
+        (True, True, "float32"),
+        (False, False, "float32"),
+    ],
+)
+def test_glm4_moe_aoa_matches_router_storage_policy(
+    enabled, master, expected_dtype
+):
+    config = SimpleNamespace(
+        using_sonic_moe=False,
+        n_routed_experts=4,
+        num_hidden_layers=2,
+        first_k_dense_replace=1,
+        mtp_num_layers=0,
+        num_nextn_predict_layers=0,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        tie_word_embeddings=False,
+        use_qk_norm=False,
+        attention_bias=False,
+        use_accuracy_compatible=enabled,
+        moe_router_use_fp32_master=master,
+        moe_expert_fusion=False,
+    )
+    config.get = lambda key, default=False: default
+    statements = Glm4MoePreTrainedModel._gen_aoa_config(config)[
+        "aoa_statements"
+    ]
+    joined = "\n".join(statements)
+    assert f"mlp.gate.weight, dtype='{expected_dtype}'" in joined
+
+
+def test_glm52_provider_selects_numeric_contract_without_changing_glm4_default():
+    from paddlefleet.transformers.glm4_moe.modeling import GLMMoEModelProvider
+    from paddlefleet.transformers.glm_moe_dsa.modeling import (
+        GlmMoeDsaModelProvider,
+    )
+
+    values = {
+        "num_hidden_layers": 1,
+        "hidden_size": 8,
+        "num_attention_heads": 1,
+    }
+    assert not GLMMoEModelProvider(**values).moe_router_use_fp32_master
+    assert GlmMoeDsaModelProvider(**values).moe_router_use_fp32_master
+    assert not GlmMoeDsaModelProvider(
+        **values, moe_router_use_fp32_master=False
+    ).moe_router_use_fp32_master
 
 
 def _base_training_args(**overrides):
