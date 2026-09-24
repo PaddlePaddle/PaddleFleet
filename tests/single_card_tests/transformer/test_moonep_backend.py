@@ -273,6 +273,7 @@ class TestMoonEPDispatcher(unittest.TestCase):
     def test_grouped_expert_uses_runtime_weights_and_activation(self):
         activation = mock.Mock(side_effect=lambda hidden: hidden + 1)
         expert = types.SimpleNamespace(
+            config=types.SimpleNamespace(use_accuracy_compatible=False),
             moe_deep_gemm=False,
             activation_recompute=False,
             activation_func=activation,
@@ -429,6 +430,7 @@ class TestMoonEPDispatcher(unittest.TestCase):
         for weight in (grouped_experts.weight1, grouped_experts.weight2):
             weight.stop_gradient = False
         expert = types.SimpleNamespace(
+            config=types.SimpleNamespace(use_accuracy_compatible=False),
             moe_deep_gemm=False,
             activation_recompute=False,
             activation_func=lambda hidden: hidden,

@@ -223,33 +223,72 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
     """
 
     @staticmethod
-    def forward(ctx, x, w, defer_dw=False, use_accuracy_compatible=False):
+    def forward(
+        ctx,
+        x,
+        w,
+        defer_dw=False,
+        use_accuracy_compatible=False,
+        sequence_shards=1,
+        use_fp32_master=False,
+    ):
         """
         forward
         """
         ctx.defer_dw = defer_dw
         ctx.use_accuracy_compatible = use_accuracy_compatible
-        # The two references disagree on where the gate projection is promoted
-        # to FP32, so this is the one place the target name matters.
         ctx.hf_bitexact = targets_hf(use_accuracy_compatible)
+        ctx.use_fp32_master = (
+            use_accuracy_compatible and use_fp32_master and not ctx.hf_bitexact
+        )
+
+        ctx.sequence_shards = (
+            int(sequence_shards or 1)
+            if ctx.use_fp32_master
+            and w.dtype == paddle.float32
+            and x.ndim == 2
+            and not defer_dw
+            else 1
+        )
         ctx.dtype = paddle.float32
-        ctx.save_for_backward(x, w)
-        w = w.T
+        # Keep the parameter as the optimizer's FP32 master. Reference routing
+        # consumes a BF16 weight, including in dgrad, after each master update.
+        effective_w = (
+            w.cast(paddle.bfloat16).cast(paddle.float32)
+            if ctx.use_fp32_master
+            and w.dtype == paddle.float32
+            and x.dtype == paddle.bfloat16
+            and not defer_dw
+            else w
+        )
+        ctx.save_for_backward(x, w, effective_w)
+        # develop (#2062 recompute) hands the gate the caller's *unflattened*
+        # activation, so collapse the leading dims locally before the
+        # projection. The saved tensor stays unflattened so backward can
+        # recover the input shape; effective_w keeps the fp32-master path.
         x = _flatten_tokens(x)
         if ctx.hf_bitexact:
-            # Qwen3_5MoeTopKRouter keeps the gate projection in the activation
-            # dtype and only upcasts inside the softmax, whereas Megatron runs
-            # the projection itself in router_dtype=fp32. Both are valid; only
-            # the first reproduces the reference logits bit-for-bit.
-            return F.linear(x, w.cast(x.dtype)).cast(ctx.dtype)
-        return F.linear(x.cast(ctx.dtype), w.cast(ctx.dtype))
+            return F.linear(x, w.T.cast(x.dtype)).cast(ctx.dtype)
+        x_cast = x.cast(ctx.dtype)
+        w_t = effective_w.T.cast(ctx.dtype)
+        shards = ctx.sequence_shards
+        if shards > 1 and int(x.shape[0]) % shards == 0:
+            size = int(x.shape[0]) // shards
+            return paddle.concat(
+                [
+                    F.linear(x_cast[i * size : (i + 1) * size], w_t)
+                    for i in range(shards)
+                ],
+                axis=0,
+            )
+        return F.linear(x_cast, w_t)
 
     @staticmethod
     def backward(ctx, y_grad):
         """
         backward
         """
-        x, w = ctx.saved_tensor()
+        x, w, effective_w = ctx.saved_tensor()
         assert ctx.dtype == y_grad.dtype, "dtype not match"
 
         w_stop_grad = w.stop_gradient
@@ -332,8 +371,41 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                 #   grad_weight = torch.mm(grad_output.t(), inp.to(router_dtype))
                 # i.e. two separate GEMMs (not a fused matmul_grad), then each
                 # gradient cast back to its own storage dtype.
-                x_g = paddle.matmul(y_grad, w.cast(ctx.dtype))
-                w_g = paddle.matmul(y_grad, x.cast(ctx.dtype), transpose_x=True)
+                shards = ctx.sequence_shards
+                if shards > 1 and int(x.shape[0]) % shards == 0:
+                    # Reference gating is SP-local. Round each local wgrad
+                    # before summing into the FP32 gradient buffer.
+                    size = int(x.shape[0]) // shards
+                    x_parts, w_parts = [], []
+                    for i in range(shards):
+                        sl = slice(i * size, (i + 1) * size)
+                        x_parts.append(
+                            paddle.matmul(
+                                y_grad[sl], effective_w.cast(ctx.dtype)
+                            )
+                        )
+                        local_wgrad = paddle.matmul(
+                            y_grad[sl], x[sl].cast(ctx.dtype), transpose_x=True
+                        )
+                        w_parts.append(
+                            local_wgrad.cast(paddle.bfloat16).cast(
+                                paddle.float32
+                            )
+                        )
+                    x_g = paddle.concat(x_parts, axis=0)
+                    w_g = w_parts[0]
+                    for local_wgrad in w_parts[1:]:
+                        w_g = w_g + local_wgrad
+                else:
+                    x_g = paddle.matmul(y_grad, effective_w.cast(ctx.dtype))
+                    w_g = paddle.matmul(
+                        y_grad, x.cast(ctx.dtype), transpose_x=True
+                    )
+                    if ctx.use_fp32_master and w.dtype == paddle.float32:
+                        # Reference local weight gradients round through BF16.
+                        w_g = w_g.cast(paddle.bfloat16).cast(paddle.float32)
+                # develop restores the caller's input shape after the flattened
+                # gate matmul; the reshape leaves every gradient value unchanged.
                 x_grad = (
                     _to_input_shape(x_g.cast(x.dtype))
                     if not x_stop_grad
@@ -473,10 +545,17 @@ def gate_detach_matmul(
     moe_router_force_load_balancing=False,
     defer_dw=False,
     use_accuracy_compatible=False,
+    sequence_shards=1,
+    use_fp32_master=False,
 ):
     if use_fuse:
         score = FusedGateDetachMatmul.apply(
-            x, weight, defer_dw, use_accuracy_compatible
+            x,
+            weight,
+            defer_dw,
+            use_accuracy_compatible,
+            sequence_shards,
+            use_fp32_master,
         )
     else:
         # Flattened before the cast: the cast makes a copy, so no view of the
@@ -564,19 +643,21 @@ class StandardMoERouter(nn.Layer):
                 f"but got {self.scoring_func!r}. "
             )
 
-        # Initialize gate weight with Normal distribution aligned with Megatron.
-        if self.use_accuracy_compatible:
-            self.weight = paddle.create_parameter(
-                shape=[self.num_experts, self.hidden_size],
-                dtype=config.params_dtype,
-                default_initializer=paddle.nn.initializer.Constant(0.0),
-            )
-        else:
-            self.weight = paddle.create_parameter(
-                shape=[self.num_experts, self.hidden_size],
-                dtype="float32",
-                default_initializer=paddle.nn.initializer.Constant(0.0),
-            )
+        self.use_fp32_master = (
+            self.use_accuracy_compatible and config.moe_router_use_fp32_master
+        )
+        # Preserve existing models' checkpoint dtype unless an FP32 master
+        # was explicitly selected by the model's configuration.
+        weight_dtype = (
+            config.params_dtype
+            if self.use_accuracy_compatible and not self.use_fp32_master
+            else "float32"
+        )
+        self.weight = paddle.create_parameter(
+            shape=[self.num_experts, self.hidden_size],
+            dtype=weight_dtype,
+            default_initializer=paddle.nn.initializer.Constant(0.0),
+        )
         config.init_method(self.weight)
 
         if (
@@ -1308,7 +1389,9 @@ class StandardMoERouter(nn.Layer):
 
         # The bias term b is used only to adjust affinity scores for Top-K expert selection (routing); it does not affect gating.
         # The gate applied during dispatch and to weight the FFN output is computed from the original affinity score s_{i,t} (without the bias).
-        if self.use_accuracy_compatible:
+        if self.use_accuracy_compatible and (
+            not self.use_fp32_master or self.tensor_model_parallel_size > 1
+        ):
             row_idx = paddle.arange(
                 bsz_seq_len, dtype=topk_idx.dtype
             ).unsqueeze(-1)
@@ -1862,19 +1945,43 @@ class TopKRouter(StandardMoERouter):
                         "moe_split_feature_routing requires scoring_func "
                         f"== 'sigmoid', but got {self.scoring_func!r}."
                     )
-                # NOTE(Difers): Fusing the two split-feature gate projections into a single autograd node
-                # leaves x.grad with only two terms—(gx0 + gx1) and the expert-dispatch gradient—thereby
-                # matching the previous behavior while avoiding ~1 ULP ordering-dependent drift.
-                logits_0, logits_1 = FusedTwoViewGate.apply(
-                    gate_input,
-                    self.weight,
-                    self.weight_1,
-                    dw_overlap_enabled(self.config, "moe_router_gate"),
-                    self.use_accuracy_compatible,
-                )
-                if self.config.moe_router_force_load_balancing:
-                    logits_0 = apply_random_logits(logits_0)
-                    logits_1 = apply_random_logits(logits_1)
+                if use_dsv4_accuracy_compatible():
+                    # NOTE(Difers): Fusing the two split-feature gate projections into a single autograd node
+                    # leaves x.grad with only two terms—(gx0 + gx1) and the expert-dispatch gradient—thereby
+                    # matching the previous behavior while avoiding ~1 ULP ordering-dependent drift.
+                    logits_0, logits_1 = FusedTwoViewGate.apply(
+                        gate_input,
+                        self.weight,
+                        self.weight_1,
+                        dw_overlap_enabled(self.config, "moe_router_gate"),
+                        self.use_accuracy_compatible,
+                    )
+                    if self.config.moe_router_force_load_balancing:
+                        logits_0 = apply_random_logits(logits_0)
+                        logits_1 = apply_random_logits(logits_1)
+                else:
+                    # GLM52 bit-exact split-feature routing: two independent
+                    # views whose per-expert scores are summed. View 0 reuses
+                    # self.weight, view 1 uses self.weight_1. Each view is its
+                    # own autograd node and carries the fp32-master path.
+                    logits_0 = gate_detach_matmul(
+                        gate_input,
+                        self.weight,
+                        True,
+                        self.config.moe_router_force_load_balancing,
+                        dw_overlap_enabled(self.config, "moe_router_gate"),
+                        self.use_accuracy_compatible,
+                        use_fp32_master=self.use_fp32_master,
+                    )
+                    logits_1 = gate_detach_matmul(
+                        gate_input,
+                        self.weight_1,
+                        True,
+                        self.config.moe_router_force_load_balancing,
+                        dw_overlap_enabled(self.config, "moe_router_gate"),
+                        self.use_accuracy_compatible,
+                        use_fp32_master=self.use_fp32_master,
+                    )
 
                 logits_0, logits_1 = inspect_tensor(
                     "moe_gate_fused_logits",
@@ -1902,6 +2009,13 @@ class TopKRouter(StandardMoERouter):
                     self.config.moe_router_force_load_balancing,
                     dw_overlap_enabled(self.config, "moe_router_gate"),
                     self.use_accuracy_compatible,
+                    sequence_shards=(
+                        self.tensor_model_parallel_size
+                        if self.sequence_parallel
+                        and self.config.expert_model_parallel_size <= 1
+                        else 1
+                    ),
+                    use_fp32_master=getattr(self, "use_fp32_master", False),
                 )
 
         _log_moe_md5(logits, "gate_logits", self._layer_number)
@@ -1966,7 +2080,13 @@ class TopKRouter(StandardMoERouter):
         )
 
         # Use clone() to ensure that the execution order of the grad nodes is consistent with EC.
-        if self.use_accuracy_compatible and not use_split:
+        if (
+            self.use_accuracy_compatible
+            and not use_split
+            and (
+                not self.use_fp32_master or self.tensor_model_parallel_size > 1
+            )
+        ):
             gates_ori = self.gate_score_func(logits).cast(logits.dtype)
             if input_ids_none_zero_mask is not None:
                 gates_ori = gates_ori * valid_mask
