@@ -57,7 +57,10 @@ from paddlefleet.transformer.dw_overlap import (
 from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
 from paddlefleet.transformer.transformer_config import dw_overlap_enabled
 from paddlefleet.transformer.utils import profile
-from paddlefleet.utils import use_dsv4_accuracy_compatible
+from paddlefleet.utils import (
+    use_dsv4_accuracy_compatible,
+    use_kimik2_accuracy_compatible,
+)
 
 from .fp8_utils import fused_stack_quant_without_cache
 from .fused_a2a import configure_buffer
@@ -157,7 +160,13 @@ class ThreePathCloneAlignMG(PyLayer):
 
     @staticmethod
     def backward(ctx, g_router, g_dispatcher, g_shared):
-        if use_dsv4_accuracy_compatible():
+        # Kimi-K2 needs the same shared-expert-last accumulation as DSV4: bf16
+        # addition is not associative, and Megatron's custom_forward runs
+        # shared_experts -> route -> preprocess, so its backward accumulates
+        # dispatch, then router, then shared. Measured on Kimi-K2: this order
+        # takes the MoE input gradient bit-exact, the router-last order left one
+        # differing bf16 element.
+        if use_dsv4_accuracy_compatible() or use_kimik2_accuracy_compatible():
             partial = g_dispatcher + g_router
             out = partial + g_shared
         else:

@@ -1986,6 +1986,24 @@ class TransformerConfig(ModelParallelConfig):
     ``paddlefleet.utils.use_dsv4_accuracy_compatible`` and installs the Paddle
     runtime patches when enabled."""
 
+    use_kimik2_accuracy: bool = False
+    """Enable the Kimi-K2 accuracy-compatible numeric paths.
+
+    Distinct from ``use_accuracy_compatible``: other alignment targets (for
+    example GLM45Air, MinimaxV2.5 and DSV4) run the megatron target without this
+    switch, so a Kimi-K2-only numeric path must key off this field instead of
+    perturbing them. ``__post_init__`` publishes it to the single runtime read
+    point ``paddlefleet.utils.use_kimik2_accuracy_compatible``.
+
+    Defaults to False so existing YAML/JSON configs keep their current numerics.
+
+    The cross-entropy and dense-wgrad paths key off this field alone. The MoE
+    gradient accumulation order additionally requires ``use_accuracy_compatible``
+    to select an alignment target, because the three-path clone whose backward
+    carries that order is only created under that switch, and not on the ``"hf"``
+    target.
+    """
+
     moe_topk_fusion: bool = False
     """If True, use Triton fused MoE TopK kernel for expert selection."""
 
@@ -2168,6 +2186,17 @@ class TransformerConfig(ModelParallelConfig):
 
                 set_dsv4_accuracy_compatible(True)
                 install_accuracy_compatible_paddle_patches()
+            if key == "use_kimik2_accuracy" and value:
+                # Same reason as above: a checkpoint ``config.json`` carrying
+                # ``"use_kimik2_accuracy": true`` reaches the config through this
+                # attribute copy, which runs before the layers are built.
+                # ``LanguageLoss.__init__`` picks its loss function from
+                # ``use_kimik2_accuracy_compatible()``, so the switch has to be
+                # published here and not only in ``__post_init__``.
+                # Turn-on only; the writer is idempotent.
+                from paddlefleet.utils import set_kimik2_accuracy_compatible
+
+                set_kimik2_accuracy_compatible(True)
 
     def get(self, key: str, default=None):
         return getattr(self, key, default)
@@ -2207,6 +2236,10 @@ class TransformerConfig(ModelParallelConfig):
 
             set_dsv4_accuracy_compatible(True)
             install_accuracy_compatible_paddle_patches()
+        if self.use_kimik2_accuracy:
+            from paddlefleet.utils import set_kimik2_accuracy_compatible
+
+            set_kimik2_accuracy_compatible(True)
         # Normalize the indexer loss coefficient: None (e.g. from a HuggingFace
         # config.json ``"indexer_loss_coeff": null`` or explicit config) means
         # "disabled" and collapses to 0.0, so this config object never exposes

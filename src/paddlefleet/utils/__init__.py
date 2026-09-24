@@ -50,6 +50,8 @@ _FLEET_UTILS_NAMES = (
     "deprecate_inference_params",
     "use_dsv4_accuracy_compatible",
     "set_dsv4_accuracy_compatible",
+    "use_kimik2_accuracy_compatible",
+    "set_kimik2_accuracy_compatible",
 )
 
 import_structure = {
