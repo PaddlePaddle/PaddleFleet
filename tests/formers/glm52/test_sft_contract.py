@@ -200,6 +200,40 @@ def test_glm52_provider_selects_numeric_contract_without_changing_glm4_default()
     assert not GlmMoeDsaModelProvider(
         **values, moe_router_use_fp32_master=False
     ).moe_router_use_fp32_master
+    assert not GLMMoEModelProvider(**values).defer_token_normalization
+    assert GlmMoeDsaModelProvider(**values).defer_token_normalization
+    assert not GlmMoeDsaModelProvider(
+        **values, defer_token_normalization=False
+    ).defer_token_normalization
+
+
+@pytest.mark.parametrize(
+    ("enabled", "deferred", "microbatches", "replicas", "expected"),
+    [
+        (False, True, 1, 2, False),
+        (True, False, 1, 2, False),
+        (True, True, 1, 2, True),
+        (True, True, 2, 2, False),
+        (True, True, 1, 1, False),
+    ],
+)
+def test_native_numerator_reporting_requires_deferred_normalization(
+    enabled, deferred, microbatches, replicas, expected
+):
+    trainer = SimpleNamespace(
+        model=SimpleNamespace(
+            config=SimpleNamespace(
+                use_accuracy_compatible=enabled,
+                defer_token_normalization=deferred,
+            )
+        ),
+        args=SimpleNamespace(gradient_accumulation_steps=microbatches),
+        _deferred_token_replica_group=lambda: SimpleNamespace(nranks=replicas),
+    )
+    assert (
+        sft_workflow.SFTTrainer._requires_native_token_weighted_logging(trainer)
+        is expected
+    )
 
 
 def _base_training_args(**overrides):

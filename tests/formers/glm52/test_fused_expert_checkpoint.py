@@ -14,6 +14,23 @@ from paddlefleet.trainer.trainer_callback import (
 from paddlefleet.trainer.trainer_utils import IntervalStrategy
 
 
+class TestDeferredTokenNormalizationWiring(unittest.TestCase):
+    def test_resolve_skips_collectives_when_model_accuracy_mode_off(self):
+        from unittest.mock import patch
+
+        trainer = object.__new__(Trainer)
+        trainer.model = SimpleNamespace(
+            config=SimpleNamespace(use_accuracy_compatible=False)
+        )
+        with (
+            patch("paddle.distributed.all_reduce") as reduce,
+            patch("paddle.full") as allocate,
+        ):
+            trainer._resolve_deferred_token_normalization()
+        reduce.assert_not_called()
+        allocate.assert_not_called()
+
+
 class TestRestoreFusedExpert3DLayout(unittest.TestCase):
     def test_restores_flattened_grouped_gemm_weight(self):
         import paddle
