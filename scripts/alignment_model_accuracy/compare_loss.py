@@ -196,7 +196,7 @@ def compare(pf: dict, mg: dict, mb: int) -> int:
                         # 不进反向、不累积. per_token_loss 才是 bit-exact 判据.
                         try:
                             pv, mv = float(p["val"]), float(m["val"])
-                            tol = 4.0 * (2.0 ** -23) * max(abs(pv), abs(mv), 1.0)
+                            tol = 4.0 * (2.0**-23) * max(abs(pv), abs(mv), 1.0)
                             tolerated = abs(pv - mv) <= tol
                         except (TypeError, ValueError):
                             tolerated = False
