@@ -27,7 +27,7 @@ WORKSPACE_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 source "${WORKSPACE_DIR}/venv/torch/bin/activate"
 cd "${WORKSPACE_DIR}"
 
-export MEGATRON_LM_PATH="${WORKSPACE_DIR}/Megatron-LM"
+export MEGATRON_LM_PATH="${MEGATRON_LM_PATH:-${WORKSPACE_DIR}/Megatron-LM}"
 
 # sharding stage1 degree2 对侧: 单机 2 卡 DP2 + distributed optimizer
 export CUDA_VISIBLE_DEVICES=0,1
