@@ -74,7 +74,7 @@ class GLMMoEModelProvider(GPTModelProvider):
     }
 
     # (@peiziliang) hard code
-    rotary_base: float = 1000000.0
+    rope_theta: float = 1000000.0
     rotary_percent: float = 0.5
     moe_shared_expert_overlap: bool = True
     moe_router_pre_softmax: bool = False

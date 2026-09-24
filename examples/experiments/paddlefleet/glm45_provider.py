@@ -54,7 +54,7 @@ class GLMMoEModelProvider(GPTModelProvider):
 
     # RoPE
     position_embedding_type: str = "rope"
-    rotary_base: float = 1000000.0
+    rope_theta: float = 1000000.0
     rotary_percent: float = 0.5
 
     # MoE specific parameters

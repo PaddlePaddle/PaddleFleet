@@ -1431,8 +1431,12 @@ class TransformerConfig(ModelParallelConfig):
     rope_type: str = "yarn"
     """Type of RoPE to use. Default to yarn, options are rope and yarn."""
 
-    rotary_base: float = 10000
-    """Rotary base for the rotary embeddings, used by rope and yarn."""
+    rotary_base: float | None = None
+    """
+    ``__post_init__`` forwards it:  when rotary_base is different from
+    rope_theta will raises error. All attention paths read
+    ``rope_theta`` only.
+    """
 
     rotary_percent: float = 1.0
     """Rotary percent for the rotary embeddings, used by rope."""
@@ -1743,7 +1747,7 @@ class TransformerConfig(ModelParallelConfig):
 
     csa_compress_rotary_base: float = 40000.0
     """Rotary base for compressed KV positions in CSA.
-    Used instead of the standard rotary_base when compress_ratio > 1 for a layer.
+    Used instead of the standard rope_theta when compress_ratio > 1 for a layer.
     """
 
     csa_dense_mode: bool = False
@@ -2212,6 +2216,19 @@ class TransformerConfig(ModelParallelConfig):
         # "disabled" and collapses to 0.0, so this config object never exposes
         # None and consumers can key on ``> 0`` instead of ``is not None``.
         self.dsa_indexer_loss_coeff = float(self.dsa_indexer_loss_coeff or 0.0)
+
+        # rope_theta is the single RoPE base field
+        if self.rotary_base is not None:
+            if not math.isclose(
+                float(self.rope_theta), float(self.rotary_base)
+            ):
+                raise ValueError(
+                    "Both 'rope_theta' and 'rotary_base' are set with "
+                    f"different values: rope_theta={self.rope_theta}, "
+                    f"rotary_base={self.rotary_base}. please set rope_theta and delete rotary_base."
+                )
+
+        self.__dict__.pop("rotary_base", None)
 
         if self.p2p_overlap_dw_calc is not None:
             if isinstance(self.p2p_overlap_dw_calc, str):

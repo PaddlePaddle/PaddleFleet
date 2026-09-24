@@ -66,6 +66,7 @@ class DeepseekV4ModelProvider(GPTModelProvider):
         "compress_ratios": "csa_compress_ratios",
         "num_hash_layers": "moe_n_hash_layers",
         "compress_rope_theta": "csa_compress_rotary_base",
+        "rotary_base": "rope_theta",  # deprecated alias kept for old checkpoints
         "sliding_window": "csa_window_size",
         "hc_mult": "num_residual_streams",
         "hc_sinkhorn_iters": "mhc_sinkhorn_iterations",
