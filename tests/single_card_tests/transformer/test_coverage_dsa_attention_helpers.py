@@ -863,7 +863,6 @@ def _forward_stub(
         indexer=indexer,
         dsa_indexer_loss_coeff=0.0,
         retain_indexer_loss_graph=False,
-        _HOLDER_ATTR=DSAttention._HOLDER_ATTR,
     )
     stub._get_index_share_topk_holder = MethodType(
         DSAttention._get_index_share_topk_holder, stub
@@ -934,18 +933,21 @@ class TestDSAttentionForwardMask(unittest.TestCase):
             index_share=True,
             skip_topk=True,
         )
-        setattr(
-            stub.config,
-            DSAttention._HOLDER_ATTR,
-            {stub.source_layer: indices},
-        )
+        holder = {stub.source_layer: indices}
         x = paddle.randn([local, batch, 6]).cast("bfloat16")
         qr = paddle.randn([local, batch, 6]).cast("bfloat16")
         query, key, value = self._tensors(batch, seq)
 
         with patch(MODULE + ".get_pg_size", return_value=2):
             output = DSAttention.forward(
-                stub, query, key, value, None, x=x, qr=qr
+                stub,
+                query,
+                key,
+                value,
+                None,
+                x=x,
+                qr=qr,
+                dsa_topk_holder=holder,
             )
 
         self.assertEqual(
@@ -966,11 +968,7 @@ class TestDSAttentionForwardMask(unittest.TestCase):
         batch, seq = 1, 4
         indices = _causal_topk_indices(batch, seq, self.topk)
         stub = _forward_stub(index_share=True, skip_topk=True)
-        setattr(
-            stub.config,
-            DSAttention._HOLDER_ATTR,
-            {stub.source_layer: indices},
-        )
+        holder = {stub.source_layer: indices}
         x = paddle.randn([batch, seq, 6]).cast("bfloat16")
         qr = paddle.randn([batch, seq, 6]).cast("bfloat16")
         query, key, value = self._tensors(batch, seq)
@@ -978,7 +976,14 @@ class TestDSAttentionForwardMask(unittest.TestCase):
 
         with patch(MODULE + ".get_pg_size", return_value=1):
             output = DSAttention.forward(
-                stub, query, key, value, attention_mask, x=x, qr=qr
+                stub,
+                query,
+                key,
+                value,
+                attention_mask,
+                x=x,
+                qr=qr,
+                dsa_topk_holder=holder,
             )
 
         expected = _unfused_dsa_attention(
@@ -1005,16 +1010,23 @@ class TestDSAttentionForwardMask(unittest.TestCase):
                 return None, indices
 
         stub = _forward_stub(index_share=True, indexer=_IndexerStub())
+        holder = {}
         x = paddle.randn([batch, seq, 6]).cast("bfloat16")
         qr = paddle.randn([batch, seq, 6]).cast("bfloat16")
         query, key, value = self._tensors(batch, seq)
 
         with patch(MODULE + ".get_pg_size", return_value=1):
             output = DSAttention.forward(
-                stub, query, key, value, None, x=x, qr=qr
+                stub,
+                query,
+                key,
+                value,
+                None,
+                x=x,
+                qr=qr,
+                dsa_topk_holder=holder,
             )
 
-        holder = getattr(stub.config, DSAttention._HOLDER_ATTR)
         self.assertIs(holder[stub.source_layer], indices)
         self.assertEqual(list(seen["mask"].shape), [1, 1, seq, seq])
         causal = paddle.triu(
@@ -1056,11 +1068,7 @@ class TestDSAttentionForwardAbsorbedCore(unittest.TestCase):
             index_share=True,
             skip_topk=True,
         )
-        setattr(
-            stub.config,
-            DSAttention._HOLDER_ATTR,
-            {stub.source_layer: self.indices},
-        )
+        stub.dsa_topk_holder = {stub.source_layer: self.indices}
         return stub
 
     def test_absorbed_query_is_built_and_projected_with_bmm(self):
@@ -1085,6 +1093,7 @@ class TestDSAttentionForwardAbsorbedCore(unittest.TestCase):
                 None,
                 x=self.x,
                 qr=self.qr,
+                dsa_topk_holder=stub.dsa_topk_holder,
                 kv_compressed=self.kv_compressed,
                 k_pos_emb=k_pos_emb,
                 v_b_proj_weight=self.v_b_proj_weight,
