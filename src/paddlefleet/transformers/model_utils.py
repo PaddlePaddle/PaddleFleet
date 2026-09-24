@@ -4536,14 +4536,64 @@ class PipelinePretrainedModel(PretrainedModel):
             "The pipeline stage must have parameters!"
         )
 
+        # Keys with no mapping entry are dropped. This is expected and not an
+        # error on its own: when a single card checkpoint is loaded, every
+        # other pipeline stage's keys arrive here too. What *is* an error is a
+        # parameter of this stage receiving no value, which is reported from
+        # ``missing_keys`` below.
+        unmapped_keys = []
         for k in list(state_dict.keys()):
             v = state_dict.pop(k)
             if k not in self._single_to_pp_mapping:
+                unmapped_keys.append(k)
                 continue
             state_dict[self._single_to_pp_mapping[k]] = v
+        if unmapped_keys:
+            logger.warning(
+                f"[pp-name-mapping] {len(unmapped_keys)} keys have no entry "
+                f"in _single_to_pp_mapping and were dropped. Keys owned by "
+                f"other pipeline stages land here too. First 20: "
+                f"{unmapped_keys[:20]}"
+            )
 
         ret = super().set_state_dict(state_dict, *args, **kwargs)
-        return ret
+        # `nn.Layer.set_state_dict` returns (missing_keys, unexpected_keys).
+        # Anything else means the parent does not report those two lists, so
+        # there is nothing to filter -- pass its value through unchanged.
+        if not (isinstance(ret, tuple) and len(ret) == 2):
+            return ret
+        missing_keys, unexpected_keys = ret
+
+        # Two physical keys can resolve to the same single card name and alias
+        # one Parameter -- typically `shared_layers.{name}.rest` and
+        # `{chunk_start}.{name}.rest`, which `pp_layers.py:1167-1171`
+        # registers for the same SharedLayerDesc under VPP. Only the winner of
+        # that single -> pp collision is fed above, so the other path shows up
+        # in ``missing_keys`` although its Parameter did get a value. Drop
+        # those, otherwise every load of a model with shared layers reports
+        # false positives.
+        alias_of = {}
+        for pp_key, single_key in (self._pp_to_single_mapping or {}).items():
+            winner = self._single_to_pp_mapping.get(single_key)
+            if winner is not None and winner != pp_key:
+                alias_of[pp_key] = winner
+        filtered_missing_keys = []
+        for key in missing_keys:
+            if key in alias_of and alias_of[key] not in missing_keys:
+                continue
+            filtered_missing_keys.append(key)
+        missing_keys = filtered_missing_keys
+
+        if missing_keys:
+            # The precise signal that a name mapping is broken: a parameter
+            # this stage owns received no value and keeps its initial one.
+            # Shared layer aliases are filtered out above.
+            logger.warning(
+                f"[pp-name-mapping] {len(missing_keys)} parameters of this "
+                f"pipeline stage got no value from the checkpoint and keep "
+                f"their initial values. First 20: {missing_keys[:20]}"
+            )
+        return missing_keys, unexpected_keys
 
 
 def load_sharded_checkpoint_as_one(folder, variant=None, return_numpy=False):
