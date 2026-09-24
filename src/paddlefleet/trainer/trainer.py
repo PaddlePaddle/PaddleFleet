@@ -507,34 +507,8 @@ class Trainer:
             args = TrainingArguments(output_dir=output_dir)
 
         self.args = args
-        # An accuracy-aligned run has to reproduce its reference's optimizer
-        # trajectory, and the Megatron alignment suite runs with clipping off.
-        # ``max_grad_norm`` defaults to 1.0, so a config that simply does not
-        # mention it (e.g. PaddleFleet's ``GLM45Air_EP2.yaml``) would clip -- with
-        # a real global norm around 90 that rescales every gradient by ~0.01, the
-        # first update lands elsewhere and the alignment diverges from step 2 on
-        # while step 1 still matches bit-for-bit. Keep forcing clipping off for
-        # that target, but say so instead of overwriting silently.
-        #
-        # The ``"hf"`` target is deliberately exempt: its reference *does* clip,
-        # and ``_build_grad_clip()`` returns the recipe that reproduces
-        # ``torch.nn.utils.clip_grad_norm_`` bit-for-bit, so zeroing the threshold
-        # here would remove the very step being aligned.
-        _accuracy_target = getattr(
-            getattr(model, "config", None), "use_accuracy_compatible", False
-        )
-        if (
-            _accuracy_target
-            and not targets_hf(_accuracy_target)
-            and getattr(self.args, "max_grad_norm", 0) > 0
-        ):
-            logger.warning(
-                f"use_accuracy_compatible={_accuracy_target!r} aligns with Megatron-LM, which is "
-                f"compared without gradient clipping; overriding max_grad_norm="
-                f"{self.args.max_grad_norm} to 0.0. Use use_accuracy_compatible='hf' if you need a "
-                "clipped run that stays bit-exact against its reference."
-            )
-            self.args.max_grad_norm = 0.0
+        # Honor the configured clipping threshold; _build_grad_clip selects
+        # the recipe for the requested accuracy target.
         # Apply the reshard broadcast toggle once here: Trainer.__init__ is the
         # single point every reshard/EMA path runs after, so all_gather_state_dict
         # need not thread the value and no construction site is missed (incl. the
@@ -3027,6 +3001,280 @@ class Trainer:
                 raise ValueError(f"unsupported type: {type(dtensors)}")
         return global_micro_batchs
 
+    def _deferred_token_replica_group(self):
+        """Return the constructed group holding the leftover data replicas."""
+        hcg = getattr(self, "hcg", None)
+        if hcg is None:
+            return getattr(self, "dp_group", None)
+        try:
+            group = hcg.get_sharding_parallel_group()
+            if group is not None and getattr(group, "nranks", 1) > 1:
+                return group
+        except Exception:
+            pass
+        try:
+            from paddlefleet.parallel_state import get_data_parallel_group
+
+            group = get_data_parallel_group(check_initialized=False)
+            if group is not None and getattr(group, "nranks", 1) > 1:
+                return group
+        except Exception:
+            pass
+        return getattr(self, "dp_group", None)
+
+    def _requires_native_token_weighted_logging(self):
+        config = getattr(self.model, "config", None)
+        if not (
+            getattr(config, "use_accuracy_compatible", False)
+            and getattr(config, "defer_token_normalization", False)
+        ):
+            return False
+        # Pipeline accumulation buffers several calls before computing MAIN.
+        # The single-microbatch receipt is valid only without that buffering.
+        if self.args.gradient_accumulation_steps != 1:
+            return False
+        group = self._deferred_token_replica_group()
+        return group is not None and getattr(group, "nranks", 1) > 1
+
+    def _note_native_microbatch_loss(self):
+        """Carry the MAIN numerator once from its actual PP owner to each stage."""
+        from paddlefleet.models.common.language_loss.language_loss import (
+            consume_main_reporting_microbatch,
+            get_local_main_valid_tokens,
+        )
+        from paddlefleet.parallel_state import get_pipeline_model_parallel_group
+
+        local_count = get_local_main_valid_tokens()
+        count = paddle.full(
+            [],
+            0.0 if local_count is None else float(local_count),
+            dtype="float32",
+        )
+        pp_group = get_pipeline_model_parallel_group(check_initialized=False)
+        if pp_group is not None and getattr(pp_group, "nranks", 1) > 1:
+            paddle.distributed.all_reduce(
+                count, op=paddle.distributed.ReduceOp.MAX, group=pp_group
+            )
+        count_value = float(count.item())
+        step = self.state.global_step + 1
+        microbatch = self._reporting_microbatch
+        receipt = consume_main_reporting_microbatch(step, microbatch)
+        rank = paddle.distributed.get_rank()
+        owner = pp_group.ranks[-1] if pp_group is not None else rank
+        if (receipt is not None) != (rank == owner):
+            raise RuntimeError(
+                "MAIN numerator must exist only on the actual PP loss owner"
+            )
+        if count_value <= 0:
+            raise RuntimeError(
+                "MAIN reporting requires a positive valid-token count"
+            )
+        if receipt is not None:
+            if (
+                receipt["step"] != step
+                or receipt["microbatch"] != microbatch
+                or receipt["count"] != count_value
+            ):
+                raise RuntimeError(
+                    "MAIN numerator step/microbatch/count mismatch"
+                )
+            numerator = receipt["sum"]
+        else:
+            numerator = paddle.full([], 0.0, dtype="float32")
+        if pp_group is not None and getattr(pp_group, "nranks", 1) > 1:
+            paddle.distributed.broadcast(numerator, src=owner, group=pp_group)
+        if getattr(self, "_native_log_numerator", None) is None:
+            self._native_log_numerator = numerator
+            self._native_log_count = count
+        else:
+            self._native_log_numerator = self._native_log_numerator + numerator
+            self._native_log_count = self._native_log_count + count
+
+    def _native_token_weighted_log_loss(self):
+        """Reduce native numerators and MAIN counts over the actual data replicas."""
+        group = self._deferred_token_replica_group()
+        numerator = getattr(self, "_native_log_numerator", None)
+        count = getattr(self, "_native_log_count", None)
+        if numerator is None or count is None:
+            numerator = paddle.full([], 0.0, dtype="float32")
+            count = paddle.full([], 0.0, dtype="float32")
+        paddle.distributed.all_reduce(
+            numerator, op=paddle.distributed.ReduceOp.SUM, group=group
+        )
+        paddle.distributed.all_reduce(
+            count, op=paddle.distributed.ReduceOp.SUM, group=group
+        )
+        self._native_log_numerator = None
+        self._native_log_count = None
+        count_value = float(count.item())
+        if count_value <= 0:
+            raise RuntimeError(
+                "Native token-weighted reporting has no valid MAIN tokens"
+            )
+        return numerator.cast("float32") / paddle.full(
+            [], count_value, dtype="float32"
+        )
+
+    def _resolve_deferred_token_normalization(self):
+        """Resolve MAIN tokens with PP MAX, then leftover-replica SUM.
+
+        The last PP stage registers its replica's MAIN count. Broadcast that
+        count to the other PP stages before summing over data replicas; TP,
+        EP and PP ranks must not be counted as additional data replicas.
+        Keep the compatibility guard and the device allocation: ordinary
+        losses do not publish a deferred divisor, and NCCL needs GPU storage.
+        """
+        try:
+            from paddlefleet.models.common.language_loss.language_loss import (
+                get_pending_gradient_divisor,
+                set_pending_gradient_divisor,
+            )
+        except ImportError:
+            return
+
+        if not getattr(
+            getattr(self.model, "config", None),
+            "use_accuracy_compatible",
+            False,
+        ):
+            return
+
+        divisor = get_pending_gradient_divisor()
+        if not paddle.distributed.is_initialized():
+            return
+
+        from paddlefleet.parallel_state import (
+            get_data_parallel_group,
+            get_pipeline_model_parallel_group,
+        )
+
+        pp_group = get_pipeline_model_parallel_group(check_initialized=False)
+        replica_group = self._deferred_token_replica_group()
+        if replica_group is None:
+            replica_group = get_data_parallel_group(check_initialized=False)
+        pp_collective = (
+            pp_group is not None and getattr(pp_group, "nranks", 1) > 1
+        )
+        replica_collective = (
+            replica_group is not None
+            and getattr(replica_group, "nranks", 1) > 1
+        )
+        if not pp_collective and not replica_collective:
+            return
+
+        holder = paddle.full(
+            [1], 0.0 if divisor is None else float(divisor), dtype="float64"
+        )
+        if pp_collective:
+            paddle.distributed.all_reduce(
+                holder, op=paddle.distributed.ReduceOp.MAX, group=pp_group
+            )
+        if replica_collective:
+            paddle.distributed.all_reduce(
+                holder, op=paddle.distributed.ReduceOp.SUM, group=replica_group
+            )
+        value = float(holder.numpy()[0])
+        if value > 0:
+            set_pending_gradient_divisor(value)
+
+    def _apply_deferred_token_normalization(self, model):
+        """Divide fp32 gradient buffers by the deferred valid-token count.
+
+        Must run AFTER on_optimizer_begin (SPGradSync all-reduce) so the
+        order is sum-then-scale, matching Megatron finalize_model_grads.
+        """
+        try:
+            from paddlefleet.models.common.language_loss.language_loss import (
+                clear_pending_gradient_divisor,
+                get_pending_gradient_divisor,
+            )
+        except ImportError:
+            return
+
+        divisor = get_pending_gradient_divisor()
+        clear_pending_gradient_divisor()
+        if not divisor or divisor <= 0:
+            return
+
+        parameters = (
+            model._layers.parameters()
+            if hasattr(model, "_layers")
+            else model.parameters()
+        )
+
+        from paddle.distributed.fleet.meta_optimizers.dygraph_optimizer.dygraph_sharding_optimizer import (
+            DygraphShardingOptimizerV2,
+        )
+
+        candidates, queue, seen = [], [self.optimizer], set()
+        while queue:
+            opt = queue.pop()
+            if opt is None or id(opt) in seen:
+                continue
+            seen.add(id(opt))
+            if isinstance(opt, DygraphShardingOptimizerV2):
+                candidates.append(opt)
+            try:
+                fields = vars(opt)
+            except TypeError:
+                continue
+            for key in ("_inner_opt", "_opt", "inner_opt", "_optimizer"):
+                child = fields.get(key)
+                if child is not None:
+                    queue.append(child)
+        if len(candidates) > 1:
+            raise RuntimeError(
+                "multiple native sharding optimizers in deferred normalization"
+            )
+        inner = candidates[0] if candidates else None
+        native_v2 = inner is not None
+        # Native fused buffers average through AVG or SUM followed by 1/R.
+        # Restore the per-parameter sum before the deferred token division.
+        # Validate every mapping before changing any gradient.
+        pending = []
+        if native_v2:
+            param2bucket = vars(inner).get("param2bucket")
+            if not param2bucket:
+                raise RuntimeError(
+                    "native DygraphShardingOptimizerV2 missing param2bucket"
+                )
+            for p in parameters:
+                grad = getattr(p, "main_grad", None)
+                if grad is None:
+                    grad = p.grad
+                if grad is None:
+                    continue
+                buckets = param2bucket.get(getattr(p, "name", None))
+                if not buckets:
+                    raise RuntimeError(
+                        "grad-bearing param missing FusedCommBuffer mapping"
+                    )
+                r = 1
+                for buf in buckets:
+                    g = getattr(buf, "_comm_group", None)
+                    if g is None:
+                        raise RuntimeError("invalid comm group on fused buffer")
+                    n = int(getattr(g, "nranks", 0) or 0)
+                    if n < 1:
+                        raise RuntimeError(
+                            "invalid comm group nranks on fused buffer"
+                        )
+                    r = max(r, n)
+                pending.append((grad, float(r) / float(divisor)))
+        else:
+            scale = float(1) / float(divisor)
+            for p in parameters:
+                grad = getattr(p, "main_grad", None)
+                if grad is None:
+                    grad = p.grad
+                if grad is None:
+                    continue
+                pending.append((grad, scale))
+
+        with paddle.no_grad():
+            for grad, scale in pending:
+                grad.scale_(scale)
+
     def optimizer_step(self, args, model, parameters_list=None):
         # When freeze_training is enabled, skip optimizer step and lr scheduler step
         # to keep both model parameters and optimizer state unchanged
@@ -3508,6 +3756,19 @@ class Trainer:
                             ).sum()
                             self.trained_tokens += inputs["input_ids"].numel()
 
+                    native_reporting = (
+                        self._requires_native_token_weighted_logging()
+                    )
+                    if native_reporting:
+                        from paddlefleet.models.common.language_loss.language_loss import (
+                            begin_main_reporting_microbatch,
+                        )
+
+                        self._reporting_microbatch = step_control + 1
+                        begin_main_reporting_microbatch(
+                            self.state.global_step + 1,
+                            self._reporting_microbatch,
+                        )
                     if not self.args.enable_auto_parallel:
                         with sync_context:
                             if (
@@ -3530,6 +3791,8 @@ class Trainer:
                     else:
                         tr_loss += tr_loss_step
 
+                    if native_reporting:
+                        self._note_native_microbatch_loss()
                     should_flush_sequence_first_wgrad = (
                         step_control + 1
                     ) % args.gradient_accumulation_steps == 0 or (
@@ -3720,6 +3983,10 @@ class Trainer:
                                             / self.args.gradient_accumulation_steps
                                         )
                         # Optimizer step
+                        # E-233/E-234: resolve BEFORE callbacks so every PP rank
+                        # sees the divisor; apply AFTER on_optimizer_begin so
+                        # SPGradSync all-reduces first (sum-then-scale).
+                        self._resolve_deferred_token_normalization()
                         self.callback_handler.on_optimizer_begin(
                             args,
                             self.state,
@@ -3728,6 +3995,7 @@ class Trainer:
                             if self.do_grad_scaling
                             else None,
                         )
+                        self._apply_deferred_token_normalization(model)
                         self.optimizer_step(
                             args, model=model, parameters_list=parameters_list
                         )
@@ -4090,17 +4358,21 @@ class Trainer:
                 - self._skip_steps_since_last_logged
             )
             self._skip_steps_since_last_logged = 0
-            # all_gather + mean() to get average loss over all processes
-            avg_loss = self._nested_gather(tr_loss).mean()
-            tr_loss_scalar = self._get_item_from_loss(avg_loss)
-
-            # reset tr_loss to zero
-            tr_loss.subtract_(tr_loss)
-            # set loss to zero if all steps are skipped since last log
-            if num_steps == 0:
-                logs["loss"] = 0.0
+            if self._requires_native_token_weighted_logging():
+                avg_loss = self._native_token_weighted_log_loss()
+                raw_loss = (
+                    0.0
+                    if num_steps == 0
+                    else self._get_item_from_loss(avg_loss)
+                )
+                # Preserve the existing accumulated-loss sum contract.
+                tr_loss_scalar = raw_loss * num_steps
             else:
-                logs["loss"] = round(tr_loss_scalar / num_steps, 8)
+                avg_loss = self._nested_gather(tr_loss).mean()
+                tr_loss_scalar = self._get_item_from_loss(avg_loss)
+                raw_loss = 0.0 if num_steps == 0 else tr_loss_scalar / num_steps
+            tr_loss.subtract_(tr_loss)
+            logs["loss"] = round(raw_loss, 8)
 
             logs["learning_rate"] = float(
                 "{0:.3e}".format(self._get_learning_rate())
@@ -4305,7 +4577,7 @@ class Trainer:
                             >> 20,
                         }
                     )
-            self.log(logs, **kwargs)
+            self.log(logs, raw_loss=raw_loss, **kwargs)
 
         metrics = None
         if self.control.should_evaluate:
@@ -5086,8 +5358,8 @@ class Trainer:
         ``config.use_accuracy_compatible="hf"`` selects the clip that reproduces
         torch's ``clip_grad_norm_`` recipe (BF16 per-tensor norms, BF16 global
         norm, BF16 coefficient, BF16-rounded scaling) and records the pre-clip
-        global norm. Every other run -- default or Megatron-aligned -- keeps
-        paddle's stock ``ClipGradByGlobalNorm``.
+        global norm. Megatron accuracy compatibility uses a partition-independent FP32 norm;
+        ordinary runs keep paddle's stock ``ClipGradByGlobalNorm``.
         """
         if self.args.max_grad_norm <= 0:
             return None
@@ -5413,7 +5685,7 @@ class Trainer:
                     global_norm_var_dist_moe, global_norm_var_not_dist_moe = (
                         args
                     )
-                    global_norm_var_fp32 = paddle.sqrt(
+                    total = (
                         global_norm_var_dist
                         + global_norm_var_not_dist
                         + global_norm_var_dist_moe
@@ -5423,9 +5695,8 @@ class Trainer:
                     global_norm_func(
                         global_norm_var_dist, global_norm_var_not_dist
                     )
-                    global_norm_var_fp32 = paddle.sqrt(
-                        global_norm_var_dist + global_norm_var_not_dist
-                    )
+                    total = global_norm_var_dist + global_norm_var_not_dist
+                global_norm_var_fp32 = paddle.sqrt(total)
                 training_logs["global_norm"] = global_norm_var_fp32.item()
 
             self.optimizer._inner_opt._grad_clip._global_norm = (
