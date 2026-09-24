@@ -563,15 +563,17 @@ class TransformerConfig(ModelParallelConfig):
     swa_high_precision_norm: bool = False
 
     rotary_embed_cache: bool = False
-    """If True, ``RotaryEmbedding.forward`` memoises its angle table per
-    ``(max_seq_len, offset)``.
+    """If True, ``RotaryEmbedding.forward`` memoises its angle table in a
+    process-wide store keyed by the rotary configuration, so identically
+    configured layers share one table instead of one each.
 
-    The table is a pure function of that key plus instance constants, so a hit is
-    bit-identical to recomputing. Training rebuilds the identical table once per
-    attention module per microbatch (~95 us of host dispatch each for an 8192 x 64
-    table), which the cache collapses to a dict lookup. Calls that pass
-    ``position_ids`` are never cached -- the result then depends on a runtime
-    tensor. Off by default so the original code path is unchanged.
+    The table is a pure function of the configuration plus ``(max_seq_len,
+    offset)``, so a hit is bit-identical to recomputing. Training rebuilds the
+    identical table once per attention module per microbatch (~95 us of host
+    dispatch each for an 8192 x 64 table), which the cache collapses to a dict
+    lookup. Calls that pass ``position_ids`` are never cached -- the result then
+    depends on a runtime tensor. Off by default so the original code path is
+    unchanged.
 
     Scope, on purpose: the ``RotaryEmbedding`` instances that attention layers own
     -- MLA (``multi_latent_attention.py``), DSv4 hybrid (``dsv4_hybrid_attention.py``)
@@ -586,12 +588,17 @@ class TransformerConfig(ModelParallelConfig):
     ``MultimodalRotaryEmbedding`` override ``forward`` outright and are likewise out
     of scope.
 
-    The memo is a single slot, not a dict. On the training path the key is fixed --
-    that is where the win comes from, and the slot is a permanent hit. Callers that
-    vary the key get no benefit: incremental decode reaches ``_build_rope_freqs``'s
-    ``sq + position_offset`` form, whose key grows with the KV cache, so every step
-    replaces the slot and misses. That is why one slot is enough -- what it holds is
-    bounded by construction, without an eviction policy."""
+    Why a shared store: every attention layer owns its own ``RotaryEmbedding``, so
+    a 44-layer DSv4-hybrid model holds ~50 instances but only a handful of distinct
+    configurations (one per rotary base -- e.g. HCA's ``csa_compress_rotary_base``
+    and the latent/indexer layers' ``rope_theta``). A per-instance memo would retain
+    ~50 copies of a table that has 2-3 distinct values: at 64k x 64 fp32 that is
+    ~800 MiB instead of ~32 MiB.
+
+    One slot per configuration signature, not a dict of keys: the training path
+    keeps one key for the whole run, so the slot is a permanent hit. A caller that
+    varies the key (incremental decode) just replaces the slot and misses, so what
+    is retained is bounded by construction, without an eviction policy."""
 
     ####################
     # fusion
