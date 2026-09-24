@@ -147,5 +147,18 @@ class TestFLAImport(unittest.TestCase):
             from paddlefleet_ops.fla import xxxx  # noqa: F401
 
 
+class TestDeepSelectImport(unittest.TestCase):
+    def test_deep_select_import(self):
+        import paddlefleet_ops
+
+        if not paddlefleet_ops.is_deep_select_available():
+            with self.assertRaises(RuntimeError):
+                from paddlefleet_ops import deep_select
+            return
+        from paddlefleet_ops import deep_select
+
+        self.assertTrue(callable(deep_select.topk))
+
+
 if __name__ == "__main__":
     unittest.main()

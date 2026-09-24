@@ -204,6 +204,7 @@ def check_submodule_updated():
             "flash-linear-attention",
             "FlashMLA",
             "fast-hadamard-transform",
+            "DeepSelect",
         ]
         if os.environ.get("ENABLE_MOONEP", "0") == "1":
             third_parties.append("MoonEP")
@@ -478,6 +479,18 @@ def get_libs():
                     "PADDLE_CUDA_ARCH_LIST": _deep_ep_arch,
                 },
             ),
+        )
+        LIBRARIES.append(
+            EcosystemLibrary(
+                name="DeepSelect",
+                source_rel_path="third_party/DeepSelect",
+                artifacts=[Artifact("deep_select", "deep_select")],
+                extra_env={
+                    "DEEP_SELECT_BUILD_FRAMEWORK": "paddle",
+                    # Empty so Paddle keeps DeepSelect's own sm_100a/sm_103a gencodes.
+                    "PADDLE_CUDA_ARCH_LIST": "",
+                },
+            )
         )
     if sys.version_info >= (3, 12):
         LIBRARIES.append(

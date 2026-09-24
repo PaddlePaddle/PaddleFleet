@@ -31,3 +31,6 @@
 [submodule "packages/paddlefleet_ops/third_party/MoonEP"]
 	path = packages/paddlefleet_ops/third_party/MoonEP
 	url = https://github.com/PFCCLab/MoonEP.git
+[submodule "packages/paddlefleet_ops/third_party/DeepSelect"]
+	path = packages/paddlefleet_ops/third_party/DeepSelect
+	url = https://github.com/PFCCLab/DeepSelect.git

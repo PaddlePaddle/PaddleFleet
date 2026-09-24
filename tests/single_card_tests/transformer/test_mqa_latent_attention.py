@@ -2278,9 +2278,10 @@ class TestForwardDsaFusedDispatchMocked(unittest.TestCase):
     S = 256
     WIDE_TOPK = 384  # a legal index_topk the kernel does not implement
 
-    def _build(self, topk):
+    def _build(self, topk, index_topk_backend):
         config = _create_mqa_config("mqa_dsa", loss_coeff=0.01)
         config.dsa_index_topk = topk
+        config.index_topk_backend = index_topk_backend
         module = _build_module(config, bf16=True)
         module.train()
         return module
@@ -2295,8 +2296,8 @@ class TestForwardDsaFusedDispatchMocked(unittest.TestCase):
             paddle.full([1, self.S, topk], -1, dtype="int32"),
         ).contiguous()
 
-    def _run(self, topk):
-        module = self._build(topk)
+    def _run(self, topk, index_topk_backend="paddle"):
+        module = self._build(topk, index_topk_backend)
         DSAIndexerLossLoggingHelper.tracker.clear()
         seen = {}
         table = self._topk_table(topk)
@@ -2304,6 +2305,7 @@ class TestForwardDsaFusedDispatchMocked(unittest.TestCase):
         import paddlefleet.cudnn_ops.indexer.csa_indexer_fwd_cudnn as fwd_mod
 
         def fake_topk(q, k, w, **kwargs):
+            seen["index_topk_backend"] = kwargs["index_topk_backend"]
             width = int(kwargs["topk_effective"])
             scores = paddle.rand([1, self.S, width], dtype="float32")
             return self._topk_table(width), None, scores
@@ -2385,6 +2387,11 @@ class TestForwardDsaFusedDispatchMocked(unittest.TestCase):
         self.assertEqual(list(seen["lse_indexer"].shape), [1, self.S, 64])
         loss = float(DSAIndexerLossLoggingHelper.tracker["values"][0])
         self.assertTrue(np.isfinite(loss))
+
+    def test_index_topk_backend_reaches_the_kernel(self):
+        for backend in ("paddle", "deep_select"):
+            seen = self._run(_LSE_INDEXER_TOPKS[0], backend)
+            self.assertEqual(seen["index_topk_backend"], backend)
 
     def test_unsupported_budget_asks_for_no_lse(self):
         self.assertNotIn(self.WIDE_TOPK, _LSE_INDEXER_TOPKS)

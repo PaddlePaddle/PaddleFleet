@@ -489,6 +489,22 @@ class TestPadTokenId(unittest.TestCase):
         self.assertEqual(config.pad_token_id, 151643)
 
 
+class TestIndexTopKBackend(unittest.TestCase):
+    def test_default_and_accepted_values(self):
+        config = TransformerConfig(num_hidden_layers=2)
+        self.assertEqual(config.index_topk_backend, "paddle")
+        config = TransformerConfig(
+            num_hidden_layers=2, index_topk_backend="deep_select"
+        )
+        self.assertEqual(config.index_topk_backend, "deep_select")
+
+    def test_unknown_value_is_rejected(self):
+        with self.assertRaisesRegex(
+            ValueError, "index_topk_backend='radix' is invalid"
+        ):
+            TransformerConfig(num_hidden_layers=2, index_topk_backend="radix")
+
+
 class FakeDictConfig(dict):
     def __getattr__(self, name):
         try:

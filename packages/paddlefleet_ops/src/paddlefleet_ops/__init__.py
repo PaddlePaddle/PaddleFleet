@@ -245,6 +245,7 @@ _FLASH_MASK_AVAILABLE = False
 _CUDNN_FRONTEND_AVAILABLE = False
 _FAST_HADAMARD_TRANSFORM_AVAILABLE = False
 _MOON_EP_AVAILABLE = False
+_DEEP_SELECT_AVAILABLE = False
 
 if paddle.is_compiled_with_cuda():
     _FLA_AVAILABLE = True
@@ -265,6 +266,11 @@ if paddle.is_compiled_with_cuda():
     if sys.version_info >= (3, 12):
         _CUDNN_FRONTEND_AVAILABLE = True
     _FAST_HADAMARD_TRANSFORM_AVAILABLE = True
+    if paddle.cuda.get_device_capability()[0] >= 10 and _cuda_version >= (
+        12,
+        9,
+    ):
+        _DEEP_SELECT_AVAILABLE = True
 
 if paddle.is_compiled_with_xpu():
     _DEEP_EP_AVAILABLE = True
@@ -308,6 +314,10 @@ def is_fast_hadamard_transform_available():
 
 def is_moonep_available():
     return _MOON_EP_AVAILABLE and os.environ.get("ENABLE_MOONEP", "0") == "1"
+
+
+def is_deep_select_available():
+    return _DEEP_SELECT_AVAILABLE
 
 
 def _try_load_nvshmem(ops_dir: Path):
@@ -471,6 +481,16 @@ if paddle.is_compiled_with_cuda():
         )
         logger.warning(warning)
         blocked_import_messages["paddlefleet_ops.moonep"] = error
+
+    if is_deep_select_available():
+        _safe_load_ecosystem_lib("deep_select", ops_dir, globals())
+    else:
+        warning, error = _build_notice(
+            "paddlefleet_ops.deep_select",
+            "requires CUDA >= 12.9 and GPU compute capability >= 10.0.",
+        )
+        logger.warning(warning)
+        blocked_import_messages["paddlefleet_ops.deep_select"] = error
 
     if is_cudnn_frontend_available():
         paddle.enable_compat(scope={"cudnn"}, silent=True)
