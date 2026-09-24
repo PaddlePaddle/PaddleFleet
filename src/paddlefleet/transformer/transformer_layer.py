@@ -1005,7 +1005,11 @@ class TransformerLayer(nn.Layer):
                     **offload_kwargs,
                 )
         else:
-            outputs = self._forward_impl(**dict_args, **docmask_meta_kwargs)
+            outputs = self._forward_impl(
+                **dict_args,
+                **docmask_meta_kwargs,
+                **dsa_topk_holder_kwargs,
+            )
 
         if isinstance(outputs, tuple):
             output, context = outputs[0], outputs[1]
