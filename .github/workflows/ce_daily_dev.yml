@@ -158,7 +158,7 @@ jobs:
           git config pull.rebase false
           pip install colorlog>=6.10.1
           pip install setuptools
-          fleet_ops_wheel=paddlefleet_ops-0.4.0.dev20260909%2Beaccfd21-cp312-cp312-linux_x86_64.whl
+          fleet_ops_wheel=paddlefleet_ops-0.4.0.dev20260909+eaccfd21-cp312-cp312-linux_x86_64.whl
           wget -q --no-proxy "https://xly-devops.bj.bcebos.com/wanghuan/paddle_dev_switch/H/paddlefleet_ops-0.4.0.dev20260909%2Beaccfd21-cp312-cp312-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -288,7 +288,7 @@ jobs:
           git submodule update --init --recursive
           pip install colorlog>=6.10.1
           pip install setuptools
-          fleet_ops_wheel=paddlefleet_ops-0.4.0.dev20260909%2Beaccfd21-cp312-cp312-linux_x86_64.whl
+          fleet_ops_wheel=paddlefleet_ops-0.4.0.dev20260909+eaccfd21-cp312-cp312-linux_x86_64.whl
           wget -q --no-proxy "https://xly-devops.bj.bcebos.com/wanghuan/paddle_dev_switch/H/paddlefleet_ops-0.4.0.dev20260909%2Beaccfd21-cp312-cp312-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -428,7 +428,7 @@ jobs:
           git config pull.rebase false
           pip install colorlog>=6.10.1
           pip install setuptools
-          fleet_ops_wheel=paddlefleet_ops-0.4.0.dev20260909%2Beaccfd21-cp312-cp312-linux_x86_64.whl
+          fleet_ops_wheel=paddlefleet_ops-0.4.0.dev20260909+eaccfd21-cp312-cp312-linux_x86_64.whl
           wget -q --no-proxy "https://xly-devops.bj.bcebos.com/wanghuan/paddle_dev_switch/H/paddlefleet_ops-0.4.0.dev20260909%2Beaccfd21-cp312-cp312-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -644,7 +644,7 @@ jobs:
           git config pull.rebase false
           pip install colorlog>=6.10.1
           pip install setuptools
-          fleet_ops_wheel=paddlefleet_ops-0.4.0.dev20260909%2Beaccfd21-cp312-cp312-linux_x86_64.whl
+          fleet_ops_wheel=paddlefleet_ops-0.4.0.dev20260909+eaccfd21-cp312-cp312-linux_x86_64.whl
           wget -q --no-proxy "https://xly-devops.bj.bcebos.com/wanghuan/paddle_dev_switch/H/paddlefleet_ops-0.4.0.dev20260909%2Beaccfd21-cp312-cp312-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
@@ -1063,7 +1063,7 @@ jobs:
           pip install colorlog>=6.10.1
           pip uninstall paddlefleet -y
           pip install setuptools
-          fleet_ops_wheel=paddlefleet_ops-0.4.0.dev20260909%2Beaccfd21-cp312-cp312-linux_x86_64.whl
+          fleet_ops_wheel=paddlefleet_ops-0.4.0.dev20260909+eaccfd21-cp312-cp312-linux_x86_64.whl
           wget -q --no-proxy "https://xly-devops.bj.bcebos.com/wanghuan/paddle_dev_switch/H/paddlefleet_ops-0.4.0.dev20260909%2Beaccfd21-cp312-cp312-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
