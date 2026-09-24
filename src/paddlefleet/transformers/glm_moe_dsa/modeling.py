@@ -57,7 +57,27 @@ class GlmMoeDsaPreTrainedModel(PretrainedModel):
         Returns:
             Dictionary with 'aoa_statements' key containing inverse conversion statements
         """
-        return MoEAOAConfigGenerator.gen_inv_aoa_config(config)
+        aoa_config = MoEAOAConfigGenerator.gen_inv_aoa_config(config)
+
+        # The AOA lexer expands wildcards from original input keys. Grouped
+        # experts become per-expert intermediates only after the first split,
+        # so their later split/transpose rules need concrete expert IDs.
+        num_experts = (
+            getattr(
+                config, "n_routed_experts", getattr(config, "num_experts", 0)
+            )
+            or 0
+        )
+        statements = []
+        for statement in aoa_config["aoa_statements"]:
+            if "$EXPERT_ID" in statement:
+                statements.extend(
+                    statement.replace("$EXPERT_ID", str(i))
+                    for i in range(num_experts)
+                )
+            else:
+                statements.append(statement)
+        return {**aoa_config, "aoa_statements": statements}
 
     @classmethod
     def _build_muon_slice_config(cls, model, config) -> dict:
