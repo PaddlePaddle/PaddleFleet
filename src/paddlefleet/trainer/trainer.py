@@ -302,6 +302,107 @@ DIST_CKPT_PATH = "dist_ckpt"
 DIST_MODEL_PATH = "dist_model"
 
 
+def restore_fused_expert_3d_layout(model, model_sharded_state_dict):
+    """Restore 3-D grouped-GEMM expert weights for FlexCheckpoint at sharding=1."""
+    named_params = dict(model.named_parameters())
+    for key, sharded_weight in model_sharded_state_dict.items():
+        if not isinstance(sharded_weight, ShardedWeight):
+            continue
+        if "grouped_gemm_experts.weight" not in key:
+            continue
+        param = named_params.get(key)
+        if param is None or getattr(param, "ndim", 0) != 3:
+            continue
+        local = sharded_weight.local_tensor
+        if tuple(local.shape) == tuple(param.shape):
+            continue
+        if int(local.numel()) != int(param.numel()):
+            continue
+        restored = local.reshape(list(param.shape))
+        restored.name = getattr(local, "name", "") or getattr(param, "name", "")
+        sharded_weight.local_tensor = restored
+        sharded_weight.local_shape = tuple(param.shape)
+        sharded_weight.global_shape = tuple(param.shape)
+        sharded_weight.global_offset = (0,) * len(param.shape)
+
+    return model_sharded_state_dict
+
+
+@contextlib.contextmanager
+def _fused_expert_optimizer_save_views(
+    model, model_sharded_state_dict, optimizer
+):
+    """Expose flat saving views without reshaping live optimizer tensors.
+
+    Only grouped-expert states need the 2-D layout advertised by their model
+    shards. Keep the original accumulator/master-weight objects and restore
+    their dictionary entries even when sharded-state construction fails.
+    Returned ShardedWeights retain the views through synchronous serialization.
+    """
+    named_params = dict(model.named_parameters())
+    parameter_shapes = {
+        named_params[key].name: tuple(shard.local_shape)
+        for key, shard in model_sharded_state_dict.items()
+        if isinstance(shard, ShardedWeight)
+        and "grouped_gemm_experts.weight" in key
+        and key in named_params
+        and named_params[key].ndim == 3
+        and len(shard.local_shape) == 2
+    }
+    if not parameter_shapes:
+        yield
+        return
+
+    inner = optimizer
+    seen = {id(inner)}
+    while True:
+        wrapped = next(
+            (
+                getattr(inner, attr)
+                for attr in ("_inner_opt", "inner_opt", "_optimizer")
+                if getattr(inner, attr, None) is not None
+            ),
+            None,
+        )
+        if wrapped is None:
+            break
+        if id(wrapped) in seen:
+            raise ValueError(
+                "Cyclic optimizer wrapper while preparing fused-expert checkpoint views."
+            )
+        seen.add(id(wrapped))
+        inner = wrapped
+
+    masters = getattr(inner, "_master_weights", {})
+    accumulator_shapes = dict(parameter_shapes)
+    for name, shape in parameter_shapes.items():
+        master = masters.get(name)
+        if master is not None:
+            accumulator_shapes[master.name] = shape
+    mappings = [
+        (mapping, accumulator_shapes)
+        for mapping in getattr(inner, "_accumulators", {}).values()
+    ]
+    mappings.append((masters, parameter_shapes))
+    replacements = []
+    try:
+        for mapping, shapes in mappings:
+            if not isinstance(mapping, dict):
+                continue
+            for name, shape in shapes.items():
+                tensor = mapping.get(name)
+                if not isinstance(tensor, paddle.Tensor) or tensor.ndim != 3:
+                    continue
+                view = tensor.reshape(shape)
+                view.name = tensor.name
+                replacements.append((mapping, name, tensor))
+                mapping[name] = view
+        yield
+    finally:
+        for mapping, name, tensor in reversed(replacements):
+            mapping[name] = tensor
+
+
 class Trainer:
     """
     Trainer is a simple but feature-complete training and eval loop for PaddlePaddle, optimized for PaddleFleet.
@@ -1471,6 +1572,7 @@ class Trainer:
 
     def _save_flex_model_state(self, output_dir):
         model_sharded_state_dict = self.model.sharded_state_dict()
+        restore_fused_expert_3d_layout(self.model, model_sharded_state_dict)
         for key, sharded_weight in model_sharded_state_dict.items():
             # NOTE(Waynezee): Only Tensor in Parameter will be used in FlexCheckpoint Save Scenario.
             if isinstance(sharded_weight, ShardedWeight):
@@ -1492,9 +1594,12 @@ class Trainer:
         optimizer_states = {}
         master_weights = {}
         model_sharded_state_dict = self.model.sharded_state_dict()
-        optimizer_sharded_state_dict = self.optimizer.sharded_state_dict(
-            model_sharded_state_dict
-        )
+        with _fused_expert_optimizer_save_views(
+            self.model, model_sharded_state_dict, self.optimizer
+        ):
+            optimizer_sharded_state_dict = self.optimizer.sharded_state_dict(
+                model_sharded_state_dict
+            )
         for k, v in optimizer_sharded_state_dict.items():
             if k.endswith(".w_0"):
                 master_weights[k] = v
@@ -4243,11 +4348,7 @@ class Trainer:
         if self.control.should_save_hf:
             if self.args.save_checkpoint_format == "flex_checkpoint":
                 is_main_process = paddle.distributed.get_rank() == 0
-                run_dir = self.args.output_dir
-                checkpoint_folder = (
-                    f"{PREFIX_HF_CHECKPOINT_DIR}-{self.state.global_step}"
-                )
-                ckpt_path = os.path.join(run_dir, checkpoint_folder)
+                run_dir, ckpt_path = self._hf_cadence_paths()
                 # Convert user-configured GB value to bytes for HFFormatFullParamSaver
                 memory_growth_threshold_bytes = (
                     self.args.save_hf_memory_growth_threshold * (2**30)
@@ -6645,6 +6746,27 @@ class Trainer:
             # ignore_errors for shared disks between train nodes.
             shutil.rmtree(checkpoint, ignore_errors=True)
 
+    def _hf_cadence_paths(self, step=None):
+        """Resolve mid-training HF cadence root and snapshot dir.
+
+        Default layout is ``{output_dir}/hf_checkpoint-{step}`` so
+        ``_rotate_hf_checkpoints``, resume, and latest-discovery keep working.
+        ``save_hf_output_dir`` is opt-in for an oracle that rglob's output_dir.
+        """
+        from .checkpoint_export import resolve_hf_checkpoint_dir
+
+        step = self.state.global_step if step is None else step
+        run_dir = (
+            getattr(self.args, "save_hf_output_dir", None)
+            or self.args.output_dir
+        )
+        ckpt_path = resolve_hf_checkpoint_dir(
+            self.args.output_dir,
+            step,
+            getattr(self.args, "save_hf_output_dir", None),
+        )
+        return run_dir, ckpt_path
+
     def _rotate_hf_checkpoints(self, use_mtime=False, output_dir=None) -> None:
         if (
             self.args.save_hf_total_limit is None
@@ -6822,6 +6944,7 @@ class Trainer:
                             is_main_process,
                             save_checkpoint_format=self.args.save_checkpoint_format,
                             memory_growth_threshold=memory_growth_threshold_bytes,
+                            export_global_step=self.state.global_step,
                         )
                 else:
                     self._save_flex_model_state(output_dir)
