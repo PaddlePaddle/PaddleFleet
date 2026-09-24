@@ -68,6 +68,7 @@ from paddlefleet.transformers.configuration_utils import (
     LlmMetaConfig,
     QuantizationConfig,
 )
+from paddlefleet.utils.accuracy_target import normalize_accuracy_target
 from paddlefleet.utils.log import logger
 
 from .make_data_utils import DataGenerator
@@ -93,6 +94,186 @@ from paddlefleet.cli.utils import (
 )
 
 
+def load_tokenizer_and_processor(model_args, data_args):
+    tokenizer_path = (
+        model_args.tokenizer_name_or_path or model_args.model_name_or_path
+    )
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    logger.info(f"Loading tokenizer from {tokenizer_path}")
+    # Keep develop's AutoProcessor load for every stage. Routing processor=
+    # tokenizer on text SFT moved GLM4 CI first-train/resume loss off the
+    # published GT (12.635027885 vs 12.63612175). GLM-5.2 still needs an
+    # independent tokenizer path; processor stays on the model weights path.
+    try:
+        processor = AutoProcessor.from_pretrained(
+            model_args.model_name_or_path, use_fast=data_args.processor_use_fast
+        )
+    except (OSError, ValueError):
+        # Extracted GLM-5.2 weights keep an independent tokenizer path and
+        # have no processor files. Published GLM-4 SFT still needs
+        # AutoProcessor; swallowing that failure moved first-train/resume
+        # loss off the published GT (12.635027885 vs 12.63612175).
+        independent_tokenizer = (
+            model_args.tokenizer_name_or_path
+            and model_args.tokenizer_name_or_path
+            != model_args.model_name_or_path
+        )
+        if not independent_tokenizer:
+            raise
+        logger.info(
+            f"No AutoProcessor at {model_args.model_name_or_path}; using tokenizer as processor"
+        )
+        processor = tokenizer
+    return tokenizer, processor
+
+
+def save_final_hf_model_if_requested(trainer, training_args):
+    """Write a HuggingFace-layout checkpoint after train().
+
+    Mid-training HF cadence is gated by save_to_hf / save_hf_steps. The
+    final export is independent: GLM-4 model-unittest generate and
+    integration SFT-from-PT both load output_dir via from_pretrained and
+    need config.json. Skipping this when save_to_hf=false left flex
+    weights only and failed those jobs.
+    """
+    trainer.save_model(
+        merge_tensor_parallel=training_args.tensor_model_parallel_size > 1,
+        last_fc_to_hf=True,
+    )
+    return True
+
+
+def validate_pretokenized_offline_dataset(dataset, expected_length):
+    if dataset is None or len(dataset) == 0:
+        raise ValueError(
+            "pretokenized offline dataset must contain at least one row"
+        )
+    for row in dataset:
+        if not isinstance(row, list) or len(row) != 1:
+            raise ValueError(
+                "pretokenized offline rows must contain exactly one TextSequence"
+            )
+        sequence = row[0]
+        fields = {
+            "token_ids": sequence.token_ids,
+            "labels": sequence.labels,
+            "position_ids": sequence.position_ids,
+        }
+        for name, values in fields.items():
+            if len(values) != expected_length:
+                raise ValueError(
+                    f"pretokenized {name} length {len(values)} != {expected_length}"
+                )
+            if any(not isinstance(value, int) for value in values):
+                raise TypeError(
+                    f"pretokenized {name} must contain integer values"
+                )
+
+
+def apply_glm_moe_dsa_training_contract(
+    model_config, training_args, model_args, data_args
+):
+    """Propagate CLI training semantics into the Fleet provider used by GLM MoE DSA."""
+    if getattr(model_config, "model_type", None) != "glm_moe_dsa":
+        return
+
+    model_config.use_accuracy_compatible = normalize_accuracy_target(
+        getattr(training_args, "use_accuracy_compatible", False)
+    )
+    requested_mtp = int(
+        getattr(training_args, "num_nextn_predict_layers", 0) or 0
+    )
+    explicit_mtp = int(getattr(training_args, "mtp_num_layers", 0) or 0)
+    if requested_mtp and explicit_mtp and requested_mtp != explicit_mtp:
+        raise ValueError(
+            f"GLM MoE DSA MTP depth mismatch: num_nextn_predict_layers={requested_mtp}, "
+            f"mtp_num_layers={explicit_mtp}"
+        )
+    mtp_depth = explicit_mtp or requested_mtp
+    model_config.num_nextn_predict_layers = mtp_depth
+    training_args.num_nextn_predict_layers = mtp_depth
+    # Fleet TransformerConfig rejects a non-zero mtp_num_layers (renamed to
+    # num_nextn_predict_layers). Keep the old CLI field at 0 so register_attributes
+    # does not fail-closed on GLM MoE DSA.
+    if hasattr(training_args, "mtp_num_layers"):
+        training_args.mtp_num_layers = 0
+    if hasattr(model_config, "mtp_num_layers"):
+        delattr(model_config, "mtp_num_layers")
+    model_config.mtp_enabled = mtp_depth > 0
+
+    requested_mtp_loss_scaling_factor = getattr(
+        training_args, "mtp_loss_scaling_factor", None
+    )
+    if requested_mtp_loss_scaling_factor is not None:
+        model_config.mtp_loss_scaling_factor = float(
+            requested_mtp_loss_scaling_factor
+        )
+    logger.info(
+        "GLM MoE DSA MTP loss weight: mtp_loss_scaling_factor="
+        f"{getattr(model_config, 'mtp_loss_scaling_factor', None)} "
+        f"(cli={requested_mtp_loss_scaling_factor!r}, mtp_depth={mtp_depth})"
+    )
+
+    if (
+        getattr(data_args, "pretokenized_dataset", False)
+        and mtp_depth > 0
+        and not model_args.mtp_attention_flexible
+    ):
+        raise ValueError(
+            "pretokenized GLM MoE DSA MTP requires mtp_attention_flexible=true"
+        )
+
+    model_config.fp32_residual_connection = (
+        training_args.fp32_residual_connection
+    )
+    model_config.moe_token_dispatcher_type = getattr(
+        training_args, "moe_token_dispatcher_type", "alltoall"
+    )
+    model_config.moe_router_bias_update_rate = float(
+        getattr(training_args, "moe_router_bias_update_rate", 0.001)
+    )
+    moe_expert_fusion = getattr(training_args, "moe_expert_fusion", None)
+    if moe_expert_fusion is not None:
+        model_config.moe_expert_fusion = bool(moe_expert_fusion)
+    # Apply parsed CLI/YAML values after the provider has received model defaults.
+    for field_name in (
+        "bias_activation_fusion",
+        "overlap_p2p_comm",
+        "batch_p2p_comm",
+        "variable_seq_lengths",
+    ):
+        value = getattr(training_args, field_name, None)
+        if value is not None:
+            setattr(model_config, field_name, value)
+    for parallel_field in (
+        "tensor_model_parallel_size",
+        "pipeline_model_parallel_size",
+        "context_parallel_size",
+        "expert_model_parallel_size",
+    ):
+        configured_size = int(getattr(training_args, parallel_field, -1))
+        setattr(model_config, parallel_field, max(configured_size, 1))
+    model_config.sequence_parallel = bool(
+        getattr(training_args, "sequence_parallel", False)
+    )
+    configured_expert_tensor_parallel_size = int(
+        getattr(training_args, "expert_tensor_model_parallel_size", -1)
+    )
+    expert_tensor_parallel_size = (
+        1
+        if configured_expert_tensor_parallel_size == -1
+        else configured_expert_tensor_parallel_size
+    )
+    if expert_tensor_parallel_size < 1:
+        raise ValueError(
+            "GLM MoE DSA expert_tensor_model_parallel_size must be -1 or at least 1, "
+            f"got {configured_expert_tensor_parallel_size}"
+        )
+    model_config.expert_tensor_parallel_size = expert_tensor_parallel_size
+    if model_args.persist_layer_norm is not None:
+        model_config.persist_layer_norm = model_args.persist_layer_norm
+
+
 def freeze_param_except_mtp(model, config):
     logger.info("freeze_param_except_mtp.")
 
@@ -107,11 +288,13 @@ def freeze_param_except_mtp(model, config):
         return None
 
     # not sure can work on all model
+    mtp_depth = int(
+        getattr(config, "num_nextn_predict_layers", 0)
+        or getattr(config, "mtp_num_layers", 0)
+        or 0
+    )
     jackpot = set(
-        range(
-            config.num_hidden_layers,
-            config.num_hidden_layers + config.mtp_num_layers,
-        )
+        range(config.num_hidden_layers, config.num_hidden_layers + mtp_depth)
     )
     for name, param in model.state_dict().items():
         layer_idx = extract_layer_idx(name)
@@ -342,10 +525,26 @@ def run_sft(
         training_args.prediction_loss_only = True
 
     LlmMetaConfig.set_llm_config(model_config, training_args)
+    apply_glm_moe_dsa_training_contract(
+        model_config, training_args, model_args, data_args
+    )
+    if getattr(model_config, "model_type", None) == "glm_moe_dsa":
+        paddle.set_flags(
+            {
+                "FLAGS_use_accuracy_compatible_kernel": bool(
+                    model_config.use_accuracy_compatible
+                )
+            }
+        )
     model_config.use_fast_layer_norm = model_args.use_fast_layer_norm
 
-    # autoregressive mtp training
-    if model_config.mtp_num_layers > 1:
+    # autoregressive mtp training (non GLM MoE DSA). GLM MoE DSA already mapped
+    # depth onto num_nextn_predict_layers and dropped mtp_num_layers so Fleet
+    # TransformerConfig does not fail-closed on the renamed key.
+    if (
+        getattr(model_config, "model_type", None) != "glm_moe_dsa"
+        and getattr(model_config, "mtp_num_layers", 0) > 1
+    ):
         tmp = model_config.mtp_num_layers
         model_config.mtp_num_layers = model_config.num_nextn_predict_layers
         model_config.num_nextn_predict_layers = tmp
@@ -497,7 +696,7 @@ def run_sft(
     runtime_timer = RuntimeTimer("Creating SFT MapDataset")
 
     # Load tokenizer & processor & dataset
-    tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path)
+    tokenizer, processor = load_tokenizer_and_processor(model_args, data_args)
     add_new_special_tokens(tokenizer, data_args.new_special_tokens_path)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
@@ -511,9 +710,6 @@ def run_sft(
     ):
         tokenizer.pad_token_id = tokenizer.eos_token_id
 
-    processor = AutoProcessor.from_pretrained(
-        model_args.model_name_or_path, use_fast=data_args.processor_use_fast
-    )
     # The multimodal plugins read the resolution bounds off the processor
     # (falling back to a hardcoded 768*768 / 32*32), so without wiring these the
     # --max_pixels / --min_pixels arguments have no way to reach image
@@ -559,6 +755,14 @@ def run_sft(
         "truncation_strategy": data_args.truncation_strategy,
         "skip_warmup": data_args.skip_warmup,
     }
+    # GeneratingArguments.enable_thinking defaults to False for VL generate.
+    # Copying that onto every SFT template overwrites qwen3_vl's registered
+    # True and shifts the Qwen3-VL CI GT by ~6e-4. Only glm5_2 needs the
+    # YAML/CLI value; other templates keep register_template defaults.
+    if data_args.template == "glm5_2":
+        dataset_config["enable_thinking"] = getattr(
+            generating_args, "enable_thinking", None
+        )
 
     if dataset_config["template_backend"] == "custom":
         template_instance = get_template_and_fix_tokenizer(dataset_config)
@@ -725,6 +929,20 @@ def run_sft(
             skip_warmup=data_args.skip_warmup,
             warmup_only_rank0=data_args.warmup_only_rank0,
         )
+        if data_args.pretokenized_dataset:
+            validate_pretokenized_offline_dataset(
+                train_dataset, data_args.max_seq_len
+            )
+            if (
+                training_args.num_nextn_predict_layers > 0
+                and data_args.pretokenized_pad_token_id is None
+            ):
+                raise ValueError(
+                    "pretokenized_pad_token_id is required when MTP padding is enabled"
+                )
+            logger.info(
+                "Using validated pretokenized offline dataset without text tokenization."
+            )
         if training_args.do_eval:
             eval_file_path = os.path.join(data_args.input_dir, "eval")
             eval_dataset = create_indexed_dataset(
@@ -802,6 +1020,11 @@ def run_sft(
                 model_args=model_args,
                 max_seq_len=max_seq_len,
                 padding_free=data_args.padding_free,
+                input_pad_token_id=(
+                    data_args.pretokenized_pad_token_id
+                    if data_args.pretokenized_dataset
+                    else None
+                ),
             )
 
     if training_args.max_steps == -1:
@@ -955,11 +1178,7 @@ def run_sft(
             f"Total_Tokens_per_second_per_gpu: {total_tokens_per_second_per_gpu} "
         )
         if not training_args.autotuner_benchmark:
-            trainer.save_model(
-                merge_tensor_parallel=training_args.tensor_model_parallel_size
-                > 1,
-                last_fc_to_hf=True,
-            )
+            save_final_hf_model_if_requested(trainer, training_args)
             trainer.log_metrics("train", train_result.metrics)
             trainer.save_metrics("train", train_result.metrics)
             trainer.save_state()
