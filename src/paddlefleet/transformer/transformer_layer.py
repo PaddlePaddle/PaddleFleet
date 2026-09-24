@@ -685,7 +685,10 @@ class TransformerLayer(nn.Layer):
         """Create or retrieve the current micro-batch's DSA top-k holder.
 
         The holder travels with ``dict_args`` through one local pipeline
-        segment. Recompute receives the same object explicitly, so producer and
+        segment. It lives below ``_block_cache_meta``, a metadata key that
+        Fleet's pipeline tuple conversion deliberately drops at a PP boundary;
+        the holder therefore cannot be sent to another stage as a non-tensor.
+        Recompute receives the same object explicitly, so producer and
         consumer never fall back to a config-global slot shared by other
         micro-batches or virtual pipeline chunks.
         """
@@ -697,10 +700,18 @@ class TransformerLayer(nn.Layer):
         )
         if not share_enabled:
             return {}
-        holder = dict_args.get("dsa_topk_holder")
+        metadata = dict_args.get("_block_cache_meta")
+        if metadata is None:
+            metadata = {}
+            dict_args["_block_cache_meta"] = metadata
+        if not isinstance(metadata, dict):
+            raise TypeError(
+                "_block_cache_meta must be a dict when DSA top-k sharing is enabled"
+            )
+        holder = metadata.get("dsa_topk_holder")
         if holder is None:
             holder = {}
-            dict_args["dsa_topk_holder"] = holder
+            metadata["dsa_topk_holder"] = holder
         return {"dsa_topk_holder": holder}
 
     def forward(

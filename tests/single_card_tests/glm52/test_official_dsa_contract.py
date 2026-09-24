@@ -745,6 +745,24 @@ class TestDsaPipelineSharing(TestCase):
                 descriptor.layer_func = spec
         model._validate_dsa_pipeline_sharing()
 
+    def test_dsa_holder_stays_in_dropped_pipeline_metadata(self):
+        from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+        layer = TransformerLayer.__new__(TransformerLayer)
+        layer.config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            dsa_indexer_types=["full", "full", "full", "shared"],
+        )
+        args = {}
+        kwargs = layer._dsa_topk_holder_kwargs(args)
+        self.assertIs(
+            kwargs["dsa_topk_holder"],
+            args["_block_cache_meta"]["dsa_topk_holder"],
+        )
+        self.assertNotIn("dsa_topk_holder", args)
+
     def test_decoder_cross_segment_is_rejected_before_build(self):
         from unittest.mock import patch
 
