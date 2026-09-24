@@ -1283,7 +1283,7 @@ class HyperBodyPretrainedModel(PretrainedModel):
             st.append(
                 f"{hf}.mlp.experts.$EXPERT_ID.gate_proj.weight^T, "
                 f"{hf}.mlp.experts.$EXPERT_ID.up_proj.weight^T "
-                f"-> {pd}.mlp.experts.$EXPERT_ID.up_gate_proj.weight, fused_ffn"
+                f"-> {pd}.mlp.experts.$EXPERT_ID.up_gate_proj.weight, axis=1"
             )
             st.append(
                 f"{hf}.mlp.experts.$EXPERT_ID.down_proj.weight^T "
@@ -1525,7 +1525,7 @@ class HyperBodyPretrainedModel(PretrainedModel):
                 st += [
                     f"{pd}.mlp.experts.{e}.up_gate_proj.weight "
                     f"-> {pd}.mlp.experts.{e}.gate_proj.weight, "
-                    f"{pd}.mlp.experts.{e}.up_proj.weight, fused_ffn",
+                    f"{pd}.mlp.experts.{e}.up_proj.weight, axis=1",
                     f"{pd}.mlp.experts.{e}.gate_proj.weight^T "
                     f"-> {hf}.mlp.experts.{e}.gate_proj.weight",
                     f"{pd}.mlp.experts.{e}.up_proj.weight^T "
