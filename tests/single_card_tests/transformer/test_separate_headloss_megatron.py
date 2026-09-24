@@ -222,6 +222,7 @@ class TestMainLanguageLossMegatron(unittest.TestCase):
 
     def _make(self, K):
         loss = MainLanguageLoss.__new__(MainLanguageLoss)
+        loss.use_accuracy_compatible = False
         cfg = MagicMock()
         cfg.num_nextn_predict_layers = K
         cfg.mtp_load_weight_only = False

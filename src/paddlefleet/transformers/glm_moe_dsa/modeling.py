@@ -29,6 +29,7 @@ class GlmMoeDsaModelProvider(GLMMoEModelProvider):
     """GLM-5.2 defaults that differ from GLM-4 MoE."""
 
     moe_router_use_fp32_master: bool = True
+    defer_token_normalization: bool = True
 
 
 class GlmMoeDsaPreTrainedModel(PretrainedModel):
