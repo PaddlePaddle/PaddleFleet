@@ -19,8 +19,10 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 import paddle
-from paddle.distributed.fleet.meta_parallel import LayerSpec
+from paddle.distributed.fleet.meta_parallel import LayerSpec, ScheduleNode
 from paddle.nn.functional import layer_norm, rms_norm
+
+from paddlefleet.jit import jit_fuser
 
 try:
     from paddle.distributed.fleet.utils.sequence_parallel_utils import (
@@ -32,10 +34,6 @@ except ImportError:
     def mark_as_sequence_parallel_parameter(parameter):
         return parameter
 
-
-from paddle.distributed.fleet.meta_parallel import ScheduleNode
-
-from paddlefleet.jit import jit_fuser
 
 if TYPE_CHECKING:
     from paddle import Tensor
@@ -82,9 +80,13 @@ class RMSNorm(paddle.nn.Layer):
             hidden_states = hidden_states.astype(paddle.float32)
             weight = self.weight.astype(paddle.float32)
         else:
+            # Ensure hidden_states dtype matches weight dtype for rms_norm
             if hidden_states.dtype != self.weight.dtype:
                 hidden_states = hidden_states.astype(self.weight.dtype)
             weight = self.weight
+        # Leave-one-out 925e25a9: fused rms_norm is required for IEEE
+        # step-1. The FLAG=1 eager PyLayer moved step-1 off 11.81065 onto
+        # 11.81135 / the live 11.821 family.
         rms_norm_out = rms_norm(
             hidden_states,
             hidden_states.shape[-1:],
