@@ -76,9 +76,6 @@ else:
     FleetGPTModel = None
 
 from paddle.distributed import fleet
-from paddlefleet.distributed.model import (
-    distributed_model as paddlefleet_distributed_model,
-)
 from paddle.distributed.fleet.meta_optimizers.dygraph_optimizer.hybrid_parallel_optimizer import (
     HybridParallelOptimizer,
 )
@@ -5439,7 +5436,7 @@ class Trainer:
                 else None
             )
 
-            model = paddlefleet_distributed_model(model)
+            model = fleet.distributed_model(model)
             if prepare_pipeline_inputs_func is not None:
                 model._prepare_pipeline_inputs_func = (
                     prepare_pipeline_inputs_func
@@ -5576,7 +5573,7 @@ class Trainer:
                     mix_precision_utils.MixPrecisionLayer(
                         model, dtype=self.amp_dtype
                     )  # return value has no use
-                model = paddlefleet_distributed_model(model)
+                model = fleet.distributed_model(model)
 
                 if self.args.amp_master_grad:
                     self.optimizer = mix_precision_utils.MixPrecisionOptimizer(
@@ -5651,7 +5648,7 @@ class Trainer:
                     model, dtype=self.amp_dtype
                 )  # return value has no use
 
-            model = paddlefleet_distributed_model(model)
+            model = fleet.distributed_model(model)
             assert self.optimizer is not None, (
                 "Tensor parallel mode need decorate optimizer, pelease init optimizer."
             )
@@ -7175,14 +7172,12 @@ class Trainer:
                 self.model_wrapped, PipelineLayer
             ):
                 # NOTE(gongenlei): when do_train=False, do_eval=True, we need to wrap model for pipeline
-                self.model_wrapped = paddlefleet_distributed_model(
-                    self.model_wrapped
-                )
+                self.model_wrapped = fleet.distributed_model(self.model_wrapped)
             if isinstance(self.model_wrapped, LoRAModel) and isinstance(
                 self.model_wrapped.model, PipelineLayer
             ):
                 # NOTE(liuting): when do_train=False, do_eval=True, lora=True, we need to wrap model for pipeline
-                self.model_wrapped = paddlefleet_distributed_model(
+                self.model_wrapped = fleet.distributed_model(
                     self.model_wrapped.model
                 )
             model = self.model_wrapped

@@ -30,7 +30,6 @@ from paddle.distributed.fleet.meta_parallel import (
 )
 from paddle.distributed.fleet.recompute import recompute
 
-from paddlefleet.distributed.model import distributed_model
 from paddlefleet.transformer import indexcache_state as sm
 from paddlefleet.transformer.csa_attention import (
     CompressedSparseAttention,
@@ -211,7 +210,7 @@ def _run_native_pipeline_cases():
         model.config = SimpleNamespace(
             indexcache_topk_pattern=actions.replace("H", "")
         )
-        pipeline = distributed_model(model)
+        pipeline = fleet.distributed_model(model)
         assert (
             type(model) is PipelineLayer and type(pipeline) is PipelineParallel
         )

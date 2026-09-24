@@ -27,8 +27,7 @@ from paddle.distributed.fleet.meta_parallel.pp_utils import (
     utils as paddle_utils,
 )
 
-from paddlefleet.distributed.model import distributed_model
-from paddlefleet.models.gpt.gpt_model import GPTModel
+from paddlefleet.models.gpt.gpt_model import GPTModel, GPTSublayersSpec
 from paddlefleet.transformer.csa_attention import CompressedSparseAttention
 from paddlefleet.transformer.indexcache_state import apply_stop_gradient_mask
 
@@ -73,68 +72,147 @@ class TestIndexCacheNativePipeline(unittest.TestCase):
                 ]
                 self.assertEqual(actual, expected)
 
-    def test_disabled_factory_delegates_without_patching(self):
-        original = PipelineParallel._backward_step
-        model = SimpleNamespace(
-            config=SimpleNamespace(indexcache_topk_pattern=None)
+    def _config(self, **overrides):
+        values = {
+            "indexcache_topk_pattern": "FS",
+            "pipeline_model_parallel_size": 1,
+            "virtual_pipeline_model_parallel_size": None,
+            "tie_word_embeddings": False,
+            "enable_mtp_magic_send": False,
+            "gpt_model_use_experimental_version": False,
+            "num_nextn_predict_layers": 0,
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def _strategy(self, amp=False, **pp_overrides):
+        pp_config = {
+            "use_dualpipev": False,
+            "forward_backward_overlap_scheduler": False,
+        }
+        pp_config.update(pp_overrides)
+        return SimpleNamespace(
+            amp=amp, hybrid_configs={"pp_configs": SimpleNamespace(**pp_config)}
         )
-        with patch(
-            "paddlefleet.distributed.model.fleet.distributed_model",
-            return_value=model,
-        ) as native:
-            self.assertIs(distributed_model(model), model)
-            native.assert_called_once_with(model)
+
+    def _build_model(self, config):
+        spec = GPTSublayersSpec(
+            embedding=paddle.nn.Identity,
+            head_empty_layers=[],
+            transformer_layers=[],
+            tail_empty_layers=[],
+            layer_norm=paddle.nn.Identity,
+            lm_head=paddle.nn.Identity,
+        )
+        return GPTModel(
+            spec, config=config, tie_word_embeddings=False, num_stages=1
+        )
+
+    def test_single_stage_build_and_backward_without_fleet_initialization(self):
+        original = PipelineParallel._backward_step
+        for vpp in (None, 1):
+            with (
+                self.subTest(vpp=vpp),
+                patch(
+                    "paddlefleet.models.gpt.gpt_model.fleet.fleet._user_defined_strategy",
+                    None,
+                    create=True,
+                ),
+            ):
+                model = self._build_model(
+                    self._config(virtual_pipeline_model_parallel_size=vpp)
+                )
+                self.assertIs(model.forward.__func__, PipelineLayer.forward)
+                inputs = paddle.ones([2, 3])
+                inputs.stop_gradient = False
+                model(inputs).sum().backward()
+                self.assertTrue(paddle.all(inputs.grad == 1).item())
         self.assertIs(PipelineParallel._backward_step, original)
 
-    def test_enabled_factory_delegates_and_rejects_unsupported_modes(self):
-        model = object.__new__(PipelineLayer)
-        paddle.nn.Layer.__init__(model)
-        model.config = SimpleNamespace(indexcache_topk_pattern="FS")
-        model._num_virtual_pipeline_stages = 1
-        pp_config = SimpleNamespace(
-            use_dualpipev=False, forward_backward_overlap_scheduler=False
-        )
-        strategy = SimpleNamespace(
-            amp=False, hybrid_configs={"pp_configs": pp_config}
-        )
-        hcg = SimpleNamespace(get_pipe_parallel_world_size=lambda: 2)
-        marker = object()
-        with (
-            patch(
-                "paddlefleet.distributed.model.fleet.fleet._user_defined_strategy",
-                strategy,
-                create=True,
+    def test_unsupported_scheduling_rejected_before_layers_are_built(self):
+        cases = [
+            (
+                {"virtual_pipeline_model_parallel_size": 2},
+                self._strategy(),
+                {},
+                "VPP=1",
             ),
-            patch(
-                "paddlefleet.distributed.model.fleet.get_hybrid_communicate_group",
-                return_value=hcg,
+            ({}, self._strategy(), {"use_dualpipev": True}, "DualPipeV"),
+            ({}, self._strategy(use_dualpipev=True), {}, "DualPipeV"),
+            (
+                {},
+                self._strategy(forward_backward_overlap_scheduler=True),
+                {},
+                "compute-overlap",
             ),
-            patch(
-                "paddlefleet.distributed.model.fleet.distributed_model",
-                return_value=marker,
-            ) as native,
+            (
+                {"pipeline_model_parallel_size": 2},
+                self._strategy(amp=True),
+                {},
+                "Trainer-managed AMP",
+            ),
+        ]
+        for config_updates, strategy, kwargs, message in cases:
+            with (
+                self.subTest(
+                    config=config_updates, strategy=strategy, kwargs=kwargs
+                ),
+                patch(
+                    "paddlefleet.models.gpt.gpt_model.fleet.fleet._user_defined_strategy",
+                    strategy,
+                    create=True,
+                ),
+                patch.object(GPTModel, "get_layer_desc_list") as build_layers,
+            ):
+                with self.assertRaisesRegex(NotImplementedError, message):
+                    GPTModel(
+                        None,
+                        config=self._config(**config_updates),
+                        tie_word_embeddings=False,
+                        **kwargs,
+                    )
+                build_layers.assert_not_called()
+
+    def test_strategy_amp_allowed_without_pipeline_parallel(self):
+        with patch(
+            "paddlefleet.models.gpt.gpt_model.fleet.fleet._user_defined_strategy",
+            self._strategy(amp=True),
+            create=True,
         ):
-            self.assertIs(distributed_model(model), marker)
-            native.assert_called_once_with(model)
-            native.reset_mock()
-            for attribute in (
-                "use_dualpipev",
-                "forward_backward_overlap_scheduler",
+            self.assertIsInstance(self._build_model(self._config()), GPTModel)
+
+    def test_supported_pipeline_and_disabled_indexcache_reach_layer_construction(
+        self,
+    ):
+        for enabled in (True, False):
+            config = self._config(
+                indexcache_topk_pattern="FS" if enabled else None,
+                virtual_pipeline_model_parallel_size=1 if enabled else 2,
+                pipeline_model_parallel_size=2,
+            )
+            strategy = self._strategy(
+                amp=not enabled,
+                use_dualpipev=not enabled,
+                forward_backward_overlap_scheduler=not enabled,
+            )
+            with (
+                self.subTest(indexcache=enabled),
+                patch(
+                    "paddlefleet.models.gpt.gpt_model.fleet.fleet._user_defined_strategy",
+                    strategy,
+                    create=True,
+                ),
+                patch.object(
+                    GPTModel,
+                    "get_layer_desc_list",
+                    side_effect=RuntimeError("build layers"),
+                ) as build_layers,
             ):
-                setattr(pp_config, attribute, True)
-                with self.assertRaises(NotImplementedError):
-                    distributed_model(model)
-                setattr(pp_config, attribute, False)
-            model._num_virtual_pipeline_stages = 2
-            with self.assertRaisesRegex(NotImplementedError, "VPP=1"):
-                distributed_model(model)
-            model._num_virtual_pipeline_stages = 1
-            strategy.amp = True
-            with self.assertRaisesRegex(
-                NotImplementedError, "Trainer-managed AMP"
-            ):
-                distributed_model(model)
-            native.assert_not_called()
-            hcg.get_pipe_parallel_world_size = lambda: 1
-            self.assertIs(distributed_model(model), marker)
-            native.assert_called_once_with(model)
+                with self.assertRaisesRegex(RuntimeError, "build layers"):
+                    GPTModel(
+                        None,
+                        config=config,
+                        tie_word_embeddings=False,
+                        use_dualpipev=not enabled,
+                    )
+                build_layers.assert_called_once()
