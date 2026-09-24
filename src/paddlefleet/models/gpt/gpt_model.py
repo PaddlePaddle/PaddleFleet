@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+from bisect import bisect_right
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -42,6 +43,11 @@ from paddlefleet.models.gpt.lm_head import (
     GPTMainLMHead,
     GPTMTPLMHead,
 )
+from paddlefleet.recompute_utils import (
+    has_recovered,
+    module_needs_recompute,
+    need_full_recompute,
+)
 from paddlefleet.transformer.multi_token_prediction import (
     MultiTokenPredictionLayer,
 )
@@ -52,6 +58,25 @@ from paddlefleet.transformer.transformer_layer import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _recomputes_dsa_core_attention(config, layer_number, is_mtp_layer):
+    """Whether recompute replays the DSA core attention of this layer.
+
+    Must track every wrapper that can enclose it: the ``RECOVER_STEP`` window
+    and full recompute in ``TransformerLayer.forward``, and ``core_attn``
+    selective recompute in the attention module.
+    """
+    if not has_recovered():
+        return True
+    if config.recompute_granularity == "full":
+        return need_full_recompute(layer_number, config)
+    if config.recompute_granularity == "selective":
+        return module_needs_recompute(
+            "core_attn", layer_number, config, is_mtp_layer=is_mtp_layer
+        )
+    return False
+
 
 _VISION_MERGE_PREFIX = "vision_merge."
 _VISION_MODEL_PREFIX = "vision_merge.vision_model."
@@ -254,6 +279,103 @@ class GPTModel(PipelineLayer):
 
         # Tie GPTMTPLMHead weight to GPTMainLMHead weight on the same stage.
         self._tie_mtp_lm_head_weight()
+
+    def _validate_dsa_pipeline_sharing(self):
+        """Reject shared-indexer layouts the top-k holder cannot serve.
+
+        The holder is process-local and keeps one top-k per producer. It
+        cannot carry top-k across ranks or interleaved chunks, so producer and
+        consumer must share a PP segment. Under pipelining a stage also runs
+        later micro-batches' forwards before an earlier one's backward, so a
+        recompute replay of a consumer would read a newer micro-batch's top-k.
+
+        Segmentation is already resolved here, but no local layers have been
+        constructed. Inspect the global descriptors so every rank rejects the
+        same unsupported layout before allocating model parameters or running
+        pipeline collectives.
+        """
+        from paddlefleet.transformer.dsa_attention import (
+            DSAttention,
+            decoder_dsa_logical_layer,
+            resolve_dsa_indexer_layout,
+        )
+
+        producers = {}
+        consumers = []
+        for index, descriptor in enumerate(self._layers_desc):
+            # Fleet versions expose the LayerSpec through either
+            # ``layer_func`` or ``layer_spec``. Prefer the former when it is
+            # itself a spec, then fall back to the latter; assuming only one
+            # spelling silently skips every DSA descriptor on the other API.
+            spec = getattr(descriptor, "layer_func", None)
+            legacy_spec = getattr(descriptor, "layer_spec", None)
+            if legacy_spec is not None and not hasattr(
+                spec, "sublayers_spec"
+            ):
+                spec = legacy_spec
+            sublayers = getattr(spec, "sublayers_spec", None)
+            mtp_transformer = getattr(sublayers, "transformer_layer", None)
+            if mtp_transformer is not None:
+                if self.config.mtp_load_weight_only:
+                    continue
+                spec = mtp_transformer
+                sublayers = spec.sublayers_spec
+            attention = getattr(sublayers, "self_attn", None)
+            core = getattr(
+                getattr(attention, "sublayers_spec", None),
+                "core_attention",
+                None,
+            )
+            if getattr(core, "layer", None) is not DSAttention:
+                continue
+
+            kwargs = getattr(spec, "extra_kwargs", {})
+            if "layer_number" not in kwargs:
+                continue
+            layer_number = kwargs["layer_number"]
+            is_mtp = kwargs.get("is_mtp_layer", False)
+            _, skip_topk, _, source = resolve_dsa_indexer_layout(
+                self.config, layer_number, is_mtp
+            )
+            segment = bisect_right(self.segment_parts, index) - 1
+            if skip_topk:
+                consumers.append((layer_number, is_mtp, source, segment))
+            elif not is_mtp:
+                logical_layer = decoder_dsa_logical_layer(
+                    self.config, layer_number
+                )
+                producers[logical_layer] = segment
+
+        pipelined = len(self.segment_parts) > 2
+        for layer_number, is_mtp, source, segment in consumers:
+            kind = "MTP" if is_mtp else "decoder"
+            producer_segment = producers.get(source)
+            if producer_segment != segment:
+                raise ValueError(
+                    f"DSA shared {kind} layer {layer_number} is in pipeline "
+                    f"segment {segment}, but decoder top-k producer {source} "
+                    f"is in segment {producer_segment}. Cross-segment DSA "
+                    "top-k sharing is not supported. Co-locate the producer "
+                    "and consumer in one segment or configure full indexers."
+                )
+            if pipelined and _recomputes_dsa_core_attention(
+                self.config, layer_number, is_mtp
+            ):
+                raise ValueError(
+                    f"DSA shared {kind} layer {layer_number} is recomputed "
+                    "under pipeline parallelism, so its replay would read "
+                    f"decoder top-k producer {source}'s indices from a later "
+                    "micro-batch. Exclude this layer from recompute or "
+                    "configure full indexers."
+                )
+
+    def _build_layer(self):
+        self._validate_dsa_pipeline_sharing()
+        return super()._build_layer()
+
+    def _build_chunked_layer(self):
+        self._validate_dsa_pipeline_sharing()
+        return super()._build_chunked_layer()
 
     def _get_weight_only_params(self):
         """Get all parameters marked with is_weight_only_mtp flag."""

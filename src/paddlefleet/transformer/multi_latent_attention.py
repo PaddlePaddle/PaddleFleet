@@ -890,6 +890,10 @@ class MultiLatentAttention(Attention):
         # against the callee's signature.
         if self.mqa_latent and kwargs.get("docmask_mb_idx") is not None:
             core_attn_extra["docmask_mb_idx"] = kwargs["docmask_mb_idx"]
+        if kwargs.get("dsa_topk_holder") is not None and hasattr(
+            self.core_attention, "_lookup_index_share_topk"
+        ):
+            core_attn_extra["dsa_topk_holder"] = kwargs["dsa_topk_holder"]
         # ``dsa_indexer_loss_bwd_p2p_overlap`` must tell the real forward pass
         # from the recompute replay, and the two differ only in whether the layer
         # body is wrapped at all -- a per-layer property
