@@ -299,6 +299,56 @@ OPTIMIZER_NAME = "optimizer"
 DIST_CKPT_PATH = "dist_ckpt"
 DIST_MODEL_PATH = "dist_model"
 
+FSDP_DEFAULT_UNIT_LAYERS = ("TransformerLayer", "Qwen3VLTextDecoderLayer", "Qwen3MoeDecoderLayer")
+FSDP_EXTRA_UNIT_LAYERS = (
+    "HyperConnectionTransformerLayer",
+    "HyperConnectionExpandLayer",
+    "HyperConnectionContractLayer",
+)
+
+
+def _mark_no_weight_decay_params(model, optimizer):
+    """Use the optimizer's actual predicate, including the HF name-based rule."""
+    if optimizer is None or not hasattr(optimizer, "_apply_decay_param_fun"):
+        raise ValueError("FSDP requires an optimizer exposing _apply_decay_param_fun")
+    decay_fun = optimizer._apply_decay_param_fun
+    for _, param in model.named_parameters():
+        # Reset stale tags too. A None callback means all parameters may decay;
+        # explicit optimizer-group weight_decay settings remain group-owned.
+        param.no_weight_decay = decay_fun is not None and not decay_fun(param.name)
+
+
+def _mark_muon_params(model, muon_param_info_map):
+    """Use optimizer metadata, never re-infer Muon eligibility from shape."""
+    if muon_param_info_map is None:
+        return
+    missing = []
+    for name, param in model.named_parameters():
+        info = muon_param_info_map.get(param.name)
+        if info is None and not param.stop_gradient:
+            missing.append(name)
+        param.use_muon = bool(info is not None and info.use_muon)
+    if missing:
+        raise ValueError(f"muon_param_info_map is missing trainable model params: {missing[:8]}")
+
+
+def _apply_fsdp(model, mp_policy, optimizer):
+    from paddle.distributed.fsdp.fully_shard_fusion import FullyShardFusion
+
+    _mark_no_weight_decay_params(model, optimizer)
+    _mark_muon_params(model, getattr(optimizer, "_muon_param_info_map", None))
+    # Explicit unit lists replace Paddle defaults. mHC reads descendant weights
+    # directly, so its enclosing units must all-gather the entire subtree.
+    unit_layers = list(dict.fromkeys(FSDP_DEFAULT_UNIT_LAYERS + FSDP_EXTRA_UNIT_LAYERS))
+    # Keep the module-owned context required by check's save/load APIs.
+    model._fsdp_context = FullyShardFusion(
+        model,
+        fsdp_unit_layers=unit_layers,
+        enable_tensor_fusion_and_overlap=os.environ.get("FSDP_OVERLAP", "1") != "0",
+        mp_policy=mp_policy,
+    )
+    return model
+
 
 class Trainer:
     """
@@ -3530,6 +3580,7 @@ class Trainer:
                         if (
                             not args.enable_auto_parallel
                             and self.args.gradient_accumulation_steps > 1
+                            and not self._fsdp_owns_grads()
                         ):
                             paddle.device.synchronize()
                             parameters = (
@@ -5272,6 +5323,21 @@ class Trainer:
             )
         return dist_optimizer
 
+    def _fsdp_owns_grads(self):
+        # Do not let another Trainer's process-global context disable our scaling.
+        return getattr(self, "_fsdp_grad_accum_configured", False)
+
+    def _set_fsdp_grad_accum_steps(self):
+        from paddle.distributed.fsdp._fsdp_context import get_fsdp_context
+
+        ctx = get_fsdp_context()
+        if ctx is None or not hasattr(ctx, "set_grad_accum_steps"):
+            raise RuntimeError("FSDP requires a context with set_grad_accum_steps")
+        # training_step divides only the detached/logging loss AFTER backward.
+        # Fused buffers must average every gradient, including unsharded experts.
+        ctx.set_grad_accum_steps(self.args.gradient_accumulation_steps)
+        self._fsdp_grad_accum_configured = True
+
     def _wrap_model(self, model, training=True):
         if self.args.enable_auto_parallel:
             model = parallelize.parallelize_model(
@@ -5391,6 +5457,7 @@ class Trainer:
         # optimizer-state sharding, registers the main_grad hooks itself and must therefore run
         # before MixPrecisionLayer, so the wrapping order below differs from the group-sharded path.
         in_fsdp_mode = ShardingOption.FSDP in self.args.sharding
+        self._fsdp_module = None
         fsdp_mp_policy = None
         if (
             in_fsdp_mode
@@ -5479,11 +5546,8 @@ class Trainer:
                 fsdp_layers = (
                     model._layers if hasattr(model, "_layers") else model
                 )
-                fully_shard(
-                    fsdp_layers,
-                    enable_tensor_fusion_and_overlap=True,
-                    mp_policy=fsdp_mp_policy,
-                )
+                _apply_fsdp(fsdp_layers, fsdp_mp_policy, self.optimizer)
+                self._set_fsdp_grad_accum_steps()
                 if self.args.amp_master_grad:
                     mix_precision_utils.MixPrecisionLayer(
                         fsdp_layers, dtype=self.amp_dtype
@@ -5491,6 +5555,8 @@ class Trainer:
                     self.optimizer = mix_precision_utils.MixPrecisionOptimizer(
                         self.optimizer
                     )
+                self._fsdp_module = fsdp_layers
+                fsdp_layers._fsdp_context.bind_optimizer(self.optimizer)
             else:
                 if self.args.amp_master_grad:
                     self.optimizer = mix_precision_utils.MixPrecisionOptimizer(
@@ -5515,11 +5581,8 @@ class Trainer:
         if not in_pipeline_parallel_mode and in_sharding_parallel_mode:
             # Sharded DDP!
             if in_fsdp_mode:
-                fully_shard(
-                    model,
-                    enable_tensor_fusion_and_overlap=True,
-                    mp_policy=fsdp_mp_policy,
-                )
+                _apply_fsdp(model, fsdp_mp_policy, self.optimizer)
+                self._set_fsdp_grad_accum_steps()
                 if self.args.amp_master_grad:
                     mix_precision_utils.MixPrecisionLayer(
                         model, dtype=self.amp_dtype
@@ -5527,6 +5590,8 @@ class Trainer:
                     self.optimizer = mix_precision_utils.MixPrecisionOptimizer(
                         self.optimizer
                     )
+                self._fsdp_module = model
+                model._fsdp_context.bind_optimizer(self.optimizer)
             elif self.args.tensor_model_parallel_size > 1:
                 hcg = fleet.get_hybrid_communicate_group()
                 assert (
@@ -5958,19 +6023,6 @@ class Trainer:
 
         return loss.detach()
 
-    def _fsdp_all_gather_params(self):
-        from paddle.distributed.fsdp._fsdp_context import get_fsdp_context
-
-        fsdp_context = get_fsdp_context()
-        if fsdp_context is None:
-            logger.warning(
-                "sharding=fsdp but no fsdp context is registered, skip param all_gather."
-            )
-            return
-        comm_manager = fsdp_context.comm_manager
-        for group in fsdp_context.buffer_manager.buffer_groups:
-            comm_manager.all_gather_params(group.params)
-
     def save_model(
         self,
         output_dir: Optional[str] = None,
@@ -5999,7 +6051,7 @@ class Trainer:
             )
 
         if ShardingOption.FSDP in self.args.sharding:
-            self._fsdp_all_gather_params()
+            self._fsdp_module._fsdp_context.all_gather_params()
 
         if self.args.should_save_model_state:
             self._save(
