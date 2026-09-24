@@ -11,17 +11,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""How ``use_accuracy_compatible`` interacts with ``max_grad_norm``.
+"""Accuracy targets select the clipping recipe and preserve its threshold.
 
-The Megatron alignment suite compares against a reference that is run without
-gradient clipping, so ``Trainer.__init__`` forces the threshold off for that
-target. ``max_grad_norm`` defaults to 1.0, which means a config that merely does
-not mention it still clips: on PaddleFleet's ``GLM45Air_EP2`` alignment case the
-real global norm is ~90, so every gradient gets rescaled by ~0.01, step 1 still
-matches bit-for-bit and the comparison diverges from step 2 onwards.
-
-The ``"hf"`` target is exempt because its reference *does* clip and
-``Trainer._build_grad_clip()`` supplies the recipe that reproduces it.
+Both sides of an alignment run must declare matching thresholds. The target
+must not silently override an explicit user value or the documented default.
 """
 
 import shutil
@@ -51,18 +44,15 @@ class TestAccuracyTargetGradClip(unittest.TestCase):
         )
         return Trainer(model=model, args=args).args.max_grad_norm
 
-    def test_megatron_target_disables_clipping(self):
-        """The default 1.0 must not survive into a Megatron-aligned run."""
-        self.assertEqual(self._max_grad_norm("megatron"), 0.0)
+    def test_megatron_target_keeps_default_threshold(self):
+        self.assertEqual(self._max_grad_norm("megatron"), 1.0)
 
-    def test_bare_true_disables_clipping(self):
-        """``True`` is the historical spelling of the Megatron target."""
-        self.assertEqual(self._max_grad_norm(True), 0.0)
+    def test_bare_true_keeps_default_threshold(self):
+        self.assertEqual(self._max_grad_norm(True), 1.0)
 
-    def test_explicit_threshold_is_still_overridden(self):
-        """Alignment beats an explicit threshold; the warning says so."""
+    def test_explicit_threshold_is_preserved(self):
         self.assertEqual(
-            self._max_grad_norm("megatron", max_grad_norm=5.0), 0.0
+            self._max_grad_norm("megatron", max_grad_norm=5.0), 5.0
         )
 
     def test_already_off_is_left_alone(self):
