@@ -795,6 +795,7 @@ class _InferenceKwargsMLA(MultiLatentAttention):
         self.use_vha_postmix = False
         self.gated_attention = False
         self.use_rr_flash_attention = False
+        self.use_rr_o_proj = False
         self.o_proj = lambda out: (out, None)
 
     def get_query_key_value_tensors(self, *args, **kwargs):

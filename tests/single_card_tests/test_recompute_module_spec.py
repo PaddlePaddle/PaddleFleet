@@ -22,6 +22,7 @@ plus the startup validation in ``validate_recompute_modules``.
 import unittest
 
 from paddlefleet.recompute_utils import (
+    make_refined_recompute,
     module_needs_recompute,
     module_needs_refined_recompute,
     validate_recompute_modules,
@@ -344,6 +345,72 @@ class TestRefinedRecompute(unittest.TestCase):
         self.assertFalse(
             module_needs_refined_recompute("flash_attn", 0, config)
         )
+
+
+class _Owner:
+    def __init__(self, config, layer_number=0, is_mtp_layer=False):
+        self.config = config
+        self.layer_number = layer_number
+        self.is_mtp_layer = is_mtp_layer
+
+
+def _rr_config(**kwargs):
+    """A config whose every layer is under full recompute, as RR needs."""
+    kwargs.setdefault("num_hidden_layers", 8)
+    kwargs.setdefault("recompute_granularity", "full")
+    kwargs.setdefault("recompute_method", "uniform")
+    kwargs.setdefault("recompute_num_layers", 1)
+    return TransformerConfig(**kwargs)
+
+
+class TestMakeRefinedRecompute(unittest.TestCase):
+    def test_enabled_point_gets_a_named_boundary(self):
+        owner = _Owner(_rr_config(recompute_modules=["mla_o_proj"]))
+        enabled, boundary = make_refined_recompute(owner, "mla_o_proj")
+        self.assertTrue(enabled)
+        self.assertEqual(boundary.name, "mla_o_proj")
+
+    def test_absent_point_builds_no_boundary(self):
+        owner = _Owner(_rr_config(recompute_modules=["flash_attn"]))
+        self.assertEqual(
+            make_refined_recompute(owner, "mla_o_proj"), (False, None)
+        )
+
+    def test_unsupported_call_site_vetoes_a_configured_point(self):
+        owner = _Owner(_rr_config(recompute_modules=["mla_o_proj"]))
+        self.assertEqual(
+            make_refined_recompute(owner, "mla_o_proj", supported=False),
+            (False, None),
+        )
+
+    def test_selective_granularity_vetoes_a_configured_point(self):
+        owner = _Owner(_config(recompute_modules=["mla_o_proj"]))
+        self.assertEqual(
+            make_refined_recompute(owner, "mla_o_proj"), (False, None)
+        )
+
+    def test_virtual_pipeline_vetoes_a_configured_point(self):
+        owner = _Owner(
+            _rr_config(
+                recompute_modules=["mla_o_proj"],
+                pipeline_model_parallel_size=2,
+                virtual_pipeline_model_parallel_size=2,
+            )
+        )
+        self.assertEqual(
+            make_refined_recompute(owner, "mla_o_proj"), (False, None)
+        )
+
+    def test_plain_pipeline_does_not_veto(self):
+        owner = _Owner(
+            _rr_config(
+                recompute_modules=["mla_o_proj"],
+                pipeline_model_parallel_size=2,
+            )
+        )
+        enabled, boundary = make_refined_recompute(owner, "mla_o_proj")
+        self.assertTrue(enabled)
+        self.assertIsNotNone(boundary)
 
 
 class TestLayerAgnosticModules(unittest.TestCase):

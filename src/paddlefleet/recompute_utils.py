@@ -726,6 +726,42 @@ def mhc_chunk_layout_text(config):
     )
 
 
+def make_refined_recompute(owner, point, supported=True):
+    """Return ``(enabled, boundary)`` for one refined-recompute point.
+
+    ``supported`` is a point-specific precondition only the call site knows.
+
+    Two preconditions are checked here instead of per point: the layer must be
+    under full recompute, or the boundary retains a frame no backward consumes;
+    and there must be no virtual pipeline, which reorders replay against the
+    first forward and would pair frames across chunks. A vetoed point warns
+    rather than raises -- it only costs the speedup.
+    """
+    # Local import: recompute_utils is imported nearly everywhere, while
+    # refined_recompute pulls in flash_attn and paddlefleet_ops.
+    from paddlefleet.refined_recompute import AutoRefinedRecompute
+
+    if not module_needs_refined_recompute(
+        point,
+        owner.layer_number,
+        owner.config,
+        is_mtp_layer=getattr(owner, "is_mtp_layer", False),
+    ):
+        return False, None
+
+    vpp = getattr(owner.config, "virtual_pipeline_model_parallel_size", None)
+    in_full = need_full_recompute(owner.layer_number, owner.config)
+    if not (supported and in_full and (vpp is None or vpp <= 1)):
+        logger.warning(
+            f"[RECOMPUTE-DECISION] kind=rr module={point} "
+            f"layer={owner.layer_number} enabled=False vetoed "
+            f"supported={supported} full_recompute={in_full} "
+            f"virtual_pipeline={vpp}"
+        )
+        return False, None
+    return True, AutoRefinedRecompute(point)
+
+
 def validate_recompute_modules(config):
     """Structural check of ``config.recompute_modules``, run from config init.
 
