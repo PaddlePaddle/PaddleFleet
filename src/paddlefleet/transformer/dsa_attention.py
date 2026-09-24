@@ -1682,8 +1682,6 @@ class DSAttention(FleetLayer):
         )
     """
 
-    _HOLDER_ATTR = "_dsa_index_share_topk_holder"
-
     def __init__(
         self,
         config: TransformerConfig,
@@ -1755,21 +1753,27 @@ class DSAttention(FleetLayer):
             config, "dsa_indexer_use_sparse_loss", False
         )
 
-    def _get_index_share_topk_holder(self) -> dict:
-        # One top-k per producer on the process-local config, so it survives
-        # the attention_mask.clone() of core-attn recompute. A recompute
-        # replay is only correct if no later micro-batch ran the producer in
-        # between; GPTModel._validate_dsa_pipeline_sharing rejects pipelined
-        # layouts that recompute a consumer.
-        holder = getattr(self.config, self._HOLDER_ATTR, None)
-        if holder is None:
-            holder = {}
-            setattr(self.config, self._HOLDER_ATTR, holder)
+    def _get_index_share_topk_holder(
+        self, holder: dict | None = None
+    ) -> dict | None:
+        """Return the top-k store owned by the current micro-batch.
+
+        ``TransformerLayer.forward`` creates this dictionary in the request
+        arguments and carries the same object through the local pipeline
+        segment and any recompute closure. Keeping it out of ``config`` is
+        essential: a config is shared by all micro-batches and virtual
+        pipeline chunks, while a top-k result belongs to one forward lifetime.
+        """
         return holder
 
     def _publish_index_share_topk(
-        self, topk_holder: dict, topk_indices
+        self, topk_holder: dict | None, topk_indices
     ) -> None:
+        if topk_holder is None:
+            raise RuntimeError(
+                "DSA index-share producer has no micro-batch top-k holder; "
+                "the holder must be passed through TransformerLayer.forward."
+            )
         # Consumers look up source_layer from resolve_dsa_indexer_layout
         # (logical producer id after num_empty_layers_add_in_head).
         # Publishing the physical GPT layer_number would miss that lookup.
@@ -1802,6 +1806,7 @@ class DSAttention(FleetLayer):
         # DSA-specific parameters
         x: Tensor | None = None,
         qr: Tensor | None = None,
+        dsa_topk_holder: dict | None = None,
         # ignore fastdeploy specific parameters
         kv_compressed: paddle.Tensor = None,
         k_pos_emb: paddle.Tensor = None,
@@ -1883,7 +1888,9 @@ class DSAttention(FleetLayer):
             )  # [1, 1, sq, sk]
 
         topk_holder = (
-            self._get_index_share_topk_holder() if self.index_share else None
+            self._get_index_share_topk_holder(dsa_topk_holder)
+            if self.index_share
+            else None
         )
         if self.skip_topk:
             topk_indices = self._lookup_index_share_topk(topk_holder)

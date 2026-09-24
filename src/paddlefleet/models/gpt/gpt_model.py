@@ -303,7 +303,16 @@ class GPTModel(PipelineLayer):
         producers = {}
         consumers = []
         for index, descriptor in enumerate(self._layers_desc):
-            spec = getattr(descriptor, "layer_spec", None)
+            # Fleet versions expose the LayerSpec through either
+            # ``layer_func`` or ``layer_spec``. Prefer the former when it is
+            # itself a spec, then fall back to the latter; assuming only one
+            # spelling silently skips every DSA descriptor on the other API.
+            spec = getattr(descriptor, "layer_func", None)
+            legacy_spec = getattr(descriptor, "layer_spec", None)
+            if legacy_spec is not None and not hasattr(
+                spec, "sublayers_spec"
+            ):
+                spec = legacy_spec
             sublayers = getattr(spec, "sublayers_spec", None)
             mtp_transformer = getattr(sublayers, "transformer_layer", None)
             if mtp_transformer is not None:
@@ -320,7 +329,9 @@ class GPTModel(PipelineLayer):
             if getattr(core, "layer", None) is not DSAttention:
                 continue
 
-            kwargs = spec.extra_kwargs
+            kwargs = getattr(spec, "extra_kwargs", {})
+            if "layer_number" not in kwargs:
+                continue
             layer_number = kwargs["layer_number"]
             is_mtp = kwargs.get("is_mtp_layer", False)
             _, skip_topk, _, source = resolve_dsa_indexer_layout(

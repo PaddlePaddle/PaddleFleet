@@ -378,18 +378,20 @@ class TestGlm52OfficialDsaHfFields(TestCase):
         with self.assertRaises(IndexError):
             resolve_dsa_indexer_layout(config, 0)
 
-    def test_index_share_holder_lives_on_config(self):
+    def test_index_share_holder_is_owned_by_the_forward_scope(self):
         from paddlefleet.transformer.dsa_attention import DSAttention
 
         attn = DSAttention.__new__(DSAttention)
         attn.config = TransformerConfig(
             hidden_size=64, num_attention_heads=2, num_hidden_layers=4
         )
-        holder = attn._get_index_share_topk_holder()
-        self.assertEqual(holder, {})
-        self.assertIs(getattr(attn.config, DSAttention._HOLDER_ATTR), holder)
+        holder = {}
+        self.assertIs(attn._get_index_share_topk_holder(holder), holder)
+        self.assertFalse(hasattr(attn.config, "_dsa_index_share_topk_holder"))
         holder[2] = "indices"
-        self.assertEqual(attn._get_index_share_topk_holder()[2], "indices")
+        next_holder = {}
+        self.assertEqual(attn._get_index_share_topk_holder(holder)[2], "indices")
+        self.assertEqual(attn._get_index_share_topk_holder(next_holder), {})
 
     def _bare_dsa_attention(
         self,
@@ -431,12 +433,10 @@ class TestGlm52OfficialDsaHfFields(TestCase):
             index_share=True,
             source_layer=0,
         )
-        holder = producer._get_index_share_topk_holder()
+        holder = {}
         producer._publish_index_share_topk(holder, "topk")
         self.assertEqual(
-            consumer._lookup_index_share_topk(
-                consumer._get_index_share_topk_holder()
-            ),
+            consumer._lookup_index_share_topk(holder),
             "topk",
         )
 
@@ -470,7 +470,7 @@ class TestGlm52OfficialDsaHfFields(TestCase):
             index_share=consumer_layout[2],
             source_layer=consumer_layout[3],
         )
-        holder = producer._get_index_share_topk_holder()
+        holder = {}
         producer._publish_index_share_topk(holder, "logical-topk")
         self.assertIn(consumer.source_layer, holder)
         self.assertNotIn(producer.layer_number, holder)
@@ -520,7 +520,7 @@ class TestGlm52OfficialDsaHfFields(TestCase):
             index_share=mtp_layout[2],
             source_layer=mtp_layout[3],
         )
-        holder = producer._get_index_share_topk_holder()
+        holder = {}
         producer._publish_index_share_topk(holder, "official-topk")
         self.assertEqual(
             last_decoder._lookup_index_share_topk(holder), "official-topk"
@@ -538,7 +538,7 @@ class TestGlm52OfficialDsaHfFields(TestCase):
             index_share=True,
             source_layer=2,
         )
-        holder = consumer._get_index_share_topk_holder()
+        holder = {}
         with self.assertRaisesRegex(RuntimeError, "source layer 2"):
             consumer._lookup_index_share_topk(holder)
         with self.assertRaisesRegex(RuntimeError, "source layer 2"):
@@ -680,7 +680,7 @@ class TestGlm52OfficialDsaHfFields(TestCase):
             hidden_size=64, num_attention_heads=2, num_hidden_layers=4
         )
         attn.source_layer = 0
-        holder = attn._get_index_share_topk_holder()
+        holder = {}
         self.assertEqual(holder, {})
         self.assertNotIn(attn.source_layer, holder)
 
@@ -736,6 +736,14 @@ class TestDsaPipelineSharing(TestCase):
             self.model(
                 parts=[0, 2, 5], offset=offset
             )._validate_dsa_pipeline_sharing()
+
+    def test_pipeline_validation_accepts_layer_func_spec(self):
+        model = self.model(parts=[0, 2, 5])
+        for descriptor in model._layers_desc:
+            spec = getattr(descriptor, "layer_spec", None)
+            if spec is not None:
+                descriptor.layer_func = spec
+        model._validate_dsa_pipeline_sharing()
 
     def test_decoder_cross_segment_is_rejected_before_build(self):
         from unittest.mock import patch
