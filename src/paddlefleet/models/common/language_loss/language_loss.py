@@ -260,7 +260,7 @@ class _MegatronCE(PyLayer):
         # The ignored rows were zeroed on the output, so their incoming
         # gradient is zero.
         g = paddle.where(mask, paddle.zeros_like(grad_output), grad_output)
-        return (softmax - onehot) * g.unsqueeze(-1)
+        return (softmax - onehot) * g.unsqueeze(-1), None
 
 
 class _MegatronStyleCrossEntropy(nn.Layer):
@@ -340,6 +340,14 @@ class LanguageLoss(FleetLayer):
             # Non-tensor-parallel path only: ParallelCrossEntropy additionally
             # reduces partial logits across the TP group, which this
             # composition deliberately does not do.
+            if config.fused_linear_ce_loss_chunk > 0:
+                # The fused path never calls loss_func, so the alignment
+                # would be skipped without any sign of it.
+                raise ValueError(
+                    "use_kimik2_accuracy requires fused_linear_ce_loss_chunk=0; "
+                    "the fused linear cross-entropy kernel bypasses the "
+                    "Megatron-aligned cross-entropy."
+                )
             self.loss_func = _MegatronStyleCrossEntropy(self.ignored_index)
         else:
             self.loss_func = paddle.nn.CrossEntropyLoss(

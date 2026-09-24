@@ -24,7 +24,13 @@ import unittest
 import paddle
 
 from paddlefleet.models.common.language_loss.language_loss import (
+    LanguageLoss,
     _MegatronStyleCrossEntropy,
+)
+from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.utils import (
+    set_kimik2_accuracy_compatible,
+    use_kimik2_accuracy_compatible,
 )
 
 IGNORE_INDEX = -100
@@ -51,9 +57,8 @@ class TestMegatronStyleCrossEntropy(unittest.TestCase):
         expected = reference(self.logits, self.labels).squeeze(-1)
         actual = self.loss_func(self.logits, self.labels)
         self.assertEqual(actual.shape, list(self.labels.shape))
-        paddle.allclose(actual, expected, atol=1e-5, rtol=1e-5)
         self.assertTrue(
-            bool(paddle.all(paddle.abs(actual - expected) < 1e-4)),
+            bool(paddle.allclose(actual, expected, atol=1e-5, rtol=1e-5)),
             "megatron composition disagrees with the fused kernel",
         )
 
@@ -89,6 +94,40 @@ class TestMegatronStyleCrossEntropy(unittest.TestCase):
         )
         # Ignored rows must not receive any gradient.
         self.assertTrue(bool(paddle.all(logits.grad[self.mask] == 0.0)))
+
+
+class TestKimiK2LossSelection(unittest.TestCase):
+    """``LanguageLoss`` picks the composition only when it will actually run."""
+
+    def setUp(self):
+        previous = use_kimik2_accuracy_compatible()
+        self.addCleanup(set_kimik2_accuracy_compatible, previous)
+
+    def _config(self, **overrides):
+        return TransformerConfig(
+            num_hidden_layers=2,
+            hidden_size=64,
+            num_attention_heads=4,
+            use_cpu_initialization=True,
+            parallel_output=False,
+            loss_subbatch_sequence_length=0,
+            **overrides,
+        )
+
+    def test_switch_selects_the_megatron_composition(self):
+        loss = LanguageLoss(
+            self._config(use_kimik2_accuracy=True), pg_collection=object()
+        )
+        self.assertIsInstance(loss.loss_func, _MegatronStyleCrossEntropy)
+
+    def test_fused_linear_ce_is_rejected(self):
+        """The fused path never calls ``loss_func``, so the switch would be
+        silently ignored."""
+        config = self._config(
+            use_kimik2_accuracy=True, fused_linear_ce_loss_chunk=1024
+        )
+        with self.assertRaisesRegex(ValueError, "fused_linear_ce_loss_chunk"):
+            LanguageLoss(config, pg_collection=object())
 
 
 if __name__ == "__main__":
