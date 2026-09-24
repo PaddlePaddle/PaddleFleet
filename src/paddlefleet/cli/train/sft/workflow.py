@@ -15,12 +15,17 @@
 """Training Ernie Model."""
 
 import gc
+import hashlib
+import importlib.metadata
+import json
 import math
 import os
+import platform
 import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import fields
 from functools import partial
+from pathlib import Path
 
 import numpy as np
 import paddle
@@ -49,6 +54,7 @@ from paddlefleet.trainer import (
     MoEGateSpGradSyncCallBack,
     MoEQuantileBalancingCallback,
     RuntimeTimer,
+    TrainerCallback,
     get_last_checkpoint,
     set_random_seed,
     set_seed,
@@ -73,6 +79,143 @@ from paddlefleet.utils.log import logger
 
 from .make_data_utils import DataGenerator
 from .sft_trainer import SFTTrainer
+
+
+class ModelReproObservationCallback(TrainerCallback):
+    """Opt-in rank-zero artifacts for formal model-reproduction runs."""
+
+    def __init__(
+        self,
+        model_source=None,
+        weights_loaded=False,
+        model_config=None,
+    ):
+        self.env_path = os.environ.get("MODEL_REPRO_ENV_PATH")
+        self.loss_path = os.environ.get("MODEL_REPRO_LOSS_PATH")
+        self._loss_events = []
+        self.model_source = model_source
+        self.weights_loaded = weights_loaded
+        self.model_config = model_config
+
+    @staticmethod
+    def _sha256_file(path):
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+    @staticmethod
+    def _write_json(path, payload):
+        path = Path(path).expanduser().resolve()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                allow_nan=False,
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _normalized_device():
+        """Return the device class the benchmark checker expects, not the GPU model name."""
+        return (
+            "cuda"
+            if paddle.device.get_device().split(":")[0] in ("gpu", "cuda")
+            else "cpu"
+        )
+
+    @staticmethod
+    def _normalized_dtype(args):
+        return "bfloat16" if getattr(args, "bf16", False) else "float32"
+
+    @staticmethod
+    def _machine_loss_payload(events):
+        """Return the machine loss artifact.
+
+        ``losses`` is the benchmark gate field: an unrounded main-loss series with
+        one entry per recorded step. ``events`` keeps per-step diagnostic detail.
+        """
+        return {
+            "schema": "glm52-machine-loss/v1",
+            "framework": "paddle",
+            "raw": True,
+            "stage": "training_callback_complete",
+            "losses": [event["loss"] for event in events if "loss" in event],
+            "event_count": len(events),
+            "steps": [event["step"] for event in events],
+            "events": events,
+        }
+
+    def _environment_payload(self, args):
+        config_path = os.environ.get("MODEL_REPRO_MODEL_CONFIG_PATH")
+        device = self._normalized_device()
+        try:
+            nccl_package = importlib.metadata.version("nvidia-nccl-cu12")
+        except importlib.metadata.PackageNotFoundError:
+            # Paddle wheels can bundle NCCL without installing the optional
+            # NVIDIA Python distribution. Missing package metadata is not a
+            # missing runtime library, and must not abort training.
+            nccl_package = None
+        return {
+            "schema": "glm52-environment/v1",
+            "framework": "paddle",
+            "framework_version": paddle.__version__,
+            "python_version": platform.python_version(),
+            "device": device,
+            "device_name": paddle.device.cuda.get_device_name()
+            if device == "cuda"
+            else paddle.device.get_device(),
+            "dtype": self._normalized_dtype(args),
+            "cuda": paddle.version.cuda(),
+            "cudnn": paddle.version.cudnn(),
+            "nccl_package": nccl_package,
+            "model_id": os.environ.get("MODEL_REPRO_MODEL_ID"),
+            "revision": os.environ.get("MODEL_REPRO_MODEL_REVISION"),
+            "model_config_sha256": self._sha256_file(config_path)
+            if config_path
+            else None,
+            "weights_loaded": self.weights_loaded,
+            "model_source": self.model_source,
+            "invocation_id": os.environ.get("MRK_INVOCATION_ID"),
+            "world_size": paddle.distributed.get_world_size()
+            if paddle.distributed.is_initialized()
+            else 1,
+        }
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        if not self._is_writer(state):
+            return
+        self._loss_events = []
+        if self.loss_path:
+            Path(self.loss_path).expanduser().resolve().unlink(missing_ok=True)
+        if self.env_path:
+            self._write_json(self.env_path, self._environment_payload(args))
+
+    def on_train_end(self, args, state, control, **kwargs):
+        if not self.loss_path or not self._is_writer(state):
+            return
+        self._write_json(
+            self.loss_path, self._machine_loss_payload(self._loss_events)
+        )
+
+    @staticmethod
+    def _is_writer(state):
+        return bool(getattr(state, "is_world_process_zero", False))
+
+    def on_log(self, args, state, control, logs=None, raw_loss=None, **kwargs):
+        if raw_loss is None or not self._is_writer(state) or not self.loss_path:
+            return
+        event = {"step": int(state.global_step), "loss": float(raw_loss)}
+        for key, value in (logs or {}).items():
+            normalized_key = key.replace(" ", "_")
+            if normalized_key.startswith("mtp_") and normalized_key.endswith(
+                "_loss"
+            ):
+                event[normalized_key] = float(value)
+        self._loss_events.append(event)
+
 
 # Fine-tune Environment Variables to support sharding stage1 overlap optimization.
 os.environ["USE_CASUAL_MASK"] = "False"
@@ -1093,6 +1236,20 @@ def run_sft(
         )
 
     callbacks = []
+    if os.environ.get("MODEL_REPRO_LOSS_PATH") or os.environ.get(
+        "MODEL_REPRO_ENV_PATH"
+    ):
+        callbacks.append(
+            ModelReproObservationCallback(
+                model_source=model_args.model_name_or_path,
+                weights_loaded=bool(
+                    model_args.continue_training
+                    and not training_args.autotuner_benchmark
+                    and not data_args.make_offline_data
+                ),
+                model_config=model_config.get_text_config(),
+            )
+        )
     if (
         getattr(model_config.get_text_config(), "topk_method", None)
         == "noaux_tc"

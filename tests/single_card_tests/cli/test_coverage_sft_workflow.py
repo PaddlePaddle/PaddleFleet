@@ -26,6 +26,9 @@ collaborators: namespaces for the argument dataclasses and tiny
 and nothing loads a checkpoint, so this stays a single-card test.
 """
 
+import hashlib
+import importlib.metadata
+import json
 import os
 import tempfile
 import unittest
@@ -36,6 +39,8 @@ from unittest import mock
 import paddle
 
 from paddlefleet.cli.train.sft import workflow as wf
+
+_CALLBACK = wf.ModelReproObservationCallback
 
 # Every environment key the callback reads. Tests clear the whole set so a
 # variable leaking in from the runner cannot flip a branch.
@@ -67,6 +72,305 @@ def _tmpdir(test):
     holder = tempfile.TemporaryDirectory()
     test.addCleanup(holder.cleanup)
     return Path(holder.name)
+
+
+def _args(**overrides):
+    """Stand in for ``FinetuningArguments`` on the callback paths."""
+    values = {
+        "bf16": True,
+        "global_batch_size": 8,
+        "per_device_train_batch_size": 2,
+        "num_nextn_predict_layers": 0,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+def _state(step=0, writer=True):
+    """Stand in for ``TrainerState``."""
+    return SimpleNamespace(global_step=step, is_world_process_zero=writer)
+
+
+class CallbackConstructionTests(unittest.TestCase):
+    """Construction wires the receipt paths and nothing else."""
+
+    def test_paths_come_from_arguments_and_environment(self):
+        _patch_env(
+            self,
+            MODEL_REPRO_ENV_PATH="/tmp/env.json",
+            MODEL_REPRO_LOSS_PATH="/tmp/loss.json",
+        )
+        config = SimpleNamespace(tensor_model_parallel_size=2)
+        callback = _CALLBACK(
+            model_source="/models/glm",
+            weights_loaded=True,
+            model_config=config,
+        )
+        self.assertEqual(callback.env_path, "/tmp/env.json")
+        self.assertEqual(callback.loss_path, "/tmp/loss.json")
+        self.assertEqual(callback.model_source, "/models/glm")
+        self.assertIs(callback.model_config, config)
+        self.assertTrue(callback.weights_loaded)
+        self.assertEqual(callback._loss_events, [])
+
+    def test_the_callback_is_inert_without_environment(self):
+        _patch_env(self)
+        callback = _CALLBACK()
+        self.assertIsNone(callback.env_path)
+        self.assertIsNone(callback.loss_path)
+        self.assertFalse(callback.weights_loaded)
+
+
+class ArtifactHelperTests(unittest.TestCase):
+    """The digest and JSON helpers behind every receipt."""
+
+    def test_sha256_file_matches_hashlib(self):
+        path = _tmpdir(self) / "blob.bin"
+        path.write_bytes(b"glm-5.2")
+        self.assertEqual(
+            _CALLBACK._sha256_file(path),
+            hashlib.sha256(b"glm-5.2").hexdigest(),
+        )
+
+    def test_write_json_sorts_keys_and_creates_parents(self):
+        target = _tmpdir(self) / "nested" / "dir" / "payload.json"
+        _CALLBACK._write_json(target, {"b": 1, "a": [1, 2]})
+        text = target.read_text(encoding="utf-8")
+        self.assertTrue(text.endswith("\n"))
+        self.assertLess(text.index('"a"'), text.index('"b"'))
+        self.assertEqual(json.loads(text), {"a": [1, 2], "b": 1})
+
+    def test_write_json_refuses_non_finite_numbers(self):
+        target = _tmpdir(self) / "payload.json"
+        with self.assertRaises(ValueError):
+            _CALLBACK._write_json(target, {"loss": float("nan")})
+
+
+class NormalizedProvenanceTests(unittest.TestCase):
+    """Device and dtype are reported as the benchmark classes."""
+
+    def test_gpu_devices_report_as_cuda(self):
+        with mock.patch.object(
+            paddle.device, "get_device", return_value="gpu:3"
+        ):
+            self.assertEqual(_CALLBACK._normalized_device(), "cuda")
+
+    def test_other_devices_report_as_cpu(self):
+        with mock.patch.object(paddle.device, "get_device", return_value="cpu"):
+            self.assertEqual(_CALLBACK._normalized_device(), "cpu")
+
+    def test_dtype_follows_the_bf16_flag(self):
+        self.assertEqual(
+            _CALLBACK._normalized_dtype(SimpleNamespace(bf16=True)),
+            "bfloat16",
+        )
+        self.assertEqual(
+            _CALLBACK._normalized_dtype(SimpleNamespace(bf16=False)),
+            "float32",
+        )
+        # A namespace without the flag must not raise.
+        self.assertEqual(
+            _CALLBACK._normalized_dtype(SimpleNamespace()), "float32"
+        )
+
+
+class MachineLossPayloadTests(unittest.TestCase):
+    """``losses`` is the gate field; ``events`` stays diagnostic."""
+
+    def test_losses_hold_one_entry_per_recorded_step(self):
+        events = [
+            {"step": 0, "loss": 12.5},
+            {"step": 1, "loss": 12.25, "mtp_0_loss": 1.5},
+        ]
+        payload = _CALLBACK._machine_loss_payload(events)
+        self.assertEqual(payload["schema"], "glm52-machine-loss/v1")
+        self.assertEqual(payload["framework"], "paddle")
+        self.assertTrue(payload["raw"])
+        self.assertEqual(payload["stage"], "training_callback_complete")
+        self.assertEqual(payload["losses"], [12.5, 12.25])
+        self.assertEqual(payload["steps"], [0, 1])
+        self.assertEqual(payload["event_count"], 2)
+        self.assertIs(payload["events"], events)
+
+    def test_events_without_a_loss_are_skipped(self):
+        payload = _CALLBACK._machine_loss_payload([{"step": 7}])
+        self.assertEqual(payload["losses"], [])
+        self.assertEqual(payload["steps"], [7])
+
+
+class EnvironmentPayloadTests(unittest.TestCase):
+    """``env.json`` carries the provenance fields the gate checks."""
+
+    def _payload(self):
+        self.config_path = _tmpdir(self) / "config.json"
+        self.config_path.write_text(
+            '{"model_type": "glm_moe_dsa"}', encoding="utf-8"
+        )
+        _patch_env(
+            self,
+            MODEL_REPRO_MODEL_CONFIG_PATH=str(self.config_path),
+            MODEL_REPRO_MODEL_ID="zai-org/GLM-5.2",
+            MODEL_REPRO_MODEL_REVISION="deadbeef",
+            MRK_INVOCATION_ID="inv-1",
+        )
+        callback = _CALLBACK(
+            model_source="/models/glm",
+            weights_loaded=True,
+            model_config=SimpleNamespace(
+                tensor_model_parallel_size=1,
+                pipeline_model_parallel_size=1,
+                expert_model_parallel_size=8,
+                context_parallel_size=1,
+                sequence_parallel=True,
+            ),
+        )
+        return callback._environment_payload(_args())
+
+    def test_payload_pins_the_gate_fields(self):
+        payload = self._payload()
+        self.assertEqual(payload["schema"], "glm52-environment/v1")
+        self.assertEqual(payload["framework"], "paddle")
+        self.assertEqual(payload["framework_version"], paddle.__version__)
+        self.assertEqual(payload["dtype"], "bfloat16")
+        self.assertEqual(payload["model_id"], "zai-org/GLM-5.2")
+        self.assertEqual(payload["revision"], "deadbeef")
+        self.assertEqual(payload["invocation_id"], "inv-1")
+        self.assertEqual(payload["model_source"], "/models/glm")
+        self.assertTrue(payload["weights_loaded"])
+        self.assertEqual(payload["world_size"], 1)
+        self.assertIn(payload["device"], ("cuda", "cpu"))
+        self.assertEqual(
+            payload["model_config_sha256"],
+            hashlib.sha256(self.config_path.read_bytes()).hexdigest(),
+        )
+        self.assertEqual(payload["cuda"], paddle.version.cuda())
+        self.assertEqual(payload["cudnn"], paddle.version.cudnn())
+
+    def test_a_missing_nccl_distribution_does_not_abort(self):
+        with mock.patch.object(
+            importlib.metadata,
+            "version",
+            side_effect=importlib.metadata.PackageNotFoundError,
+        ):
+            payload = self._payload()
+        self.assertIsNone(payload["nccl_package"])
+
+    def test_a_present_nccl_distribution_is_recorded(self):
+        with mock.patch.object(
+            importlib.metadata, "version", return_value="2.21.5"
+        ) as version:
+            payload = self._payload()
+        self.assertEqual(payload["nccl_package"], "2.21.5")
+        version.assert_called_once_with("nvidia-nccl-cu12")
+
+
+class TrainLifecycleTests(unittest.TestCase):
+    """``on_train_begin`` resets artifacts; ``on_train_end`` seals them."""
+
+    def test_non_writer_ranks_write_nothing_at_train_begin(self):
+        env_path = _tmpdir(self) / "env.json"
+        _patch_env(self, MODEL_REPRO_ENV_PATH=str(env_path))
+        callback = _CALLBACK()
+        callback._loss_events = [{"step": 0, "loss": 1.0}]
+        callback.on_train_begin(_args(), _state(writer=False), None)
+        self.assertFalse(env_path.exists())
+        self.assertEqual(callback._loss_events, [{"step": 0, "loss": 1.0}])
+
+    def test_train_begin_clears_stale_artifacts_and_writes_env(self):
+        directory = _tmpdir(self)
+        env_path = directory / "env.json"
+        loss_path = directory / "loss.json"
+        loss_path.write_text("stale", encoding="utf-8")
+        _patch_env(
+            self,
+            MODEL_REPRO_ENV_PATH=str(env_path),
+            MODEL_REPRO_LOSS_PATH=str(loss_path),
+        )
+        callback = _CALLBACK(model_config=SimpleNamespace())
+        callback._loss_events = [{"step": 9, "loss": 1.0}]
+        callback.on_train_begin(_args(), _state(), None)
+        self.assertEqual(callback._loss_events, [])
+        self.assertFalse(loss_path.exists())
+        payload = json.loads(env_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["framework"], "paddle")
+        self.assertEqual(payload["schema"], "glm52-environment/v1")
+
+    def test_train_end_without_a_loss_path_is_a_no_op(self):
+        _patch_env(self)
+        callback = _CALLBACK()
+        self.assertIsNone(callback.on_train_end(_args(), _state(), None))
+
+    def test_train_end_skips_non_writer_ranks(self):
+        loss_path = _tmpdir(self) / "loss.json"
+        _patch_env(self, MODEL_REPRO_LOSS_PATH=str(loss_path))
+        callback = _CALLBACK()
+        callback.on_train_end(_args(), _state(writer=False), None)
+        self.assertFalse(loss_path.exists())
+
+    def test_train_end_writes_the_machine_loss_artifact(self):
+        directory = _tmpdir(self)
+        loss_path = directory / "loss.json"
+        _patch_env(self, MODEL_REPRO_LOSS_PATH=str(loss_path))
+        callback = _CALLBACK()
+        callback._loss_events = [{"step": 0, "loss": 1.5}]
+        callback.on_train_end(_args(), _state(), None)
+        payload = json.loads(loss_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["losses"], [1.5])
+
+
+class TensorValueTests(unittest.TestCase):
+    """The writer predicate the receipt paths are gated on."""
+
+    def test_is_writer_reads_the_trainer_state(self):
+        self.assertTrue(_CALLBACK._is_writer(_state()))
+        self.assertFalse(_CALLBACK._is_writer(_state(writer=False)))
+        self.assertFalse(_CALLBACK._is_writer(SimpleNamespace()))
+
+
+class LogEventTests(unittest.TestCase):
+    """``on_log`` is the only writer of the raw loss series."""
+
+    def test_a_missing_raw_loss_records_nothing(self):
+        loss_path = _tmpdir(self) / "loss.json"
+        _patch_env(self, MODEL_REPRO_LOSS_PATH=str(loss_path))
+        callback = _CALLBACK()
+        callback.on_log(_args(), _state(), None, logs={"loss": 1.0})
+        self.assertEqual(callback._loss_events, [])
+
+    def test_non_writer_ranks_do_not_log(self):
+        loss_path = _tmpdir(self) / "loss.json"
+        _patch_env(self, MODEL_REPRO_LOSS_PATH=str(loss_path))
+        callback = _CALLBACK()
+        callback.on_log(_args(), _state(writer=False), None, raw_loss=1.0)
+        self.assertEqual(callback._loss_events, [])
+
+    def test_without_any_path_nothing_is_buffered(self):
+        _patch_env(self)
+        callback = _CALLBACK()
+        callback.on_log(_args(), _state(), None, raw_loss=1.0)
+        self.assertEqual(callback._loss_events, [])
+
+    def test_events_append_to_the_raw_log_and_the_loss_buffer(self):
+        directory = _tmpdir(self)
+        _patch_env(self, MODEL_REPRO_LOSS_PATH=str(directory / "loss.json"))
+        callback = _CALLBACK()
+        callback.on_log(
+            _args(),
+            _state(step=3),
+            None,
+            logs={"mtp 0 loss": 2.5, "loss": 9.0, "learning_rate": 1e-5},
+            raw_loss=1.25,
+        )
+        callback.on_log(_args(), _state(step=4), None, raw_loss=1.0)
+        # ``mtp 0 loss`` is normalized; ``loss`` and the rest are dropped.
+        self.assertEqual(
+            callback._loss_events[0],
+            {"step": 3, "loss": 1.25, "mtp_0_loss": 2.5},
+        )
+        self.assertEqual(callback._loss_events[1], {"step": 4, "loss": 1.0})
+        self.assertEqual(
+            [event["step"] for event in callback._loss_events], [3, 4]
+        )
 
 
 class TokenizerLoadingTests(unittest.TestCase):
@@ -954,6 +1258,69 @@ class RunSftWiringTests(unittest.TestCase):
             "pretokenized token_ids length 3 != 4", str(caught.exception)
         )
         self.assertEqual(_StubTrainer.instances, [])
+
+    def test_a_receipt_run_installs_the_observation_callback(self):
+        _patch_env(
+            self,
+            MODEL_REPRO_LOSS_PATH="/tmp/glm52-loss.json",
+            MODEL_REPRO_ENV_PATH="/tmp/glm52-env.json",
+        )
+        self._run(
+            data_args=_sft_data_args(pretokenized_pad_token_id=0),
+            training_args=_sft_training_args(
+                self.output_dir, num_nextn_predict_layers=1
+            ),
+        )
+        self.assertEqual(len(_StubTrainer.instances), 1)
+        trainer = _StubTrainer.instances[0]
+        observers = [
+            callback
+            for callback in trainer.kwargs["callbacks"]
+            if isinstance(callback, wf.ModelReproObservationCallback)
+        ]
+        self.assertEqual(len(observers), 1)
+        observer = observers[0]
+        self.assertEqual(observer.model_source, "/models/glm52")
+        self.assertIs(observer.model_config, self.model_config)
+        # continue_training with no autotuner and no offline-data pass.
+        self.assertTrue(observer.weights_loaded)
+        self.assertIs(trainer.kwargs["train_dataset"], self.dataset)
+        self.assertIsNone(trainer.kwargs["eval_dataset"])
+        self.assertIs(trainer.kwargs["tokenizer"], self.tokenizer)
+        self.assertIs(trainer.kwargs["processing_class"], self.processor)
+        self.assertEqual(trainer.trained, [None])
+        self.assertEqual(
+            trainer.saved,
+            [{"merge_tensor_parallel": False, "last_fc_to_hf": True}],
+        )
+        self.assertTrue(trainer.state_saved)
+        self.assertEqual(
+            [entry[0] for entry in trainer.metrics], ["log", "save"]
+        )
+
+    def test_without_receipt_variables_no_observer_is_installed(self):
+        self._run(
+            data_args=_sft_data_args(pretokenized_pad_token_id=0),
+            training_args=_sft_training_args(
+                self.output_dir, num_nextn_predict_layers=1
+            ),
+        )
+        trainer = _StubTrainer.instances[0]
+        self.assertEqual(
+            [
+                callback
+                for callback in trainer.kwargs["callbacks"]
+                if isinstance(callback, wf.ModelReproObservationCallback)
+            ],
+            [],
+        )
+        # The FP8 callback is still wired for a non-LoRA run.
+        self.assertTrue(
+            any(
+                isinstance(callback, wf.FP8QuantWeightCallback)
+                for callback in trainer.kwargs["callbacks"]
+            )
+        )
 
     def test_an_autotuner_benchmark_skips_the_final_export(self):
         self._run(
