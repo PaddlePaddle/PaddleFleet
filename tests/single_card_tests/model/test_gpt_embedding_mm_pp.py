@@ -53,6 +53,7 @@ class _Cfg:
     """
 
     def __init__(self, **overrides):
+        self.use_accuracy_compatible = False
         self.gpt_model_use_experimental_version = False
         self.multi_latent_attention = False
         self.max_sequence_length = 16
