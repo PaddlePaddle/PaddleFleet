@@ -483,7 +483,16 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
 
         if ctx.weight_requires_grad and grad_weight is not None:
             weight = ctx.weight_ref
-            if hasattr(weight, "main_grad"):
+            # Under FSDP the parameter carries a grad hook that owns main_grad
+            # allocation (it must share memory with the grads buffer), the
+            # re-shard and -- crucially -- the reduce-scatter. That hook only
+            # fires when autograd actually delivers a gradient to the
+            # parameter, so folding the grad straight into main_grad here would
+            # skip the cross-rank reduction and leave the LM head training on a
+            # rank-local gradient. Hand the gradient back through the PyLayer
+            # slot instead and let the hook do its job.
+            fsdp_managed = getattr(weight, "_fsdp_grad_hooked", False)
+            if hasattr(weight, "main_grad") and not fsdp_managed:
                 if weight.main_grad is None:
                     weight.main_grad = paddle.zeros(
                         weight.shape, dtype=paddle.float32
@@ -496,6 +505,18 @@ class LigerFusedLinearCrossEntropyFunction(paddle.autograd.PyLayer):
                     weight.main_grad.add_(grad_weight)
 
                 grad_weight = None
+            elif fsdp_managed:
+                # The gradient must travel back through the autograd slot for
+                # the FSDP grad hook to fire, but autograd casts it to the
+                # parameter dtype (bf16) on the way and that rounding is enough
+                # to pull the training trajectory off the non-FSDP baseline.
+                # Hand the fp32 tensor to the hook out-of-band so it accumulates
+                # into the fp32 grads buffer losslessly, exactly like the
+                # non-FSDP branch above.
+                if ctx.ec_align:
+                    # The autograd slot and main_grad both want [V, H].
+                    grad_weight = grad_weight.T
+                weight._fused_kernel_fp32_grad = grad_weight
 
         # Multimax params: accumulate into main_grad when present (matches
         # the weight pattern); otherwise fall back to returning the grad
