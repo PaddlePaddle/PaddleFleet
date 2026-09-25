@@ -34,6 +34,18 @@ from paddlefleet.transformer.moe.token_dispatcher import init_ring_subgroups
 
 def gpt_builder(config, **kwargs):
     print("building GPT model ...")
+    # Attention governance sidecar (plan §2.1 ①-④): normalize -> validate
+    # (shadow) -> resolve AttentionExecutionPlan -> print/dump. Strictly
+    # observational: the spec chain below still reads the flat config and
+    # must not consume the plan (P3 will do the equivalent refactor).
+    try:
+        from paddlefleet.transformer.attention_plan import (
+            run_attention_plan,
+        )
+
+        run_attention_plan(config)
+    except Exception as e:  # sidecar must never break the build
+        print(f"[ATTN-PLAN] pipeline skipped: {type(e).__name__}: {e}")
     if getattr(config, "moe_token_dispatcher_type", None) == "ringmoe":
         # RingMoE sub-group creation is a world collective, so it cannot live in
         # the dispatcher: every rank runs the builder, but only the pipeline
