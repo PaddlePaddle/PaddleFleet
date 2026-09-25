@@ -656,5 +656,135 @@ class TestFlashAttnFa3Backend(unittest.TestCase):
             self.facade.set_fa3_backend("cute")
 
 
+class TestMTPDepthSamplingValidation(unittest.TestCase):
+    """__post_init__ validation for mtp_depth_sampling / mtp_shared_weights."""
+
+    def test_defaults_are_off(self):
+        config = TransformerConfig(num_nextn_predict_layers=3)
+        self.assertIsNone(config.mtp_depth_sampling)
+        self.assertFalse(config.mtp_shared_weights)
+
+    def test_valid_distribution_accepted(self):
+        config = TransformerConfig(
+            num_nextn_predict_layers=3,
+            mtp_depth_sampling=[0.6, 0.3, 0.1],
+            mtp_shared_weights=True,
+        )
+        self.assertEqual(config.mtp_depth_sampling, [0.6, 0.3, 0.1])
+        self.assertTrue(config.mtp_shared_weights)
+
+    def test_shared_weights_can_combine_with_shared_last_layer(self):
+        config = TransformerConfig(
+            num_nextn_predict_layers=2,
+            mtp_shared_weights=True,
+            mtp_shared_last_layer=True,
+        )
+        self.assertTrue(config.mtp_shared_weights)
+        self.assertTrue(config.mtp_shared_last_layer)
+
+    def test_length_must_match_num_nextn_predict_layers(self):
+        with self.assertRaisesRegex(
+            ValueError, r"num_nextn_predict_layers=3"
+        ) as context:
+            TransformerConfig(
+                num_nextn_predict_layers=3,
+                mtp_depth_sampling=[0.5, 0.5],
+            )
+        self.assertIn("[0.5, 0.5]", str(context.exception))
+
+    def test_non_list_rejected(self):
+        with self.assertRaisesRegex(
+            ValueError, r"mtp_depth_sampling must be a list/tuple"
+        ):
+            TransformerConfig(
+                num_nextn_predict_layers=1,
+                mtp_depth_sampling=1.0,
+            )
+
+    def test_must_sum_to_one(self):
+        with self.assertRaisesRegex(ValueError, r"must sum to 1.0") as context:
+            TransformerConfig(
+                num_nextn_predict_layers=2,
+                mtp_depth_sampling=[0.5, 0.9],
+            )
+        self.assertIn("sum=1.4", str(context.exception))
+
+    def test_negative_probability_rejected(self):
+        with self.assertRaisesRegex(ValueError, r"must all be >= 0"):
+            TransformerConfig(
+                num_nextn_predict_layers=2,
+                mtp_depth_sampling=[1.5, -0.5],
+            )
+
+    def test_non_finite_probability_rejected(self):
+        for probs in ([float("nan"), 0.0], [float("inf"), 0.0]):
+            with self.assertRaisesRegex(
+                ValueError, r"must be finite real numbers"
+            ):
+                TransformerConfig(
+                    num_nextn_predict_layers=2,
+                    mtp_depth_sampling=probs,
+                )
+
+    def test_conflicting_flag_rejected(self):
+        with self.assertRaisesRegex(
+            ValueError, r"requires mtp_distillation_loss=False"
+        ):
+            TransformerConfig(
+                num_nextn_predict_layers=2,
+                mtp_depth_sampling=[0.5, 0.5],
+                mtp_distillation_loss=True,
+            )
+
+    def test_pipeline_parallel_accepted(self):
+        """PP>1 is supported: the sampler is collective-free, so the last stage
+        can draw K on its own without the other stages joining a collective.
+        The end-to-end pp=2 coverage lives in
+        tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_depth_sampling.py.
+        """
+        config = TransformerConfig(
+            num_nextn_predict_layers=2,
+            mtp_depth_sampling=[0.5, 0.5],
+            pipeline_model_parallel_size=2,
+        )
+        self.assertEqual(config.mtp_depth_sampling, [0.5, 0.5])
+        self.assertEqual(config.pipeline_model_parallel_size, 2)
+
+    def test_pipeline_parallel_with_sampling_off(self):
+        """Sampling off + PP>1 keeps working (regression guard)."""
+        config = TransformerConfig(
+            num_nextn_predict_layers=2,
+            pipeline_model_parallel_size=2,
+            mtp_shared_weights=True,
+        )
+        self.assertIsNone(config.mtp_depth_sampling)
+        self.assertEqual(config.pipeline_model_parallel_size, 2)
+
+    def test_validation_survives_python_optimize(self):
+        """`python -O` strips assert, so the checks must raise ValueError."""
+        code = """
+from paddlefleet.transformer.transformer_config import TransformerConfig
+
+try:
+    TransformerConfig(num_nextn_predict_layers=2, mtp_depth_sampling=[0.5, 0.9])
+except ValueError as exc:
+    if "must sum to 1.0" not in str(exc):
+        raise RuntimeError(f"incomplete validation error: {exc}")
+else:
+    raise RuntimeError("mtp_depth_sampling summing to 1.4 was accepted")
+"""
+        result = subprocess.run(
+            [sys.executable, "-O", "-c", code],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        self.assertEqual(
+            result.returncode,
+            0,
+            msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

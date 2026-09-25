@@ -19,6 +19,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import numpy as np
 import paddle
 from paddle import Tensor, nn
 from paddle.distributed.fleet.meta_parallel import (
@@ -1008,6 +1009,32 @@ class MultiTokenPredictionLayer(FleetLayer):
     def transformer_layer_weights(self):
         return self.transformer_layer.named_parameters()
 
+    @property
+    def all_weights(self):
+        """Every parameter of this MTP depth: the transformer_layer body plus the
+        per-depth fusion modules (enorm / hnorm / eh_proj or e_proj+h_proj / norm).
+
+        Used as ``shared_weight_attr`` for the ``mtp_shared_weights`` key so that
+        paddle registers all of them in ``PipelineLayer.shared_comm`` -- unlike
+        ``transformer_layer_weights``, which deliberately covers the body only.
+
+        ``mtp_embed`` is excluded. Under enable_mtp_magic_send it is a real
+        VocabParallelEmbedding sublayer, but GPTModel already owns it end to end:
+        _tie_mtp_embed_weights_intra_rank shares it within a rank,
+        _create_mtp_embed_global_group / _synchronize_mtp_embed_weight sync it across
+        stages, and _mark_mtp_embed_shared_flags sets its is_firstly_shared.
+        Registering it in shared_comm as well would give its initial broadcast two
+        competing sources (stage 0 over the pipe group vs the shared group's lowest
+        rank), tag it with a sharding-sync ``color`` it does not want, and leave
+        is_firstly_shared decided by whichever mechanism ran last. The gradient
+        itself is already safe -- GPTModel.allreduce_shared_weight_gradients skips
+        mtp_embed by Parameter identity -- but the remaining three are not.
+        """
+        for name, param in self.named_parameters():
+            if name.startswith("mtp_embed."):
+                continue
+            yield name, param
+
     def _concat_embeddings(
         self,
         hidden_states: paddle.Tensor,
@@ -1370,6 +1397,48 @@ class MultiTokenPredictionLayer(FleetLayer):
 
         return outputs
 
+    def _sample_mtp_depth(self):
+        """Sample how many MTP depths K to actually run this step (prefix 1..K).
+
+        Driven by config.mtp_depth_sampling, a list P(K=k) of length
+        D=num_nextn_predict_layers. Returns D when sampling is disabled.
+
+        The draw is DETERMINISTIC and collective-free: a private RNG is seeded by
+        a per-call counter, so every rank that runs this MTP layer draws the SAME
+        K without any communication. That is all the consistency the feature
+        needs -- K only gates the MTP layers, and every rank executing them (the
+        last pipeline stage's dp/tp/ep ranks) advances the counter in lockstep,
+        so their MoE expert-parallel all-to-all always agrees on which depths are
+        skipped. A world-group broadcast(src=0) -- the previous mechanism --
+        deadlocks under pp>1 instead: only the last pipeline stage runs the MTP
+        layer, while src=0 sits on the first stage and never joins the
+        collective. A private Generator is used (not np.random.*) so the global
+        RNG stream used elsewhere is untouched.
+
+        The counter only advances outside a recompute replay, mirroring the
+        magic-count handling further down this file. The caller's primary guard is
+        ``"mtp_sampled_depth" not in dict_args``, which relies on the replay seeing
+        the dict this layer already wrote into; if a replay ever arrives with a
+        fresh dict instead, not advancing the counter makes the re-draw return the
+        SAME K rather than a new one, so the backward still matches the depths the
+        forward actually ran.
+        """
+        d = self.config.num_nextn_predict_layers
+        ratio = getattr(self.config, "mtp_depth_sampling", None)
+        if not ratio:
+            return d
+        probs = np.asarray(ratio, dtype="float64")
+        probs = probs / probs.sum()
+        if not hasattr(self, "_mtp_sampling_counter"):
+            self._mtp_sampling_counter = 0
+        base = int(getattr(self.config, "seed", 0) or 0)
+        seed = base * 1_000_003 + self._mtp_sampling_counter
+        if paddle.is_grad_enabled() or not self.training:
+            self._mtp_sampling_counter += 1
+        rng = np.random.default_rng(seed)
+        k = int(rng.choice(len(probs), p=probs)) + 1
+        return max(1, min(k, d))
+
     def forward(self, dict_args: dict):
         # Dispatch by config.use_erndata. Under erndata the data pipeline
         # emits no mtp_startend_row_indices_all / mtp_hidden_inputs_mask_all
@@ -1390,6 +1459,35 @@ class MultiTokenPredictionLayer(FleetLayer):
             assert dict_args["packed_seq_params"] is None, (
                 "multi token prediction + sequence packing is not yet supported."
             )
+
+        # === MTP depth sampling (prefix-length sampling) ===
+        # Sample K once per micro-batch in the depth-0 layer and carry it in
+        # dict_args so it flows WITH the data. This is robust to
+        # gradient_accumulation_steps>1, pipeline_parallel and recompute: there is no
+        # shared/config state an interleaved micro-batch could overwrite, and the
+        # recompute of a layer replays the same saved dict_args. Depths >= K return
+        # early, skipping their transformer_layer forward; the LM head then emits None
+        # logits for them and the loss drops those entries.
+        if (
+            getattr(self.config, "mtp_depth_sampling", None)
+            and not self.config.enable_mtp_magic_send
+        ):
+            d = self.config.num_nextn_predict_layers
+            if self.layer_number == 0 and "mtp_sampled_depth" not in dict_args:
+                # Draw once per micro-batch. The `not in dict_args` guard makes
+                # this idempotent: if a recompute pass re-enters this layer with
+                # the same dict_args, K is reused (not re-drawn), so the skip
+                # decision matches the original forward and the private RNG
+                # counter does not run ahead of the other ranks.
+                k = self._sample_mtp_depth()
+                dict_args["mtp_sampled_depth"] = k
+                # observability only, never read by the logic
+                self._last_sampled_depth = k
+            k = dict_args.get("mtp_sampled_depth", d)
+            if self.layer_number >= k:
+                # Skip this depth entirely: leave hidden_states_concat unchanged
+                # (K stays in dict_args for downstream MTP layers + the LM head).
+                return dict_args
 
         # === MTP input arrives outside hidden_states ===
         # hidden_states is the pure backbone output in both cases. The shifted MTP
@@ -1774,7 +1872,13 @@ class MultiTokenPredictionLayer(FleetLayer):
             )
 
         if self.config.train_mtp_only:
-            for i in range(self.config.num_nextn_predict_layers):
+            sampled_depth = dict_args.get(
+                "mtp_sampled_depth", self.config.num_nextn_predict_layers
+            )
+            num_depths = min(
+                self.config.num_nextn_predict_layers, sampled_depth
+            )
+            for i in range(num_depths):
                 tensor_list = paddle.split(
                     hidden_states_concat,
                     self.config.num_nextn_predict_layers + 1,

@@ -36,6 +36,20 @@ tests:
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_megatron.py]
     products:
       - num_gpus: 2
+  # PP=2 mtp_depth_sampling: the sampled K must not issue cross-stage collectives.
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_depth_sampling.py]
+    products:
+      - num_gpus: 2
+  # EP=2 mtp_depth_sampling: K identical on every EP rank, prefix-average loss,
+  # optimizer steps with sampled-out depths, combined MTP weight sharing.
+  - test_case: [tests/multi_card_tests/moe/test_gpt_mtp_depth_sampling_ep.py]
+    products:
+      - num_gpus: 2
+  # PP=2 mtp_shared_weights + mtp_shared_last_layer: body tied to the backbone
+  # last layer across stages, fusion tied across depths, split depths rejected.
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_combined_sharing.py]
+    products:
+      - num_gpus: 2
   # PP2 + CP2 + Erndata magic-send: shared token embeddings must remain
   # bit-identical through PP gradient reduction, CP scaling, and optimizer steps.
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_magic_cp_weight_sync.py]
@@ -249,6 +263,11 @@ tests:
   # (config.cp_balance_mode) the megatron MTP branch slices the embeddings
   # with -- checked for dualchunk_allgather and contiguous_allgather.
   - test_case: [tests/multi_card_tests/test_gpt_mtp_megatron_cp.py]
+    products:
+      - num_gpus: 2
+  # CP=2 mtp_shared_weights + mtp_shared_last_layer: loss and summed gradients
+  # match an unshared model with tied values.
+  - test_case: [tests/multi_card_tests/test_gpt_mtp_combined_sharing_cp.py]
     products:
       - num_gpus: 2
   # ZCC EMA resume when only the 2D shard layout moved: needs a fixed world so
