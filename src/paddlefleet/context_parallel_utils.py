@@ -64,6 +64,25 @@ if is_flash_mask_available():
         ) from exc
 
 
+# calculate_per_token_loss switch, read by ContextParallelScatterOp.backward to
+# decide whether to divide the all-gathered gradient by the CP group size (see the
+# comment there and loss_grad_normalization.md 3.5/6.1). Module-level rather than a
+# config field because the op is a stateless PyLayer; set once at trainer/model
+# init from config.calculate_per_token_loss. Default False keeps the legacy
+# mean-of-means path bitwise unchanged.
+_PER_TOKEN_GRAD_SCALE = False
+
+
+def set_per_token_grad_scale(enabled):
+    """Enable/disable per-token gradient scaling in the CP scatter backward."""
+    global _PER_TOKEN_GRAD_SCALE
+    _PER_TOKEN_GRAD_SCALE = bool(enabled)
+
+
+def _per_token_grad_scale_enabled():
+    return _PER_TOKEN_GRAD_SCALE
+
+
 def mark_context_parallel_parameter_disable_scale_grad(param_or_layer):
     """
     Mark parameters or layers to disable context parallel gradient scaling.
@@ -532,9 +551,27 @@ class ContextParallelScatterOp(PyLayer):
     """
 
     @staticmethod
-    def forward(ctx, input_tensor, axis=0, mode="dualchunk_allgather"):
+    def forward(
+        ctx,
+        input_tensor,
+        axis=0,
+        mode="dualchunk_allgather",
+        scale_grad_by_cp=False,
+    ):
         ctx.axis = axis
         ctx.mode = mode
+        # Per-token loss only: divide the all-gathered gradient by the CP group
+        # size in backward. Opt-in PER CALL SITE (default False) because this op is
+        # used all over the model -- on rope tables, masks, input_ids, labels,
+        # freqs_cis, valid ranges -- and dividing those backwards would be wrong or
+        # meaningless. It is correct ONLY where the tensor being scattered is the
+        # *embedding output*, whose sole upstream learnable parameter (embed_tokens
+        # / MTP embed) is looked up on the full sequence and therefore receives cp
+        # identical gradient copies through this all-gather. See the backward and
+        # loss_grad_normalization.md 3.5/6.1. Even when a site passes True, the
+        # division still only happens under the global per-token switch, so the
+        # legacy mean-of-means path is byte-identical regardless.
+        ctx.scale_grad_by_cp = scale_grad_by_cp
         hcg = fleet.get_hybrid_communicate_group()
 
         assert hcg.get_context_parallel_world_size() > 1, (
@@ -552,10 +589,27 @@ class ContextParallelScatterOp(PyLayer):
     @staticmethod
     def backward(ctx, grad_output):
         if ctx.mode.startswith("contiguous"):
-            return all_gather_contiguous(
+            grad = all_gather_contiguous(
                 grad_output, group=ctx.group, axis=ctx.axis
             )
-        return all_gather_balance(grad_output, axis=ctx.axis, group=ctx.group)
+        else:
+            grad = all_gather_balance(
+                grad_output, axis=ctx.axis, group=ctx.group
+            )
+        # Per-token loss + this specific call site opted in (embedding output): the
+        # all-gather put cp identical full-sequence gradient copies on every CP
+        # rank, so the upstream embedding parameter would be counted cp times under
+        # the pure-SUM reduce. Divide them back out here; ``ctx.group`` carries this
+        # microbatch's own CP size. Both conditions are required, so every other
+        # call site and the legacy path are untouched. See loss_grad_normalization.md 3.5/6.1.
+        if (
+            getattr(ctx, "scale_grad_by_cp", False)
+            and _per_token_grad_scale_enabled()
+        ):
+            nranks = getattr(ctx.group, "nranks", 1)
+            if nranks and nranks > 1:
+                grad = grad / nranks
+        return grad
 
 
 class ContextParallelGatherOp(PyLayer):

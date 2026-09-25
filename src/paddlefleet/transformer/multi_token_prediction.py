@@ -1502,7 +1502,12 @@ class MultiTokenPredictionLayer(FleetLayer):
                 # CP/SP scatter, mirroring what GPTEmbedding does per chunk
                 if cp_world_size > 1 and self.config.experimental_dataflow:
                     decoder_input = ContextParallelScatterOp.apply(
-                        decoder_input, axis=1, mode=self.config.cp_balance_mode
+                        decoder_input,
+                        axis=1,
+                        mode=self.config.cp_balance_mode,
+                        # Shifted embedding output (E175): divide out cp-duplicate
+                        # embed grads under per-token loss; no-op otherwise.
+                        scale_grad_by_cp=True,
                     )
                 if self.config.sequence_parallel:
                     batch_size, local_seq_len, hidden_size = decoder_input.shape
