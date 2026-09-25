@@ -297,6 +297,27 @@ def _ec_compatible_rope_apply(
     return xq_out.cast(q_pe.dtype), xk_out.cast(k_pe.dtype)
 
 
+class _AlignedHeadExpand(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, x, num_heads, head_axis):
+        ctx.num_heads = int(num_heads)
+        ctx.head_axis = int(head_axis)
+        shape = list(x.shape)
+        shape[ctx.head_axis] = ctx.num_heads
+        return x.expand(shape)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        axis = ctx.head_axis
+        grad = grad_output.cast("float32")
+        acc = paddle.slice(grad, axes=[axis], starts=[0], ends=[1])
+        for i in range(1, ctx.num_heads):
+            acc = acc + paddle.slice(
+                grad, axes=[axis], starts=[i], ends=[i + 1]
+            )
+        return acc.cast(grad_output.dtype)
+
+
 @dataclass
 class MLASelfAttentionSublayersSpec:
     """Sublayers for MLA self-attention layer."""
@@ -839,15 +860,47 @@ class MultiLatentAttention(Attention):
         # Query, Key, and Value
         # =====================
         # Get the query, key and value tensors based on the type of attention
-        # Also get q_compressed for DSA indexer (if enabled)
-        query, key, value, q_compressed, kv_compressed, k_pos_emb = (
-            self.get_query_key_value_tensors(
-                hidden_states,
-                key_value_states,
-                position_ids,
-                packed_seq_params,
-                is_decode=is_decode,
+        (
+            query,
+            key,
+            value,
+            q_compressed,
+            kv_compressed,
+            k_pos_emb,
+        ) = self.get_query_key_value_tensors(
+            hidden_states,
+            key_value_states,
+            position_ids,
+            packed_seq_params,
+            is_decode=is_decode,
+        )
+        # Main-path RoPE freqs stashed on self by get_query_key_value_tensors
+        # (reused by the DSA indexer under use_accuracy_compatible); read via
+        # attribute so the return arity stays 6 for all callers/subclasses.
+        indexer_rotary_pos_emb = getattr(self, "_indexer_rotary_pos_emb", None)
+        # Only forward rotary_pos_emb to core attentions that accept it (DSA /
+        # dot-product cores do; latent-MQA cores do not).
+        if not hasattr(self, "_core_attn_accepts_rope"):
+            import inspect as _inspect
+
+            try:
+                _sig = _inspect.signature(self.core_attention.forward)
+                self._core_attn_accepts_rope = (
+                    "rotary_pos_emb" in _sig.parameters
+                    or any(
+                        p.kind == p.VAR_KEYWORD
+                        for p in _sig.parameters.values()
+                    )
+                )
+            except (ValueError, TypeError):
+                self._core_attn_accepts_rope = False
+        _rope_kw = (
+            {"rotary_pos_emb": indexer_rotary_pos_emb}
+            if (
+                indexer_rotary_pos_emb is not None
+                and self._core_attn_accepts_rope
             )
+            else {}
         )
 
         layer_num = getattr(self, "layer_number", -1)
@@ -1005,6 +1058,7 @@ class MultiLatentAttention(Attention):
                 # ``DSv4HybridAttention``'s ``full_attn`` one.
                 x=keep_indexer_grad_path(hidden_states, self.config),
                 qr=q_compressed,
+                **_rope_kw,
                 # fastdeploy support
                 kv_compressed=kv_compressed,
                 k_pos_emb=k_pos_emb,
@@ -1031,6 +1085,7 @@ class MultiLatentAttention(Attention):
                 # DSA-specific parameters
                 x=hidden_states,
                 qr=q_compressed,
+                **_rope_kw,
                 # fastdeploy support
                 kv_compressed=kv_compressed,
                 k_pos_emb=k_pos_emb,
@@ -2512,15 +2567,35 @@ class MLASelfAttention(MultiLatentAttention):
                     query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)
 
                     # key: [num_tokens, n, (qk_nope_head_dim + qk_rope_head_dim)]
+                    _align_expand = bool(
+                        getattr(self.config, "use_accuracy_compatible", False)
+                    )
                     if k_pos_emb.ndim == 4:
-                        k_pos_emb = k_pos_emb.expand(
-                            -1, -1, self.num_attention_heads_per_partition, -1
-                        )
+                        if _align_expand:
+                            k_pos_emb = _AlignedHeadExpand.apply(
+                                k_pos_emb,
+                                self.num_attention_heads_per_partition,
+                                2,
+                            )
+                        else:
+                            k_pos_emb = k_pos_emb.expand(
+                                -1,
+                                -1,
+                                self.num_attention_heads_per_partition,
+                                -1,
+                            )
                     else:
                         assert k_pos_emb.ndim == 3
-                        k_pos_emb = k_pos_emb.expand(
-                            -1, self.num_attention_heads_per_partition, -1
-                        )
+                        if _align_expand:
+                            k_pos_emb = _AlignedHeadExpand.apply(
+                                k_pos_emb,
+                                self.num_attention_heads_per_partition,
+                                1,
+                            )
+                        else:
+                            k_pos_emb = k_pos_emb.expand(
+                                -1, self.num_attention_heads_per_partition, -1
+                            )
                     key = paddle.cat([k_no_pe, k_pos_emb], axis=-1)
 
             # if self.layer_number == 0:
@@ -2558,7 +2633,15 @@ class MLASelfAttention(MultiLatentAttention):
                 position_ids,
             )
 
-        return query, key, value, q_compressed, kv_compressed, k_pos_emb
+        self._indexer_rotary_pos_emb = rotary_pos_emb
+        return (
+            query,
+            key,
+            value,
+            q_compressed,
+            kv_compressed,
+            k_pos_emb,
+        )
 
     def backward_dw(self) -> NoReturn:
         """Execute weight gradient computation"""
@@ -2764,15 +2847,19 @@ class MQASelfAttention(MLASelfAttention):
         # Query, Key, and Value
         # =====================
         # Get the query, key and value tensors based on the type of attention
-        # Also get q_compressed for DSA indexer (if enabled)
-        query, key, value, q_compressed, kv_compressed, k_pos_emb = (
-            self.get_query_key_value_tensors(
-                hidden_states,
-                key_value_states,
-                position_ids,
-                packed_seq_params,
-                is_decode=is_decode,
-            )
+        (
+            query,
+            key,
+            value,
+            q_compressed,
+            kv_compressed,
+            k_pos_emb,
+        ) = self.get_query_key_value_tensors(
+            hidden_states,
+            key_value_states,
+            position_ids,
+            packed_seq_params,
+            is_decode=is_decode,
         )
 
         layer_num = getattr(self, "layer_number", -1)
@@ -3255,4 +3342,12 @@ class MQASelfAttention(MLASelfAttention):
             position_ids,
         )
 
-        return query, key, value, q_compressed, kv_compressed, k_pos_emb
+        self._indexer_rotary_pos_emb = rotary_pos_emb
+        return (
+            query,
+            key,
+            value,
+            q_compressed,
+            kv_compressed,
+            k_pos_emb,
+        )
