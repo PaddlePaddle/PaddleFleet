@@ -1,6 +1,9 @@
-name: CE Daily Dev
+name: Test CE Daily Dev
 
 on:
+  pull_request:
+    branches:
+      - develop
   schedule:
     - cron: '0 19 * * *'
   workflow_dispatch: # 可选：允许手动点 Run
@@ -58,16 +61,16 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - cuda: "12.9"
-            python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.10"
           - cuda: "13.0"
             python: "3.12"
-          - cuda: "12.9"
-            python: "3.11"
+          # - cuda: "12.9"
+          #   python: "3.11"
           - cuda: "12.9"
             python: "3.12"
-          - cuda: "12.9"
-            python: "3.13"
+          # - cuda: "12.9"
+          #   python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -165,15 +168,28 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          if [ -n "$PR_ID" ] && [ "$PR_ID" != "0" ]; then
+            git fetch origin pull/${PR_ID}/head
+            git checkout -b PR_${PR_ID} FETCH_HEAD
+            git remote add upstream https://github.com/PaddlePaddle/PaddleFleet.git
+            echo "Checking out ${BRANCH}..."
+            git fetch upstream ${BRANCH}:${BRANCH}
+            git merge ${BRANCH} --no-edit
+            git diff --numstat ${BRANCH} -- | awk "{print \$NF}"
+          else
+            echo "Not in a pull_request event. Skipping PR-specific operations."
+          fi
           pip install colorlog>=6.10.1
           pip install setuptools
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget -q "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          uv build --wheel --package paddlefleet --out-dir dist --clear -v
+          pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
+            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           fi
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           echo "Paddle Commit"
@@ -225,16 +241,16 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - cuda: "12.9"
-            python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.10"
           - cuda: "13.0"
             python: "3.12"
           - cuda: "12.9"
             python: "3.11"
           - cuda: "12.9"
             python: "3.12"
-          - cuda: "12.9"
-            python: "3.13"
+          # - cuda: "12.9"
+          #   python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       TASK: paddlefleet-CE-${{ matrix.cuda }}-${{ matrix.python }}-multi-card_test-dev
@@ -326,16 +342,29 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          if [ -n "$PR_ID" ] && [ "$PR_ID" != "0" ]; then
+            git fetch origin pull/${PR_ID}/head
+            git checkout -b PR_${PR_ID} FETCH_HEAD
+            git remote add upstream https://github.com/PaddlePaddle/PaddleFleet.git
+            echo "Checking out ${BRANCH}..."
+            git fetch upstream ${BRANCH}:${BRANCH}
+            git merge ${BRANCH} --no-edit
+            git diff --numstat ${BRANCH} -- | awk "{print \$NF}"
+          else
+            echo "Not in a pull_request event. Skipping PR-specific operations."
+          fi
           git submodule update --init --recursive
           pip install colorlog>=6.10.1
           pip install setuptools
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget -q "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          uv build --wheel --package paddlefleet --out-dir dist --clear -v
+          pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
+            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           fi
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt pytest matplotlib==3.10.8
           wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
@@ -396,16 +425,16 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - cuda: "12.9"
-            python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.10"
           - cuda: "13.0"
             python: "3.12"
-          - cuda: "12.9"
-            python: "3.11"
+          # - cuda: "12.9"
+          #   python: "3.11"
           - cuda: "12.9"
             python: "3.12"
-          - cuda: "12.9"
-            python: "3.13"
+          # - cuda: "12.9"
+          #   python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -501,14 +530,33 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          if [ -n "$PR_ID" ] && [ "$PR_ID" != "0" ]; then
+            git fetch origin pull/${PR_ID}/head
+            git checkout -b PR_${PR_ID} FETCH_HEAD
+            git remote add upstream https://github.com/PaddlePaddle/PaddleFleet.git
+            echo "Checking out ${BRANCH}..."
+            git fetch upstream ${BRANCH}:${BRANCH}
+            git merge ${BRANCH} --no-edit
+            git diff --numstat ${BRANCH} -- | awk "{print \$NF}"
+          else
+            echo "Not in a pull_request event. Skipping PR-specific operations."
+          fi
           pip install colorlog>=6.10.1
           pip install setuptools
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget -q "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          uv build --wheel --package paddlefleet --out-dir dist --clear -v
+          pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/
           wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
+          echo "Paddle Commit"
+          python -c "import paddle; print(paddle.version.commit)"
+          echo "PaddleFleet Commit"
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
+          echo "paddlefleet Commit"
+          python -c "import paddlefleet; print(paddlefleet.version.commit)"
           '
 
       - name: Prepare model tests
@@ -532,11 +580,11 @@ jobs:
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
           git log -1
-          sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
-          sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
+          # sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/glm45_provider.py
+          # sed -i "s/from gpt_provider import GPTModelProvider/from paddlefleet.transformers.gpt_provider import GPTModelProvider/g" examples/experiments/paddlefleet/qwen_provider.py
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
+            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           fi
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt matplotlib==3.10.8 pytest parameterized
           pip install librosa==0.11.0
@@ -664,16 +712,16 @@ jobs:
       max-parallel: 1
       matrix:
         include:
-          - cuda: "12.9"
-            python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.10"
           - cuda: "13.0"
             python: "3.12"
-          - cuda: "12.9"
-            python: "3.11"
+          # - cuda: "12.9"
+          #   python: "3.11"
           - cuda: "12.9"
             python: "3.12"
-          - cuda: "12.9"
-            python: "3.13"
+          # - cuda: "12.9"
+          #   python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -764,12 +812,25 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          if [ -n "$PR_ID" ] && [ "$PR_ID" != "0" ]; then
+            git fetch origin pull/${PR_ID}/head
+            git checkout -b PR_${PR_ID} FETCH_HEAD
+            git remote add upstream https://github.com/PaddlePaddle/PaddleFleet.git
+            echo "Checking out ${BRANCH}..."
+            git fetch upstream ${BRANCH}:${BRANCH}
+            git merge ${BRANCH} --no-edit
+            git diff --numstat ${BRANCH} -- | awk "{print \$NF}"
+          else
+            echo "Not in a pull_request event. Skipping PR-specific operations."
+          fi
           pip install colorlog>=6.10.1
           pip install setuptools
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget -q "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          uv build --wheel --package paddlefleet --out-dir dist --clear -v
+          pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/
           wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -781,28 +842,28 @@ jobs:
           source /root/proxy
           source "$HOME/miniconda/etc/profile.d/conda.sh"
           conda activate python${PYTHON_VERSION}
-          paddle_url=${PADDLE_URL}
-          if [ ${CUDA_VERSION} == "cu129" ]; then
-            paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
-            paddle_url="${PADDLE_URL}${paddle_whl}"
-          fi
-          if [ ${CUDA_VERSION} == "cu130" ]; then
-            pip install blinker==1.9.0 --ignore-installed
-          fi
-          cd PaddleFleet
-          cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
-          git config --global --add safe.directory /workspace/PaddleFleet
-          git config user.name "PaddleCI"
-          git config user.email "paddle_ci@example.com"
-          git config pull.rebase false
-          git log -1
+          # paddle_url=${PADDLE_URL}
+          # if [ ${CUDA_VERSION} == "cu129" ]; then
+          #   paddle_whl=paddlepaddle_gpu-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
+          #   paddle_url="${PADDLE_URL}${paddle_whl}"
+          # fi
+          # if [ ${CUDA_VERSION} == "cu130" ]; then
+          #   pip install blinker==1.9.0 --ignore-installed
+          # fi
+          # cd PaddleFleet
+          # cp examples/experiments/paddlefleet/glm45.json examples/experiments/paddlefleet/glm45_fp8.json
+          # git config --global --add safe.directory /workspace/PaddleFleet
+          # git config user.name "PaddleCI"
+          # git config user.email "paddle_ci@example.com"
+          # git config pull.rebase false
+          # git log -1
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
             pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
           fi
-          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
-          pip install bce-python-sdk==0.8.74
-          pip install coverage==7.13.0
+          # pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          # pip install bce-python-sdk==0.8.74
+          # pip install coverage==7.13.0
           pip install librosa==0.11.0
           echo "Paddle Commit"
           python -c "import paddle; print(paddle.version.commit)"
@@ -1182,16 +1243,16 @@ jobs:
       max-parallel: 2
       matrix:
         include:
-          - cuda: "12.9"
-            python: "3.10"
+          # - cuda: "12.9"
+          #   python: "3.10"
           - cuda: "13.0"
             python: "3.12"
-          - cuda: "12.9"
-            python: "3.11"
+          # - cuda: "12.9"
+          #   python: "3.11"
           - cuda: "12.9"
             python: "3.12"
-          - cuda: "12.9"
-            python: "3.13"
+          # - cuda: "12.9"
+          #   python: "3.13"
     env:
       PIP_CACHE_DIR: /home/.cache/pip
       CACHE_DIR: /home/.cache
@@ -1282,13 +1343,26 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
+          if [ -n "$PR_ID" ] && [ "$PR_ID" != "0" ]; then
+            git fetch origin pull/${PR_ID}/head
+            git checkout -b PR_${PR_ID} FETCH_HEAD
+            git remote add upstream https://github.com/PaddlePaddle/PaddleFleet.git
+            echo "Checking out ${BRANCH}..."
+            git fetch upstream ${BRANCH}:${BRANCH}
+            git merge ${BRANCH} --no-edit
+            git diff --numstat ${BRANCH} -- | awk "{print \$NF}"
+          else
+            echo "Not in a pull_request event. Skipping PR-specific operations."
+          fi
           pip install colorlog>=6.10.1
           pip uninstall paddlefleet -y
           pip install setuptools
           fleet_ops_wheel=paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl
           wget -q "https://paddle-github-action.bj.bcebos.com/PaddleFleet/develop/latest/${CUDA_VERSION}/paddle-release/paddlefleet_ops-0.0.0-cp${PYTHON_VERSION//./}-cp${PYTHON_VERSION//./}-linux_x86_64.whl" -O ${fleet_ops_wheel}
           pip install ${fleet_ops_wheel} --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/  --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
-          pip install -e . --no-build-isolation --index-url https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/ --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
+          pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
+          uv build --wheel --package paddlefleet --out-dir dist --clear -v
+          pip install dist/paddlefleet-*.whl --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/${CUDA_VERSION}/
           wget -q --no-proxy https://paddle-qa.bj.bcebos.com/paddleformers/yq_linux_amd64 -O /usr/local/bin/yq
           chmod +x /usr/local/bin/yq
           '
@@ -1316,7 +1390,7 @@ jobs:
           git log -1
           if [ "${use_release}" == "true" ]; then
             echo "Using pre-built paddle package from develop branch."
-            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir
+            pip install ${paddle_url} --index-url=https://www.paddlepaddle.org.cn/packages/nightly/${CUDA_VERSION}/ --force-reinstall --no-cache-dir --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple
           fi
           pip install uv coverage==7.13.0 bce-python-sdk==0.8.74 wrapt
           pip install bce-python-sdk==0.8.74
@@ -1641,7 +1715,7 @@ jobs:
           git config user.name "PaddleCI"
           git config user.email "paddle_ci@example.com"
           git config pull.rebase false
-          # git pull --no-edit origin pull/${PR_ID}/head
+          
           '
 
       - name: Check full coverage
