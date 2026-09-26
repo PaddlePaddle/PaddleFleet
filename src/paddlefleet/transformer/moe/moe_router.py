@@ -1739,14 +1739,15 @@ class TopKRouter(StandardMoERouter):
                 and input_ids is not None
                 and input_ids.shape[1] != seq_len
             ):
-                # erndata MTP path: PaddleFleet dataloader broadcasts
-                # input_ids full-length [B, L] to every CP rank (unlike
-                # experimental_dataflow which pre-scatters). Embedding was
+                # erndata CP path (MTP branch or plain K==0 branch, both in
+                # gpt_embedding.py): PaddleFleet dataloader broadcasts input_ids
+                # full-length [B, L] to every CP rank (unlike
+                # experimental_dataflow which pre-scatters). The embedding was
                 # already sliced to [B, L/cp, H] with the model's
-                # cp_balance_mode layout via extract_local_cp_chunks (see
-                # gpt_embedding.py). Slice input_ids with the same layout here
-                # — no comm needed since every rank holds the same [B, L]
-                # tensor.
+                # cp_balance_mode layout via extract_local_cp_chunks, so input
+                # here is L/cp while input_ids is still L. Slice input_ids with
+                # the same layout — no comm needed since every rank holds the
+                # same [B, L] tensor.
                 from paddlefleet.transformer.multi_token_prediction import (
                     extract_local_cp_chunks,
                 )

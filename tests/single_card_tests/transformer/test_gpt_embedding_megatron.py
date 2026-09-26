@@ -195,6 +195,78 @@ class TestGptEmbeddingMegatron(unittest.TestCase):
         emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu_cpu})
         self.assertTrue(LanguageLoss._cu_seqlens_q_stash.place.is_gpu_place())
 
+    def test_erndata_plain_k0_cp_slices_locally(self) -> None:
+        # K == 0 erndata plain path (gpt_embedding.py plain branch): with no MTP
+        # layer and experimental_dataflow off, forward must slice decoder_input
+        # to this rank's local CP chunk via extract_local_cp_chunks -- the same
+        # helper (and cp_balance_mode layout) the MTP branch uses -- and emit no
+        # MTP concat/tail. Locks in the fix for erndata + mtp0 + CP>1.
+        B, L, H = 1, 8, 4  # L divisible by 2*cp_size
+        for mode in ("dualchunk_allgather", "contiguous_allgather"):
+            for cp_rank in (0, 1):
+                with self.subTest(cp_balance_mode=mode, cp_rank=cp_rank):
+                    emb = _make_embedding(0, B, L, H, cp_balance_mode=mode)
+                    # Skip fill_feature (which zeros pad_token positions) and the
+                    # experimental-version rope-nulling so hidden_states is the
+                    # bare sliced stub embedding, comparable element-for-element.
+                    emb.config.gpt_model_use_experimental_version = False
+                    input_ids = (
+                        paddle.arange(B * L, dtype="int64")
+                        .reshape([B, L])
+                        .cuda()
+                    )
+                    cu = paddle.to_tensor([0, L], dtype="int32")
+                    # The stub embedding is a deterministic arange of the full
+                    # length L; the local slice must equal extract_local_cp_chunks
+                    # of it under the same (mode, rank).
+                    full = paddle.arange(B * L * H, dtype="float32").reshape(
+                        [B, L, H]
+                    )
+                    with _fake_cp(cp_size=2, cp_rank=cp_rank):
+                        out = emb.forward(
+                            {"input_ids": input_ids, "cu_seqlens_q": cu}
+                        )
+                    self.assertEqual(
+                        list(out["hidden_states"].shape), [B, L // 2, H]
+                    )
+                    expected = extract_local_cp_chunks(
+                        full, cp_rank, 2, axis=1, mode=mode
+                    )
+                    np.testing.assert_array_equal(
+                        out["hidden_states"].numpy(), expected.numpy()
+                    )
+                    # No MTP tail: plain path never populates mtp_emb_res.
+                    self.assertNotIn("mtp_decoder_inputs", out)
+                    # Backbone flashmask was derived full-length from cu_seqlens_q.
+                    self.assertIn("attn_mask_startend_row_indices", out)
+
+    def test_erndata_plain_k0_keeps_supplied_mask(self) -> None:
+        # _derive_erndata_backbone_mask early-return: when the loader already
+        # supplied a flashmask, the plain branch must pass it through unchanged
+        # (not rebuild it from cu_seqlens_q), while still slicing decoder_input.
+        B, L, H = 1, 8, 4
+        emb = _make_embedding(
+            0, B, L, H, cp_balance_mode="contiguous_allgather"
+        )
+        emb.config.gpt_model_use_experimental_version = False
+        input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
+        cu = paddle.to_tensor([0, L], dtype="int32")
+        # Full-length [B, 1, L, 1] flashmask supplied by the loader.
+        supplied = paddle.full([B, 1, L, 1], L, dtype="int32").cuda()
+        with _fake_cp(cp_size=2, cp_rank=1):
+            out = emb.forward(
+                {
+                    "input_ids": input_ids,
+                    "cu_seqlens_q": cu,
+                    "startend_row_indices": supplied,
+                }
+            )
+        # hidden still sliced to L/cp; mask passed through unchanged.
+        self.assertEqual(list(out["hidden_states"].shape), [B, L // 2, H])
+        np.testing.assert_array_equal(
+            out["attn_mask_startend_row_indices"].numpy(), supplied.numpy()
+        )
+
 
 class TestGptEmbeddingErnie5(unittest.TestCase):
     """ernie5 (non-megatron) MTP embedding path, single-card (no SP/CP).

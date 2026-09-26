@@ -2489,41 +2489,59 @@ class TransformerConfig(ModelParallelConfig):
             # ever missing on the loss rank, LanguageLoss.forward raises rather
             # than silently rolling labels across packed-doc boundaries.
 
+        # NOTE(erndata CP sharding): under erndata nothing upstream shards by CP
+        # -- the loader broadcasts every tensor full-length to the whole CP group
+        # (erndata_paddle_adapter._get_cp_group_and_src) and the model takes its
+        # own local slice. Three paths now do that, covering every erndata+CP
+        # combination:
+        #   * GPTEmbedding's MTP branch (extract_local_cp_chunks), gated on
+        #     num_nextn_predict_layers > 0 and not mtp_load_weight_only;
+        #   * the plain-path ContextParallelScatterOp, gated on
+        #     experimental_dataflow;
+        #   * the plain-path erndata branch beside it (extract_local_cp_chunks),
+        #     reachable at K == 0 when experimental_dataflow is off. It slices the
+        #     embedding and (via _slice_rope_for_mtp_megatron_cp) the RoPE tables;
+        #     LanguageLoss._forward slices the labels with the same layout.
+        # The K > 0 + mtp_load_weight_only case also lands on the last path (the
+        # MTP branch is gated off by mtp_load_weight_only), but it is already
+        # fully constrained by the num_nextn_predict_layers > 0 block above, which
+        # forbids experimental_dataflow, contiguous_a2a and
+        # gpt_model_use_experimental_version. Only the pure K == 0 spelling
+        # bypasses that block, so re-assert the two constraints the local-slice
+        # helper imposes here.
         if (
             self.use_erndata
             and self.context_parallel_size > 1
             and not self.experimental_dataflow
+            and (
+                self.num_nextn_predict_layers is None
+                or self.num_nextn_predict_layers <= 0
+            )
         ):
-            # Under erndata nothing upstream shards by CP: the loader broadcasts
-            # every tensor full-length to the whole CP group
-            # (erndata_paddle_adapter._get_cp_group_and_src) and the model is
-            # expected to take its own slice. Exactly two paths do that:
-            #   * GPTEmbedding's MTP branch (extract_local_cp_chunks), gated on
-            #     num_nextn_predict_layers > 0 and not mtp_load_weight_only;
-            #   * the plain-path ContextParallelScatterOp beside it, gated on
-            #     experimental_dataflow, which also scatters the RoPE tables and
-            #     -- in LanguageLoss._forward -- the labels. The MTP block above
-            #     forbids experimental_dataflow whenever
-            #     num_nextn_predict_layers > 0, so this path is only reachable at
-            #     K == 0, and there it is legal: hence the guard is skipped
-            #     rather than applied to it.
-            # With neither active the hidden states stay length L while
-            # DotProductAttention computes seq_len = key.shape[1] * cp_size and
-            # expand() fails against an L-row mask -- a shape error naming
-            # neither use_erndata nor cp_balance_mode. Note use_erndata is set
-            # implicitly by erniebot whenever the YAML carries an `erndata:`
-            # section, so this is reachable without any MTP-specific flag.
-            if self.num_nextn_predict_layers <= 0 or self.mtp_load_weight_only:
+            if self.cp_balance_mode not in (
+                "dualchunk_allgather",
+                "contiguous_allgather",
+            ):
+                # extract_local_cp_chunks only implements these two layouts;
+                # contiguous_a2a has a different mask contract (see the MTP block).
                 raise ValueError(
-                    "use_erndata=True with context_parallel_size>1 needs some "
-                    "path that slices the loader's full-length sequence: "
-                    "either MTP (num_nextn_predict_layers>0, "
-                    "mtp_load_weight_only=False), which slices in GPTEmbedding, "
-                    "or experimental_dataflow=True, whose plain-path "
-                    "ContextParallelScatterOp does it. With neither, no CP "
-                    "sharding happens at all. Got num_nextn_predict_layers="
-                    f"{self.num_nextn_predict_layers}, mtp_load_weight_only="
-                    f"{self.mtp_load_weight_only}."
+                    "use_erndata=True with context_parallel_size>1 (no MTP) "
+                    "slices the loader's full-length tensors locally via "
+                    "extract_local_cp_chunks, which requires cp_balance_mode in "
+                    "{'dualchunk_allgather', 'contiguous_allgather'}, got "
+                    f"{self.cp_balance_mode!r}."
+                )
+            if self.gpt_model_use_experimental_version:
+                # Same reason the MTP branch refuses it: the flag nulls the
+                # rotary tables (making the CP RoPE slice inert) and routes
+                # attention through the EC 3-axis MRoPE path expecting a mode-axis
+                # position_ids, while erndata delivers [B, L].
+                raise ValueError(
+                    "use_erndata=True with context_parallel_size>1 (no MTP) is "
+                    "incompatible with gpt_model_use_experimental_version=True: "
+                    "it switches attention to the EC 3-axis MRoPE path (mode-axis "
+                    "position_ids) and nulls the rotary tables the CP slice needs. "
+                    "Set gpt_model_use_experimental_version=False."
                 )
 
         if self.intermediate_size is None:

@@ -88,6 +88,9 @@ CU_SEQLENS = [0, 12, 20, SEQ]
 
 # Single-card (cp_degree=1) reference loss, see module docstring.
 REF_LOSS = 9.246039390563965
+# Single-card reference loss for the mtp0 (num_nextn_predict_layers=0) plain
+# path. Regenerate with --gpus=0 (see TestMtp0MegatronCP).
+REF_LOSS_MTP0 = None
 
 CP_SIZE = None
 STRATEGY = None
@@ -125,7 +128,9 @@ def setUpModule():
     model_parallel_cuda_manual_seed(SEED)
 
 
-def _make_config(cp_balance_mode="dualchunk_allgather"):
+def _make_config(
+    cp_balance_mode="dualchunk_allgather", num_nextn_predict_layers=NUM_MTP
+):
     return GPTConfig(
         vocab_size=VOCAB,
         max_sequence_length=SEQ,
@@ -149,7 +154,7 @@ def _make_config(cp_balance_mode="dualchunk_allgather"):
         apply_rope_fusion=False,
         gated_linear_unit=True,
         # MTP, megatron data style
-        num_nextn_predict_layers=NUM_MTP,
+        num_nextn_predict_layers=num_nextn_predict_layers,
         mtp_loss_scaling_factor=0.3,
         use_erndata=True,
         # CP
@@ -582,6 +587,141 @@ class TestMTPMegatronMainMaskFromCuSeqlens(unittest.TestCase):
         self.assertTrue(np.isfinite(val), f"loss must be finite, got {val}")
         if REF_LOSS is not None:
             np.testing.assert_allclose(val, REF_LOSS, rtol=5e-3, atol=0)
+
+
+class TestMtp0MegatronCP(unittest.TestCase):
+    """Plain (mtp0) erndata + CP path: no MTP layer, sliced by GPTEmbedding's
+    plain branch instead of the MTP branch.
+
+    With ``num_nextn_predict_layers=0`` the MTP embedding branch is gated off, so
+    ``GPTEmbedding.forward`` takes its plain erndata branch: it slices
+    ``decoder_input`` locally via ``extract_local_cp_chunks`` and slices the RoPE
+    tables through the same ``_slice_rope_for_mtp_megatron_cp`` the MTP branch
+    uses; ``LanguageLoss._forward`` slices the labels. These reuse #1970's
+    primitives, so the layout assertions are identical -- only the entry path
+    differs. Registered under the same 2-GPU coverage job as the MTP cases.
+    """
+
+    def _rope_layout(self, mode, extract):
+        from paddlefleet.parallel_state import get_context_parallel_rank
+
+        paddle.seed(SEED)
+        model = gpt_builder(
+            _make_config(cp_balance_mode=mode, num_nextn_predict_layers=0),
+            num_stages=1,
+        )
+        emb = _find_embedding(model)
+        raw = _make_inputs()
+        out = emb.forward(
+            {
+                "input_ids": raw["input_ids"],
+                "position_ids": raw["position_ids"],
+                "cu_seqlens_q": raw["cu_seqlens_q"],
+            }
+        )
+        rope_local = out["rotary_pos_emb"]
+        # mtp0 keeps no MTP tail: hidden stays [B, L/cp, H] straight from the
+        # plain-branch slice, and RoPE must match the same layout.
+        self.assertEqual(out["hidden_states"].shape[1], SEQ // CP_SIZE)
+        self.assertEqual(rope_local.shape[1], SEQ // CP_SIZE)
+        full = emb.rotary_pos_emb(SEQ)
+        cp_rank = get_context_parallel_rank() if CP_SIZE > 1 else 0
+        expected = extract(full, cp_rank, CP_SIZE, axis=1)
+        np.testing.assert_array_equal(
+            rope_local.astype("float32").numpy(),
+            expected.astype("float32").numpy(),
+        )
+
+    def test_mtp0_rope_matches_zigzag_layout(self):
+        from paddlefleet.transformer.multi_token_prediction import (
+            extract_local_zigzag_chunks,
+        )
+
+        self._rope_layout("dualchunk_allgather", extract_local_zigzag_chunks)
+
+    def test_mtp0_rope_matches_contiguous_layout(self):
+        from paddlefleet.transformer.multi_token_prediction import (
+            extract_local_contiguous_chunk,
+        )
+
+        self._rope_layout(
+            "contiguous_allgather", extract_local_contiguous_chunk
+        )
+
+    def test_mtp0_derives_main_mask_from_cu_seqlens(self):
+        # No explicit flashmask: the plain branch must derive the full-length
+        # per-doc mask from cu_seqlens_q (shared _derive_erndata_backbone_mask).
+        paddle.seed(SEED)
+        model = gpt_builder(
+            _make_config(num_nextn_predict_layers=0), num_stages=1
+        )
+        emb = _find_embedding(model)
+        raw = _make_inputs(with_mask=False)
+        out = emb.forward(
+            {
+                "input_ids": raw["input_ids"],
+                "position_ids": raw["position_ids"],
+                "cu_seqlens_q": raw["cu_seqlens_q"],
+            }
+        )
+        mask = out.get("attn_mask_startend_row_indices")
+        self.assertIsNotNone(mask, "plain branch did not derive the main mask")
+        self.assertEqual(list(mask.shape), [BATCH, 1, SEQ, 1])
+
+    def test_mtp0_derive_mask_noop_when_supplied(self):
+        # The early-return branch of _derive_erndata_backbone_mask: an explicit
+        # mask is passed through unchanged (not rebuilt from cu_seqlens_q).
+        paddle.seed(SEED)
+        model = gpt_builder(
+            _make_config(num_nextn_predict_layers=0), num_stages=1
+        )
+        emb = _find_embedding(model)
+        raw = _make_inputs(with_mask=True)
+        out = emb.forward(
+            {
+                "input_ids": raw["input_ids"],
+                "position_ids": raw["position_ids"],
+                "cu_seqlens_q": raw["cu_seqlens_q"],
+                "attn_mask_startend_row_indices": raw[
+                    "attn_mask_startend_row_indices"
+                ],
+            }
+        )
+        mask = out.get("attn_mask_startend_row_indices")
+        self.assertIsNotNone(mask)
+        np.testing.assert_array_equal(
+            mask.numpy(),
+            raw["attn_mask_startend_row_indices"].numpy(),
+        )
+
+    def test_mtp0_cp_invariant_loss(self):
+        # End-to-end: exercises the plain-branch embedding slice, RoPE slice, the
+        # CP flashmask attention, and LanguageLoss._forward's label slice.
+        if (
+            not paddle.device.current_device_is_cpu
+            and paddle.device.get_device_capability()[0] < 9
+        ):
+            self.skipTest("requires SM90+ for the CP flashmask kernels")
+        paddle.seed(SEED)
+        model = gpt_builder(
+            _make_config(num_nextn_predict_layers=0), num_stages=1
+        )
+        model = paddle.amp.decorate(
+            models=model, optimizers=None, level="O2", dtype="bfloat16"
+        )
+        loss = _forward_backward(model, _make_inputs())
+        val = float(loss.astype("float32"))
+        print(f"[MTP0-MEGATRON-CP] cp={CP_SIZE} loss={val}", flush=True)
+        self.assertTrue(np.isfinite(val), f"loss must be finite, got {val}")
+        grads = [p.grad for p in model.parameters() if p.grad is not None]
+        self.assertGreater(len(grads), 0, "no gradients were produced")
+        for g in grads:
+            self.assertTrue(
+                bool(paddle.isfinite(g.astype("float32")).all()),
+                "gradients must be finite",
+            )
+        if REF_LOSS_MTP0 is not None:
+            np.testing.assert_allclose(val, REF_LOSS_MTP0, rtol=5e-3, atol=0)
 
 
 if __name__ == "__main__":

@@ -14,8 +14,10 @@ historical ernie5 L+K layout. Guards checked here:
   3. use_erndata + MTP supports enable_mtp_magic_send while retaining the
      generic magic-send PP>1 constraint.
   4. use_erndata + MTP is incompatible with experimental_dataflow.
-  5. use_erndata without MTP (K == 0) trips none of the guards — the packed-doc
-     forward is only reachable through the MTP layer.
+  5. use_erndata without MTP (K == 0) trips none of the MTP-specific guards; at
+     CP>1 it is sliced by GPTEmbedding's plain branch, but still rejects
+     contiguous_a2a and gpt_model_use_experimental_version (the two constraints
+     the local-slice helper imposes).
   6. use_erndata=False never trips any of the guards regardless of other MTP
      flags.
   7. use_erndata + MTP + CP>1 accepts both sequence-scatter layouts
@@ -29,10 +31,11 @@ historical ernie5 L+K layout. Guards checked here:
      Indexer, and CP==1, stay legal.
  10. use_erndata + MTP + CP>1 rejects ``mtp_distillation_loss`` (that branch
      double-scatters its loss mask).
- 11. use_erndata + CP>1 requires one of the two paths that slice the
-     full-length tensors the loader broadcasts: a real MTP layer, or
-     ``experimental_dataflow`` (whose ContextParallelScatterOp covers the
-     no-MTP case).
+ 11. use_erndata + CP>1 is sliced by one of three paths: a real MTP layer, or
+     ``experimental_dataflow`` (ContextParallelScatterOp), or -- at K == 0 with
+     the default dataflow -- GPTEmbedding's plain erndata branch
+     (extract_local_cp_chunks). mtp_load_weight_only collapses onto the last
+     path but is still fully constrained by the MTP block.
 """
 
 from __future__ import annotations
@@ -370,19 +373,55 @@ class TestUseErndataValidation(unittest.TestCase):
         )
         self.assertTrue(cfg.mtp_distillation_loss)
 
-    def test_erndata_cp_requires_a_slicing_path(self) -> None:
-        # GPTEmbedding only slices the erndata tensors inside its MTP branch, and
-        # the plain-path ContextParallelScatterOp beside it needs
-        # experimental_dataflow. With MTP off and the default dataflow nothing
-        # shards at all and attention dies on a shape mismatch naming neither
-        # flag. Reachable without any MTP-specific setting, since erniebot sets
-        # use_erndata implicitly from the YAML's `erndata:` section.
-        with self.assertRaisesRegex(ValueError, r"num_nextn_predict_layers"):
+    def test_erndata_cp_without_mtp_sliced_by_plain_path(self) -> None:
+        # K == 0 + CP > 1 + default dataflow is now supported: GPTEmbedding's
+        # plain branch slices decoder_input locally via extract_local_cp_chunks
+        # (and the RoPE tables via _slice_rope_for_mtp_megatron_cp), and
+        # LanguageLoss._forward slices the labels the same way. The default
+        # cp_balance_mode (dualchunk_allgather) is one the helper supports, so
+        # the config must construct without raising.
+        cfg = TransformerConfig(
+            **self._base_kwargs(
+                use_erndata=True,
+                num_nextn_predict_layers=0,
+                context_parallel_size=2,
+            )
+        )
+        self.assertTrue(cfg.use_erndata)
+        self.assertEqual(cfg.num_nextn_predict_layers, 0)
+        self.assertEqual(cfg.context_parallel_size, 2)
+
+    def test_erndata_cp_without_mtp_rejects_contiguous_a2a(self) -> None:
+        # The K == 0 plain path uses the same extract_local_cp_chunks helper as
+        # the MTP branch, which does not implement contiguous_a2a (different mask
+        # contract). Reject at config time with the no-MTP wording rather than let
+        # it fail at runtime inside the helper.
+        with self.assertRaisesRegex(
+            ValueError,
+            r"use_erndata=True with context_parallel_size>1 \(no MTP\)",
+        ):
             TransformerConfig(
                 **self._base_kwargs(
                     use_erndata=True,
                     num_nextn_predict_layers=0,
                     context_parallel_size=2,
+                    cp_balance_mode="contiguous_a2a",
+                )
+            )
+
+    def test_erndata_cp_without_mtp_rejects_experimental_version(self) -> None:
+        # Same reason the MTP branch refuses it: the flag nulls the rotary tables
+        # and routes attention through the EC 3-axis MRoPE path, which the K == 0
+        # CP slice cannot satisfy.
+        with self.assertRaisesRegex(
+            ValueError, r"gpt_model_use_experimental_version"
+        ):
+            TransformerConfig(
+                **self._base_kwargs(
+                    use_erndata=True,
+                    num_nextn_predict_layers=0,
+                    context_parallel_size=2,
+                    gpt_model_use_experimental_version=True,
                 )
             )
 
@@ -431,27 +470,30 @@ class TestUseErndataValidation(unittest.TestCase):
                 )
                 self.assertEqual(cfg.cp_balance_mode, mode)
 
-    def test_erndata_cp_rejects_weight_only_mtp(self) -> None:
+    def test_erndata_cp_weight_only_mtp_sliced_by_plain_path(self) -> None:
         # WeightOnlyMTPLayer.forward returns its inputs unchanged, so the
-        # embedding's slicing branch is gated off and this collapses to the
-        # no-MTP case above.
-        with self.assertRaisesRegex(ValueError, r"mtp_load_weight_only"):
-            TransformerConfig(
-                **self._base_kwargs(
-                    use_erndata=True,
-                    num_nextn_predict_layers=1,
-                    context_parallel_size=2,
-                    cp_balance_mode="contiguous_allgather",
-                    mtp_load_weight_only=True,
-                )
+        # embedding's MTP slicing branch is gated off and this collapses to the
+        # K == 0 case, which GPTEmbedding's plain branch now slices locally. With
+        # experimental_dataflow off (the only legal spelling, see the sibling
+        # test below) the config must construct without raising.
+        cfg = TransformerConfig(
+            **self._base_kwargs(
+                use_erndata=True,
+                num_nextn_predict_layers=1,
+                context_parallel_size=2,
+                cp_balance_mode="contiguous_allgather",
+                mtp_load_weight_only=True,
             )
+        )
+        self.assertTrue(cfg.mtp_load_weight_only)
+        self.assertEqual(cfg.context_parallel_size, 2)
 
     def test_erndata_cp_weight_only_mtp_has_no_dataflow_escape(self) -> None:
-        # The experimental_dataflow escape does not reach weight-only MTP:
+        # The non-dataflow spelling is now legal (sliced by the plain branch,
+        # see the test above), but the experimental_dataflow spelling is not:
         # num_nextn_predict_layers > 0 puts the config in the MTP block, which
-        # rejects experimental_dataflow before the slicing guard is reached. So
-        # erndata + CP > 1 + mtp_load_weight_only has no legal spelling, and the
-        # rejection has to name experimental_dataflow rather than pass silently.
+        # rejects experimental_dataflow before anything else. The rejection has
+        # to name experimental_dataflow rather than pass silently.
         with self.assertRaisesRegex(ValueError, r"experimental_dataflow"):
             TransformerConfig(
                 **self._base_kwargs(
