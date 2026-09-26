@@ -463,5 +463,116 @@ class TestMegatronLabelForDepthCP(unittest.TestCase):
         np.testing.assert_array_equal(out.numpy(), labels_np)
 
 
+class TestLanguageLossForwardErndataCP(unittest.TestCase):
+    """``_forward`` (the K == 0 / non-list path) slices labels under erndata+CP.
+
+    erndata broadcasts labels full-length L to every CP rank, while the logits
+    this rank produces are its local CP slice. ``_forward`` must extract this
+    rank's label slice (real ``extract_local_cp_chunks``, cp_balance_mode layout)
+    before handing them to ``forward_impl``, mirroring the MTP path's
+    ``_megatron_label_for_depth``. Checked by value on every rank / both layouts.
+    """
+
+    L = 16
+
+    def _run(self, mode, cp_size, cp_rank):
+        loss = _make_loss(0, distill=False, cp_balance_mode=mode)
+        captured = {}
+
+        # Patch at the class level: LanguageLoss is an nn.Layer whose
+        # __setattr__ does not reliably store a plain function on an instance
+        # built via __new__, so stub the method on the class instead.
+        def _fake_impl(self, logits, labels):
+            captured["labels"] = labels
+            return paddle.zeros([1], dtype="float32")
+
+        labels_np = np.arange(self.L, dtype="int64").reshape([1, self.L])
+        labels = paddle.to_tensor(labels_np)
+        # Local logits shape is irrelevant to the stubbed impl; pass a matching
+        # local length for realism.
+        logits = paddle.zeros([1, self.L // cp_size, 4], dtype="float32")
+        with mock.patch.object(
+            ll, "module_needs_recompute", lambda *a, **k: False
+        ):
+            with mock.patch.object(LanguageLoss, "forward_impl", _fake_impl):
+                with _cp_ranks(cp_size, cp_rank):
+                    # _make_loss stubs the *instance* _forward; call the real
+                    # unbound method so the CP-slicing logic under test runs.
+                    LanguageLoss._forward(loss, logits, labels)
+        return labels_np, captured["labels"].numpy()
+
+    def test_forward_k0_slices_labels_for_both_modes(self) -> None:
+        cp_size = 2
+        for mode in ("dualchunk_allgather", "contiguous_allgather"):
+            for cp_rank in range(cp_size):
+                with self.subTest(cp_balance_mode=mode, rank=cp_rank):
+                    labels_np, got = self._run(mode, cp_size, cp_rank)
+                    self.assertEqual(list(got.shape), [1, self.L // cp_size])
+                    np.testing.assert_array_equal(
+                        got, _local_slice_ref(labels_np, cp_rank, cp_size, mode)
+                    )
+
+    def test_forward_k0_ranks_cover_full_label(self) -> None:
+        # The ranks must partition the sequence with no overlap / no gap.
+        cp_size = 2
+        for mode in ("dualchunk_allgather", "contiguous_allgather"):
+            with self.subTest(cp_balance_mode=mode):
+                pieces = [self._run(mode, cp_size, r)[1] for r in range(cp_size)]
+                union = np.sort(np.concatenate(pieces, axis=1).reshape([-1]))
+                np.testing.assert_array_equal(union, np.arange(self.L))
+
+    def test_forward_k0_cp1_leaves_labels_full_length(self) -> None:
+        # cp_size == 1: extract_local_cp_chunks is a no-op, labels stay length L.
+        labels_np, got = self._run("dualchunk_allgather", 1, 0)
+        self.assertEqual(list(got.shape), [1, self.L])
+        np.testing.assert_array_equal(got, labels_np)
+
+    def test_forward_list_kgt0_slices_labels_once(self) -> None:
+        # Regression: the MTP list path (forward, K>0, non-weight-only) already
+        # slices lm_labels / per-depth labels to [B, L/cp] via
+        # extract_local_cp_chunks *before* calling self._forward. _forward's
+        # erndata branch must NOT slice again -- doing so would yield
+        # [B, L/cp**2] and mismatch the local logits. Drive the REAL forward +
+        # _forward and assert every labels tensor reaching forward_impl is
+        # length L/cp (sliced exactly once), for main head and MTP depth alike.
+        cp_size = 2
+        for cp_rank in range(cp_size):
+            with self.subTest(rank=cp_rank):
+                loss = _make_loss(1, distill=False)
+                # Restore the REAL _forward (｜_make_loss stubs the instance one)
+                # and take the non-experimental depth path, which also routes the
+                # already-sliced per-depth labels through _forward.
+                loss._forward = LanguageLoss._forward.__get__(
+                    loss, LanguageLoss
+                )
+                loss.config.gpt_model_use_experimental_version = False
+                LanguageLoss._cu_seqlens_q_stash = _make_cu([self.L])
+                seen = []
+
+                def _fake_impl(self, logits, labels):
+                    seen.append(labels.shape[1])
+                    return paddle.zeros([], dtype="float32")
+
+                labels = paddle.arange(self.L, dtype="int64").reshape(
+                    [1, self.L]
+                )
+                # main + 1 depth, each already the rank-local length L/cp.
+                logits = [
+                    paddle.zeros([1, self.L // cp_size, 4], dtype="float32")
+                    for _ in range(2)
+                ]
+                with mock.patch.object(
+                    ll, "module_needs_recompute", lambda *a, **k: False
+                ):
+                    with mock.patch.object(
+                        LanguageLoss, "forward_impl", _fake_impl
+                    ):
+                        with _cp_ranks(cp_size, cp_rank):
+                            loss.forward(logits, labels)
+                self.assertTrue(seen, "forward_impl was never called")
+                for n in seen:
+                    self.assertEqual(n, self.L // cp_size)
+
+
 if __name__ == "__main__":
     unittest.main()

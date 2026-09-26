@@ -539,6 +539,39 @@ class LanguageLoss(FleetLayer):
             labels = ContextParallelScatterOp.apply(
                 labels, axis=1, mode=self.config.cp_balance_mode
             )
+        elif (
+            get_context_parallel_world_size() > 1
+            and getattr(self.config, "use_erndata", False)
+            and (
+                self.config.num_nextn_predict_layers is None
+                or self.config.num_nextn_predict_layers <= 0
+                or self.config.mtp_load_weight_only
+            )
+        ):
+            # erndata single-entry path (K==0, or mtp_load_weight_only): labels
+            # reach _forward full-length L (the loader broadcasts them and no
+            # upstream op shards them), while the logits this rank produces are
+            # its local CP slice. Slice labels with the identical cp_balance_mode
+            # layout so shapes match -- no comm, every rank holds the same [B, L].
+            #
+            # The guard on num_nextn_predict_layers is load-bearing: the MTP list
+            # path (forward, K>0, not mtp_load_weight_only) already slices
+            # lm_labels / per-depth labels to [B, L/cp] via extract_local_cp_chunks
+            # *before* calling self._forward, so slicing again here would produce
+            # [B, L/cp**2] and mismatch the local logits. That path never sets
+            # num_nextn_predict_layers<=0, so this branch stays off for it.
+            from paddlefleet.parallel_state import get_context_parallel_rank
+            from paddlefleet.transformer.multi_token_prediction import (
+                extract_local_cp_chunks,
+            )
+
+            labels = extract_local_cp_chunks(
+                labels,
+                get_context_parallel_rank(),
+                get_context_parallel_world_size(),
+                axis=1,
+                mode=self.config.cp_balance_mode,
+            )
         if module_needs_recompute("loss_fn", None, self.config):
             # One lifetime per CE invocation, not a flag on the shared layer:
             # several heads/micro-batches may await backward simultaneously.

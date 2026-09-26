@@ -327,6 +327,38 @@ class GPTEmbedding(FleetLayer):
                 deepstack_visual_embeds.append(embed_joint)
         return decoder_input, visual_pos_masks, deepstack_visual_embeds
 
+    def _derive_erndata_backbone_mask(
+        self, attn_mask_startend_row_indices, cu_seqlens_q, decoder_input
+    ):
+        """Derive the full-length backbone flashmask from ``cu_seqlens_q``.
+
+        The erndata contract only guarantees length-L tensors plus
+        ``cu_seqlens_q``; the main flashmask boundaries are optional (erndata
+        emits them only when ``pack_by_cu_seqlen=True`` and the sample has
+        documents). Without a mask the CP branch of ``DotProductAttention``
+        synthesizes an all-visible one and calls flashmask with ``causal=False``,
+        silently dropping both causality and doc boundaries from the backbone.
+        Deriving the mask from ``cu_seqlens_q`` makes the backbone see the same
+        per-doc boundaries the MTP depths do. Both the erndata MTP branch and the
+        erndata plain (K==0) branch need this identical derivation, so it lives
+        here once.
+
+        Returns the incoming mask unchanged when it is already present or
+        ``cu_seqlens_q`` is absent.
+        """
+        if attn_mask_startend_row_indices is not None or cu_seqlens_q is None:
+            return attn_mask_startend_row_indices
+        from paddlefleet.transformer.multi_token_prediction import (
+            build_startend_row_indices_from_cu_seqlens,
+        )
+
+        return build_startend_row_indices_from_cu_seqlens(
+            cu_seqlens_q,
+            decoder_input.shape[0],
+            include_position_axis=self.config.gpt_model_use_experimental_version,
+            seq_len=decoder_input.shape[1],
+        )
+
     def forward(
         self,
         dict_args: dict,
@@ -482,30 +514,20 @@ class GPTEmbedding(FleetLayer):
                         "erndata MTP path does not support multimodal for now."
                     )
                     from paddlefleet.transformer.multi_token_prediction import (
-                        build_startend_row_indices_from_cu_seqlens,
                         extract_local_cp_chunks,
                         roll_tensor,
                     )
 
                     # The erndata contract only guarantees length-L tensors plus
-                    # cu_seqlens_q; the main flashmask boundaries are optional
-                    # (erndata emits them only when pack_by_cu_seqlen=True and
-                    # the sample has documents). Without a mask the CP branch of
-                    # DotProductAttention synthesizes an all-visible one and
-                    # calls flashmask with causal=False, silently dropping both
-                    # causality and doc boundaries from the backbone. Derive the
-                    # mask from cu_seqlens_q here so the backbone sees the same
-                    # per-doc boundaries the MTP depths do.
-                    if (
-                        attn_mask_startend_row_indices is None
-                        and cu_seqlens_q is not None
-                    ):
-                        attn_mask_startend_row_indices = build_startend_row_indices_from_cu_seqlens(
+                    # cu_seqlens_q; derive the backbone flashmask from
+                    # cu_seqlens_q when erndata omitted it (see helper docstring).
+                    attn_mask_startend_row_indices = (
+                        self._derive_erndata_backbone_mask(
+                            attn_mask_startend_row_indices,
                             cu_seqlens_q,
-                            decoder_input.shape[0],
-                            include_position_axis=self.config.gpt_model_use_experimental_version,
-                            seq_len=decoder_input.shape[1],
+                            decoder_input,
                         )
+                    )
 
                     # decoder_input: [B, L, H] full-length embedding (already
                     # computed above from the length-L input_ids in this branch).
@@ -815,7 +837,7 @@ class GPTEmbedding(FleetLayer):
                         ]
             # CP scatter for the plain (no-MTP, no-multimodal) path must happen
             # before rope generation so that get_rotary_seq_len sees local seq len.
-            if (
+            _is_plain_cp_path = (
                 not self.multimodal_embedding
                 and not (
                     self.config.num_nextn_predict_layers
@@ -823,8 +845,8 @@ class GPTEmbedding(FleetLayer):
                     and not self.config.mtp_load_weight_only
                 )
                 and get_context_parallel_world_size() > 1
-                and self.config.experimental_dataflow
-            ):
+            )
+            if _is_plain_cp_path and self.config.experimental_dataflow:
                 assert not self.sequence_parallel, (
                     "sequence_parallel is not supported when context_parallel scatter "
                     "is applied in the plain (no-MTP, no-multimodal) path before RoPE "
@@ -832,6 +854,49 @@ class GPTEmbedding(FleetLayer):
                 )
                 decoder_input = ContextParallelScatterOp.apply(
                     decoder_input, axis=1, mode=self.config.cp_balance_mode
+                )
+            elif _is_plain_cp_path and getattr(
+                self.config, "use_erndata", False
+            ):
+                # erndata plain path (K == 0, or MTP weights loaded but frozen):
+                # the loader broadcasts every tensor full-length L to the whole
+                # CP group and no upstream op shards it. The MTP branch above and
+                # the experimental_dataflow ContextParallelScatterOp are both
+                # unreachable here, so slice this rank's local chunk right here --
+                # exactly the way the erndata MTP branch slices its embeddings --
+                # so DotProductAttention's key.shape[1] * cp_size reconstructs L.
+                # No ContextParallelScatterOp: every rank already holds the same
+                # full-length embedding, so a local slice needs no communication.
+                assert not self.sequence_parallel, (
+                    "sequence_parallel is not supported on the erndata plain "
+                    "(no-MTP, no-multimodal) CP path."
+                )
+                from paddlefleet.transformer.multi_token_prediction import (
+                    extract_local_cp_chunks,
+                )
+
+                # The backbone attention mask stays FULL length L: the CP branch
+                # of DotProductAttention expands it back to key.shape[1]*cp_size.
+                # Derive it from cu_seqlens_q when erndata omitted it, exactly as
+                # the MTP branch does (shared helper).
+                attn_mask_startend_row_indices = (
+                    self._derive_erndata_backbone_mask(
+                        attn_mask_startend_row_indices,
+                        cu_seqlens_q,
+                        decoder_input,
+                    )
+                )
+
+                # Publish the CP layout so the RoPE tables below get sliced with
+                # the identical layout via _slice_rope_for_mtp_megatron_cp.
+                mtp_megatron_cp_size = get_context_parallel_world_size()
+                mtp_megatron_cp_rank = get_context_parallel_rank()
+                decoder_input = extract_local_cp_chunks(
+                    decoder_input,
+                    mtp_megatron_cp_rank,
+                    mtp_megatron_cp_size,
+                    axis=1,
+                    mode=self.config.cp_balance_mode,
                 )
 
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
