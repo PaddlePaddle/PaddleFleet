@@ -2544,7 +2544,6 @@ class TransformerConfig(ModelParallelConfig):
                     "Set gpt_model_use_experimental_version=False."
                 )
 
-
         if self.intermediate_size is None:
             self.intermediate_size = 4 * self.hidden_size
 

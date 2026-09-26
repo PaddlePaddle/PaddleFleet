@@ -491,14 +491,16 @@ class TestLanguageLossForwardErndataCP(unittest.TestCase):
         # Local logits shape is irrelevant to the stubbed impl; pass a matching
         # local length for realism.
         logits = paddle.zeros([1, self.L // cp_size, 4], dtype="float32")
-        with mock.patch.object(
-            ll, "module_needs_recompute", lambda *a, **k: False
+        with (
+            mock.patch.object(
+                ll, "module_needs_recompute", lambda *a, **k: False
+            ),
+            mock.patch.object(LanguageLoss, "forward_impl", _fake_impl),
+            _cp_ranks(cp_size, cp_rank),
         ):
-            with mock.patch.object(LanguageLoss, "forward_impl", _fake_impl):
-                with _cp_ranks(cp_size, cp_rank):
-                    # _make_loss stubs the *instance* _forward; call the real
-                    # unbound method so the CP-slicing logic under test runs.
-                    LanguageLoss._forward(loss, logits, labels)
+            # _make_loss stubs the *instance* _forward; call the real unbound
+            # method so the CP-slicing logic under test runs.
+            LanguageLoss._forward(loss, logits, labels)
         return labels_np, captured["labels"].numpy()
 
     def test_forward_k0_slices_labels_for_both_modes(self) -> None:
@@ -517,7 +519,9 @@ class TestLanguageLossForwardErndataCP(unittest.TestCase):
         cp_size = 2
         for mode in ("dualchunk_allgather", "contiguous_allgather"):
             with self.subTest(cp_balance_mode=mode):
-                pieces = [self._run(mode, cp_size, r)[1] for r in range(cp_size)]
+                pieces = [
+                    self._run(mode, cp_size, r)[1] for r in range(cp_size)
+                ]
                 union = np.sort(np.concatenate(pieces, axis=1).reshape([-1]))
                 np.testing.assert_array_equal(union, np.arange(self.L))
 
@@ -561,14 +565,14 @@ class TestLanguageLossForwardErndataCP(unittest.TestCase):
                     paddle.zeros([1, self.L // cp_size, 4], dtype="float32")
                     for _ in range(2)
                 ]
-                with mock.patch.object(
-                    ll, "module_needs_recompute", lambda *a, **k: False
+                with (
+                    mock.patch.object(
+                        ll, "module_needs_recompute", lambda *a, **k: False
+                    ),
+                    mock.patch.object(LanguageLoss, "forward_impl", _fake_impl),
+                    _cp_ranks(cp_size, cp_rank),
                 ):
-                    with mock.patch.object(
-                        LanguageLoss, "forward_impl", _fake_impl
-                    ):
-                        with _cp_ranks(cp_size, cp_rank):
-                            loss.forward(logits, labels)
+                    loss.forward(logits, labels)
                 self.assertTrue(seen, "forward_impl was never called")
                 for n in seen:
                     self.assertEqual(n, self.L // cp_size)

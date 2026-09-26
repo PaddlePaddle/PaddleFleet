@@ -128,7 +128,9 @@ def setUpModule():
     model_parallel_cuda_manual_seed(SEED)
 
 
-def _make_config(cp_balance_mode="dualchunk_allgather", num_nextn_predict_layers=NUM_MTP):
+def _make_config(
+    cp_balance_mode="dualchunk_allgather", num_nextn_predict_layers=NUM_MTP
+):
     return GPTConfig(
         vocab_size=VOCAB,
         max_sequence_length=SEQ,

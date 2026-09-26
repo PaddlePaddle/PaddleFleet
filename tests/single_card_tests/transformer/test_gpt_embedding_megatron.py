@@ -245,7 +245,9 @@ class TestGptEmbeddingMegatron(unittest.TestCase):
         # supplied a flashmask, the plain branch must pass it through unchanged
         # (not rebuild it from cu_seqlens_q), while still slicing decoder_input.
         B, L, H = 1, 8, 4
-        emb = _make_embedding(0, B, L, H, cp_balance_mode="contiguous_allgather")
+        emb = _make_embedding(
+            0, B, L, H, cp_balance_mode="contiguous_allgather"
+        )
         emb.config.gpt_model_use_experimental_version = False
         input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
         cu = paddle.to_tensor([0, L], dtype="int32")
