@@ -1100,12 +1100,18 @@ class GPTEmbedding(FleetLayer):
                 mtp_hidden_inputs_mask_all
             )
         if mtp_emb_res is not None:
-            assert (
+            if not (
                 self.config.num_nextn_predict_layers is not None
                 and self.config.num_nextn_predict_layers > 0
                 and not self.config.mtp_load_weight_only
-            )
-            assert len(mtp_emb_res) == self.config.num_nextn_predict_layers + 1
+            ):
+                raise ValueError(
+                    "mtp_emb_res requires active MTP prediction layers and training weights"
+                )
+            if len(mtp_emb_res) != self.config.num_nextn_predict_layers + 1:
+                raise ValueError(
+                    "mtp_emb_res must contain one backbone embedding plus one entry per MTP layer"
+                )
             if self.config.separate_mtp_input:
                 # Keep hidden_states free of MTP chunks so the backbone layers do not
                 # have to split/concat them. The shifted embeddings travel to the MTP
