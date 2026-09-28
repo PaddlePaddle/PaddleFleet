@@ -3106,9 +3106,7 @@ class Trainer:
         hcg = getattr(self, "hcg", None)
         if hcg is None:
             return getattr(self, "dp_group", None)
-        get_sharding_group = getattr(
-            hcg, "get_sharding_parallel_group", None
-        )
+        get_sharding_group = getattr(hcg, "get_sharding_parallel_group", None)
         if get_sharding_group is not None:
             group = get_sharding_group()
             if group is not None and group.nranks > 1:
@@ -4581,10 +4579,7 @@ class Trainer:
                             _avg_group = _hcg.get_sharding_parallel_group()
                         if _avg_group is None or _avg_group.nranks <= 1:
                             _avg_group = _hcg.get_data_parallel_group()
-                        if (
-                            _avg_group is None
-                            and _pf_dist.get_world_size() > 1
-                        ):
+                        if _avg_group is None and _pf_dist.get_world_size() > 1:
                             raise RuntimeError(
                                 "LOG_LOSS_MD5 requires a data-parallel-equivalent process group"
                             )
