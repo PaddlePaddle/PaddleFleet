@@ -52,6 +52,14 @@ from paddlefleet.transformer.layer import FleetLayer
 
 if TYPE_CHECKING:
     from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddle.distributed.flex_checkpoint.aoa.generation import (
+    join_name,
+    resolve_checkpoint_name_from_anchor,
+    resolve_names,
+    resolve_single_name,
+    strip_name_suffix,
+)
+
 from paddlefleet.utils import (
     get_tensor_model_parallel_group_if_none,
     nvtx_range_pop,
@@ -431,3 +439,298 @@ class MLP(FleetLayer):
     def backward_dw(self):
         self.down_proj.backward_dw()
         self.up_gate_proj.backward_dw()
+
+    def gen_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Checkpoint->model generator for the MLP.
+
+        The base class assumes the checkpoint stores ``gate_proj`` and
+        ``up_proj`` as two separate tensors and fuses them (each transposed)
+        into ``up_gate_proj`` via the ``fused_ffn`` macro. ``down_proj`` is
+        always delegated. Any own directly-held param/buffer of this MLP (not a
+        sublayer) is caught by a generic same-name-skipping fallback between the
+        fused body and the ``down_proj`` delegation, mirroring ``SelfAttention``.
+        Inverse is generated independently in :meth:`gen_inv_aoa_statements`.
+
+        Models whose checkpoint layout differs (no gate/up split, or a single
+        pre-fused tensor) override this in a minimal-scope subclass in their own
+        modeling file rather than branching here on model config.
+        """
+        fused_local_name = "up_gate_proj.weight"
+        fused_model_name = resolve_single_name(
+            fused_local_name,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            ctx.model_name_prefix,
+        )
+        gate_checkpoint_name = resolve_checkpoint_name_from_anchor(
+            fused_model_name,
+            fused_local_name,
+            "gate_proj.weight",
+            ctx.checkpoint_name_prefix,
+            ctx.checkpoint_name_mapping,
+            model_name_prefix=ctx.model_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+        up_checkpoint_name = resolve_checkpoint_name_from_anchor(
+            fused_model_name,
+            fused_local_name,
+            "up_proj.weight",
+            ctx.checkpoint_name_prefix,
+            ctx.checkpoint_name_mapping,
+            model_name_prefix=ctx.model_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+        statements = self._gen_up_gate_fusion_aoa_statements(
+            gate_checkpoint_name, up_checkpoint_name, fused_model_name
+        )
+        if self.up_gate_proj.bias is not None:
+            statements += self._gen_up_gate_bias_aoa_statements(
+                ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+            )
+        local_state_dict = self.state_dict(
+            structured_name_prefix="", include_sublayers=False
+        )
+        for name in local_state_dict:
+            source_name, target_name = resolve_names(
+                name,
+                ctx.checkpoint_name_prefix,
+                structured_name_prefix,
+                ctx.pp_to_single_mapping,
+                ctx.checkpoint_name_mapping,
+                model_name_prefix=ctx.model_name_prefix,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+            if source_name != target_name:
+                statements.append(f"{source_name} -> {target_name}")
+        statements += self.down_proj.gen_aoa_statements(
+            ctx,
+            structured_name_prefix=f"{structured_name_prefix}down_proj.",
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+        return statements
+
+    def gen_inv_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Inverse (model -> checkpoint) generator for the MLP.
+
+        Independently splits the fused ``up_gate_proj`` back into checkpoint
+        ``gate_proj`` and ``up_proj`` via ``fused_ffn``, catches any own
+        directly-held param/buffer via a generic same-name-skipping fallback,
+        then delegates ``down_proj``. Not derived from the checkpoint->model
+        text. The inverse ``fused_ffn`` carries no ``^T``: the fused macro
+        handles the layout, and the two model-side halves are transposed to
+        their checkpoint names in separate statements.
+
+        Models whose checkpoint layout differs override this in a minimal-scope
+        subclass in their own modeling file rather than branching here.
+        """
+        fused_local_name = "up_gate_proj.weight"
+        fused_model_name = resolve_single_name(
+            fused_local_name,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            ctx.model_name_prefix,
+        )
+        # Split targets use the model-side gate/up half names, derived from the
+        # fused anchor's scope (never sent through pp_to_single_mapping, since
+        # the halves are not real params under the fused up_gate_proj).
+        scope_single = strip_name_suffix(fused_model_name, fused_local_name)
+        gate_model_name = join_name(scope_single, "gate_proj.weight")
+        up_model_name = join_name(scope_single, "up_proj.weight")
+        gate_checkpoint_name = resolve_checkpoint_name_from_anchor(
+            fused_model_name,
+            fused_local_name,
+            "gate_proj.weight",
+            ctx.checkpoint_name_prefix,
+            ctx.checkpoint_name_mapping,
+            model_name_prefix=ctx.model_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+        up_checkpoint_name = resolve_checkpoint_name_from_anchor(
+            fused_model_name,
+            fused_local_name,
+            "up_proj.weight",
+            ctx.checkpoint_name_prefix,
+            ctx.checkpoint_name_mapping,
+            model_name_prefix=ctx.model_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+        statements = self._gen_inv_up_gate_fusion_aoa_statements(
+            fused_model_name,
+            gate_model_name,
+            up_model_name,
+            gate_checkpoint_name,
+            up_checkpoint_name,
+        )
+        if self.up_gate_proj.bias is not None:
+            statements += self._gen_inv_up_gate_bias_aoa_statements(
+                ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+            )
+        local_state_dict = self.state_dict(
+            structured_name_prefix="", include_sublayers=False
+        )
+        for name in local_state_dict:
+            target_name, source_name = resolve_names(
+                name,
+                ctx.checkpoint_name_prefix,
+                structured_name_prefix,
+                ctx.pp_to_single_mapping,
+                ctx.checkpoint_name_mapping,
+                model_name_prefix=ctx.model_name_prefix,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+            if source_name != target_name:
+                statements.append(f"{source_name} -> {target_name}")
+        statements += self.down_proj.gen_inv_aoa_statements(
+            ctx,
+            structured_name_prefix=f"{structured_name_prefix}down_proj.",
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+        return statements
+
+    def _gen_up_gate_fusion_aoa_statements(
+        self, gate_checkpoint_name, up_checkpoint_name, fused_model_name
+    ):
+        """Checkpoint->model fusion of gate/up into ``up_gate_proj``.
+
+        Default uses the ``fused_ffn`` macro, whose TP-rank interleaving is
+        required for dense and shared MLPs that are tensor-parallel sharded.
+        Routed experts are expert-parallel (their fused weight is not
+        TP-interleaved), so they override this with a plain ``axis=1`` concat.
+        """
+        return [
+            f"{gate_checkpoint_name}^T, {up_checkpoint_name}^T "
+            f"-> {fused_model_name}, fused_ffn"
+        ]
+
+    def _gen_inv_up_gate_fusion_aoa_statements(
+        self,
+        fused_model_name,
+        gate_model_name,
+        up_model_name,
+        gate_checkpoint_name,
+        up_checkpoint_name,
+    ):
+        """Model->checkpoint split of ``up_gate_proj`` back into gate/up.
+
+        Split the fused weight via the TP-interleaving ``fused_ffn`` macro onto
+        the model-side gate/up half names (still in model ``(out,in)`` layout),
+        then transpose each half back to its checkpoint ``(in,out)`` name. The
+        transpose is a separate statement because ``^T`` binds to the source
+        (left) side while ``fused_ffn`` emits its halves on the target side.
+        Routed experts override only the fusion macro (``axis=1``); the
+        split-then-transpose shape is identical.
+        """
+        return [
+            f"{fused_model_name} -> "
+            f"{gate_model_name}, {up_model_name}, fused_ffn",
+            f"{gate_model_name}^T -> {gate_checkpoint_name}",
+            f"{up_model_name}^T -> {up_checkpoint_name}",
+        ]
+
+    def _gen_up_gate_bias_fusion_aoa_statements(
+        self, gate_checkpoint_name, up_checkpoint_name, fused_model_name
+    ):
+        """Checkpoint->model fusion of the gate/up 1-D bias.
+
+        Same TP-interleaving requirement as the weight, on the single bias axis
+        (``axis=0``); routed experts are expert-parallel and override this with
+        a plain concat.
+        """
+        return [
+            f"{gate_checkpoint_name}, {up_checkpoint_name} "
+            f"-> {fused_model_name}, fused_ffn, axis=0"
+        ]
+
+    def _gen_inv_up_gate_bias_fusion_aoa_statements(
+        self, fused_model_name, gate_checkpoint_name, up_checkpoint_name
+    ):
+        """Model->checkpoint split of the fused 1-D bias.
+
+        No transpose on either side, so unlike the weight this is a single
+        statement straight onto the checkpoint names.
+        """
+        return [
+            f"{fused_model_name} -> "
+            f"{gate_checkpoint_name}, {up_checkpoint_name}, fused_ffn, axis=0"
+        ]
+
+    def _gen_up_gate_bias_aoa_statements(
+        self, ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+    ):
+        """Checkpoint->model helper: fuse checkpoint gate/up 1-D bias into the
+        model fused bias (no transpose). Anchored on the real
+        ``up_gate_proj.bias`` key."""
+        fused_local_name = "up_gate_proj.bias"
+        fused_model_name = resolve_single_name(
+            fused_local_name,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            ctx.model_name_prefix,
+        )
+        gate_checkpoint_name = resolve_checkpoint_name_from_anchor(
+            fused_model_name,
+            fused_local_name,
+            "gate_proj.bias",
+            ctx.checkpoint_name_prefix,
+            ctx.checkpoint_name_mapping,
+            model_name_prefix=ctx.model_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+        up_checkpoint_name = resolve_checkpoint_name_from_anchor(
+            fused_model_name,
+            fused_local_name,
+            "up_proj.bias",
+            ctx.checkpoint_name_prefix,
+            ctx.checkpoint_name_mapping,
+            model_name_prefix=ctx.model_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+        return self._gen_up_gate_bias_fusion_aoa_statements(
+            gate_checkpoint_name, up_checkpoint_name, fused_model_name
+        )
+
+    def _gen_inv_up_gate_bias_aoa_statements(
+        self, ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+    ):
+        """Inverse-only helper: split the model fused 1-D bias back into
+        checkpoint gate/up bias (no transpose)."""
+        fused_local_name = "up_gate_proj.bias"
+        fused_model_name = resolve_single_name(
+            fused_local_name,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            ctx.model_name_prefix,
+        )
+        gate_checkpoint_name = resolve_checkpoint_name_from_anchor(
+            fused_model_name,
+            fused_local_name,
+            "gate_proj.bias",
+            ctx.checkpoint_name_prefix,
+            ctx.checkpoint_name_mapping,
+            model_name_prefix=ctx.model_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+        up_checkpoint_name = resolve_checkpoint_name_from_anchor(
+            fused_model_name,
+            fused_local_name,
+            "up_proj.bias",
+            ctx.checkpoint_name_prefix,
+            ctx.checkpoint_name_mapping,
+            model_name_prefix=ctx.model_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+        return self._gen_inv_up_gate_bias_fusion_aoa_statements(
+            fused_model_name, gate_checkpoint_name, up_checkpoint_name
+        )
