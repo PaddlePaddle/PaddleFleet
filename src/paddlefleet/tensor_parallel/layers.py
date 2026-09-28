@@ -842,7 +842,11 @@ def general_gemm(
         elif use_accuracy_compatible:
             output = paddle.matmul(a, b.T.contiguous(), transpose_y=True)
         else:
-            output = F.linear(a, b, bias) if bias is not None else paddle.matmul(a, b)
+            output = (
+                F.linear(a, b, bias)
+                if bias is not None
+                else paddle.matmul(a, b)
+            )
         return output, None
 
 
