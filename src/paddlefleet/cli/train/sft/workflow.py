@@ -209,12 +209,15 @@ def apply_glm_moe_dsa_training_contract(
     model_config.use_accuracy_compatible = normalize_accuracy_target(
         getattr(training_args, "use_accuracy_compatible", False)
     )
+
     def _read_mtp_depth(name):
         value = getattr(training_args, name, 0)
         if value is None:
             return 0
         if isinstance(value, bool) or not isinstance(value, int):
-            raise TypeError(f"GLM MoE DSA {name} must be an integer, got {value!r}")
+            raise TypeError(
+                f"GLM MoE DSA {name} must be an integer, got {value!r}"
+            )
         return value
 
     requested_mtp = _read_mtp_depth("num_nextn_predict_layers")
