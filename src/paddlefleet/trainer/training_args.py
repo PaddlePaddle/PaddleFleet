@@ -587,6 +587,10 @@ class TrainingArguments:
         and decreased for the experts with more assigned tokens."""
         },
     )
+    moe_token_dispatcher_type: str = field(
+        default="alltoall",
+        metadata={"help": "MoE token dispatcher implementation."},
+    )
     freeze_training: bool = field(
         default=False,
         metadata={
@@ -1555,6 +1559,12 @@ class TrainingArguments:
     )
     num_nextn_predict_layers: int = field(
         default=0, metadata={"help": "Number of nextn predict layers."}
+    )
+    fp32_residual_connection: Optional[bool] = field(
+        default=None,
+        metadata={
+            "help": "Whether residual connections use FP32 accumulation; None keeps the model configuration."
+        },
     )
     train_mtp_only: bool = field(
         default=False, metadata={"help": "Whether to train MTP only."}

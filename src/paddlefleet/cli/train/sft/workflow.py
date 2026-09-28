@@ -75,6 +75,7 @@ from paddlefleet.transformers.configuration_utils import (
 )
 from paddlefleet.utils.accuracy_target import normalize_accuracy_target
 from paddlefleet.utils.log import logger
+from paddlefleet.transformer.moe.moe_utils import set_accuracy_compatible_kernel
 
 from .make_data_utils import DataGenerator
 from .sft_trainer import SFTTrainer
@@ -132,7 +133,7 @@ def load_tokenizer_and_processor(model_args, data_args):
         processor = AutoProcessor.from_pretrained(
             model_args.model_name_or_path, use_fast=data_args.processor_use_fast
         )
-    except (OSError, ValueError):
+    except OSError:
         # Extracted GLM-5.2 weights keep an independent tokenizer path and
         # have no processor files. Any other load failure must surface:
         # published GLM-4 SFT depends on the real AutoProcessor.
@@ -208,10 +209,16 @@ def apply_glm_moe_dsa_training_contract(
     model_config.use_accuracy_compatible = normalize_accuracy_target(
         getattr(training_args, "use_accuracy_compatible", False)
     )
-    requested_mtp = int(
-        getattr(training_args, "num_nextn_predict_layers", 0) or 0
-    )
-    explicit_mtp = int(getattr(training_args, "mtp_num_layers", 0) or 0)
+    def _read_mtp_depth(name):
+        value = getattr(training_args, name, 0)
+        if value is None:
+            return 0
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise TypeError(f"GLM MoE DSA {name} must be an integer, got {value!r}")
+        return value
+
+    requested_mtp = _read_mtp_depth("num_nextn_predict_layers")
+    explicit_mtp = _read_mtp_depth("mtp_num_layers")
     for name, depth in (
         ("num_nextn_predict_layers", requested_mtp),
         ("mtp_num_layers", explicit_mtp),
@@ -259,9 +266,11 @@ def apply_glm_moe_dsa_training_contract(
             "pretokenized GLM MoE DSA MTP requires mtp_attention_flexible=true"
         )
 
-    model_config.fp32_residual_connection = (
-        training_args.fp32_residual_connection
+    fp32_residual_connection = getattr(
+        training_args, "fp32_residual_connection", None
     )
+    if fp32_residual_connection is not None:
+        model_config.fp32_residual_connection = bool(fp32_residual_connection)
     model_config.moe_token_dispatcher_type = getattr(
         training_args, "moe_token_dispatcher_type", "alltoall"
     )
@@ -565,13 +574,11 @@ def run_sft(
         model_config, training_args, model_args, data_args
     )
     if getattr(model_config, "model_type", None) == "glm_moe_dsa":
+        accuracy_kernel_enabled = bool(model_config.use_accuracy_compatible)
         paddle.set_flags(
-            {
-                "FLAGS_use_accuracy_compatible_kernel": bool(
-                    model_config.use_accuracy_compatible
-                )
-            }
+            {"FLAGS_use_accuracy_compatible_kernel": accuracy_kernel_enabled}
         )
+        set_accuracy_compatible_kernel(accuracy_kernel_enabled)
     model_config.use_fast_layer_norm = model_args.use_fast_layer_norm
 
     # autoregressive mtp training (non GLM MoE DSA). GLM MoE DSA already mapped

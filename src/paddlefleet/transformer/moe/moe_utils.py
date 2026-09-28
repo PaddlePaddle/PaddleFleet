@@ -61,6 +61,12 @@ def use_accuracy_compatible_kernel() -> bool:
     return _USE_ACCURACY_COMPATIBLE_KERNEL
 
 
+def set_accuracy_compatible_kernel(enabled: bool) -> None:
+    """Update the process-local MoE kernel switch after CLI parsing."""
+    global _USE_ACCURACY_COMPATIBLE_KERNEL
+    _USE_ACCURACY_COMPATIBLE_KERNEL = bool(enabled)
+
+
 class AutoSBHistoryTracker:
     """只统计 warmup 阶段连续 MoE auto-subbatch forward 起点的显存下降。"""
 
