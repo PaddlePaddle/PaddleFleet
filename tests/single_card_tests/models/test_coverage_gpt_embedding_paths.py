@@ -221,7 +221,7 @@ class MtpAttentionMaskPassthroughTest(_ForwardHarness):
             dict_args = {"input_ids": None, **extra}
             with (
                 self.subTest(reason=reason),
-                self.assertRaises(AssertionError),
+                self.assertRaises(ValueError),
             ):
                 self._run_forward(
                     _config(),

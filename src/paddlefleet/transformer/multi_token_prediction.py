@@ -74,9 +74,10 @@ def _apply_mtp_layer_masks(dict_args, depth, config):
         "mtp_startend_row_indices_all", None
     )
     mtp_attn_mask = dict_args.pop("mtp_attn_mask", None)
-    assert not (
-        mtp_startend_row_indices_all is not None and mtp_attn_mask is not None
-    ), "MTP compressed and dense attention masks are mutually exclusive"
+    if mtp_startend_row_indices_all is not None and mtp_attn_mask is not None:
+        raise ValueError(
+            "MTP compressed and dense attention masks are mutually exclusive"
+        )
     mtp_hidden_inputs_mask_all = dict_args.pop(
         "mtp_hidden_inputs_mask_all", None
     )

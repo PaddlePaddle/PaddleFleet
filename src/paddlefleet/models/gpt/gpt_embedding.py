@@ -1065,19 +1065,21 @@ class GPTEmbedding(FleetLayer):
         mtp_hidden_inputs_mask_all = dict_args.get(
             "mtp_hidden_inputs_mask_all", None
         )
-        assert not (
+        if (
             mtp_startend_row_indices_all is not None
             and mtp_attn_mask is not None
-        ), "MTP compressed and dense attention masks are mutually exclusive"
+        ):
+            raise ValueError(
+                "MTP compressed and dense attention masks are mutually exclusive"
+            )
         has_mtp_attention_mask = (
             mtp_startend_row_indices_all is not None
             or mtp_attn_mask is not None
         )
-        assert has_mtp_attention_mask == (
-            mtp_hidden_inputs_mask_all is not None
-        ), (
-            "an MTP attention mask and mtp_hidden_inputs_mask_all must both be present or both be absent"
-        )
+        if has_mtp_attention_mask != (mtp_hidden_inputs_mask_all is not None):
+            raise ValueError(
+                "an MTP attention mask and mtp_hidden_inputs_mask_all must both be present or both be absent"
+            )
         if has_mtp_attention_mask:
             # Ensure tensors are on GPU; PP P2P communication cannot send pinned tensors directly.
             if mtp_startend_row_indices_all is not None:
