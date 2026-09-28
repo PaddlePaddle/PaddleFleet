@@ -13,12 +13,15 @@
 # limitations under the License.
 #
 # Scope: an MTP block's AOA contract. The block declares one checkpoint lookup
-# drop segment (``transformer_layer``) for its whole subtree and enumerates
-# nothing else itself, so this test pins: the inner transformer's tensors reach
-# the ordinary-layer mapping entries while the model side keeps the segment;
-# direct children are unaffected by the drop; ``eh_proj`` is transposed; and a
-# private ``mtp_embed`` copy is filled from the one embedding tensor the
-# checkpoint holds and is never written back.
+# drop segment (``transformer_layer``) for its whole subtree, leaves the inner
+# transformer and its components to the standard recursion, and states two
+# children that have no self-owned rule: ``eh_proj``'s ``^T`` (its upstream
+# FusedLinear does not take part itself) and a private ``mtp_embed`` copy. So
+# this test pins: the inner transformer's tensors reach the ordinary-layer
+# mapping entries while the model side keeps the segment; direct children are
+# unaffected by the drop; ``eh_proj`` is transposed; and a private ``mtp_embed``
+# copy is filled from the one embedding tensor the checkpoint holds and is
+# never written back.
 import os
 import sys
 
@@ -32,9 +35,15 @@ sys.path.insert(
 )
 
 import unittest
+from types import SimpleNamespace
 
 import paddle
 from paddle.distributed.flex_checkpoint.aoa.generation import AOAContext
+
+from paddlefleet.tensor_parallel.layers import (
+    gen_linear_aoa_statements,
+    gen_linear_inv_aoa_statements,
+)
 
 # Three entries of the shape a real model declares: the first two are written
 # for an ordinary layer, and the drop segment is what lets the second one also
@@ -74,23 +83,39 @@ class _ParamLeaf(paddle.nn.Layer):
 
 
 def _fused_linear_leaf():
-    """Binds ``FusedLinear``'s AOA overrides onto a controllable stand-in.
+    """An ``eh_proj`` stand-in for the experimental version: no AOA override.
 
-    The real class allocates a fused GEMM weight through its own constructor,
-    so the two overrides (which only forward to the Linear family helpers) are
-    bound onto a lightweight ``paddle.nn.Layer`` carrying a real param.
+    There ``eh_proj`` is an upstream ``paddle.incubate.nn.FusedLinear`` that does
+    not take part in modular AOA itself; the MTP block supplies its ``^T``. A
+    lightweight ``paddle.nn.Layer`` carrying a real ``weight`` models that.
     """
-    from paddlefleet.tensor_parallel.layers import FusedLinear
 
     class _FusedLinearLeaf(paddle.nn.Layer):
-        gen_aoa_statements = FusedLinear.gen_aoa_statements
-        gen_inv_aoa_statements = FusedLinear.gen_inv_aoa_statements
-
         def __init__(self):
             super().__init__()
             self.weight = self.create_parameter(shape=[2, 2])
 
     return _FusedLinearLeaf()
+
+
+def _self_handling_linear_leaf():
+    """An ``eh_proj`` stand-in for the non-experimental version.
+
+    There ``eh_proj`` is a Linear-family layer (``ColumnParallelLinear`` / a spec
+    layer) that owns its ``gen_aoa_statements``, so the recursion already emits
+    its ``^T`` and the MTP block must not add a second copy. The shared Linear
+    helpers, bound as methods, reproduce that self-owned rule.
+    """
+
+    class _SelfHandlingLinearLeaf(paddle.nn.Layer):
+        gen_aoa_statements = gen_linear_aoa_statements
+        gen_inv_aoa_statements = gen_linear_inv_aoa_statements
+
+        def __init__(self):
+            super().__init__()
+            self.weight = self.create_parameter(shape=[2, 2])
+
+    return _SelfHandlingLinearLeaf()
 
 
 class _InnerMLP(paddle.nn.Layer):
@@ -107,12 +132,14 @@ class _InnerTransformer(paddle.nn.Layer):
         self.mlp = _InnerMLP()
 
 
-def _make_mtp_stand_in(*, mtp_embed=False):
+def _make_mtp_stand_in(*, mtp_embed=False, experimental=True):
     """A structural stand-in for an MTP block.
 
     Building the real layer needs a live config plus TP / PP process groups, so
     this subclass keeps the class (hence both AOA overrides and their
     ``super()`` chain) and only the child layout that decides resolved names.
+    ``experimental`` mirrors ``gpt_model_use_experimental_version``: it picks the
+    matching ``eh_proj`` kind and drives the block's own branch.
     """
     from paddlefleet.transformer.multi_token_prediction import (
         MultiTokenPredictionLayer,
@@ -121,9 +148,16 @@ def _make_mtp_stand_in(*, mtp_embed=False):
     class _MTPStandIn(MultiTokenPredictionLayer):
         def __init__(self):
             paddle.nn.Layer.__init__(self)
+            self.config = SimpleNamespace(
+                gpt_model_use_experimental_version=experimental
+            )
             self.enorm = _ParamLeaf()
             self.hnorm = _ParamLeaf()
-            self.eh_proj = _fused_linear_leaf()
+            self.eh_proj = (
+                _fused_linear_leaf()
+                if experimental
+                else _self_handling_linear_leaf()
+            )
             self.norm = _ParamLeaf()
             self.transformer_layer = _InnerTransformer()
             # The real layer leaves this ``None`` unless
@@ -167,15 +201,6 @@ class TestMTPClassContract(unittest.TestCase):
             WeightOnlyMTPLayer.gen_inv_aoa_statements,
             MultiTokenPredictionLayer.gen_inv_aoa_statements,
         )
-
-    def test_fused_linear_takes_part_and_is_exported(self):
-        import paddlefleet.tensor_parallel as tp
-        from paddlefleet.tensor_parallel.layers import FusedLinear
-
-        self.assertIn("gen_aoa_statements", FusedLinear.__dict__)
-        self.assertIn("gen_inv_aoa_statements", FusedLinear.__dict__)
-        self.assertIs(tp.FusedLinear, FusedLinear)
-        self.assertIn("FusedLinear", tp.__all__)
 
 
 class TestMTPForward(unittest.TestCase):
@@ -285,6 +310,29 @@ class TestMTPInverse(unittest.TestCase):
             _ctx(), structured_name_prefix=_PFX
         )
         self.assertFalse(any("mtp_embed" in s for s in stmts))
+
+
+class TestMTPNonExperimental(unittest.TestCase):
+    # Outside the experimental version ``eh_proj`` is a Linear-family layer that
+    # owns its ``^T``, so the recursion already emits it once; the block must not
+    # add a second copy (a duplicate statement is not a guaranteed no-op).
+    def test_eh_proj_transposed_exactly_once(self):
+        stmts = _make_mtp_stand_in(experimental=False).gen_aoa_statements(
+            _ctx(), structured_name_prefix=_PFX
+        )
+        self.assertEqual(
+            [s for s in stmts if "eh_proj" in s],
+            [f"{_EH_MD}^T -> {_EH_MD}"],
+        )
+
+    def test_inverse_eh_proj_transposed_exactly_once(self):
+        stmts = _make_mtp_stand_in(experimental=False).gen_inv_aoa_statements(
+            _ctx(), structured_name_prefix=_PFX
+        )
+        self.assertEqual(
+            [s for s in stmts if "eh_proj" in s],
+            [f"{_EH_MD}^T -> {_EH_MD}"],
+        )
 
 
 if __name__ == "__main__":

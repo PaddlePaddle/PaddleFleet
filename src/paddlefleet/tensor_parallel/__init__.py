@@ -18,7 +18,6 @@
 from .cross_entropy import vocab_parallel_cross_entropy
 from .layers import (
     ColumnParallelLinear,
-    FusedLinear,
     Linear,
     RowParallelLinear,
     VocabParallelEmbedding,
@@ -39,7 +38,6 @@ __all__ = [
     "vocab_parallel_cross_entropy",
     # layers.py
     "ColumnParallelLinear",
-    "FusedLinear",
     "Linear",
     "RowParallelLinear",
     "VocabParallelEmbedding",

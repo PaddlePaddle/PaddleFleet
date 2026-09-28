@@ -42,6 +42,10 @@ from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.tensor_parallel.layers import (
+    gen_linear_aoa_statements,
+    gen_linear_inv_aoa_statements,
+)
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_sequence_parallel_region,
@@ -918,7 +922,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             # The output will be sent to the following transformer layer,
             # so the output's shape should be [s, b, h].
             if self.config.gpt_model_use_experimental_version:
-                self.eh_proj = tensor_parallel.FusedLinear(
+                self.eh_proj = paddle.incubate.nn.FusedLinear(
                     self.config.hidden_size * 2,
                     self.config.hidden_size,
                     bias_attr=self.config.use_bias,
@@ -1058,10 +1062,16 @@ class MultiTokenPredictionLayer(FleetLayer):
 
         Declares the subtree's drop segment and otherwise leaves the walk to
         the standard recursion, so the inner transformer layer and its
-        components emit their own rules and nothing here enumerates them. An
-        MTP block is always registered as a top-level pipeline layer, never
-        inside another subtree, so there is no inherited segment to keep.
+        components emit their own rules. An MTP block is always registered as a
+        top-level pipeline layer, never inside another subtree, so there is no
+        inherited segment to keep.
 
+        Two children need a rule stated here. In the experimental version
+        ``eh_proj`` is an upstream ``paddle.incubate.nn.FusedLinear`` with no AOA
+        override of its own, so the recursion only same-name passes its
+        ``[in, out]`` weight and its ``^T`` is supplied via the shared Linear
+        helper; other versions build ``eh_proj`` as a Linear-family layer that
+        already emits that ``^T`` in the recursion, so nothing is added here.
         A private embedding copy is filled from the one embedding tensor the
         checkpoint holds, the same tensor the model root's embedding reads.
         """
@@ -1076,6 +1086,16 @@ class MultiTokenPredictionLayer(FleetLayer):
             structured_name_prefix=structured_name_prefix,
             checkpoint_lookup_drop_segment=_AOA_DROP_SEGMENT,
         )
+        if (
+            self.eh_proj is not None
+            and self.config.gpt_model_use_experimental_version
+        ):
+            statements += gen_linear_aoa_statements(
+                self.eh_proj,
+                ctx,
+                structured_name_prefix=f"{structured_name_prefix}eh_proj.",
+                checkpoint_lookup_drop_segment=_AOA_DROP_SEGMENT,
+            )
         for model_name in self._mtp_embed_model_names(
             ctx, structured_name_prefix
         ):
@@ -1093,14 +1113,27 @@ class MultiTokenPredictionLayer(FleetLayer):
     ):
         """Inverse (model -> checkpoint) AOA, independently generated.
 
-        A private embedding copy is not written: the checkpoint keeps one
-        embedding tensor and the model root's embedding is what writes it.
+        In the experimental version ``eh_proj``'s weight is transposed back here
+        for the same reason the forward direction supplies its ``^T``; other
+        versions leave it to the recursion. A private embedding copy is not
+        written: the checkpoint keeps one embedding tensor and the model root's
+        embedding is what writes it.
         """
         statements = super().gen_inv_aoa_statements(
             ctx,
             structured_name_prefix=structured_name_prefix,
             checkpoint_lookup_drop_segment=_AOA_DROP_SEGMENT,
         )
+        if (
+            self.eh_proj is not None
+            and self.config.gpt_model_use_experimental_version
+        ):
+            statements += gen_linear_inv_aoa_statements(
+                self.eh_proj,
+                ctx,
+                structured_name_prefix=f"{structured_name_prefix}eh_proj.",
+                checkpoint_lookup_drop_segment=_AOA_DROP_SEGMENT,
+            )
         for model_name in self._mtp_embed_model_names(
             ctx, structured_name_prefix
         ):
