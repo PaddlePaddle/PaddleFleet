@@ -302,6 +302,49 @@ DIST_CKPT_PATH = "dist_ckpt"
 DIST_MODEL_PATH = "dist_model"
 
 
+def _sharded_parameter(model, named_params, key):
+    """Find the live parameter behind a sharded-state key.
+
+    ``GPTModel.sharded_state_dict`` renames pipeline keys to single-card
+    names while ``named_parameters()`` keeps the pipeline names.
+    """
+    param = named_params.get(key)
+    if param is None:
+        single_to_pp = getattr(model, "_pipeline_name_mapping", None)
+        if isinstance(single_to_pp, dict) and key in single_to_pp:
+            param = named_params.get(single_to_pp[key])
+    return param
+
+
+def _expert_3d_coordinates(sharded_weight, param_shape):
+    """Map a row-flattened expert shard's global layout onto 3-D experts.
+
+    Expert parallel ranks share the grouped-GEMM key and differ only in the
+    expert offset, so the global expert count and this rank's first expert
+    must survive the reshape.
+    """
+    _, rows, cols = param_shape
+    global_shape = tuple(sharded_weight.global_shape)
+    global_offset = tuple(sharded_weight.global_offset)
+    if (
+        len(global_shape) != 2
+        or len(global_offset) != 2
+        or global_shape[1] != cols
+        or global_offset[1] != 0
+        or global_shape[0] % rows
+        or global_offset[0] % rows
+    ):
+        raise ValueError(
+            f"Cannot restore fused expert shard {sharded_weight.key}: global "
+            f"shape {global_shape} at offset {global_offset} does not split "
+            f"into whole [{rows}, {cols}] experts."
+        )
+    return (
+        (global_shape[0] // rows, rows, cols),
+        (global_offset[0] // rows, 0, 0),
+    )
+
+
 def restore_fused_expert_3d_layout(model, model_sharded_state_dict):
     """Restore 3-D grouped-GEMM expert weights for FlexCheckpoint at sharding=1."""
     named_params = dict(model.named_parameters())
@@ -310,20 +353,32 @@ def restore_fused_expert_3d_layout(model, model_sharded_state_dict):
             continue
         if "grouped_gemm_experts.weight" not in key:
             continue
-        param = named_params.get(key)
+        param = _sharded_parameter(model, named_params, key)
         if param is None or getattr(param, "ndim", 0) != 3:
             continue
         local = sharded_weight.local_tensor
-        if tuple(local.shape) == tuple(param.shape):
+        param_shape = tuple(param.shape)
+        if tuple(local.shape) == param_shape:
             continue
         if int(local.numel()) != int(param.numel()):
             continue
-        restored = local.reshape(list(param.shape))
+        if tuple(local.shape) != (
+            param_shape[0] * param_shape[1],
+            param_shape[2],
+        ):
+            raise ValueError(
+                f"Cannot restore fused expert shard {key}: local shape "
+                f"{tuple(local.shape)} is not a row-flattened {param_shape}."
+            )
+        global_shape, global_offset = _expert_3d_coordinates(
+            sharded_weight, param_shape
+        )
+        restored = local.reshape(list(param_shape))
         restored.name = getattr(local, "name", "") or getattr(param, "name", "")
         sharded_weight.local_tensor = restored
-        sharded_weight.local_shape = tuple(param.shape)
-        sharded_weight.global_shape = tuple(param.shape)
-        sharded_weight.global_offset = (0,) * len(param.shape)
+        sharded_weight.local_shape = param_shape
+        sharded_weight.global_shape = global_shape
+        sharded_weight.global_offset = global_offset
 
     return model_sharded_state_dict
 
@@ -340,15 +395,19 @@ def _fused_expert_optimizer_save_views(
     Returned ShardedWeights retain the views through synchronous serialization.
     """
     named_params = dict(model.named_parameters())
-    parameter_shapes = {
-        named_params[key].name: tuple(shard.local_shape)
-        for key, shard in model_sharded_state_dict.items()
-        if isinstance(shard, ShardedWeight)
-        and "grouped_gemm_experts.weight" in key
-        and key in named_params
-        and named_params[key].ndim == 3
-        and len(shard.local_shape) == 2
-    }
+    parameter_shapes = {}
+    for key, shard in model_sharded_state_dict.items():
+        if not isinstance(shard, ShardedWeight):
+            continue
+        if "grouped_gemm_experts.weight" not in key:
+            continue
+        param = _sharded_parameter(model, named_params, key)
+        if (
+            param is not None
+            and param.ndim == 3
+            and len(shard.local_shape) == 2
+        ):
+            parameter_shapes[param.name] = tuple(shard.local_shape)
     if not parameter_shapes:
         yield
         return

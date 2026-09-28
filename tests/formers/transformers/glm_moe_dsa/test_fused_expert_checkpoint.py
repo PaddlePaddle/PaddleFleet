@@ -12,6 +12,7 @@ from paddlefleet.trainer.trainer_callback import (
     TrainerState,
 )
 from paddlefleet.trainer.trainer_utils import IntervalStrategy
+from paddlefleet.trainer.training_args import _resolve_save_hf_steps
 
 
 class TestRestoreFusedExpert3DLayout(unittest.TestCase):
@@ -37,6 +38,63 @@ class TestRestoreFusedExpert3DLayout(unittest.TestCase):
         restore_fused_expert_3d_layout(model, {key: shard})
 
         self.assertEqual(tuple(shard.local_tensor.shape), (2, 4, 6))
+        self.assertEqual(shard.local_shape, (2, 4, 6))
+        self.assertEqual(shard.global_shape, (2, 4, 6))
+        self.assertEqual(shard.global_offset, (0, 0, 0))
+
+    def expert_shard(self, key, global_shape, global_offset):
+        import paddle
+        from paddle.distributed import ShardedWeight
+
+        param = paddle.zeros([2, 4, 6], dtype="float32")
+        flat = param.reshape([8, 6])
+        shard = ShardedWeight(
+            key=key,
+            local_tensor=flat,
+            local_shape=tuple(flat.shape),
+            global_shape=global_shape,
+            global_offset=global_offset,
+        )
+        return param, shard
+
+    def test_keeps_expert_parallel_global_coordinates(self):
+        from paddlefleet.trainer.trainer import restore_fused_expert_3d_layout
+
+        key = "model.layers.3.mlp.grouped_gemm_experts.weight1"
+        # EP rank 1 of 2: experts [2, 4) of 4, flattened to rows [8, 16).
+        param, shard = self.expert_shard(key, (16, 6), (8, 0))
+        model = MagicMock()
+        model.named_parameters.return_value = [(key, param)]
+
+        restore_fused_expert_3d_layout(model, {key: shard})
+
+        self.assertEqual(shard.local_shape, (2, 4, 6))
+        self.assertEqual(shard.global_shape, (4, 4, 6))
+        self.assertEqual(shard.global_offset, (2, 0, 0))
+
+    def test_rejects_shards_that_split_an_expert(self):
+        from paddlefleet.trainer.trainer import restore_fused_expert_3d_layout
+
+        key = "model.layers.3.mlp.grouped_gemm_experts.weight1"
+        param, shard = self.expert_shard(key, (16, 6), (6, 0))
+        model = MagicMock()
+        model.named_parameters.return_value = [(key, param)]
+
+        with self.assertRaisesRegex(ValueError, "whole"):
+            restore_fused_expert_3d_layout(model, {key: shard})
+
+    def test_resolves_pipeline_parameter_names(self):
+        from paddlefleet.trainer.trainer import restore_fused_expert_3d_layout
+
+        single_key = "model.layers.3.mlp.grouped_gemm_experts.weight1"
+        pp_key = "4.mlp.grouped_gemm_experts.weight1"
+        param, shard = self.expert_shard(single_key, (8, 6), (0, 0))
+        model = MagicMock()
+        model.named_parameters.return_value = [(pp_key, param)]
+        model._pipeline_name_mapping = {single_key: pp_key}
+
+        restore_fused_expert_3d_layout(model, {single_key: shard})
+
         self.assertEqual(shard.local_shape, (2, 4, 6))
         self.assertEqual(shard.global_shape, (2, 4, 6))
 
@@ -232,8 +290,8 @@ class TestFusedExpertOptimizerSave(unittest.TestCase):
 
 
 class TestDefaultFlowCallbackSaveHf(unittest.TestCase):
-    def test_save_to_hf_reuses_save_steps_when_save_hf_steps_default(self):
-        args = SimpleNamespace(
+    def args(self, save_hf_steps):
+        return SimpleNamespace(
             logging_first_step=False,
             logging_strategy=IntervalStrategy.NO,
             logging_steps=1,
@@ -243,33 +301,33 @@ class TestDefaultFlowCallbackSaveHf(unittest.TestCase):
             save_steps=5,
             flash_device_save_steps=0,
             save_last_step=False,
-            save_hf_steps=-1,
-            save_to_hf=True,
+            save_hf_steps=save_hf_steps,
         )
+
+    def test_save_to_hf_reuses_save_steps_when_save_hf_steps_default(self):
+        save_hf_steps = _resolve_save_hf_steps(-1, 5, True)
+        self.assertEqual(save_hf_steps, 5)
         state = TrainerState(global_step=5, max_steps=5)
         control = TrainerControl()
-        DefaultFlowCallback().on_step_end(args, state, control)
+        DefaultFlowCallback().on_step_end(
+            self.args(save_hf_steps), state, control
+        )
         self.assertTrue(control.should_save_hf)
         self.assertTrue(control.should_save)
 
     def test_save_hf_stays_off_when_save_to_hf_false(self):
-        args = SimpleNamespace(
-            logging_first_step=False,
-            logging_strategy=IntervalStrategy.NO,
-            logging_steps=1,
-            evaluation_strategy=IntervalStrategy.NO,
-            eval_steps=1,
-            save_strategy=IntervalStrategy.STEPS,
-            save_steps=5,
-            flash_device_save_steps=0,
-            save_last_step=False,
-            save_hf_steps=-1,
-            save_to_hf=False,
-        )
+        save_hf_steps = _resolve_save_hf_steps(-1, 5, False)
+        self.assertEqual(save_hf_steps, -1)
         state = TrainerState(global_step=5, max_steps=5)
         control = TrainerControl()
-        DefaultFlowCallback().on_step_end(args, state, control)
+        DefaultFlowCallback().on_step_end(
+            self.args(save_hf_steps), state, control
+        )
         self.assertFalse(control.should_save_hf)
+
+    def test_explicit_save_hf_steps_wins(self):
+        self.assertEqual(_resolve_save_hf_steps(10, 5, True), 10)
+        self.assertEqual(_resolve_save_hf_steps(-1, 0, True), -1)
 
 
 if __name__ == "__main__":

@@ -35,6 +35,7 @@ from paddlefleet.trainer.trainer_callback import (
     IntervalStrategy,
 )
 from paddlefleet.trainer.trainer_utils import get_last_checkpoint
+from paddlefleet.trainer.training_args import _resolve_save_hf_steps
 
 
 class _FakeArgs:
@@ -220,7 +221,7 @@ class CadenceLayoutAndRotationTests(unittest.TestCase):
             eval_steps=1,
             save_strategy=IntervalStrategy.STEPS,
             save_steps=5,
-            save_hf_steps=-1,
+            save_hf_steps=_resolve_save_hf_steps(-1, 5, True),
             save_to_hf=True,
             flash_device_save_steps=0,
             save_last_step=False,

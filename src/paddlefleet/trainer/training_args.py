@@ -76,6 +76,14 @@ def default_logdir() -> str:
     return os.path.join("runs", current_time + "_" + socket.gethostname())
 
 
+def _resolve_save_hf_steps(save_hf_steps, save_steps, save_to_hf):
+    """save_to_hf follows save_steps unless save_hf_steps is set explicitly."""
+    if save_to_hf and (save_hf_steps is None or save_hf_steps <= 0):
+        if save_steps is not None and save_steps > 0:
+            return save_steps
+    return save_hf_steps
+
+
 @dataclass
 class TrainingArguments:
     """
@@ -2204,6 +2212,11 @@ class TrainingArguments:
         self.evaluation_strategy = IntervalStrategy(self.evaluation_strategy)
         self.logging_strategy = IntervalStrategy(self.logging_strategy)
         self.save_strategy = IntervalStrategy(self.save_strategy)
+        # Resolve the HF cadence once: the save callback and the EMA/ZCC
+        # savers all read save_hf_steps and must agree on it.
+        self.save_hf_steps = _resolve_save_hf_steps(
+            self.save_hf_steps, self.save_steps, self.save_to_hf
+        )
 
         self.lr_scheduler_type = SchedulerType(self.lr_scheduler_type)
         if (
