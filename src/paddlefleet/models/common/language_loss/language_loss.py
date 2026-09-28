@@ -79,6 +79,7 @@ def begin_main_reporting_microbatch(step: int, microbatch: int) -> None:
     global _MAIN_REPORTING_CONTEXT
     if _MAIN_REPORTING_CONTEXT is not None:
         raise RuntimeError("unconsumed MAIN reporting context")
+    _LOCAL_MAIN_VALID_TOKENS.pop("value", None)
     _MAIN_REPORTING_CONTEXT = {
         "step": int(step),
         "microbatch": int(microbatch),

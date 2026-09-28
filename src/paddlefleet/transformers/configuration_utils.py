@@ -781,6 +781,12 @@ class LlmMetaConfig:
             "publishes it to the runtime switch and installs the Paddle runtime patches.",
         ),
         (
+            "defer_token_normalization",
+            bool,
+            False,
+            "Normalize accuracy-compatible token-loss gradients after reduction.",
+        ),
+        (
             "experimental_dataflow",
             bool,
             False,

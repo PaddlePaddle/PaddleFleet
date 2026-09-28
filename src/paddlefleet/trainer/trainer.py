@@ -706,6 +706,17 @@ class Trainer:
 
         self.model_wrapped = model
         self.model = model
+        model_config = getattr(model, "config", None)
+        if model_config is None:
+            model_config = getattr(getattr(model, "model", None), "config", None)
+        if (
+            getattr(model_config, "defer_token_normalization", False)
+            and self.args.gradient_accumulation_steps != 1
+        ):
+            raise ValueError(
+                "defer_token_normalization requires gradient_accumulation_steps=1; "
+                "token counts are normalized at each optimizer step."
+            )
         self.criterion = criterion
         if (
             self.criterion is None
@@ -3225,13 +3236,12 @@ class Trainer:
         except ImportError:
             return
 
-        if not getattr(
-            getattr(self.model, "config", None),
-            "use_accuracy_compatible",
-            False,
+        config = getattr(self.model, "config", None)
+        if not (
+            getattr(config, "use_accuracy_compatible", False)
+            and getattr(config, "defer_token_normalization", False)
         ):
             return
-
         divisor = get_pending_gradient_divisor()
         if not paddle.distributed.is_initialized():
             return
@@ -3284,6 +3294,12 @@ class Trainer:
         except ImportError:
             return
 
+        config = getattr(self.model, "config", None)
+        if not (
+            getattr(config, "use_accuracy_compatible", False)
+            and getattr(config, "defer_token_normalization", False)
+        ):
+            return
         divisor = get_pending_gradient_divisor()
         clear_pending_gradient_divisor()
         if not divisor or divisor <= 0:
