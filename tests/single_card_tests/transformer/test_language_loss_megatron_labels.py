@@ -18,20 +18,18 @@ Drives the REAL ``LanguageLoss.forward`` via ``__new__`` + MagicMock config
 and stubbed ``_forward`` / ``loss_func`` so the megatron label-shift paths
 are exercised on a single GPU (CP=1, TP=1):
 
-- non-distillation megatron branch: full-length ``lm_labels = labels_ori``,
-  per-depth ``_roll_tensor_packed_seq`` driven by the class-level
-  ``_cu_seqlens_q_stash`` (language_loss.py:527-528, 536, 566-574, 600, 609).
-- distillation megatron branch: mirror roll path (lines 742-750, 770, 777).
-- missing-stash guards raise RuntimeError in both branches (lines 592, 762).
+- non-distillation and distillation megatron branches both go through
+  ``_megatron_label_for_depth`` (packed roll + ``slice_erndata_cp``)
+- missing-stash guards raise RuntimeError in both branches
 
-The CP>1 sublines (515/518/522/530/603/771) are covered single-card by
-monkeypatching ``get_context_parallel_world_size`` -> 2, faking the CP rank,
-and replacing ``extract_local_cp_chunks`` / the CP comm ops with
-identities (see TestLanguageLossMegatronCP).
+The CP>1 sublines are covered single-card by monkeypatching
+``get_context_parallel_world_size`` -> 2, faking the CP rank, and replacing
+``slice_erndata_cp`` / the CP comm ops with identities
+(see TestLanguageLossCpBalanceMode for mode forwarding, and
+TestLanguageLossForwardErndataCP / TestMegatronLabelForDepthCP for values).
 
-``_megatron_label_for_depth`` -- the separate Main/MTP head-loss entry point,
-which reaches its own CP slice without going through ``forward`` -- is covered
-by TestMegatronLabelForDepthCP, which runs the REAL extract helper so the
+``_megatron_label_for_depth`` is also covered directly by
+TestMegatronLabelForDepthCP, which runs the REAL extract helper so the
 slice is checked by value rather than by recorded kwarg.
 """
 
@@ -46,7 +44,6 @@ import numpy as np
 import paddle
 
 import paddlefleet.models.common.language_loss.language_loss as ll
-import paddlefleet.parallel_state as ps
 import paddlefleet.transformer.multi_token_prediction as mtp
 from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
 
@@ -155,8 +152,8 @@ class TestLanguageLossMegatronDistill(unittest.TestCase):
 
 class TestLanguageLossErnie5Slice(unittest.TestCase):
     """ernie5 (non-megatron) MTP label path: lm_labels = labels[:, :-K] and
-    per-depth labels_cur_depth = labels_ori[:, (depth+1):(depth+1+seq)]
-    (language_loss.py:538-539, 611). Single-card, CP=1, TP=1.
+    per-depth labels_cur_depth = labels_ori[:, (depth+1):(depth+1+seq)].
+    Single-card, CP=1, TP=1.
     """
 
     def setUp(self) -> None:
@@ -178,18 +175,16 @@ class TestLanguageLossErnie5Slice(unittest.TestCase):
 
 @contextlib.contextmanager
 def _fake_cp(cp_size=2):
-    """Monkeypatch the CP machinery so the ``_cp_size_for_extract > 1``
-    branches run single-card:
+    """Monkeypatch the CP machinery so the erndata CP slice runs single-card:
 
     - module-level ``get_context_parallel_world_size`` -> cp_size;
-    - source-module ``get_context_parallel_rank`` (local import) -> 0;
-    - ``extract_local_cp_chunks`` (local import) -> identity, recording the
-      kwargs it was called with;
+    - ``slice_erndata_cp`` (imported into language_loss) -> identity,
+      recording the kwargs it was called with;
     - CP scatter/gather PyLayers -> identity;
     - ``dist.all_reduce`` -> no-op and ``fleet`` -> MagicMock (the
       distillation branch all-reduces the per-depth loss).
 
-    Yields the recorded ``extract_local_cp_chunks`` calls.
+    Yields the recorded ``slice_erndata_cp`` calls.
     """
 
     calls = []
@@ -208,12 +203,7 @@ def _fake_cp(cp_size=2):
             )
         )
         stack.enter_context(
-            mock.patch.object(ps, "get_context_parallel_rank", lambda: 0)
-        )
-        stack.enter_context(
-            mock.patch.object(
-                mtp, "extract_local_cp_chunks", recording_identity
-            )
+            mock.patch.object(ll, "slice_erndata_cp", recording_identity)
         )
         stack.enter_context(
             mock.patch.object(ll.ContextParallelScatterOp, "apply", identity)
@@ -247,53 +237,11 @@ def _fake_cp(cp_size=2):
         yield calls
 
 
-class TestLanguageLossMegatronCP(unittest.TestCase):
-    """Covers the CP>1 sublines (515,518,522,530,603,771) via monkeypatch.
-
-    ``extract_local_cp_chunks`` is mocked to identity, so all tensors
-    keep their full length and shapes stay self-consistent.
-    """
-
-    def setUp(self) -> None:
-        LanguageLoss._cu_seqlens_q_stash = None
-
-    def tearDown(self) -> None:
-        LanguageLoss._cu_seqlens_q_stash = None
-
-    def test_non_distill_cp_branch(self) -> None:
-        # Covers 515, 518, 522, 530 (lm_labels extract) and 603 (per-depth).
-        K, B, L, V = 2, 1, 8, 5
-        loss = _make_loss(K, distill=False)
-        LanguageLoss._cu_seqlens_q_stash = _make_cu([3, 5])
-        logits = [
-            paddle.randn([B, L, V], dtype="float32") for _ in range(K + 1)
-        ]
-        labels = paddle.arange(B * L, dtype="int64").reshape([B, L])
-        with _fake_cp(cp_size=2):
-            out = loss.forward(logits, labels)
-        self.assertEqual(out.dtype, paddle.float32)
-
-    def test_distill_cp_branch(self) -> None:
-        # Covers 771 (per-depth extract in the distillation branch).
-        K, B, L, V = 2, 1, 8, 5
-        loss = _make_loss(K, distill=True)
-        LanguageLoss._cu_seqlens_q_stash = _make_cu([4, 4])
-        logits = [
-            paddle.randn([B, L, V], dtype="float32") for _ in range(K + 1)
-        ]
-        labels = paddle.arange(B * L, dtype="int64").reshape([B, L])
-        with _fake_cp(cp_size=2):
-            out = loss.forward(logits, labels)
-        self.assertEqual(out.dtype, paddle.float32)
-
-
 class TestLanguageLossCpBalanceMode(unittest.TestCase):
     """Every CP slice here must use ``config.cp_balance_mode``.
 
-    The identity mock above keeps shapes self-consistent whatever layout is
-    requested, so the two tests before this one pass even if the mode is
-    hard-coded -- which is exactly the defect this change fixes. Assert on the
-    recorded kwarg instead, for both layouts and both loss branches.
+    ``slice_erndata_cp`` is mocked to identity so shapes stay self-consistent;
+    asserting on the recorded config is what fails if the mode is hard-coded.
     """
 
     def setUp(self) -> None:
@@ -313,7 +261,13 @@ class TestLanguageLossCpBalanceMode(unittest.TestCase):
         with _fake_cp(cp_size=2) as calls:
             loss.forward(logits, labels)
         self.assertTrue(calls, "no CP slice happened, so nothing was checked")
-        return [kwargs.get("mode") for _args, kwargs in calls]
+        modes = []
+        for args, kwargs in calls:
+            if args:
+                modes.append(args[0].cp_balance_mode)
+            else:
+                modes.append(kwargs["config"].cp_balance_mode)
+        return modes
 
     def test_non_distill_forwards_configured_mode(self) -> None:
         for mode in ("dualchunk_allgather", "contiguous_allgather"):
@@ -333,10 +287,9 @@ def _cp_ranks(cp_size, cp_rank):
     """Fake a CP group without touching ``extract_local_cp_chunks``.
 
     Unlike ``_fake_cp`` this leaves the real extract helper installed, so the
-    slice actually happens and can be asserted on by value. Only the two
-    lookups ``_megatron_label_for_depth`` performs are patched: the module-level
-    ``get_context_parallel_world_size`` and the locally imported
-    ``get_context_parallel_rank``.
+    slice actually happens and can be asserted on by value. ``slice_erndata_cp``
+    reads rank/size from ``multi_token_prediction``; LanguageLoss._forward also
+    gates on the module-level world size.
     """
     with contextlib.ExitStack() as stack:
         stack.enter_context(
@@ -345,7 +298,12 @@ def _cp_ranks(cp_size, cp_rank):
             )
         )
         stack.enter_context(
-            mock.patch.object(ps, "get_context_parallel_rank", lambda: cp_rank)
+            mock.patch.object(
+                mtp, "get_context_parallel_world_size", lambda: cp_size
+            )
+        )
+        stack.enter_context(
+            mock.patch.object(mtp, "get_context_parallel_rank", lambda: cp_rank)
         )
         yield
 
@@ -372,10 +330,10 @@ def _local_slice_ref(full_np, cp_rank, cp_size, mode):
 class TestMegatronLabelForDepthCP(unittest.TestCase):
     """``_megatron_label_for_depth`` slices with the REAL extract helper.
 
-    The separate Main/MTP head-loss path (``GPTMainLMHead`` / ``GPTMTPLMHead``,
-    language_loss.py:1026 and 1128) reaches the CP slice through this method
-    rather than through ``forward``, so the identity mock used above never
-    exercises it. Here the real ``extract_local_cp_chunks`` runs and the
+    The separate Main/MTP head-loss path (``GPTMainLMHead`` / ``GPTMTPLMHead``)
+    reaches the CP slice through this method rather than through ``forward``,
+    so the identity mock used above never exercises it. Here the real
+    ``extract_local_cp_chunks`` runs and the
     assertion is on values: the CP>1 label must equal the numpy slice of the
     CP=1 label for the configured ``cp_balance_mode``, on every rank and at
     every depth. A hard-coded layout would fail one of the two modes, and the
@@ -461,6 +419,110 @@ class TestMegatronLabelForDepthCP(unittest.TestCase):
             out = loss._megatron_label_for_depth(labels, -1)
         self.assertEqual(list(out.shape), [1, self.L])
         np.testing.assert_array_equal(out.numpy(), labels_np)
+
+
+class TestLanguageLossForwardErndataCP(unittest.TestCase):
+    """``_forward`` (the K == 0 / non-list path) slices labels under erndata+CP.
+
+    erndata broadcasts labels full-length L to every CP rank, while the logits
+    this rank produces are its local CP slice. ``_forward`` must extract this
+    rank's label slice (real ``extract_local_cp_chunks``, cp_balance_mode layout)
+    before handing them to ``forward_impl``, mirroring the MTP path's
+    ``_megatron_label_for_depth``. Checked by value on every rank / both layouts.
+    """
+
+    L = 16
+
+    def _run(self, mode, cp_size, cp_rank):
+        loss = _make_loss(0, distill=False, cp_balance_mode=mode)
+        captured = {}
+
+        # Patch at the class level: LanguageLoss is an nn.Layer whose
+        # __setattr__ does not reliably store a plain function on an instance
+        # built via __new__, so stub the method on the class instead.
+        def _fake_impl(self, logits, labels):
+            captured["labels"] = labels
+            return paddle.zeros([1], dtype="float32")
+
+        labels_np = np.arange(self.L, dtype="int64").reshape([1, self.L])
+        labels = paddle.to_tensor(labels_np)
+        # Logits layout is not used to decide whether to slice; pass a local
+        # length for realism.
+        logits = paddle.zeros([1, self.L // cp_size, 4], dtype="float32")
+        with (
+            mock.patch.object(
+                ll, "module_needs_recompute", lambda *a, **k: False
+            ),
+            mock.patch.object(LanguageLoss, "forward_impl", _fake_impl),
+            _cp_ranks(cp_size, cp_rank),
+        ):
+            # _make_loss stubs the *instance* _forward; call the real unbound
+            # method so the CP-slicing logic under test runs.
+            LanguageLoss._forward(loss, logits, labels)
+        return labels_np, captured["labels"].numpy()
+
+    def test_forward_k0_slices_labels_for_both_modes(self) -> None:
+        cp_size = 2
+        for mode in ("dualchunk_allgather", "contiguous_allgather"):
+            for cp_rank in range(cp_size):
+                with self.subTest(cp_balance_mode=mode, rank=cp_rank):
+                    labels_np, got = self._run(mode, cp_size, cp_rank)
+                    self.assertEqual(list(got.shape), [1, self.L // cp_size])
+                    np.testing.assert_array_equal(
+                        got, _local_slice_ref(labels_np, cp_rank, cp_size, mode)
+                    )
+
+    def test_forward_k0_cp1_leaves_labels_full_length(self) -> None:
+        # cp_size == 1: slice_erndata_cp is a no-op, labels stay length L.
+        labels_np, got = self._run("dualchunk_allgather", 1, 0)
+        self.assertEqual(list(got.shape), [1, self.L])
+        np.testing.assert_array_equal(got, labels_np)
+
+    def test_forward_list_kgt0_slices_labels_once(self) -> None:
+        # Regression: the MTP list path (forward, K>0, non-weight-only) already
+        # slices lm_labels / per-depth labels to [B, L/cp] via
+        # slice_erndata_cp *before* calling self._forward. _forward's
+        # erndata branch must NOT slice again -- doing so would yield
+        # [B, L/cp**2] and mismatch the local logits. Drive the REAL forward +
+        # _forward and assert every labels tensor reaching forward_impl is
+        # length L/cp (sliced exactly once), for main head and MTP depth alike.
+        cp_size = 2
+        for cp_rank in range(cp_size):
+            with self.subTest(rank=cp_rank):
+                loss = _make_loss(1, distill=False)
+                # Restore the REAL _forward (｜_make_loss stubs the instance one)
+                # and take the non-experimental depth path, which also routes the
+                # already-sliced per-depth labels through _forward.
+                loss._forward = LanguageLoss._forward.__get__(
+                    loss, LanguageLoss
+                )
+                loss.config.gpt_model_use_experimental_version = False
+                LanguageLoss._cu_seqlens_q_stash = _make_cu([self.L])
+                seen = []
+
+                def _fake_impl(self, logits, labels):
+                    seen.append(labels.shape[1])
+                    return paddle.zeros([], dtype="float32")
+
+                labels = paddle.arange(self.L, dtype="int64").reshape(
+                    [1, self.L]
+                )
+                # main + 1 depth, each already the rank-local length L/cp.
+                logits = [
+                    paddle.zeros([1, self.L // cp_size, 4], dtype="float32")
+                    for _ in range(2)
+                ]
+                with (
+                    mock.patch.object(
+                        ll, "module_needs_recompute", lambda *a, **k: False
+                    ),
+                    mock.patch.object(LanguageLoss, "forward_impl", _fake_impl),
+                    _cp_ranks(cp_size, cp_rank),
+                ):
+                    loss.forward(logits, labels)
+                self.assertTrue(seen, "forward_impl was never called")
+                for n in seen:
+                    self.assertEqual(n, self.L // cp_size)
 
 
 if __name__ == "__main__":

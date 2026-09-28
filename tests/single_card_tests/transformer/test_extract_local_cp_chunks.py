@@ -3,7 +3,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 
-"""Layout-aware CP slicing for the ``use_erndata`` MTP path.
+"""Layout-aware CP slicing for the ``use_erndata`` non-dataflow path.
 
 That path never calls ``ContextParallelScatterOp``: it keeps its tensors
 full-length on every CP rank and slices the local part itself. The slice must
@@ -26,9 +26,11 @@ non-sequence axes.
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 import paddle
 
+import paddlefleet.transformer.multi_token_prediction as mtp
 from paddlefleet.context_parallel_utils import (
     scatter_balance,
     scatter_contiguous,
@@ -37,6 +39,7 @@ from paddlefleet.transformer.multi_token_prediction import (
     extract_local_contiguous_chunk,
     extract_local_cp_chunks,
     extract_local_zigzag_chunks,
+    slice_erndata_cp,
 )
 
 
@@ -222,6 +225,70 @@ class TestExtractLocalCpChunksDispatch(unittest.TestCase):
             local = extract_local_cp_chunks(t, 1, 2, axis=1, mode=mode)
             self.assertEqual(local.shape, [2, 4, 4])
             self.assertEqual(local.dtype, t.dtype)
+
+
+class TestSliceErndataCp(unittest.TestCase):
+    """``slice_erndata_cp`` is the call-site wrapper around extract."""
+
+    def _cfg(self, **overrides):
+        class C:
+            use_erndata = True
+            experimental_dataflow = False
+            cp_balance_mode = "dualchunk_allgather"
+
+        for key, value in overrides.items():
+            setattr(C, key, value)
+        return C()
+
+    def test_passthrough_when_not_erndata_or_dataflow(self) -> None:
+        t = _arange_bl(1, 8)
+        self.assertIs(slice_erndata_cp(t, self._cfg(use_erndata=False)), t)
+        self.assertIs(
+            slice_erndata_cp(t, self._cfg(experimental_dataflow=True)), t
+        )
+        self.assertIs(
+            slice_erndata_cp(None, self._cfg(experimental_dataflow=True)), None
+        )
+
+    def test_none_tensor_is_none(self) -> None:
+        self.assertIsNone(slice_erndata_cp(None, self._cfg()))
+
+    def test_cp1_is_identity(self) -> None:
+        t = _arange_bl(1, 8)
+        with (
+            mock.patch.object(
+                mtp, "get_context_parallel_world_size", lambda: 1
+            ),
+            mock.patch.object(mtp, "get_context_parallel_rank", lambda: 0),
+        ):
+            self.assertIs(slice_erndata_cp(t, self._cfg()), t)
+
+    def test_slices_with_configured_layout(self) -> None:
+        t = _arange_bl(1, 16)
+        cp_size = 2
+        for mode in ("dualchunk_allgather", "contiguous_allgather"):
+            for rank in range(cp_size):
+                with self.subTest(mode=mode, rank=rank):
+                    with (
+                        mock.patch.object(
+                            mtp,
+                            "get_context_parallel_world_size",
+                            lambda size=cp_size: size,
+                        ),
+                        mock.patch.object(
+                            mtp,
+                            "get_context_parallel_rank",
+                            lambda r=rank: r,
+                        ),
+                    ):
+                        got = slice_erndata_cp(
+                            t, self._cfg(cp_balance_mode=mode)
+                        )
+                    expected = extract_local_cp_chunks(
+                        t, rank, cp_size, axis=1, mode=mode
+                    )
+                    self.assertEqual(list(got.shape), list(expected.shape))
+                    self.assertTrue(bool((got == expected).all()))
 
 
 if __name__ == "__main__":

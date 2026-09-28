@@ -25,8 +25,9 @@ Megatron data contract (differs from the ernie5 template!):
   * a single int32 ``cu_seqlens_q`` = ``[0, d1, ..., L]`` carries the packed-doc
     boundaries (batch-global semantics);
   * ``GPTEmbedding`` (stage 0) rolls embeddings per-doc via ``cu_seqlens_q``,
-    the MTP layer derives per-depth attn masks from it, and ``LanguageLoss``
-    (last stage) rolls labels per-doc using the stashed ``cu_seqlens_q``.
+    the MTP layer reuses the adapter-supplied backbone flashmask, and
+    ``LanguageLoss`` (last stage) rolls labels per-doc using the stashed
+    ``cu_seqlens_q``.
 
 If the last-stage stash were missing, ``LanguageLoss.forward`` would raise
 ``RuntimeError("... requires cu_seqlens_q to be stashed ...")`` instead of

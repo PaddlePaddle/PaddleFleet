@@ -74,7 +74,7 @@ SUPPORTED_ATTN_MASK = [
 #   * cp_group is None or size==1 → non-CP path.
 #   * cp_group.nranks > 1 with cu_seqlens_q → NotImplementedError; the
 #     mirror-chunk (DualChunkSwap) CP variant is not implemented on this path
-#     (CP is instead handled by extract_local_cp_chunks at the call site,
+#     (CP is instead handled by slice_erndata_cp at the call site,
 #     which follows config.cp_balance_mode).
 #
 # Note: we consciously do NOT wrap cu_seqlens_q in an MCore-style
@@ -232,7 +232,7 @@ def roll_tensor(
     already holds a full-length ``[B, L]`` copy — no zigzag scatter happens
     before the model. Consequently rolling reduces to standard CP=1
     semantics on the full-length tensor, and callers should invoke
-    ``extract_local_cp_chunks`` (which follows ``config.cp_balance_mode``)
+    ``slice_erndata_cp`` (which follows ``config.cp_balance_mode``)
     after ``roll_tensor`` to obtain their local slice before embedding / loss.
 
     Args:
@@ -435,8 +435,32 @@ def extract_local_cp_chunks(tensor_full, cp_rank, cp_size, axis=1, *, mode):
     # run on this path. Refuse rather than guess.
     raise ValueError(
         f"extract_local_cp_chunks: unsupported cp_balance_mode={mode!r} for the "
-        "use_erndata MTP path; expected 'dualchunk_allgather' or "
+        "use_erndata path; expected 'dualchunk_allgather' or "
         "'contiguous_allgather'."
+    )
+
+
+def slice_erndata_cp(tensor, config, axis=1):
+    """Local CP slice for the ``use_erndata`` non-dataflow path.
+
+    The erndata loader broadcasts every tensor full-length ``L`` to the whole
+    CP group; the model then takes its rank-local chunk with the layout named
+    by ``config.cp_balance_mode``. No communication: every rank already holds
+    the same ``[..., L, ...]``.
+
+    Returns ``tensor`` unchanged when it is ``None``, ``use_erndata`` is off,
+    ``experimental_dataflow`` owns the scatter, or ``cp_size == 1``.
+    """
+    if tensor is None or not getattr(config, "use_erndata", False):
+        return tensor
+    if getattr(config, "experimental_dataflow", False):
+        return tensor
+    return extract_local_cp_chunks(
+        tensor,
+        get_context_parallel_rank(),
+        get_context_parallel_world_size(),
+        axis=axis,
+        mode=config.cp_balance_mode,
     )
 
 
@@ -445,12 +469,10 @@ def build_startend_row_indices_from_cu_seqlens(
 ):
     """Derive flashmask ``attn_mask_startend_row_indices`` from ``cu_seqlens_q``.
 
-    The erndata MTP contract carries packed-document boundaries as a
-    cumulative-length int32 vector ``[num_docs + 1]`` rather than a materialized
-    attention mask. Every consumer of that contract (the main backbone via
-    ``GPTEmbedding``, and each MTP depth via
-    ``MultiTokenPredictionLayer._forward_megatron_style``) needs the equivalent
-    flashmask boundaries, so the derivation lives here once.
+    Packed-document boundaries as a cumulative-length int32 vector
+    ``[num_docs + 1]``. HyperBody's packed decoder still derives its flashmask
+    this way; the erndata GPT path receives the rows from the adapter and does
+    not call this helper.
 
     For a token at position ``i`` inside document ``j``
     (``cu[j] <= i < cu[j+1]``), the end row is ``cu[j+1]`` — i.e. attention is
@@ -1950,7 +1972,7 @@ class MultiTokenPredictionLayer(FleetLayer):
     # only while another MTP depth needs it and never reaches the LMHead.
     #
     # Constraints: experimental_dataflow=False. Context parallelism is handled
-    # via extract_local_cp_chunks (layout picked by config.cp_balance_mode)
+    # via slice_erndata_cp (layout picked by config.cp_balance_mode)
     # after the full-sequence packed roll rather than inside roll_tensor.
     # ------------------------------------------------------------------ #
 
@@ -1992,16 +2014,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 cu_seqlens_q=cu_seqlens_q,
             )
 
-        cp_size = get_context_parallel_world_size()
-        if cp_size > 1:
-            cp_rank = get_context_parallel_rank()
-            decoder_input = extract_local_cp_chunks(
-                decoder_input,
-                cp_rank,
-                cp_size,
-                axis=1,
-                mode=self.config.cp_balance_mode,
-            )
+        decoder_input = slice_erndata_cp(decoder_input, self.config)
 
         if self.sequence_parallel:
             # ScatterOp partitions axis 0; transpose to canonical [S, B, H]
@@ -2094,54 +2107,14 @@ class MultiTokenPredictionLayer(FleetLayer):
                 f"Under use_erndata=True, input_ids must be [B, L], got shape {input_ids.shape}."
             )
 
-        # Derive per-depth attn_mask_startend_row_indices from cu_seqlens_q
-        # only when the dataloader did not already provide one. The erndata
-        # loader emits a per-sample mask [B, 1, S, 1] that already reflects
-        # packed-doc boundaries, and doc boundaries are the SAME at every MTP
-        # depth (per-doc roll does not wrap across doc boundaries), so reusing
-        # it avoids both redundant deviation and any semantic drift. The
-        # fallback derivation below handles the case where the loader omitted
-        # the mask.
-        cu_seqlens_q = dict_args.get("cu_seqlens_q", None)
-        if (
-            cu_seqlens_q is not None
-            and dict_args.get("attn_mask_startend_row_indices") is None
-        ):
-            # experimental_dataflow: 2-col [B, 1, S, 2]; fleet-mode: 1-col [B, 1, S, 1].
-            # ernie5 flashmask & SWA helpers require a 4D layout [B, heads, S, num_vec]
-            # (see startend_row_indices_add_sliding_window in utils.py).
-            include_pos = bool(
-                getattr(
-                    self.config, "gpt_model_use_experimental_version", False
-                )
-            )
-            # Recover the GLOBAL per-sample length L from this rank's shard.
-            # ``input_ids`` must not be used: GPTEmbedding publishes it as
-            # ``input_ids_for_moe_mask``, which stays None under plain
-            # use_erndata with expert_model_parallel_size == 1 and
-            # gpt_model_use_experimental_version == False, so the key is absent
-            # here. Scale the local seq axis back up by the parallel degrees,
-            # exactly the way the KDA branch of GPTEmbedding.forward does for
-            # its own cu_seqlens (gpt_embedding.py, build_cu_seqlens call site):
-            # the mask lives in global sequence coordinates while hidden_states
-            # is the rank-local shard. Layout is seq-first iff sequence_parallel.
-            cp_size = max(get_context_parallel_world_size(), 1)
-            if getattr(self.config, "sequence_parallel", False):
-                # [s/tp, b, h]
-                local_seq_len, batch_size = dict_args["hidden_states"].shape[:2]
-                sp_size = self.config.tensor_model_parallel_size
-            else:
-                # [b, s, h]
-                batch_size, local_seq_len = dict_args["hidden_states"].shape[:2]
-                sp_size = 1
-            seq_len = local_seq_len * sp_size * cp_size
-            dict_args["attn_mask_startend_row_indices"] = (
-                build_startend_row_indices_from_cu_seqlens(
-                    cu_seqlens_q,
-                    batch_size,
-                    include_position_axis=include_pos,
-                    seq_len=seq_len,
-                )
+        # The adapter ships attn_mask_startend_row_indices; GPTEmbedding
+        # rejects a missing mask. Doc boundaries are the same at every MTP
+        # depth, so reuse the backbone mask rather than rebuild it.
+        if dict_args.get("attn_mask_startend_row_indices") is None:
+            raise RuntimeError(
+                "use_erndata=True requires attn_mask_startend_row_indices "
+                "on the MTP batch; the adapter ships the backbone mask and "
+                "this path reuses it."
             )
 
         # Run transformer layer.

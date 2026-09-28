@@ -50,12 +50,12 @@ from paddlefleet.context_parallel_utils import (
     ContextParallelScatterOp,
 )
 from paddlefleet.parallel_state import (
-    get_context_parallel_rank,
     get_context_parallel_world_size,
     get_tensor_model_parallel_group,
 )
 from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
+from paddlefleet.transformer.multi_token_prediction import slice_erndata_cp
 from paddlefleet.transformer.transformer_config import dw_overlap_enabled
 from paddlefleet.utils import use_dsv4_accuracy_compatible
 
@@ -1739,27 +1739,10 @@ class TopKRouter(StandardMoERouter):
                 and input_ids is not None
                 and input_ids.shape[1] != seq_len
             ):
-                # erndata MTP path: PaddleFleet dataloader broadcasts
-                # input_ids full-length [B, L] to every CP rank (unlike
-                # experimental_dataflow which pre-scatters). Embedding was
-                # already sliced to [B, L/cp, H] with the model's
-                # cp_balance_mode layout via extract_local_cp_chunks (see
-                # gpt_embedding.py). Slice input_ids with the same layout here
-                # — no comm needed since every rank holds the same [B, L]
-                # tensor.
-                from paddlefleet.transformer.multi_token_prediction import (
-                    extract_local_cp_chunks,
-                )
-
-                _cp_size = get_context_parallel_world_size()
-                _cp_rank = get_context_parallel_rank()
-                input_ids = extract_local_cp_chunks(
-                    input_ids,
-                    _cp_rank,
-                    _cp_size,
-                    axis=1,
-                    mode=self.config.cp_balance_mode,
-                )
+                # erndata CP path: the loader broadcasts input_ids [B, L] while
+                # the embedding has already been sliced to L/cp. Same layout,
+                # no comm.
+                input_ids = slice_erndata_cp(input_ids, self.config)
             if input_ids is not None:
                 pad_token_id = getattr(self.config, "pad_token_id", 0)
                 if pad_token_id is None:

@@ -19,13 +19,11 @@ MagicMock config + a stubbed ``_proj_and_transformer_layer`` so the whole
 megatron-style prologue is exercised:
 
 - ``forward`` dispatch to ``_forward_megatron_style`` under
-  ``use_erndata=True`` (multi_token_prediction.py:1062).
-- (K+1) split, per-depth hidden_states/decoder_input dispatch, field pops
-  (lines 1636-1656).
-- per-depth attn_mask_startend_row_indices derivation from cu_seqlens_q,
-  both the 1-col (fleet) and 2-col (experimental / include_pos) layouts
-  (lines 1667-1717), plus batch_size>1 expand (1713-1716).
-- concat write-back (lines 1723-1726).
+  ``use_erndata=True``.
+- (K+1) split, per-depth hidden_states/decoder_input dispatch, field pops.
+- backbone ``attn_mask_startend_row_indices`` is reused as-is (the adapter
+  ships it; this path does not derive it from cu_seqlens_q).
+- concat write-back.
 - guard raises: cross-attention, missing packed magic metadata, and 3-D input_ids.
 """
 
@@ -34,6 +32,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import MagicMock
 
+import numpy as np
 import paddle
 
 from paddlefleet.transformer.multi_token_prediction import (
@@ -76,83 +75,67 @@ def _make_layer(
 
 class TestMtpForwardMegatron(unittest.TestCase):
     def test_forward_dispatches_to_megatron(self) -> None:
-        # forward() must route to _forward_megatron_style (line 1062).
+        # forward() must route to _forward_megatron_style.
         K, S, H = 1, 8, 4
         layer, recorded = _make_layer(K)
         hs = paddle.arange((K + 1) * S * H, dtype="float32").reshape(
             [K + 1, S, H]
         )
         cu = paddle.to_tensor([0, 3, 8], dtype="int32")
+        mask = paddle.full([1, 1, S, 1], S, dtype="int32")
         out = layer.forward(
-            {"hidden_states": hs, "cu_seqlens_q": cu, "context": None}
+            {
+                "hidden_states": hs,
+                "cu_seqlens_q": cu,
+                "attn_mask_startend_row_indices": mask,
+                "context": None,
+            }
         )
         self.assertEqual(recorded["hidden_states_shape"], [1, S, H])
         self.assertEqual(list(out["hidden_states"].shape), [K + 1, S, H])
         self.assertNotIn("decoder_input", out)
 
-    def test_fleet_layout_attn_mask_values(self) -> None:
-        # 1-col [1,1,S,1] layout (include_pos=False) with derived ends.
+    def test_supplied_mask_is_reused(self) -> None:
+        # Adapter-owned 1-col mask is forwarded unchanged; not rebuilt from
+        # cu_seqlens_q.
         K, S, H = 1, 8, 4
         layer, recorded = _make_layer(K, include_pos=False)
         hs = paddle.arange((K + 1) * S * H, dtype="float32").reshape(
             [K + 1, S, H]
         )
-        cu = paddle.to_tensor([0, 3, 8], dtype="int32")
+        mask = paddle.full([1, 1, S, 1], 8, dtype="int32")
         layer._forward_megatron_style(
-            {"hidden_states": hs, "cu_seqlens_q": cu, "context": None}
+            {
+                "hidden_states": hs,
+                "cu_seqlens_q": paddle.to_tensor([0, 3, 8], dtype="int32"),
+                "attn_mask_startend_row_indices": mask,
+                "context": None,
+            }
         )
         self.assertEqual(recorded["attn_mask_shape"], [1, 1, S, 1])
-        ends = [row[0] for row in recorded["attn_mask"].numpy().tolist()[0][0]]
-        self.assertEqual(ends, [3, 3, 3, 8, 8, 8, 8, 8])
+        np.testing.assert_array_equal(
+            recorded["attn_mask"].numpy(), mask.numpy()
+        )
 
-    def test_experimental_include_pos_layout(self) -> None:
-        # include_pos=True -> 2-col [1,1,S,2] layout (lines 1697-1700).
-        K, S, H = 1, 8, 4
-        layer, recorded = _make_layer(K, include_pos=True)
-        hs = paddle.arange((K + 1) * S * H, dtype="float32").reshape(
-            [K + 1, S, H]
-        )
-        cu = paddle.to_tensor([0, 4, 8], dtype="int32")
-        layer._forward_megatron_style(
-            {"hidden_states": hs, "cu_seqlens_q": cu, "context": None}
-        )
-        self.assertEqual(recorded["attn_mask_shape"], [1, 1, S, 2])
-        vals = recorded["attn_mask"].numpy().tolist()[0][0]
-        ends = [row[0] for row in vals]
-        pos = [row[1] for row in vals]
-        self.assertEqual(ends, [4, 4, 4, 4, 8, 8, 8, 8])
-        self.assertEqual(pos, list(range(S)))
-
-    def test_batch_size_gt_one_expands(self) -> None:
-        # batch_size>1 -> expand branch (lines 1713-1716).
-        K, S, H, B = 1, 8, 4, 2
-        layer, recorded = _make_layer(K)
-        total = (K + 1) * B
-        hs = paddle.arange(total * S * H, dtype="float32").reshape(
-            [total, S, H]
-        )
-        cu = paddle.to_tensor([0, 5, 8], dtype="int32")
-        layer._forward_megatron_style(
-            {"hidden_states": hs, "cu_seqlens_q": cu, "context": None}
-        )
-        self.assertEqual(recorded["attn_mask_shape"], [B, 1, S, 1])
-
-    def test_no_cu_seqlens_skips_mask(self) -> None:
-        # cu_seqlens_q=None -> derivation skipped (line 1668 False branch);
-        # no attn_mask_startend_row_indices set.
+    def test_absent_mask_raises(self) -> None:
         K, S, H = 2, 6, 4
-        layer, recorded = _make_layer(K)
+        layer, _ = _make_layer(K)
         hs = paddle.arange((K + 1) * S * H, dtype="float32").reshape(
             [K + 1, S, H]
         )
-        out = layer._forward_megatron_style(
-            {"hidden_states": hs, "context": None}
-        )
-        self.assertIsNone(recorded["attn_mask_shape"])
-        self.assertEqual(list(out["hidden_states"].shape), [K + 1, S, H])
+        with self.assertRaisesRegex(
+            RuntimeError, r"attn_mask_startend_row_indices"
+        ):
+            layer._forward_megatron_style(
+                {
+                    "hidden_states": hs,
+                    "cu_seqlens_q": paddle.to_tensor([0, 3, 6], dtype="int32"),
+                    "context": None,
+                }
+            )
 
     def test_cross_attention_raises(self) -> None:
-        # context is not None -> NotImplementedError (lines 1621-1625).
+        # context is not None -> NotImplementedError.
         K, S, H = 1, 8, 4
         layer, _ = _make_layer(K)
         hs = paddle.zeros([(K + 1), S, H], dtype="float32")
@@ -173,7 +156,7 @@ class TestMtpForwardMegatron(unittest.TestCase):
             )
 
     def test_mtp_input_embeds_incompatible_raises(self) -> None:
-        # mtp_input_embeds present -> ValueError (lines 1626-1634).
+        # mtp_input_embeds present -> ValueError.
         K, S, H = 1, 8, 4
         layer, _ = _make_layer(K)
         hs = paddle.zeros([(K + 1), S, H], dtype="float32")
@@ -187,7 +170,7 @@ class TestMtpForwardMegatron(unittest.TestCase):
             )
 
     def test_3d_input_ids_raises(self) -> None:
-        # input_ids with ndim>2 -> RuntimeError (lines 1656-1660).
+        # input_ids with ndim>2 -> RuntimeError.
         K, S, H = 1, 8, 4
         layer, _ = _make_layer(K)
         hs = paddle.zeros([(K + 1), S, H], dtype="float32")

@@ -26,11 +26,11 @@ single-card by:
   and ``get_context_parallel_rank`` -> 0;
 - feeding a 3-D ``input`` and an ``input_ids`` whose seq length differs from
   ``input``'s, so the ``elif`` condition is True;
-- replacing the (locally-imported) ``extract_local_cp_chunks`` with a recorder
-  that captures its kwargs and then raises a sentinel, so execution stops right
-  after the slice (before the full MoE routing, which needs real gate weights).
-  The sentinel proves the slice line was reached; the captured ``mode`` proves
-  the router read ``config.cp_balance_mode`` instead of assuming a layout.
+- replacing ``slice_erndata_cp`` with a recorder that captures its kwargs and
+  then raises a sentinel, so execution stops right after the slice (before the
+  full MoE routing, which needs real gate weights). The sentinel proves the
+  slice line was reached; the captured config proves the router forwarded
+  ``config.cp_balance_mode`` instead of assuming a layout.
 """
 
 from __future__ import annotations
@@ -43,7 +43,6 @@ from unittest.mock import MagicMock
 import paddle
 
 import paddlefleet.transformer.moe.moe_router as mr
-import paddlefleet.transformer.multi_token_prediction as mtp
 from paddlefleet.transformer.moe.moe_router import TopKRouter
 
 
@@ -53,12 +52,12 @@ class _Sentinel(Exception):
 
 @contextlib.contextmanager
 def _fake_cp_and_extract(cp_size=2):
-    """Fake a CP group and swap ``extract_local_cp_chunks`` for a recorder.
+    """Fake a CP group and swap ``slice_erndata_cp`` for a recorder.
 
-    Yields the ``calls`` list so a test can assert on the kwargs the router
-    passed -- ``mode`` in particular. Recording and *then* raising keeps the
-    original behaviour: execution stops right after the slice line, before the
-    real MoE routing that would need gate weights.
+    Yields the ``calls`` list so a test can assert on the config the router
+    passed -- ``cp_balance_mode`` in particular. Recording and *then* raising
+    keeps the original behaviour: execution stops right after the slice line,
+    before the real MoE routing that would need gate weights.
     """
     calls = []
 
@@ -73,10 +72,7 @@ def _fake_cp_and_extract(cp_size=2):
             )
         )
         stack.enter_context(
-            mock.patch.object(mr, "get_context_parallel_rank", lambda: 0)
-        )
-        stack.enter_context(
-            mock.patch.object(mtp, "extract_local_cp_chunks", _record_and_raise)
+            mock.patch.object(mr, "slice_erndata_cp", _record_and_raise)
         )
         yield calls
 
@@ -109,13 +105,12 @@ class TestTopKRouterMegatronCPSlice(unittest.TestCase):
     def test_slice_uses_configured_cp_balance_mode(self) -> None:
         # The router must forward config.cp_balance_mode rather than assume a
         # layout: picking the wrong one hands this rank input_ids belonging to
-        # other ranks' tokens, which shifts the MoE mask silently. Asserting on
-        # the recorded kwarg is what makes a hard-coded mode fail here -- the
-        # reachability check above passes either way.
+        # other ranks' tokens, which shifts the MoE mask silently.
         for mode in ("dualchunk_allgather", "contiguous_allgather"):
             with self.subTest(mode=mode):
-                ((_args, kwargs),) = self._run_forward(mode)
-                self.assertEqual(kwargs.get("mode"), mode)
+                (args, kwargs) = self._run_forward(mode)[0]
+                cfg = args[1] if len(args) > 1 else kwargs["config"]
+                self.assertEqual(cfg.cp_balance_mode, mode)
 
 
 if __name__ == "__main__":

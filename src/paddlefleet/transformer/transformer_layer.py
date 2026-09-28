@@ -841,8 +841,8 @@ class TransformerLayer(nn.Layer):
             else:
                 # New dataflow (experimental_dataflow=True): main mask is already main-seq only,
                 # mtp masks are in mtp_startend_row_indices_all and will be used by MTP layer directly.
-                # Megatron style: mask is already length-L; MTP layer will derive per-depth mask
-                # from cu_seqlens_q, so leave main mask untouched here.
+                # Megatron style: mask is already length-L; MTP reuses the
+                # adapter-supplied backbone mask, so leave it untouched here.
                 attn_mask_startend_row_indices_mtp = None
 
         if self.config.block_attention_residuals and "blocks" not in dict_args:
