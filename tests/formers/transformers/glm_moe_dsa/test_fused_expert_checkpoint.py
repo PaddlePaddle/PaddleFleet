@@ -98,6 +98,30 @@ class TestRestoreFusedExpert3DLayout(unittest.TestCase):
         self.assertEqual(shard.local_shape, (2, 4, 6))
         self.assertEqual(shard.global_shape, (2, 4, 6))
 
+    def test_rejects_missing_or_non_3d_parameter(self):
+        import paddle
+        from paddle.distributed import ShardedWeight
+        from paddlefleet.trainer.trainer import restore_fused_expert_3d_layout
+
+        key = "model.layers.3.mlp.grouped_gemm_experts.weight1"
+        shard = ShardedWeight(
+            key=key,
+            local_tensor=paddle.zeros([8, 6], dtype="float32"),
+            local_shape=(8, 6),
+            global_shape=(8, 6),
+            global_offset=(0, 0),
+        )
+        model = MagicMock()
+        model.named_parameters.return_value = []
+        with self.assertRaisesRegex(ValueError, "no matching model parameter"):
+            restore_fused_expert_3d_layout(model, {key: shard})
+
+        model.named_parameters.return_value = [
+            (key, paddle.zeros([8, 6], dtype="float32"))
+        ]
+        with self.assertRaisesRegex(ValueError, "3-D model parameter"):
+            restore_fused_expert_3d_layout(model, {key: shard})
+
 
 class TestFusedExpertOptimizerSave(unittest.TestCase):
     def make_trainer(self, dtype="bfloat16"):

@@ -354,8 +354,15 @@ def restore_fused_expert_3d_layout(model, model_sharded_state_dict):
         if "grouped_gemm_experts.weight" not in key:
             continue
         param = _sharded_parameter(model, named_params, key)
-        if param is None or getattr(param, "ndim", 0) != 3:
-            continue
+        if param is None:
+            raise ValueError(
+                f"Cannot restore fused expert shard {key}: no matching model parameter."
+            )
+        if param.ndim != 3:
+            raise ValueError(
+                f"Cannot restore fused expert shard {key}: expected a 3-D model parameter, "
+                f"got shape {tuple(param.shape)}."
+            )
         local = sharded_weight.local_tensor
         param_shape = tuple(param.shape)
         if tuple(local.shape) == param_shape:
@@ -1790,8 +1797,6 @@ class Trainer:
                 os.remove(metadata_path)
             except FileNotFoundError:
                 pass
-            except Exception as e:
-                logger.error(f"Failed to delete {metadata_path}: {e}")
 
             load_transform = build_hf_dequant_load_transform(
                 checkpoint_path=resume_from_checkpoint,
