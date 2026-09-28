@@ -1916,19 +1916,31 @@ class DSAttention(FleetLayer):
         indexer_query = query
         indexer_key = key
         if sp_enabled:
-            indexer_query = gather_from_sequence_parallel_region(
-                query.transpose([1, 0, 2, 3]).contiguous(),
-                group=self.pg_collection.tp,
-            ).transpose([1, 0, 2, 3]).contiguous()
-            indexer_key = gather_from_sequence_parallel_region(
-                key.transpose([1, 0, 2, 3]).contiguous(),
-                group=self.pg_collection.tp,
-            ).transpose([1, 0, 2, 3]).contiguous()
+            indexer_query = (
+                gather_from_sequence_parallel_region(
+                    query.transpose([1, 0, 2, 3]).contiguous(),
+                    group=self.pg_collection.tp,
+                )
+                .transpose([1, 0, 2, 3])
+                .contiguous()
+            )
+            indexer_key = (
+                gather_from_sequence_parallel_region(
+                    key.transpose([1, 0, 2, 3]).contiguous(),
+                    group=self.pg_collection.tp,
+                )
+                .transpose([1, 0, 2, 3])
+                .contiguous()
+            )
             key = indexer_key
-            value = gather_from_sequence_parallel_region(
-                value.transpose([1, 0, 2, 3]).contiguous(),
-                group=self.pg_collection.tp,
-            ).transpose([1, 0, 2, 3]).contiguous()
+            value = (
+                gather_from_sequence_parallel_region(
+                    value.transpose([1, 0, 2, 3]).contiguous(),
+                    group=self.pg_collection.tp,
+                )
+                .transpose([1, 0, 2, 3])
+                .contiguous()
+            )
 
         # Build causal mask
         causal_mask = paddle.triu(
@@ -2022,13 +2034,17 @@ class DSAttention(FleetLayer):
         index_mask = paddle.put_along_axis(
             index_mask,
             safe_topk,
-            paddle.where(valid_topk, zeros, paddle.full_like(zeros, float("-inf"))),
+            paddle.where(
+                valid_topk, zeros, paddle.full_like(zeros, float("-inf"))
+            ),
             axis=-1,
         )
         # Merge causal + index
         index_mask = index_mask + causal_mask.unsqueeze(0)
         if sp_enabled:
-            row_start = int(parallel_state.get_tensor_model_parallel_rank()) * sq
+            row_start = (
+                int(parallel_state.get_tensor_model_parallel_rank()) * sq
+            )
             index_mask = index_mask[:, row_start : row_start + sq, :]
             causal_mask = causal_mask[row_start : row_start + sq, :]
         combined_mask = index_mask.unsqueeze(1)  # [b, 1, sq, sk]
@@ -2044,7 +2060,9 @@ class DSAttention(FleetLayer):
                 if aligned_attn.ndim == 3:
                     aligned_attn = aligned_attn.unsqueeze(1)
                 if sp_enabled:
-                    aligned_attn = aligned_attn[:, row_start : row_start + sq, :]
+                    aligned_attn = aligned_attn[
+                        :, row_start : row_start + sq, :
+                    ]
                 combined_mask = aligned_attn.cast("float32") + combined_mask
 
         # Run sparse attention (batch-first layout)

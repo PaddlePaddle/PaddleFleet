@@ -1866,9 +1866,10 @@ class MultiTokenPredictionLayer(FleetLayer):
             raise ValueError(
                 "MTP compressed and dense attention masks are mutually exclusive"
             )
-        if (mtp_startend_row_indices_all is not None or mtp_attn_mask is not None) != (
-            mtp_hidden_inputs_mask_all is not None
-        ):
+        if (
+            mtp_startend_row_indices_all is not None
+            or mtp_attn_mask is not None
+        ) != (mtp_hidden_inputs_mask_all is not None):
             raise ValueError(
                 "an MTP attention mask and mtp_hidden_inputs_mask_all must both be present or both be absent"
             )
