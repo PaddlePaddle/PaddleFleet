@@ -361,7 +361,10 @@ def restore_fused_expert_3d_layout(model, model_sharded_state_dict):
         if tuple(local.shape) == param_shape:
             continue
         if int(local.numel()) != int(param.numel()):
-            continue
+            raise ValueError(
+                f"Cannot restore fused expert shard {key}: local tensor has "
+                f"{int(local.numel())} elements, expected {int(param.numel())}."
+            )
         if tuple(local.shape) != (
             param_shape[0] * param_shape[1],
             param_shape[2],
@@ -1597,6 +1600,17 @@ class Trainer:
         if getattr(self.args, "copy_custom_file_list", None):
             self.copy_custom_files(output_dir)
 
+    @staticmethod
+    def _validate_hf_export(output_dir):
+        """Validate tensor names when an HF exporter produced safetensors."""
+        from .checkpoint_export import (
+            assert_unique_safetensors_names,
+            iter_safetensors_files,
+        )
+
+        if any(iter_safetensors_files(output_dir)):
+            assert_unique_safetensors_names(output_dir)
+
     def create_ema_state_assembler(self):
         global_steps = self.state.global_step
         memory_growth_threshold_bytes = (
@@ -1696,6 +1710,7 @@ class Trainer:
 
         with _sprof_span("sharded_state_dict"):
             model_sharded_state_dict = self.model.sharded_state_dict()
+        restore_fused_expert_3d_layout(self.model, model_sharded_state_dict)
         master_weights_path = os.path.join(
             resume_from_checkpoint, MASTER_WEIGHT_DIC
         )
@@ -4427,6 +4442,7 @@ class Trainer:
                         save_checkpoint_format=self.args.save_checkpoint_format,
                         memory_growth_threshold=memory_growth_threshold_bytes,
                     )
+                self._validate_hf_export(ckpt_path)
                 if self.tokenizer is not None and self.args.save_tokenizer:
                     self.tokenizer.save_pretrained(ckpt_path)
                 if self.processing_class is not None:
@@ -6939,6 +6955,7 @@ class Trainer:
                     enable_auto_parallel=True,
                     save_checkpoint_format=self.args.save_checkpoint_format,
                 )
+                self._validate_hf_export(output_dir)
             else:
                 self._save_flex_model_state(output_dir)
                 self._save_flex_optimizer_state(output_dir)
@@ -7005,6 +7022,7 @@ class Trainer:
                             memory_growth_threshold=memory_growth_threshold_bytes,
                             export_global_step=self.state.global_step,
                         )
+                    self._validate_hf_export(output_dir)
                 else:
                     self._save_flex_model_state(output_dir)
 
@@ -7126,6 +7144,7 @@ class Trainer:
                         save_safetensors=self.args.save_safetensors,
                         save_checkpoint_format=self.args.save_checkpoint_format,
                     )
+            self._validate_hf_export(output_dir)
             if self.args.should_save_sharding_stage1_model:
                 model_meta = self.sharding_io.gather_distributed_model_meta()
                 if self.args.should_save:

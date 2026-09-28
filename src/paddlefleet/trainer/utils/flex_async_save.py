@@ -156,6 +156,11 @@ class FlexAsyncSaver:
 
         # --- Model State: GPU → CPU pinned copy ---
         model_sharded = trainer.model.sharded_state_dict()
+        # Keep async FlexCheckpoint's model metadata identical to the
+        # synchronous path for grouped-GEMM experts.
+        from ..trainer import restore_fused_expert_3d_layout
+
+        restore_fused_expert_3d_layout(trainer.model, model_sharded)
         for key, sw in model_sharded.items():
             if isinstance(sw, ShardedWeight):
                 sw.local_tensor = paddle.Tensor(sw.local_tensor)
@@ -175,9 +180,14 @@ class FlexAsyncSaver:
 
         # --- Optimizer State: zero-copy reference (already on CPU pinned) ---
         model_sharded_for_opt = trainer.model.sharded_state_dict()
-        opt_sharded = trainer.optimizer.sharded_state_dict(
-            model_sharded_for_opt
-        )
+        from ..trainer import _fused_expert_optimizer_save_views
+
+        with _fused_expert_optimizer_save_views(
+            trainer.model, model_sharded_for_opt, trainer.optimizer
+        ):
+            opt_sharded = trainer.optimizer.sharded_state_dict(
+                model_sharded_for_opt
+            )
 
         opt_states = {}
         mw_states = {}
