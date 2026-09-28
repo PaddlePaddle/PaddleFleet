@@ -42,6 +42,7 @@ from paddlefleet.tensor_parallel.mappings import (
 from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.kimi_delta_attention import build_cu_seqlens
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.utils.accuracy_target import targets_hf
 from paddlefleet.utils import get_pg_size, use_dsv4_accuracy_compatible
 
 if TYPE_CHECKING:
@@ -122,7 +123,9 @@ class GPTEmbedding(FleetLayer):
         self.mrope_section = mrope_section
         # Claim main_grad so MixPrecision skips this Parameter. The
         # PyLayer deposits IndexingBackward into this buffer (E-471).
-        if self.config.use_accuracy_compatible:
+        if self.config.use_accuracy_compatible and not targets_hf(
+            self.config.use_accuracy_compatible
+        ):
             self.embedding.embed_tokens.weight.main_grad = None
         self.position_embedding_type = position_embedding_type
         if sublayers_spec.rope_embedding is not None:
@@ -358,6 +361,7 @@ class GPTEmbedding(FleetLayer):
             and self.config.num_nextn_predict_layers is not None
             and self.config.num_nextn_predict_layers > 0
             and not self.config.mtp_load_weight_only
+            and not getattr(self.config, "use_erndata", False)
             and input_ids.shape[-1] > self.config.num_nextn_predict_layers
         ):
             _mtp_tail = self.config.num_nextn_predict_layers

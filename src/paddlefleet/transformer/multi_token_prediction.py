@@ -78,9 +78,14 @@ def _mtp_eh_projection(
     use_accuracy_compatible: bool = False,
 ):
     if use_accuracy_compatible and tensor_parallel_size == 1:
-        output_bias = projection.bias if projection.skip_bias_add else None
-        bias = None if projection.skip_bias_add else projection.bias
-        return F.linear(hidden_states, projection.weight, bias), output_bias
+        skip_bias_add = getattr(projection, "skip_bias_add", False)
+        output_bias = projection.bias if skip_bias_add else None
+        bias = None if skip_bias_add else projection.bias
+        # ColumnParallelLinear stores [input, output], while F.linear expects
+        # [output, input]. Keep this explicit UAC path layout-correct for both
+        # the standard projection and experimental fused linear modules.
+        weight = projection.weight.transpose([1, 0])
+        return F.linear(hidden_states, weight, bias), output_bias
     return projection(hidden_states)
 
 
