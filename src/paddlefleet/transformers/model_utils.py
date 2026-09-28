@@ -3885,22 +3885,17 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
                         and dist.fleet._hcg is not None
                     ):
                         hcg = dist.fleet.get_hybrid_communicate_group()
-                        try:
-                            pp_group = hcg.get_pipe_parallel_group()
-                        except Exception:
-                            pp_group = None
-                        if hasattr(hcg, "get_expert_parallel_group"):
-                            try:
-                                moe_group = hcg.get_expert_parallel_group()
-                            except Exception:
-                                moe_group = None
-                        if hasattr(hcg, "get_moe_sharding_parallel_group"):
-                            try:
-                                moe_sharding_group = (
-                                    hcg.get_moe_sharding_parallel_group()
-                                )
-                            except Exception:
-                                moe_sharding_group = None
+                        pp_group = hcg.get_pipe_parallel_group()
+                        get_expert_group = getattr(
+                            hcg, "get_expert_parallel_group", None
+                        )
+                        if get_expert_group is not None:
+                            moe_group = get_expert_group()
+                        get_moe_sharding_group = getattr(
+                            hcg, "get_moe_sharding_parallel_group", None
+                        )
+                        if get_moe_sharding_group is not None:
+                            moe_sharding_group = get_moe_sharding_group()
 
                     use_parallel_save = (
                         pp_group is not None
