@@ -404,12 +404,13 @@ class GlmMoeDsaPreTrainedModel(PretrainedModel):
 
         pp_to_single = getattr(model, "_pp_to_single_mapping", None)
         if pp_to_single is None:
-            try:
-                single_to_pp = model._set_pipeline_name_mapping()
+            set_pipeline_name_mapping = getattr(
+                model, "_set_pipeline_name_mapping", None
+            )
+            if set_pipeline_name_mapping is not None:
+                single_to_pp = set_pipeline_name_mapping()
                 if single_to_pp:
                     pp_to_single = {v: k for k, v in single_to_pp.items()}
-            except Exception as e:
-                logger.warning(f"_set_pipeline_name_mapping failed: {e}")
         if pp_to_single is None:
             pp_to_single = {}
 

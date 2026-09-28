@@ -1741,14 +1741,10 @@ class DSAttention(FleetLayer):
                 for parameter in self.indexer.parameters():
                     parameter.stop_gradient = True
 
-        # DSA loss config; None is normalized to 0.0 (disabled), so all
-        # downstream checks can key on ``> 0`` instead of ``is not None``.
-        self.dsa_indexer_loss_coeff = float(
-            getattr(config, "dsa_indexer_loss_coeff", 0.0) or 0.0
-        )
-        self.dsa_indexer_use_sparse_loss = getattr(
-            config, "dsa_indexer_use_sparse_loss", False
-        )
+        # These fields are part of TransformerConfig. Read them directly so a
+        # malformed DSA configuration cannot silently disable the loss path.
+        self.dsa_indexer_loss_coeff = float(config.dsa_indexer_loss_coeff)
+        self.dsa_indexer_use_sparse_loss = config.dsa_indexer_use_sparse_loss
 
     def _get_index_share_topk_holder(
         self, holder: dict | None = None
