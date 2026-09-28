@@ -250,14 +250,18 @@ def _align_dsa_indexer_mask(
 
     Indexer Q/K are all-gathered under sequence parallel, so scores are
     ``[..., s, s]``. The dense ``attention_mask`` often stays sharded on the
-    last dim (``[..., s, s/TP]``). Adding those ranks fail-closes with a
-    broadcast error. Gather that last dim when it is the SP shard; otherwise
-    leave a last-dim mismatch as ``None`` so the caller can use the
-    already-sized causal mask.
+    last dim (``[..., s, s/TP]``). Gather that last dim when it is the SP
+    shard. Any other shape is a contract error: silently replacing a supplied
+    mask with a causal mask changes the attention pattern.
     """
     mask = _normalize_dsa_mask(mask)
     if mask is None:
         return None
+    if mask.ndim not in (2, 3):
+        raise ValueError(
+            "DSA attention mask must have rank 2 or 3 after normalization, "
+            f"got shape {tuple(mask.shape)}"
+        )
     mask_sk = int(mask.shape[-1])
     if mask_sk == int(score_sk):
         return mask
@@ -269,7 +273,11 @@ def _align_dsa_indexer_mask(
     if not (
         sequence_parallel and tp_size > 1 and mask_sk * tp_size == int(score_sk)
     ):
-        return None
+        raise ValueError(
+            "DSA attention mask key length does not match gathered scores: "
+            f"mask shape {tuple(mask.shape)}, score_sk={score_sk}, "
+            f"sequence_parallel={sequence_parallel}, tp_size={tp_size}"
+        )
     if mask.ndim == 2:
         gathered = gather_from_sequence_parallel_region(
             mask.transpose([1, 0]).contiguous(), group=tp_group
@@ -280,7 +288,9 @@ def _align_dsa_indexer_mask(
             mask.transpose([2, 0, 1]).contiguous(), group=tp_group
         )
         return gathered.transpose([1, 2, 0]).contiguous()
-    return None
+    raise ValueError(
+        f"Unsupported DSA attention mask shape after normalization: {tuple(mask.shape)}"
+    )
 
 
 # ---------------------------------------------------------------------------

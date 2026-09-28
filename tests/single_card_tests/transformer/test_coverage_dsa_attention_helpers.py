@@ -73,25 +73,28 @@ class TestNormalizeAndAlignIndexerMask(unittest.TestCase):
         mask = paddle.zeros([2, 4, 4], dtype="float32")
         self.assertIs(_align_dsa_indexer_mask(mask, 4), mask)
 
-    def test_mismatch_without_sequence_parallel_returns_none(self):
+    def test_mismatch_without_sequence_parallel_is_rejected(self):
         mask = paddle.zeros([2, 4, 2], dtype="float32")
-        self.assertIsNone(_align_dsa_indexer_mask(mask, 4))
-        self.assertIsNone(
+        with self.assertRaisesRegex(ValueError, "key length"):
+            _align_dsa_indexer_mask(mask, 4)
+        with self.assertRaisesRegex(ValueError, "key length"):
             _align_dsa_indexer_mask(
                 mask,
                 4,
                 sequence_parallel=True,
                 tp_group=SimpleNamespace(nranks=1),
             )
-        )
-        self.assertIsNone(
+        with self.assertRaisesRegex(ValueError, "key length"):
             _align_dsa_indexer_mask(
                 mask,
                 4,
                 sequence_parallel=False,
                 tp_group=SimpleNamespace(nranks=2),
             )
-        )
+
+    def test_unsupported_rank_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "rank 2 or 3"):
+            _align_dsa_indexer_mask(paddle.zeros([2], "float32"), 4)
 
     def _gathered(self, mask, score_sk):
         with patch(
@@ -121,10 +124,6 @@ class TestNormalizeAndAlignIndexerMask(unittest.TestCase):
         self.assertEqual(list(aligned.shape), [1, 6, 4])
         expected = paddle.concat([mask, mask], axis=-1)
         self.assertTrue(_true(_equal_all(aligned, expected)))
-
-    def test_unsupported_rank_returns_none(self):
-        self.assertIsNone(self._gathered(paddle.zeros([2], "float32"), 4))
-
 
 if __name__ == "__main__":
     unittest.main()
