@@ -1840,6 +1840,7 @@ class MultiTokenPredictionLayer(FleetLayer):
 
         # === Original concat+split logic ===
         hidden_states_concat = dict_args["hidden_states"]
+        origin_attention_mask = dict_args.get("attention_mask", None)
         # mHC multi-stream: the erndata backbone contract layer passes the
         # MTP chunks as [s, b, n*h] through mhc_multistream (same contract as
         # the magic-send / separate_mtp_input branch); pop it here and let the
@@ -1854,9 +1855,23 @@ class MultiTokenPredictionLayer(FleetLayer):
         mtp_startend_row_indices_all = dict_args.pop(
             "mtp_startend_row_indices_all", None
         )
+        mtp_attn_mask = dict_args.pop("mtp_attn_mask", None)
         mtp_hidden_inputs_mask_all = dict_args.pop(
             "mtp_hidden_inputs_mask_all", None
         )
+        if (
+            mtp_startend_row_indices_all is not None
+            and mtp_attn_mask is not None
+        ):
+            raise ValueError(
+                "MTP compressed and dense attention masks are mutually exclusive"
+            )
+        if (mtp_startend_row_indices_all is not None or mtp_attn_mask is not None) != (
+            mtp_hidden_inputs_mask_all is not None
+        ):
+            raise ValueError(
+                "an MTP attention mask and mtp_hidden_inputs_mask_all must both be present or both be absent"
+            )
         # Pop per-depth MTP input_ids for MoE routing mask.
         # Shape: [B, num_nextn_predict_layers, max_seq] when present, None otherwise.
         mtp_input_ids_for_moe_mask = dict_args.pop(
@@ -1955,6 +1970,10 @@ class MultiTokenPredictionLayer(FleetLayer):
                         :, i : i + 1, :, :
                     ]
                     dict_args["attn_mask_startend_row_indices"] = mtp_mask_i
+                if mtp_attn_mask is not None:
+                    dict_args["attention_mask"] = mtp_attn_mask[
+                        :, i : i + 1, :, :
+                    ]
 
                 # New dataflow: get hidden inputs mask for depth i, shape [B, 1, S]
                 if mtp_hidden_inputs_mask_all is not None:
@@ -2014,6 +2033,10 @@ class MultiTokenPredictionLayer(FleetLayer):
                         :1,
                     ]
                 dict_args["attn_mask_startend_row_indices"] = mtp_mask
+            if mtp_attn_mask is not None:
+                dict_args["attention_mask"] = mtp_attn_mask[
+                    :, self.layer_number : self.layer_number + 1, :, :
+                ]
 
             # New dataflow: get hidden inputs mask for this layer's depth, shape [B, 1, S]
             if mtp_hidden_inputs_mask_all is not None:
@@ -2062,6 +2085,8 @@ class MultiTokenPredictionLayer(FleetLayer):
             dict_args["mtp_startend_row_indices_all"] = (
                 mtp_startend_row_indices_all
             )
+        if mtp_attn_mask is not None:
+            dict_args["mtp_attn_mask"] = mtp_attn_mask
         # Restore mtp_hidden_inputs_mask_all for subsequent MTP layers (num_nextn > 1)
         if mtp_hidden_inputs_mask_all is not None:
             dict_args["mtp_hidden_inputs_mask_all"] = mtp_hidden_inputs_mask_all
@@ -2082,6 +2107,11 @@ class MultiTokenPredictionLayer(FleetLayer):
             dict_args["rotary_pos_sin"] = origin_rotary_pos_sin
         # Clean up per-depth slice key
         dict_args.pop("mtp_hidden_inputs_mask", None)
+        if mtp_attn_mask is not None:
+            if origin_attention_mask is None:
+                dict_args.pop("attention_mask", None)
+            else:
+                dict_args["attention_mask"] = origin_attention_mask
         if origin_start_row_indices is not None:
             dict_args["attn_mask_startend_row_indices"] = (
                 origin_start_row_indices
