@@ -3867,20 +3867,20 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
                     aoa_config = self._gen_inv_aoa_config(model_to_save.config)
 
                 if is_main_process:
-                logger.info(
-                    "HF_EXPORT_PROVENANCE "
-                    + json.dumps(
-                        hf_export_provenance(
-                            model_to_save.config,
-                            aoa_config,
-                            save_dir,
-                            kwargs.get("export_global_step"),
+                    logger.info(
+                        "HF_EXPORT_PROVENANCE "
+                        + json.dumps(
+                            hf_export_provenance(
+                                model_to_save.config,
+                                aoa_config,
+                                save_dir,
+                                kwargs.get("export_global_step"),
+                            ),
+                            sort_keys=True,
                         ),
-                        sort_keys=True,
-                    ),
-                )
+                    )
 
-            clean_unrelated_safetensors(save_dir)
+                clean_unrelated_safetensors(save_dir)
 
                 if using_sonic_moe:
                     SonicMoEHFFormatFullParamSaver(
