@@ -29,18 +29,14 @@ class TestLegacyAutoregressiveMtpExportConfig(TestCase):
             self.assertEqual(config.num_nextn_predict_layers, 2)
 
     def test_zero_legacy_field_keeps_canonical_config(self):
-        config = SimpleNamespace(
-            mtp_num_layers=0, num_nextn_predict_layers=2
-        )
+        config = SimpleNamespace(mtp_num_layers=0, num_nextn_predict_layers=2)
 
         with _legacy_autoregressive_mtp_export_config(config):
             self.assertEqual(config.mtp_num_layers, 0)
             self.assertEqual(config.num_nextn_predict_layers, 2)
 
     def test_positive_legacy_field_is_swapped_and_restored(self):
-        config = SimpleNamespace(
-            mtp_num_layers=1, num_nextn_predict_layers=2
-        )
+        config = SimpleNamespace(mtp_num_layers=1, num_nextn_predict_layers=2)
 
         with _legacy_autoregressive_mtp_export_config(config):
             self.assertEqual(config.mtp_num_layers, 2)
@@ -50,25 +46,25 @@ class TestLegacyAutoregressiveMtpExportConfig(TestCase):
         self.assertEqual(config.num_nextn_predict_layers, 2)
 
     def test_export_failure_restores_the_config(self):
-        config = SimpleNamespace(
-            mtp_num_layers=1, num_nextn_predict_layers=2
-        )
+        config = SimpleNamespace(mtp_num_layers=1, num_nextn_predict_layers=2)
 
-        with self.assertRaisesRegex(RuntimeError, "export failed"):
-            with _legacy_autoregressive_mtp_export_config(config):
-                raise RuntimeError("export failed")
+        with (
+            self.assertRaisesRegex(RuntimeError, "export failed"),
+            _legacy_autoregressive_mtp_export_config(config),
+        ):
+            raise RuntimeError("export failed")
 
         self.assertEqual(config.mtp_num_layers, 1)
         self.assertEqual(config.num_nextn_predict_layers, 2)
 
     def test_invalid_legacy_value_is_rejected(self):
-        config = SimpleNamespace(
-            mtp_num_layers="1", num_nextn_predict_layers=2
-        )
+        config = SimpleNamespace(mtp_num_layers="1", num_nextn_predict_layers=2)
 
-        with self.assertRaisesRegex(TypeError, "mtp_num_layers"):
-            with _legacy_autoregressive_mtp_export_config(config):
-                pass
+        with (
+            self.assertRaisesRegex(TypeError, "mtp_num_layers"),
+            _legacy_autoregressive_mtp_export_config(config),
+        ):
+            pass
 
 
 if __name__ == "__main__":
