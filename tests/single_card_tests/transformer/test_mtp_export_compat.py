@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from contextlib import ExitStack
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest import TestCase, mock
@@ -80,8 +81,15 @@ class _ExportModel(model_utils.PretrainedModel):
         super().__init__(config)
         self.projection = nn.Linear(2, 3)
 
+
+class _InverseExportModel(_ExportModel):
     def _gen_inv_aoa_config(self, config):
         return MoEAOAConfigGenerator.gen_inv_aoa_config(config)
+
+
+class _ForwardExportModel(_ExportModel):
+    def _gen_aoa_config(self, config):
+        return MoEAOAConfigGenerator.gen_aoa_config(config)
 
 
 class TestMtpSavePretrained(TestCase):
@@ -107,7 +115,7 @@ class TestMtpSavePretrained(TestCase):
             mtp_num_layers=1,
             num_nextn_predict_layers=2,
         )
-        self.model = _ExportModel(self.config)
+        self.model = _InverseExportModel(self.config)
 
     def test_export_uses_legacy_layer_count_and_restores_runtime_config(self):
         self.model.save_pretrained(self.save_dir)
@@ -141,6 +149,35 @@ class TestMtpSavePretrained(TestCase):
         self.assertEqual(saved.num_nextn_predict_layers, 2)
         self.assertFalse(hasattr(self.config, "mtp_num_layers"))
 
+    def test_forward_aoa_is_reversed_with_legacy_layer_count(self):
+        model = _ForwardExportModel(self.config)
+
+        model.save_pretrained(self.save_dir)
+
+        saved_model, aoa = self.saver.call_args.args
+        self.assertIs(saved_model, model)
+        self.assertTrue(aoa["aoa_config_reverse"])
+        self.assertEqual(
+            [item for item in aoa["aoa_statements"] if ".eh_proj." in item],
+            [
+                "model.layers.1.eh_proj.weight^T -> model.layers.1.eh_proj.weight"
+            ],
+        )
+        saved = PretrainedConfig.from_pretrained(self.save_dir)
+        self.assertEqual(saved.num_nextn_predict_layers, 1)
+        self.assertEqual(self.config.mtp_num_layers, 1)
+        self.assertEqual(self.config.num_nextn_predict_layers, 2)
+
+    def test_missing_aoa_generator_restores_runtime_config(self):
+        model = _ExportModel(self.config)
+
+        with self.assertRaisesRegex(RuntimeError, "must implement either"):
+            model.save_pretrained(self.save_dir)
+
+        self.saver.assert_not_called()
+        self.assertEqual(self.config.mtp_num_layers, 1)
+        self.assertEqual(self.config.num_nextn_predict_layers, 2)
+
     def test_saver_failure_restores_runtime_config(self):
         self.saver.return_value.save_checkpoint.side_effect = RuntimeError(
             "checkpoint failed"
@@ -149,6 +186,57 @@ class TestMtpSavePretrained(TestCase):
         with self.assertRaisesRegex(RuntimeError, "checkpoint failed"):
             self.model.save_pretrained(self.save_dir)
 
+        self.assertEqual(self.config.mtp_num_layers, 1)
+        self.assertEqual(self.config.num_nextn_predict_layers, 2)
+
+    def test_sonic_saver_failure_restores_runtime_config(self):
+        self.config.using_sonic_moe = True
+        with mock.patch.object(
+            model_utils, "SonicMoEHFFormatFullParamSaver"
+        ) as sonic_saver:
+            sonic_saver.return_value.save_checkpoint.side_effect = RuntimeError(
+                "sonic checkpoint failed"
+            )
+
+            with self.assertRaisesRegex(
+                RuntimeError, "sonic checkpoint failed"
+            ):
+                self.model.save_pretrained(self.save_dir)
+
+            sonic_saver.return_value.save_checkpoint.assert_called_once_with(
+                self.save_dir, "10GB"
+            )
+
+        self.saver.assert_not_called()
+        self.assertEqual(self.config.mtp_num_layers, 1)
+        self.assertEqual(self.config.num_nextn_predict_layers, 2)
+
+    def test_model_export_config_is_copied_before_tp_normalization(self):
+        self.model.config_to_save = PretrainedConfig(
+            tensor_model_parallel_size=2,
+            num_nextn_predict_layers=1,
+            architectures=["_ExportModel"],
+        )
+
+        self.model.save_pretrained(self.save_dir)
+
+        saved = PretrainedConfig.from_pretrained(self.save_dir)
+        self.assertEqual(saved.tensor_model_parallel_size, 1)
+        self.assertEqual(saved.num_nextn_predict_layers, 1)
+        self.assertEqual(saved.architectures, ["_ExportModel"])
+        self.assertEqual(
+            self.model.config_to_save.tensor_model_parallel_size, 2
+        )
+        self.assertEqual(self.config.mtp_num_layers, 1)
+        self.assertEqual(self.config.num_nextn_predict_layers, 2)
+
+    def test_non_main_process_saves_weights_without_config_files(self):
+        self.model.save_pretrained(self.save_dir, is_main_process=False)
+
+        self.saver.return_value.save_checkpoint.assert_called_once_with(
+            self.save_dir, "10GB"
+        )
+        self.assertEqual(list(Path(self.save_dir).iterdir()), [])
         self.assertEqual(self.config.mtp_num_layers, 1)
         self.assertEqual(self.config.num_nextn_predict_layers, 2)
 
