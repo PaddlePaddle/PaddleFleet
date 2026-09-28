@@ -57,7 +57,41 @@ class GlmMoeDsaPreTrainedModel(PretrainedModel):
         Returns:
             Dictionary with 'aoa_statements' key containing inverse conversion statements
         """
-        return MoEAOAConfigGenerator.gen_inv_aoa_config(config)
+        aoa_config = MoEAOAConfigGenerator.gen_inv_aoa_config(config)
+
+        # The AOA lexer expands wildcards from original input keys. Grouped
+        # experts become per-expert intermediates only after the first split,
+        # so their later split/transpose rules need concrete expert IDs.
+        num_experts = getattr(config, "n_routed_experts", None)
+        if num_experts is None:
+            num_experts = getattr(config, "num_experts", None)
+        statements = []
+        has_expert_wildcard = any(
+            "$EXPERT_ID" in statement
+            for statement in aoa_config["aoa_statements"]
+        )
+        if has_expert_wildcard:
+            if isinstance(num_experts, bool) or not isinstance(
+                num_experts, int
+            ):
+                raise TypeError(
+                    "n_routed_experts/num_experts must be an integer when "
+                    "inverse AOA contains $EXPERT_ID"
+                )
+            if num_experts < 1:
+                raise ValueError(
+                    "n_routed_experts/num_experts must be positive when "
+                    "inverse AOA contains $EXPERT_ID"
+                )
+        for statement in aoa_config["aoa_statements"]:
+            if "$EXPERT_ID" in statement:
+                statements.extend(
+                    statement.replace("$EXPERT_ID", str(i))
+                    for i in range(num_experts)
+                )
+            else:
+                statements.append(statement)
+        return {**aoa_config, "aoa_statements": statements}
 
     @classmethod
     def _build_muon_slice_config(cls, model, config) -> dict:
@@ -333,15 +367,7 @@ class GlmMoeDsaPreTrainedModel(PretrainedModel):
         for layer_idx in range(num_hidden_layers):
             _add_layer_slice_config(f"model.layers.{layer_idx}")
 
-        mtp_num_layers = getattr(config, "mtp_num_layers", 0)
-        if mtp_num_layers > 0:
-            num_nextn_predict_layers = mtp_num_layers
-        else:
-            num_nextn_predict_layers = (
-                config.num_nextn_predict_layers
-                if config.num_nextn_predict_layers
-                else 0
-            )
+        num_nextn_predict_layers = config.num_nextn_predict_layers
         for layer_idx in range(num_nextn_predict_layers):
             _add_layer_slice_config(
                 f"model.layers.{num_hidden_layers + layer_idx}"

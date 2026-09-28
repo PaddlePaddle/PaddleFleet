@@ -712,6 +712,28 @@ class TestMTPLayerForward(unittest.TestCase):
             r1 = layer1.forward(r0)
         self.assertEqual(r1["hidden_states"].shape, [3 * B, S, H])
 
+    def test_block_cache_meta_reaches_projection_and_next_depth(self):
+        layer = _build_mtp_layer(_cfg())
+        B, S, H = 2, 8, 64
+        _setup_magic(layer, [paddle.randint(0, 512, [B, S + 1])])
+        meta = {"dsa_topk_holder": {}}
+        captured = {}
+
+        def proj(hidden_states=None, **kw):
+            captured.update(kw)
+            return hidden_states
+
+        with _fwd_ctx(proj_override=proj, layer=layer):
+            result = layer.forward(
+                {
+                    "hidden_states": paddle.randn([B, S, H]),
+                    "labels": paddle.randint(0, 100, [B, S]),
+                    "_block_cache_meta": meta,
+                }
+            )
+        self.assertIs(captured["_block_cache_meta"], meta)
+        self.assertIs(result["_block_cache_meta"], meta)
+
     def test_ep_fill_feature(self):
         layer = _build_mtp_layer(_cfg(expert_model_parallel_size=4))
         B, S, H = 1, 4, 64

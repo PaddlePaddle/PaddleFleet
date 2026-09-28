@@ -1373,6 +1373,12 @@ class MultiTokenPredictionLayer(FleetLayer):
                 "input_ids": input_ids,
                 "position_ids": position_ids,
             }
+            # The inner layer resolves the micro-batch DSA top-k holder from
+            # this metadata; without it an MTP index-share consumer would get
+            # a fresh holder that the decoder producer never filled.
+            block_cache_meta = kwargs.get("_block_cache_meta")
+            if block_cache_meta is not None:
+                input_dict["_block_cache_meta"] = block_cache_meta
             rst_dict = self.transformer_layer(input_dict)
 
         hidden_states = rst_dict["hidden_states"]
@@ -1437,6 +1443,13 @@ class MultiTokenPredictionLayer(FleetLayer):
             position_ids = None
             if self.config.gpt_model_use_experimental_version:
                 position_ids = kwargs.get("position_ids", None)
+            # The replay must read the same micro-batch DSA top-k holder as
+            # the original forward.
+            block_cache_meta_kwargs = (
+                {"_block_cache_meta": kwargs["_block_cache_meta"]}
+                if kwargs.get("_block_cache_meta") is not None
+                else {}
+            )
             return recompute(
                 forward_func,
                 hidden_states=hidden_states
@@ -1482,6 +1495,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 else None,
                 input_ids=input_ids if input_ids is not None else None,
                 position_ids=position_ids if position_ids is not None else None,
+                **block_cache_meta_kwargs,
             )
 
         if self.config.recompute_method == "uniform":
@@ -1780,6 +1794,11 @@ class MultiTokenPredictionLayer(FleetLayer):
             for extra_key in ("position_ids", "attention_bias", "blocks"):
                 if extra_key in dict_args and dict_args[extra_key] is not None:
                     new_args[extra_key] = dict_args[extra_key]
+            # Later MTP depths consume the same decoder top-k producer.
+            # Fleet drops this metadata key at a PP boundary instead of
+            # sending it.
+            if dict_args.get("_block_cache_meta") is not None:
+                new_args["_block_cache_meta"] = dict_args["_block_cache_meta"]
 
             # mHC: pass multi-stream output to next MTP layer
             if (
