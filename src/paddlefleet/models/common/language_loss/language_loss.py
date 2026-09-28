@@ -371,6 +371,15 @@ class LanguageLoss(FleetLayer):
         self.pg_collection = pg_collection
 
         self.config = config
+        # Fixed at construction: whether the loss returns a raw per-token SUM
+        # (trainer applies the single 1/T_global) instead of the legacy
+        # mean-of-means. Cached here so forward paths read a plain attribute.
+        # `is True` (not bool()) is deliberate: under a MagicMock config getattr
+        # returns a truthy child mock, and bool() would falsely activate the
+        # per-token display/renorm path (empty mtp_tok_full_list -> IndexError).
+        self.calculate_per_token_loss = (
+            getattr(config, "calculate_per_token_loss", False) is True
+        )
         self.use_accuracy_compatible = getattr(
             config, "use_accuracy_compatible", False
         )
@@ -407,10 +416,7 @@ class LanguageLoss(FleetLayer):
             and num_mtp > 0
             and not getattr(config, "mtp_load_weight_only", False)
         )
-        if (
-            getattr(config, "calculate_per_token_loss", False) is True
-            and mtp_enabled
-        ):
+        if self.calculate_per_token_loss and mtp_enabled:
             cp_size = (
                 get_context_parallel_world_size()
                 if paddle.distributed.is_initialized()
@@ -472,9 +478,7 @@ class LanguageLoss(FleetLayer):
         #     train step's T_global and dilute that step's gradients.
         # Re-enabling eval means normalising the returned loss by its own valid-token
         # count at the eval call site, and saving/restoring the counters around it.
-        assert self.training or not getattr(
-            self.config, "calculate_per_token_loss", False
-        ), (
+        assert self.training or not self.calculate_per_token_loss, (
             "eval / non-training forward is unsupported under "
             "calculate_per_token_loss: the returned loss is a raw per-token SUM (eval "
             "PPL would be wrong by ~the microbatch token count) and the token counters "
@@ -555,7 +559,7 @@ class LanguageLoss(FleetLayer):
             loss = paddle.sum(
                 loss.cast(paddle.float32).reshape([-1]) * lossmask
             )
-            if not getattr(self.config, "calculate_per_token_loss", False):
+            if not self.calculate_per_token_loss:
                 # mean-of-means: local per-token mean here, the trainer averages
                 # over replicas/microbatches. Per-token instead keeps the raw sum
                 # and divides by the global token count once (trainer, step end).
@@ -698,7 +702,7 @@ class LanguageLoss(FleetLayer):
             # EC-compat: line-wise loss (per-sample mean then average across samples)
             # EC's ErniemmPretrainingCriterion recomputes loss as line-wise when task_id
             # is present, which changes the value due to division by (count + 1e-6).
-            if getattr(self.config, "calculate_per_token_loss", False):
+            if self.calculate_per_token_loss:
                 # Per-token: raw non-padded token loss sum; the single global-token
                 # denominator is applied later by the trainer (skip both the
                 # mean-of-means /lossmask.sum() and the EC line-wise reweighting,
@@ -919,28 +923,22 @@ class LanguageLoss(FleetLayer):
             # head, used by _record_per_token_display below. Detached; never affects
             # grads. lm_labels / labels_cur_depth here are the full (un-scattered)
             # slices, so these match the post-CP-gather loss sums forward_impl returns.
-            _per_token_disp = (
-                getattr(self.config, "calculate_per_token_loss", False) is True
+            per_token = self.calculate_per_token_loss
+            lm_tok = (
+                (lm_labels != self.ignored_index).sum() if per_token else None
             )
-            _lm_tok = (
-                (lm_labels != self.ignored_index).sum()
-                if _per_token_disp
-                else None
-            )
-            _mtp_tok_list = []
+            mtp_tok_list = []
 
             # Full-sequence (pre-CP-extract) non-pad counts per head, used by the
             # per-token renormalisation below. forward_impl returns the CP-GATHERED loss
             # sum, so the matching denominator must be the full count, not this rank's
             # shard; and being identical on every CP rank it makes all ranks scale a
-            # head the same way. Separate from _lm_tok / _mtp_tok_list, which stay on the
+            # head the same way. Separate from lm_tok / mtp_tok_list, which stay on the
             # display path. Supported-config guards live in __init__ (E183).
-            _lm_tok_full = (
-                (labels_ori != self.ignored_index).sum()
-                if _per_token_disp
-                else None
+            lm_tok_full = (
+                (labels_ori != self.ignored_index).sum() if per_token else None
             )
-            _mtp_tok_full_list = []
+            mtp_tok_full_list = []
 
             if not self.config.mtp_distillation_loss:
                 if self.config.train_mtp_only:
@@ -997,10 +995,10 @@ class LanguageLoss(FleetLayer):
                                 "rank. It should be set by GPTEmbedding.forward "
                                 "(PP=1) or GPTLMHead.forward (last PP stage)."
                             )
-                        if _per_token_disp:
+                        if per_token:
                             # Count before the CP extract: matches the CP-gathered sum
                             # forward_impl returns, and is equal on every CP rank (E183).
-                            _mtp_tok_full_list.append(
+                            mtp_tok_full_list.append(
                                 (_lbl != self.ignored_index).sum()
                             )
                         if _cp_size_for_extract > 1:
@@ -1017,8 +1015,8 @@ class LanguageLoss(FleetLayer):
                         labels_cur_depth = labels_ori[
                             :, (depth + 1) : (depth + 1 + seq_length)
                         ]
-                    if _per_token_disp:
-                        _mtp_tok_list.append(
+                    if per_token:
+                        mtp_tok_list.append(
                             (labels_cur_depth != self.ignored_index).sum()
                         )
                     if self.config.gpt_model_use_experimental_version:
@@ -1320,12 +1318,12 @@ class LanguageLoss(FleetLayer):
                 full-sequence and equal on every CP rank. Returns mtp_l untouched
                 outside per-token so the legacy path stays byte-identical.
                 """
-                if not _per_token_disp:
+                if not per_token:
                     return mtp_l
                 return mtp_l * (
-                    _lm_tok_full.astype("float32")
+                    lm_tok_full.astype("float32")
                     / paddle.clip(
-                        _mtp_tok_full_list[idx].astype("float32"), min=1.0
+                        mtp_tok_full_list[idx].astype("float32"), min=1.0
                     )
                 )
 
@@ -1368,21 +1366,21 @@ class LanguageLoss(FleetLayer):
                 )
             # per-token keeps the raw SUM (trainer divides by the global token count once
             # at step end, spanning all acc microbatches) -> must NOT also ÷acc_steps here.
-            if use_dsv4_accuracy_compatible() and not _per_token_disp:
+            if use_dsv4_accuracy_compatible() and not per_token:
                 loss = LossScaleBeforeBackward.scale(loss)
 
             # Per-token display stats (print only; detached). Split lm vs mtp here so
             # forward_impl keeps its original signature. Skipped for the distillation
             # path (mtp_loss there is already a mean, not a raw sum).
-            if _per_token_disp and not self.config.mtp_distillation_loss:
+            if per_token and not self.config.mtp_distillation_loss:
                 self._record_per_token_display(
-                    lm_loss, _lm_tok, mtp_loss, _mtp_tok_list
+                    lm_loss, lm_tok, mtp_loss, mtp_tok_list
                 )
 
             return loss
         else:
             loss = self._forward(logits, labels)
-            if getattr(self.config, "calculate_per_token_loss", False):
+            if self.calculate_per_token_loss:
                 self._record_per_token_display(
                     loss, (labels != self.ignored_index).sum(), [], []
                 )
@@ -1485,7 +1483,7 @@ class MainLanguageLoss(LanguageLoss):
         # same domain as the post-CP-gather sums. Used twice below: to recover the
         # baseline-comparable per-token mean for the mtp_i_loss display, and to
         # renormalise the head inside the loss value itself.
-        per_token = getattr(self.config, "calculate_per_token_loss", False)
+        per_token = self.calculate_per_token_loss
         mtp_tok_full_list = []
         lm_tok_full = None
         if per_token:
