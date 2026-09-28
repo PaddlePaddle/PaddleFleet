@@ -72,6 +72,9 @@ def _make_loss():
     loss.enable_parallel_cross_entropy = False
     loss.loss_subbatch_sequence_length = 0
     loss.use_subbatch = False
+    # forward_impl's per-token eval guard reads self.training; a real
+    # LanguageLoss gets it from nn.Layer.__init__, which __new__ skips here.
+    loss.training = True
     # Normally set in __init__, which __new__ skips; the plain reduction
     # branch reads it directly.
     loss.use_accuracy_compatible = False

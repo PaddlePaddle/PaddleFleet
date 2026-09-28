@@ -73,6 +73,9 @@ class _StubLanguageLoss:
         )
         self.enable_parallel_cross_entropy = parallel_ce
         self.ignored_index = ignored_index
+        # forward_impl's per-token eval guard reads self.training; a real
+        # LanguageLoss gets it from nn.Layer.__init__, which this stub skips.
+        self.training = True
 
 
 class TestLanguageLossMultimaxRouting(unittest.TestCase):

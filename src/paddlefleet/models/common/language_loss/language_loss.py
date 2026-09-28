@@ -401,12 +401,16 @@ class LanguageLoss(FleetLayer):
         # config up front rather than train on a wrong objective. All of these are
         # fixed at construction time, and the guard is scoped to
         # calculate_per_token_loss so the legacy mean-of-means path is unaffected.
+        num_mtp = getattr(config, "num_nextn_predict_layers", 0)
         mtp_enabled = (
-            getattr(config, "num_nextn_predict_layers", 0)
-            and config.num_nextn_predict_layers > 0
+            isinstance(num_mtp, int)
+            and num_mtp > 0
             and not getattr(config, "mtp_load_weight_only", False)
         )
-        if getattr(config, "calculate_per_token_loss", False) and mtp_enabled:
+        if (
+            getattr(config, "calculate_per_token_loss", False) is True
+            and mtp_enabled
+        ):
             cp_size = (
                 get_context_parallel_world_size()
                 if paddle.distributed.is_initialized()
@@ -915,8 +919,8 @@ class LanguageLoss(FleetLayer):
             # head, used by _record_per_token_display below. Detached; never affects
             # grads. lm_labels / labels_cur_depth here are the full (un-scattered)
             # slices, so these match the post-CP-gather loss sums forward_impl returns.
-            _per_token_disp = getattr(
-                self.config, "calculate_per_token_loss", False
+            _per_token_disp = (
+                getattr(self.config, "calculate_per_token_loss", False) is True
             )
             _lm_tok = (
                 (lm_labels != self.ignored_index).sum()
