@@ -1342,6 +1342,33 @@ def get_common_folder(file_list):
         raise ValueError("All files must be in the same folder!")
 
 
+@contextmanager
+def _legacy_autoregressive_mtp_export_config(config):
+    """Expose the legacy MTP layer count while exporting its HF checkpoint."""
+    legacy_layers = getattr(config, "mtp_num_layers", None)
+    if legacy_layers is None:
+        yield
+        return
+    if isinstance(legacy_layers, bool) or not isinstance(legacy_layers, int):
+        raise TypeError("mtp_num_layers must be an integer or None")
+    if legacy_layers < 0:
+        raise ValueError("mtp_num_layers must be non-negative")
+    if legacy_layers == 0:
+        yield
+        return
+
+    nextn_layers = config.num_nextn_predict_layers
+    if isinstance(nextn_layers, bool) or not isinstance(nextn_layers, int):
+        raise TypeError("num_nextn_predict_layers must be an integer")
+    config.mtp_num_layers = nextn_layers
+    config.num_nextn_predict_layers = legacy_layers
+    try:
+        yield
+    finally:
+        config.mtp_num_layers = legacy_layers
+        config.num_nextn_predict_layers = nextn_layers
+
+
 @six.add_metaclass(InitTrackerMeta)
 class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
     """
@@ -3821,149 +3848,126 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
         model_to_save = unwrap_model(self)
 
         if save_checkpoint_format == "flex_checkpoint":
-            # autoregressive mtp training
-            autoregressive_mtp_training = (
-                model_to_save.config.mtp_num_layers > 0
-            )
-            if autoregressive_mtp_training:
-                tmp = model_to_save.config.mtp_num_layers
-                model_to_save.config.mtp_num_layers = (
-                    model_to_save.config.num_nextn_predict_layers
-                )
-                model_to_save.config.num_nextn_predict_layers = tmp
-
-                logger.info(
-                    f"MTP args changing for autoregressive mtp training checkpoint saving, mtp_num_layers: {model_to_save.config.mtp_num_layers}, num_nextn_predict_layers: {model_to_save.config.num_nextn_predict_layers}!!"
-                )
-            if not hasattr(self, "_gen_inv_aoa_config"):
-                if hasattr(self, "_gen_aoa_config"):
-                    aoa_config = self._gen_aoa_config(model_to_save.config)
-                    aoa_config["aoa_config_reverse"] = True
-                    logger.warning(
-                        "There is no _gen_inv_aoa_config, so we auto-derived it from _gen_aoa_config."
-                    )
+            with _legacy_autoregressive_mtp_export_config(model_to_save.config):
+                if not hasattr(self, "_gen_inv_aoa_config"):
+                    if hasattr(self, "_gen_aoa_config"):
+                        aoa_config = self._gen_aoa_config(model_to_save.config)
+                        aoa_config["aoa_config_reverse"] = True
+                        logger.warning(
+                            "There is no _gen_inv_aoa_config, so we auto-derived it from _gen_aoa_config."
+                        )
+                    else:
+                        raise RuntimeError(
+                            "When using flex_checkpoint to save Hugging Face weights, "
+                            "the model must implement either the _gen_inv_aoa_config function "
+                            "or the _gen_aoa_config function (which will be automatically used to derive _gen_inv_aoa_config)."
+                        )
                 else:
-                    raise RuntimeError(
-                        "When using flex_checkpoint to save Hugging Face weights, "
-                        "the model must implement either the _gen_inv_aoa_config function "
-                        "or the _gen_aoa_config function (which will be automatically used to derive _gen_inv_aoa_config)."
-                    )
-            else:
-                aoa_config = self._gen_inv_aoa_config(model_to_save.config)
+                    aoa_config = self._gen_inv_aoa_config(model_to_save.config)
 
-            clean_unrelated_safetensors(save_dir)
+                clean_unrelated_safetensors(save_dir)
 
-            if using_sonic_moe:
-                SonicMoEHFFormatFullParamSaver(
-                    model_to_save,
-                    aoa_config,
-                    memory_growth_threshold=memory_growth_threshold,
-                ).save_checkpoint(save_dir, max_shard_size)
-            else:
-                pp_group = None
-                moe_group = None
-                moe_sharding_group = None
-
-                if (
-                    paddle.distributed.get_world_size() > 1
-                    and hasattr(dist, "fleet")
-                    and hasattr(dist.fleet, "_hcg")
-                    and dist.fleet._hcg is not None
-                ):
-                    hcg = dist.fleet.get_hybrid_communicate_group()
-                    try:
-                        pp_group = hcg.get_pipe_parallel_group()
-                    except Exception:
-                        pp_group = None
-                    if hasattr(hcg, "get_expert_parallel_group"):
-                        try:
-                            moe_group = hcg.get_expert_parallel_group()
-                        except Exception:
-                            moe_group = None
-                    if hasattr(hcg, "get_moe_sharding_parallel_group"):
-                        try:
-                            moe_sharding_group = (
-                                hcg.get_moe_sharding_parallel_group()
-                            )
-                        except Exception:
-                            moe_sharding_group = None
-
-                use_parallel_save = (
-                    pp_group is not None
-                    and pp_group.nranks > 1
-                    and moe_group is not None
-                    and moe_group.nranks > 1
-                    and moe_sharding_group is not None
-                )
-
-                if use_parallel_save:
-                    moe_sharding_rank = (
-                        moe_sharding_group.rank
-                        if moe_sharding_group.nranks > 1
-                        else 0
-                    )
-                    HFFormatFullParamSaver(
-                        model=model_to_save,
-                        aoa_config=aoa_config,
-                        h_group=moe_group,
-                        v_group=pp_group,
-                        num_splits=moe_sharding_group.nranks,
-                        shard_idx=moe_sharding_rank,
-                        memory_growth_threshold=memory_growth_threshold,
-                    ).save_checkpoint(save_dir, max_shard_size)
-                else:
-                    HFFormatFullParamSaver(
+                if using_sonic_moe:
+                    SonicMoEHFFormatFullParamSaver(
                         model_to_save,
                         aoa_config,
                         memory_growth_threshold=memory_growth_threshold,
                     ).save_checkpoint(save_dir, max_shard_size)
-
-            dtype = get_parameter_dtype(model_to_save)
-            if dtype is not None:
-                model_to_save.config.dtype = str(dtype).split(".")[1]
-            if config_to_save is None:
-                if hasattr(model_to_save, "config_to_save"):
-                    config_to_save = copy.deepcopy(model_to_save.config_to_save)
                 else:
-                    config_to_save = copy.deepcopy(model_to_save.config)
-                    # Attach architecture to the config
-                    if not config_to_save.architectures:
-                        config_to_save.architectures = [
-                            clean_model_class_name(
-                                model_to_save.__class__.__name__
-                            )
-                        ]
+                    pp_group = None
+                    moe_group = None
+                    moe_sharding_group = None
 
-            # Save the config
-            if is_main_process:
-                if config_to_save.tensor_model_parallel_size > 1:
-                    config_to_save.tensor_model_parallel_size = 1
-                paddle_series = ["ernie4_5", "paddleocr_vl"]
-                if any(
-                    paddle_model in config_to_save.get("model_type", "")
-                    for paddle_model in paddle_series
-                ):
-                    # hacking for FastDeploy to deploy paddle series model
-                    config_to_save.save_pretrained(
-                        save_directory, save_safetensors=True
+                    if (
+                        paddle.distributed.get_world_size() > 1
+                        and hasattr(dist, "fleet")
+                        and hasattr(dist.fleet, "_hcg")
+                        and dist.fleet._hcg is not None
+                    ):
+                        hcg = dist.fleet.get_hybrid_communicate_group()
+                        try:
+                            pp_group = hcg.get_pipe_parallel_group()
+                        except Exception:
+                            pp_group = None
+                        if hasattr(hcg, "get_expert_parallel_group"):
+                            try:
+                                moe_group = hcg.get_expert_parallel_group()
+                            except Exception:
+                                moe_group = None
+                        if hasattr(hcg, "get_moe_sharding_parallel_group"):
+                            try:
+                                moe_sharding_group = (
+                                    hcg.get_moe_sharding_parallel_group()
+                                )
+                            except Exception:
+                                moe_sharding_group = None
+
+                    use_parallel_save = (
+                        pp_group is not None
+                        and pp_group.nranks > 1
+                        and moe_group is not None
+                        and moe_group.nranks > 1
+                        and moe_sharding_group is not None
                     )
-                else:
-                    config_to_save.save_pretrained(save_directory)
-                if self.can_generate():
-                    model_to_save.generation_config.save_pretrained(
-                        save_directory
-                    )
 
-            if autoregressive_mtp_training:
-                tmp = model_to_save.config.mtp_num_layers
-                model_to_save.config.mtp_num_layers = (
-                    model_to_save.config.num_nextn_predict_layers
-                )
-                model_to_save.config.num_nextn_predict_layers = tmp
+                    if use_parallel_save:
+                        moe_sharding_rank = (
+                            moe_sharding_group.rank
+                            if moe_sharding_group.nranks > 1
+                            else 0
+                        )
+                        HFFormatFullParamSaver(
+                            model=model_to_save,
+                            aoa_config=aoa_config,
+                            h_group=moe_group,
+                            v_group=pp_group,
+                            num_splits=moe_sharding_group.nranks,
+                            shard_idx=moe_sharding_rank,
+                            memory_growth_threshold=memory_growth_threshold,
+                        ).save_checkpoint(save_dir, max_shard_size)
+                    else:
+                        HFFormatFullParamSaver(
+                            model_to_save,
+                            aoa_config,
+                            memory_growth_threshold=memory_growth_threshold,
+                        ).save_checkpoint(save_dir, max_shard_size)
 
-                logger.info(
-                    f"MTP args changing for autoregressive mtp training checkpoint saving RECOVER, mtp_num_layers: {model_to_save.config.mtp_num_layers}, num_nextn_predict_layers: {model_to_save.config.num_nextn_predict_layers}!!"
-                )
+                dtype = get_parameter_dtype(model_to_save)
+                if dtype is not None:
+                    model_to_save.config.dtype = str(dtype).split(".")[1]
+                if config_to_save is None:
+                    if hasattr(model_to_save, "config_to_save"):
+                        config_to_save = copy.deepcopy(model_to_save.config_to_save)
+                    else:
+                        config_to_save = copy.deepcopy(model_to_save.config)
+                        # Attach architecture to the config
+                        if not config_to_save.architectures:
+                            config_to_save.architectures = [
+                                clean_model_class_name(
+                                    model_to_save.__class__.__name__
+                                )
+                            ]
+
+                # Save the config
+                if is_main_process:
+                    if config_to_save.tensor_model_parallel_size > 1:
+                        config_to_save.tensor_model_parallel_size = 1
+                    paddle_series = ["ernie4_5", "paddleocr_vl"]
+                    if any(
+                        paddle_model in config_to_save.get("model_type", "")
+                        for paddle_model in paddle_series
+                    ):
+                        # hacking for FastDeploy to deploy paddle series model
+                        config_to_save.save_pretrained(
+                            save_directory, save_safetensors=True
+                        )
+                    else:
+                        config_to_save.save_pretrained(save_directory)
+                    if self.can_generate():
+                        model_to_save.generation_config.save_pretrained(
+                            save_directory
+                        )
+
             return
 
         # save the string version of dtype to the config, e.g. convert paddle.float32 => "float32"
