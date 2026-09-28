@@ -1736,28 +1736,22 @@ class Trainer:
             else self.args.flex_ckpt_comm_method
         )
         if flex_ckpt_comm_method == "parallel_broadcast":
-            try:
-                pp_group = hcg.get_pipe_parallel_group()
-                if pp_group is None or pp_group.nranks < 1:
-                    raise NotImplementedError(
-                        "Only support when pp_group is not None."
-                    )
-            except Exception:
+            pp_group = hcg.get_pipe_parallel_group()
+            if pp_group is None or pp_group.nranks < 1:
                 raise RuntimeError("Only support when pp_group is not None.")
 
-            try:
-                moe_group = hcg.get_expert_parallel_group()
-                if moe_group is None or moe_group.nranks < 1:
-                    raise NotImplementedError(
-                        "Only support when moe_group is not None."
-                    )
-            except Exception:
+            moe_group = hcg.get_expert_parallel_group()
+            if moe_group is None or moe_group.nranks < 1:
                 raise RuntimeError("Only support when moe_group is not None.")
 
-            try:
-                moe_sharding_group = hcg.get_moe_sharding_parallel_group()
-            except Exception:
-                moe_sharding_group = None
+            get_moe_sharding_group = getattr(
+                hcg, "get_moe_sharding_parallel_group", None
+            )
+            moe_sharding_group = (
+                get_moe_sharding_group()
+                if get_moe_sharding_group is not None
+                else None
+            )
 
             if pp_group.nranks > 1:
                 worker_groups = [moe_group, pp_group, moe_sharding_group]
@@ -3112,20 +3106,19 @@ class Trainer:
         hcg = getattr(self, "hcg", None)
         if hcg is None:
             return getattr(self, "dp_group", None)
-        try:
-            group = hcg.get_sharding_parallel_group()
-            if group is not None and getattr(group, "nranks", 1) > 1:
+        get_sharding_group = getattr(
+            hcg, "get_sharding_parallel_group", None
+        )
+        if get_sharding_group is not None:
+            group = get_sharding_group()
+            if group is not None and group.nranks > 1:
                 return group
-        except Exception:
-            pass
-        try:
-            from paddlefleet.parallel_state import get_data_parallel_group
 
-            group = get_data_parallel_group(check_initialized=False)
-            if group is not None and getattr(group, "nranks", 1) > 1:
-                return group
-        except Exception:
-            pass
+        from paddlefleet.parallel_state import get_data_parallel_group
+
+        group = get_data_parallel_group(check_initialized=False)
+        if group is not None and group.nranks > 1:
+            return group
         return getattr(self, "dp_group", None)
 
     def _requires_native_token_weighted_logging(self):
@@ -4579,18 +4572,22 @@ class Trainer:
 
                     _avg_group = None
                     if _log_md5:
-                        try:
-                            import paddle.distributed as _pf_dist
-                            from paddle.distributed import fleet as _pf_fleet
+                        import paddle.distributed as _pf_dist
+                        from paddle.distributed import fleet as _pf_fleet
 
-                            _hcg = _pf_fleet.get_hybrid_communicate_group()
-                            _avg_group = _hcg.get_check_parallel_group()
-                            if _avg_group is None or _avg_group.nranks <= 1:
-                                _avg_group = _hcg.get_sharding_parallel_group()
-                            if _avg_group is None or _avg_group.nranks <= 1:
-                                _avg_group = _hcg.get_data_parallel_group()
-                        except Exception:
-                            _avg_group = None
+                        _hcg = _pf_fleet.get_hybrid_communicate_group()
+                        _avg_group = _hcg.get_check_parallel_group()
+                        if _avg_group is None or _avg_group.nranks <= 1:
+                            _avg_group = _hcg.get_sharding_parallel_group()
+                        if _avg_group is None or _avg_group.nranks <= 1:
+                            _avg_group = _hcg.get_data_parallel_group()
+                        if (
+                            _avg_group is None
+                            and _pf_dist.get_world_size() > 1
+                        ):
+                            raise RuntimeError(
+                                "LOG_LOSS_MD5 requires a data-parallel-equivalent process group"
+                            )
 
                     _reduced_mtp = {}
                     if _log_md5:
