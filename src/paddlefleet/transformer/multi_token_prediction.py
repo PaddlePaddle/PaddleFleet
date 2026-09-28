@@ -764,6 +764,75 @@ class MTPLossAutoScaler(paddle.autograd.PyLayer):
         MTPLossAutoScaler.main_loss_backward_scale = scale
 
 
+def draw_mtp_sampled_depth(owner, config):
+    """Draw K -- how many MTP depths (prefix 1..K) to run this micro-batch.
+
+    Driven by ``config.mtp_depth_sampling``, a list P(K=k) of length
+    D=num_nextn_predict_layers. Returns D when sampling is disabled.
+
+    The draw is DETERMINISTIC and collective-free: a private RNG is seeded by
+    ``owner``'s own per-call counter, so every site that draws derives the SAME K
+    without any communication. ``owner`` may be an MTP layer at any depth or the
+    MTP LM head -- each is entered exactly once per micro-batch, so their counters
+    stay in lockstep and agree on K even when they sit on DIFFERENT pipeline
+    stages. That is what makes sampling work at
+    ``pipeline_model_parallel_size > 1``: K rides in ``dict_args`` within a stage,
+    but ``dict_args`` does not cross a stage boundary (p2p ships tensors only), so
+    the first consumer on each stage re-derives it instead of falling back to D.
+    A world-group ``broadcast(src=0)`` -- the original mechanism -- deadlocks
+    under pp>1 instead: only the last stage runs the MTP layers, while src=0 sits
+    on the first stage and never joins the collective.
+
+    Per-site counters are deliberate; a single stage-wide counter would break
+    under virtual pipeline parallelism, where one process holds several chunks and
+    would advance it once per chunk rather than once per micro-batch.
+
+    A private Generator is used (not ``np.random.*``) so the global RNG stream
+    used elsewhere is untouched.
+
+    The counter only advances outside a recompute replay, mirroring the
+    magic-count handling further down this file. The caller's primary guard is
+    ``resolve_mtp_sampled_depth``'s ``"mtp_sampled_depth" in dict_args`` check,
+    which relies on the replay seeing the dict this site already wrote into; if a
+    replay ever arrives with a fresh dict instead, not advancing the counter makes
+    the re-draw return the SAME K rather than a new one, so the backward still
+    matches the depths the forward actually ran.
+    """
+    d = config.num_nextn_predict_layers
+    ratio = getattr(config, "mtp_depth_sampling", None)
+    if not ratio:
+        return d
+    probs = np.asarray(ratio, dtype="float64")
+    probs = probs / probs.sum()
+    counter = getattr(owner, "_mtp_sampling_counter", 0)
+    owner._mtp_sampling_counter = counter
+    base = int(getattr(config, "seed", 0) or 0)
+    seed = base * 1_000_003 + counter
+    if paddle.is_grad_enabled() or not owner.training:
+        owner._mtp_sampling_counter = counter + 1
+    rng = np.random.default_rng(seed)
+    k = int(rng.choice(len(probs), p=probs)) + 1
+    return max(1, min(k, d))
+
+
+def resolve_mtp_sampled_depth(owner, config, dict_args):
+    """Return this micro-batch's K, drawing it if nobody upstream published one.
+
+    ``dict_args`` is the within-stage carrier: the first MTP depth on a stage (or
+    the MTP LM head, when no MTP depth shares its stage) draws and publishes K,
+    and the remaining consumers on that stage read it back. Reusing the published
+    value -- rather than drawing again -- is also what makes a recompute replay
+    idempotent, since the replay re-enters with the dict the forward wrote into.
+    """
+    if "mtp_sampled_depth" in dict_args:
+        return dict_args["mtp_sampled_depth"]
+    k = draw_mtp_sampled_depth(owner, config)
+    dict_args["mtp_sampled_depth"] = k
+    # observability only, never read by the logic
+    owner._last_sampled_depth = k
+    return k
+
+
 class MultiTokenPredictionLayer(FleetLayer):
     """The implementation for Multi-Token Prediction (MTP) which extends
     the prediction scope to multiple future tokens at each position.
@@ -1398,46 +1467,12 @@ class MultiTokenPredictionLayer(FleetLayer):
         return outputs
 
     def _sample_mtp_depth(self):
-        """Sample how many MTP depths K to actually run this step (prefix 1..K).
+        """Draw K for this micro-batch from this layer's own counter.
 
-        Driven by config.mtp_depth_sampling, a list P(K=k) of length
-        D=num_nextn_predict_layers. Returns D when sampling is disabled.
-
-        The draw is DETERMINISTIC and collective-free: a private RNG is seeded by
-        a per-call counter, so every rank that runs this MTP layer draws the SAME
-        K without any communication. That is all the consistency the feature
-        needs -- K only gates the MTP layers, and every rank executing them (the
-        last pipeline stage's dp/tp/ep ranks) advances the counter in lockstep,
-        so their MoE expert-parallel all-to-all always agrees on which depths are
-        skipped. A world-group broadcast(src=0) -- the previous mechanism --
-        deadlocks under pp>1 instead: only the last pipeline stage runs the MTP
-        layer, while src=0 sits on the first stage and never joins the
-        collective. A private Generator is used (not np.random.*) so the global
-        RNG stream used elsewhere is untouched.
-
-        The counter only advances outside a recompute replay, mirroring the
-        magic-count handling further down this file. The caller's primary guard is
-        ``"mtp_sampled_depth" not in dict_args``, which relies on the replay seeing
-        the dict this layer already wrote into; if a replay ever arrives with a
-        fresh dict instead, not advancing the counter makes the re-draw return the
-        SAME K rather than a new one, so the backward still matches the depths the
-        forward actually ran.
+        Thin wrapper over :func:`draw_mtp_sampled_depth`; see that function for the
+        determinism / lockstep argument and the recompute handling.
         """
-        d = self.config.num_nextn_predict_layers
-        ratio = getattr(self.config, "mtp_depth_sampling", None)
-        if not ratio:
-            return d
-        probs = np.asarray(ratio, dtype="float64")
-        probs = probs / probs.sum()
-        if not hasattr(self, "_mtp_sampling_counter"):
-            self._mtp_sampling_counter = 0
-        base = int(getattr(self.config, "seed", 0) or 0)
-        seed = base * 1_000_003 + self._mtp_sampling_counter
-        if paddle.is_grad_enabled() or not self.training:
-            self._mtp_sampling_counter += 1
-        rng = np.random.default_rng(seed)
-        k = int(rng.choice(len(probs), p=probs)) + 1
-        return max(1, min(k, d))
+        return draw_mtp_sampled_depth(self, self.config)
 
     def forward(self, dict_args: dict):
         # Dispatch by config.use_erndata. Under erndata the data pipeline
@@ -1461,29 +1496,21 @@ class MultiTokenPredictionLayer(FleetLayer):
             )
 
         # === MTP depth sampling (prefix-length sampling) ===
-        # Sample K once per micro-batch in the depth-0 layer and carry it in
-        # dict_args so it flows WITH the data. This is robust to
-        # gradient_accumulation_steps>1, pipeline_parallel and recompute: there is no
-        # shared/config state an interleaved micro-batch could overwrite, and the
-        # recompute of a layer replays the same saved dict_args. Depths >= K return
-        # early, skipping their transformer_layer forward; the LM head then emits None
-        # logits for them and the loss drops those entries.
+        # Resolve K once per micro-batch and carry it in dict_args so it flows WITH
+        # the data. This is robust to gradient_accumulation_steps>1 and recompute:
+        # there is no shared/config state an interleaved micro-batch could
+        # overwrite, and the recompute of a layer replays the same saved dict_args.
+        # dict_args does not cross a pipeline stage boundary, so the first MTP depth
+        # on each stage re-derives K from its own counter instead of falling back to
+        # D -- the draw is deterministic and collective-free, so every stage agrees
+        # (see draw_mtp_sampled_depth). Depths >= K return early, skipping their
+        # transformer_layer forward; the LM head then emits None logits for them and
+        # the loss drops those entries.
         if (
             getattr(self.config, "mtp_depth_sampling", None)
             and not self.config.enable_mtp_magic_send
         ):
-            d = self.config.num_nextn_predict_layers
-            if self.layer_number == 0 and "mtp_sampled_depth" not in dict_args:
-                # Draw once per micro-batch. The `not in dict_args` guard makes
-                # this idempotent: if a recompute pass re-enters this layer with
-                # the same dict_args, K is reused (not re-drawn), so the skip
-                # decision matches the original forward and the private RNG
-                # counter does not run ahead of the other ranks.
-                k = self._sample_mtp_depth()
-                dict_args["mtp_sampled_depth"] = k
-                # observability only, never read by the logic
-                self._last_sampled_depth = k
-            k = dict_args.get("mtp_sampled_depth", d)
+            k = resolve_mtp_sampled_depth(self, self.config, dict_args)
             if self.layer_number >= k:
                 # Skip this depth entirely: leave hidden_states_concat unchanged
                 # (K stays in dict_args for downstream MTP layers + the LM head).

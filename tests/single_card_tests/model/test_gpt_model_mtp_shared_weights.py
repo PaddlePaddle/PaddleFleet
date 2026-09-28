@@ -33,6 +33,7 @@ from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.transformer.multi_token_prediction import (
     MultiTokenPredictionLayer,
+    resolve_mtp_sampled_depth,
 )
 from paddlefleet.transformer.transformer_layer import TransformerLayer
 
@@ -365,6 +366,72 @@ class TestMTPDepthSampling(unittest.TestCase):
         layers = _mtp_layers(model)
         return layers[0] if layers else None
 
+    def test_split_depths_derive_matching_k(self):
+        """Depths on DIFFERENT pipeline stages must agree on K without talking.
+
+        dict_args does not cross a stage boundary, so each stage's first MTP depth
+        re-derives K from its own counter. This is the invariant that lets sampling
+        run at pp>1 with a split layout: same counter index -> same seed -> same K.
+        A drift here silently trains a different depth set than the loss
+        normalises over, so the whole sequence must match, not just the first draw.
+        """
+        config = self._cfg([0.2, 0.3, 0.5])
+        depths = _mtp_layers(gpt_builder(config, num_stages=1))
+        stage_a, stage_b = depths[0], depths[1]
+        for layer in (stage_a, stage_b):
+            layer.train()
+
+        drawn_a, drawn_b = [], []
+        for _ in range(8):
+            # separate dicts == separate stages: neither sees the other's K
+            drawn_a.append(resolve_mtp_sampled_depth(stage_a, config, {}))
+            drawn_b.append(resolve_mtp_sampled_depth(stage_b, config, {}))
+
+        self.assertEqual(drawn_a, drawn_b)
+        self.assertEqual(stage_a._mtp_sampling_counter, 8)
+        self.assertEqual(stage_b._mtp_sampling_counter, 8)
+        # a constant K would make the equality above vacuous
+        self.assertGreater(len(set(drawn_a)), 1)
+
+    def test_lm_head_derives_same_k_as_mtp_depths(self):
+        """The MTP LM head may sit on a stage holding no MTP depth, so it must
+        re-derive the same K rather than fall back to D (which would project the
+        skipped depths and normalise the loss over D)."""
+        config = self._cfg([0.2, 0.3, 0.5])
+        model = gpt_builder(config, num_stages=1)
+        depth0 = self._mtp0(model)
+        head = next(
+            layer
+            for layer in model.run_function
+            if type(layer).__name__ == "GPTLMHead"
+        )
+        depth0.train()
+        head.train()
+
+        for _ in range(5):
+            self.assertEqual(
+                resolve_mtp_sampled_depth(depth0, config, {}),
+                resolve_mtp_sampled_depth(head, config, {}),
+            )
+
+    def test_published_k_is_reused_not_redrawn(self):
+        """Within a stage the first depth publishes K in dict_args; later consumers
+        must read it back instead of drawing, which is also what makes a recompute
+        replay idempotent."""
+        config = self._cfg([0.2, 0.3, 0.5])
+        depths = _mtp_layers(gpt_builder(config, num_stages=1))
+        depths[0].train()
+        depths[1].train()
+
+        dict_args = {}
+        first = resolve_mtp_sampled_depth(depths[0], config, dict_args)
+        second = resolve_mtp_sampled_depth(depths[1], config, dict_args)
+
+        self.assertEqual(first, second)
+        self.assertEqual(depths[0]._mtp_sampling_counter, 1)
+        # the reusing consumer must not touch its own counter
+        self.assertEqual(getattr(depths[1], "_mtp_sampling_counter", 0), 0)
+
     def test_sampler_fixed_k1(self):
         """P(K=1)=1 -> always sample K=1."""
         cfg = self._cfg([1.0, 0.0, 0.0])
@@ -577,20 +644,6 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
             "the probe sublayer should be visible to named_parameters"
         )
 
-    def _colocation_check(self, layout):
-        """Run the co-location check with a faked pipe-group layout."""
-        model, _ = self._independent_model()
-
-        def _fake_all_gather_object(object_list, obj, group=None):
-            object_list.extend(layout)
-
-        with mock.patch.object(
-            paddle.distributed,
-            "all_gather_object",
-            side_effect=_fake_all_gather_object,
-        ):
-            model._assert_mtp_depths_colocated_for_sampling()
-
     def _combined_sharing_colocation_check(self, layout):
         """Run the combined-sharing placement check with a faked PP layout."""
         model, _ = self._independent_model()
@@ -606,8 +659,8 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
             model._assert_mtp_depths_colocated_for_combined_sharing()
 
     def test_combined_sharing_accepts_depths_on_one_stage(self):
-        """Combined sharing only needs MTP depths co-located, not necessarily on
-        the last stage; sampling has the stronger last-stage requirement."""
+        """Combined sharing needs the MTP depths co-located because its fusion
+        params are rank-local aliases; sampling has no such requirement."""
         self._combined_sharing_colocation_check([[0, 1], []])
         self._combined_sharing_colocation_check([[], [0, 1]])
 
@@ -619,28 +672,6 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
             r"mtp_shared_weights \+ mtp_shared_last_layer requires all MTP",
         ):
             self._combined_sharing_colocation_check([[0], [1]])
-
-    def test_colocation_accepts_depths_on_last_stage(self):
-        """All depths on the last stage is the supported layout."""
-        self._colocation_check([[], [0, 1]])
-
-    def test_colocation_rejects_split_depths(self):
-        """Split depths must raise: K rides in dict_args and does not cross a
-        stage boundary, so the off-stage depths would silently run in full while
-        the loss still normalises over K."""
-        with self.assertRaisesRegex(
-            RuntimeError, r"requires every MTP depth to live on the LAST"
-        ):
-            self._colocation_check([[0], [1]])
-
-    def test_colocation_rejects_depths_off_last_stage(self):
-        """Depths co-located but NOT on the last stage must also raise: the MTP LM
-        head and the loss live on the last stage, so they would never see K and
-        would project the skipped depths anyway."""
-        with self.assertRaisesRegex(
-            RuntimeError, r"requires every MTP depth to live on the LAST"
-        ):
-            self._colocation_check([[0, 1], []])
 
     def test_sampling_is_idempotent_under_recompute(self):
         """A recompute replay must reuse the forward's K, not draw a new one.

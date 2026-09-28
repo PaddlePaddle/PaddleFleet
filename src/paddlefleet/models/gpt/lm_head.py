@@ -355,11 +355,22 @@ class GPTLMHead(ColumnParallelLinear):
             # step, so their slice of hidden_states carries no MTP computation. Skip
             # the vocab projection for them and keep a None placeholder so the list
             # length stays num_nextn_predict_layers + 1 and the loss can detect the
-            # skipped depths. K flows in dict_args (recompute / pp / grad-accum safe).
-            sampled_depth = dict_args.get(
-                "mtp_sampled_depth", self.config.num_nextn_predict_layers
-            )
+            # skipped depths. K flows in dict_args (recompute / grad-accum safe);
+            # dict_args does not cross a pipeline stage boundary, so when no MTP
+            # depth shares this stage the head re-derives K from its own counter --
+            # the draw is deterministic and collective-free, so it matches the K the
+            # MTP layers used (see draw_mtp_sampled_depth).
             sampling_on = bool(getattr(self.config, "mtp_depth_sampling", None))
+            if sampling_on:
+                from paddlefleet.transformer.multi_token_prediction import (
+                    resolve_mtp_sampled_depth,
+                )
+
+                sampled_depth = resolve_mtp_sampled_depth(
+                    self, self.config, dict_args
+                )
+            else:
+                sampled_depth = self.config.num_nextn_predict_layers
             for i in range(self.config.num_nextn_predict_layers):
                 if sampling_on and i >= sampled_depth:
                     logits.append(None)

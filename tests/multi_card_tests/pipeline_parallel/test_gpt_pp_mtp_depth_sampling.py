@@ -207,13 +207,10 @@ class TestMTPDepthSamplingPP(unittest.TestCase):
             f"K=1 must skip every depth >= 1, body_calls={body_calls}"
         )
         depth0 = next((la for la in mtp_layers if la.layer_number == 0), None)
-        assert depth0 is not None, (
-            "co-location is enforced for sampling, so a rank holding MTP layers "
-            f"must hold depth 0; got {sorted(body_calls)}"
-        )
-        assert getattr(depth0, "_last_sampled_depth", None) == 1, (
-            f"expected K=1, got {getattr(depth0, '_last_sampled_depth', None)}"
-        )
+        if depth0 is not None:
+            assert getattr(depth0, "_last_sampled_depth", None) == 1, (
+                f"expected K=1, got {getattr(depth0, '_last_sampled_depth', None)}"
+            )
 
     def test_pp_sampling_mixed(self):
         # K varies per micro-batch; every rank running the MTP layer must draw
@@ -226,9 +223,9 @@ class TestMTPDepthSamplingPP(unittest.TestCase):
             )
 
     def test_pp_sampling_with_shared_weights(self):
-        """The combination the config layer now allows: cross-depth full sharing
-        plus sampling. All MTP depths stay on one stage, which
-        _assert_mtp_depths_colocated_for_sampling requires."""
+        """Cross-depth full sharing plus sampling. mtp_shared_weights exists to let
+        the depths land on different stages, and sampling now tolerates that: each
+        stage's first MTP depth re-derives the same K from its own counter."""
         loss, mtp_layers, body_calls = _run_pp(
             [1.0, 0.0, 0.0], mtp_shared_weights=True
         )

@@ -209,10 +209,10 @@ class TransformerConfig(ModelParallelConfig):
     syncs it through _tie_mtp_embed_weights_intra_rank and the
     _mtp_embed_global_group broadcast (see all_weights).
 
-    The cross-stage path means this flag alone tolerates MTP depths split across
-    stages. Combining it with mtp_depth_sampling does NOT: sampling additionally
-    requires the depths to be co-located, enforced by
-    GPTModel._assert_mtp_depths_colocated_for_sampling.
+    The cross-stage path means this flag tolerates MTP depths split across
+    stages, and it composes with mtp_depth_sampling: every MTP layer and the MTP
+    LM head re-derive the same K from their own collective-free counter, so a
+    split layout keeps sampling correct (see mtp_depth_sampling).
 
     Can be combined with mtp_shared_last_layer. In that mode,
     mtp_shared_last_layer shares each MTP transformer's body with the last
@@ -236,12 +236,14 @@ class TransformerConfig(ModelParallelConfig):
       sampled once per micro-batch from a private RNG seeded by a per-call
       counter, so every rank running the MTP layers derives the same K with no
       collective; MoE expert-parallel all-to-all therefore stays consistent.
-    Works under pipeline_model_parallel_size > 1, but requires all MTP depths to
-    sit on a SINGLE pipeline stage: K is published as an int in dict_args, which
-    never crosses a stage boundary (p2p ships tensors only), so depths on a later
-    stage would fall back to D and run in full while the loss still normalises
-    over K. GPTModel._assert_mtp_depths_colocated_for_sampling enforces this at
-    build time, since the segmentation is not visible here. Covered by
+    Works under pipeline_model_parallel_size > 1, including layouts that split the
+    MTP depths across stages. K is published as an int in dict_args, which never
+    crosses a stage boundary (p2p ships tensors only), so the first consumer on
+    each stage -- an MTP depth, or the MTP LM head when no depth shares its stage
+    -- re-derives K from its own counter instead of falling back to D. Every such
+    site is entered exactly once per micro-batch, so the counters stay in lockstep
+    and the derived K agrees across stages without any communication (see
+    multi_token_prediction.draw_mtp_sampled_depth). Covered by
     tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_depth_sampling.py.
     Works under expert_model_parallel_size > 1: every EP rank derives the same K,
     so the MoE all-to-all of each computed depth stays matched; covered by
