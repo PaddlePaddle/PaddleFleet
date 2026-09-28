@@ -708,7 +708,9 @@ class Trainer:
         self.model = model
         model_config = getattr(model, "config", None)
         if model_config is None:
-            model_config = getattr(getattr(model, "model", None), "config", None)
+            model_config = getattr(
+                getattr(model, "model", None), "config", None
+            )
         if (
             getattr(model_config, "defer_token_normalization", False)
             and self.args.gradient_accumulation_steps != 1
