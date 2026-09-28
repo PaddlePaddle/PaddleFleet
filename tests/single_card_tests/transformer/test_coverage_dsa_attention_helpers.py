@@ -125,5 +125,6 @@ class TestNormalizeAndAlignIndexerMask(unittest.TestCase):
         expected = paddle.concat([mask, mask], axis=-1)
         self.assertTrue(_true(_equal_all(aligned, expected)))
 
+
 if __name__ == "__main__":
     unittest.main()
