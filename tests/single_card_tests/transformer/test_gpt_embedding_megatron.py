@@ -40,11 +40,9 @@ import numpy as np
 import paddle
 
 import paddlefleet.models.gpt.gpt_embedding as ge
+from paddlefleet.context_parallel_utils import extract_local_cp_chunks
 from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
 from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
-from paddlefleet.transformer.multi_token_prediction import (
-    extract_local_cp_chunks,
-)
 
 
 def _make_embedding(
@@ -132,13 +130,13 @@ def _fake_cp(cp_size=2, cp_rank=0):
         )
         stack.enter_context(
             mock.patch(
-                "paddlefleet.transformer.multi_token_prediction.get_context_parallel_world_size",
+                "paddlefleet.parallel_state.get_context_parallel_world_size",
                 lambda: cp_size,
             )
         )
         stack.enter_context(
             mock.patch(
-                "paddlefleet.transformer.multi_token_prediction.get_context_parallel_rank",
+                "paddlefleet.parallel_state.get_context_parallel_rank",
                 lambda: cp_rank,
             )
         )
@@ -217,7 +215,7 @@ class TestGptEmbeddingMegatron(unittest.TestCase):
 
     def test_erndata_missing_mask_raises(self) -> None:
         # GPTEmbedding fail-closes for every use_erndata spelling, including
-        # the plain K==0 / weight-only path that has no MTP compute. MTP-layer
+        # the plain path where MTP is inactive (K==0 / weight-only). MTP-layer
         # reuse of a missing mask is covered in test_mtp_forward_dispatch.
         B, L, H = 1, 8, 4
         cases = (
@@ -371,7 +369,8 @@ class TestGptEmbeddingMegatronCPSP(unittest.TestCase):
 
     def test_plain_cp_rejects_sequence_parallel(self) -> None:
         # Config already rejects this combo; the runtime check is the
-        # -O-safe belt and must distinguish scatter vs local slice.
+        # -O-safe belt. It must name scatter vs local slice and the
+        # inactive-MTP flags, including weight-only (not "no MTP").
         B, L, H = 1, 8, 4
         cases = (
             (0, False, False, "a local CP slice"),
@@ -398,7 +397,11 @@ class TestGptEmbeddingMegatronCPSP(unittest.TestCase):
                     _fake_cp(cp_size=2),
                     self.assertRaisesRegex(
                         ValueError,
-                        rf"sequence_parallel is not supported when {how}",
+                        rf"sequence_parallel=True.*{how}"
+                        rf".*context_parallel_size=2"
+                        rf".*num_nextn_predict_layers={k}"
+                        rf".*mtp_load_weight_only={weight_only}"
+                        r".*Set sequence_parallel=False",
                     ),
                 ):
                     emb.forward(_erndata_args(input_ids, cu))
@@ -507,7 +510,7 @@ class TestGptEmbeddingMegatronCPRope(unittest.TestCase):
         LanguageLoss._cu_seqlens_q_stash = None
 
     def test_rope_is_zigzag_sliced(self) -> None:
-        from paddlefleet.transformer.multi_token_prediction import (
+        from paddlefleet.context_parallel_utils import (
             extract_local_zigzag_chunks,
         )
 

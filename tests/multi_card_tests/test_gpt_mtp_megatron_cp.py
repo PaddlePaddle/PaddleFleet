@@ -294,7 +294,7 @@ class TestMTPMegatronCPRope(_RopeLayoutChecks, unittest.TestCase):
         before the fix -- fails this at any CP degree > 1. Parameterized over
         MTP and the K==0 plain path: both slice through slice_erndata_cp.
         """
-        from paddlefleet.transformer.multi_token_prediction import (
+        from paddlefleet.context_parallel_utils import (
             extract_local_zigzag_chunks,
         )
 
@@ -330,7 +330,7 @@ class TestMTPMegatronCPContiguousRope(_RopeLayoutChecks, unittest.TestCase):
     """
 
     def test_rope_matches_contiguous_layout(self):
-        from paddlefleet.transformer.multi_token_prediction import (
+        from paddlefleet.context_parallel_utils import (
             extract_local_contiguous_chunk,
             extract_local_zigzag_chunks,
         )
@@ -439,7 +439,7 @@ class TestMTPMegatronCP(unittest.TestCase):
 
 
 class TestMtp0MegatronCP(unittest.TestCase):
-    """Plain (mtp0) erndata + CP path: no MTP layer.
+    """Plain erndata + CP path with MTP inactive (K==0).
 
     RoPE layout for K==0 is covered by the parameterized checks above. This
     class only keeps a smoke e2e: embedding slice, RoPE slice, CP flashmask

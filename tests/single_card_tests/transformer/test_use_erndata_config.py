@@ -14,11 +14,11 @@ historical ernie5 L+K layout. Guards checked here:
   3. use_erndata + MTP supports enable_mtp_magic_send while retaining the
      generic magic-send PP>1 constraint.
   4. use_erndata + MTP is incompatible with experimental_dataflow.
-  5. use_erndata without MTP (K == 0) trips none of the MTP-specific guards; at
-     CP>1 it is sliced by GPTEmbedding's plain branch, and shares the
-     local-slice constraints (contiguous_a2a,
+  5. use_erndata with inactive MTP (K == 0 or mtp_load_weight_only) trips
+     none of the MTP-specific guards; at CP>1 it is sliced by GPTEmbedding's
+     plain branch, and shares the local-slice constraints (contiguous_a2a,
      gpt_model_use_experimental_version, multimodal_embedding) with the MTP
-     path. K==0 additionally rejects sequence_parallel.
+     path. Inactive MTP additionally rejects sequence_parallel.
   6. use_erndata=False never trips any of the guards regardless of other MTP
      flags.
   7. use_erndata + CP>1 (MTP or K==0) accepts both sequence-scatter layouts
@@ -36,7 +36,8 @@ historical ernie5 L+K layout. Guards checked here:
      experimental_dataflow stays legal; K>0 still rejects that flag.
  12. use_erndata + CP>1 rejects multimodal_embedding (RoPE would slice while
      decoder_input would not).
- 13. use_erndata + CP>1 + K==0 rejects sequence_parallel; MTP+SP stays legal.
+ 13. use_erndata + CP>1 + inactive MTP (K==0 or mtp_load_weight_only)
+     rejects sequence_parallel; MTP+SP stays legal.
 """
 
 from __future__ import annotations
@@ -45,7 +46,10 @@ import unittest
 from types import SimpleNamespace
 
 from paddlefleet.models.gpt.gpt_config import GPTConfig
-from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.transformer.transformer_config import (
+    TransformerConfig,
+    mtp_layers_active,
+)
 
 
 class TestUseErndataValidation(unittest.TestCase):
@@ -56,6 +60,23 @@ class TestUseErndataValidation(unittest.TestCase):
         other fields. All fields have defaults; we only override MTP-related
         ones needed for a given test case."""
         return dict(overrides)
+
+    def _sp_survives_post_init(self, **overrides):
+        """ModelParallelConfig clears sequence_parallel when TP<=1.
+
+        These sizes keep the flag alive into TransformerConfig.__post_init__.
+        """
+        kwargs = {
+            "use_erndata": True,
+            "context_parallel_size": 2,
+            "sequence_parallel": True,
+            "tensor_model_parallel_size": 2,
+            "hidden_size": 64,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 4,
+            **overrides,
+        }
+        return self._base_kwargs(**kwargs)
 
     def test_default_is_false(self) -> None:
         cfg = TransformerConfig(**self._base_kwargs())
@@ -417,7 +438,12 @@ class TestUseErndataValidation(unittest.TestCase):
             )
 
     def test_erndata_cp_rejects_multimodal_embedding(self) -> None:
-        with self.assertRaisesRegex(ValueError, r"multimodal_embedding"):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"use_erndata=True with context_parallel_size=2"
+            r".*multimodal_embedding=True"
+            r".*Set multimodal_embedding=False",
+        ):
             TransformerConfig(
                 **self._base_kwargs(
                     use_erndata=True,
@@ -428,26 +454,16 @@ class TestUseErndataValidation(unittest.TestCase):
             )
 
     def test_erndata_cp_without_mtp_rejects_sequence_parallel(self) -> None:
-        # ModelParallelConfig clears sequence_parallel when TP==1, so TP must
-        # be >1 for the flag to survive into TransformerConfig.__post_init__.
         with self.assertRaisesRegex(
             ValueError,
-            r"MTP layers are inactive"
+            r"use_erndata=True with context_parallel_size=2 and "
+            r"sequence_parallel=True"
             r".*num_nextn_predict_layers=0"
             r".*mtp_load_weight_only=False"
             r".*Set sequence_parallel=False",
         ):
             TransformerConfig(
-                **self._base_kwargs(
-                    use_erndata=True,
-                    num_nextn_predict_layers=0,
-                    context_parallel_size=2,
-                    sequence_parallel=True,
-                    tensor_model_parallel_size=2,
-                    hidden_size=64,
-                    num_attention_heads=4,
-                    num_key_value_heads=4,
-                )
+                **self._sp_survives_post_init(num_nextn_predict_layers=0)
             )
 
     def test_erndata_cp_weight_only_rejects_sequence_parallel(self) -> None:
@@ -455,39 +471,55 @@ class TestUseErndataValidation(unittest.TestCase):
         # MTP weights, but the CP slice runs before RoPE just like K==0.
         with self.assertRaisesRegex(
             ValueError,
-            r"MTP layers are inactive"
+            r"sequence_parallel=True"
             r".*num_nextn_predict_layers=1"
             r".*mtp_load_weight_only=True"
             r".*Set sequence_parallel=False",
         ):
             TransformerConfig(
-                **self._base_kwargs(
-                    use_erndata=True,
+                **self._sp_survives_post_init(
                     num_nextn_predict_layers=1,
-                    context_parallel_size=2,
-                    sequence_parallel=True,
                     mtp_load_weight_only=True,
-                    tensor_model_parallel_size=2,
-                    hidden_size=64,
-                    num_attention_heads=4,
-                    num_key_value_heads=4,
                 )
             )
 
     def test_erndata_cp_mtp_accepts_sequence_parallel(self) -> None:
         cfg = TransformerConfig(
-            **self._base_kwargs(
-                use_erndata=True,
-                num_nextn_predict_layers=1,
-                context_parallel_size=2,
-                sequence_parallel=True,
-                tensor_model_parallel_size=2,
-                hidden_size=64,
-                num_attention_heads=4,
-                num_key_value_heads=4,
-            )
+            **self._sp_survives_post_init(num_nextn_predict_layers=1)
         )
         self.assertTrue(cfg.sequence_parallel)
+        self.assertTrue(mtp_layers_active(cfg))
+
+    def test_mtp_layers_active(self) -> None:
+        self.assertFalse(
+            mtp_layers_active(TransformerConfig(num_nextn_predict_layers=0))
+        )
+        self.assertTrue(
+            mtp_layers_active(TransformerConfig(num_nextn_predict_layers=1))
+        )
+        self.assertFalse(
+            mtp_layers_active(
+                TransformerConfig(
+                    num_nextn_predict_layers=1, mtp_load_weight_only=True
+                )
+            )
+        )
+        # Duck-typed configs (MagicMock / SimpleNamespace) must work too:
+        # GPTEmbedding tests never construct a real TransformerConfig.
+        self.assertFalse(
+            mtp_layers_active(
+                SimpleNamespace(
+                    num_nextn_predict_layers=0, mtp_load_weight_only=False
+                )
+            )
+        )
+        self.assertTrue(
+            mtp_layers_active(
+                SimpleNamespace(
+                    num_nextn_predict_layers=2, mtp_load_weight_only=False
+                )
+            )
+        )
 
     def test_erndata_cp_without_mtp_rejects_experimental_version(self) -> None:
         # Same reason the MTP branch refuses it: the flag nulls the rotary tables

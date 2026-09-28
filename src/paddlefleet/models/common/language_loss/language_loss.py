@@ -34,6 +34,7 @@ from paddlefleet.context_parallel_utils import (
     ContextParallelGatherOp,
     ContextParallelScatterOp,
     MTPDistillationLossShift,
+    slice_erndata_cp,
 )
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
@@ -44,8 +45,10 @@ from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import module_needs_recompute
 from paddlefleet.training.global_vars import get_global_training_logs
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.transformer.multi_token_prediction import slice_erndata_cp
-from paddlefleet.transformer.transformer_config import TransformerConfig
+from paddlefleet.transformer.transformer_config import (
+    TransformerConfig,
+    mtp_layers_active,
+)
 from paddlefleet.utils import use_dsv4_accuracy_compatible
 
 # A replay must not notify either the original observer or one installed by a
@@ -544,11 +547,7 @@ class LanguageLoss(FleetLayer):
             get_context_parallel_world_size() > 1
             and getattr(self.config, "use_erndata", False)
             and labels is not None
-            and (
-                self.config.num_nextn_predict_layers is None
-                or self.config.num_nextn_predict_layers <= 0
-                or self.config.mtp_load_weight_only
-            )
+            and not mtp_layers_active(self.config)
         ):
             # K==0 / weight-only: labels arrive full-length L. The MTP list
             # path slices in _megatron_label_for_depth before calling
@@ -618,19 +617,14 @@ class LanguageLoss(FleetLayer):
 
     def forward(self, logits: Tensor | list, labels: Tensor) -> Tensor:
         if isinstance(logits, list):
-            assert (
-                self.config.num_nextn_predict_layers is not None
-                and self.config.num_nextn_predict_layers > 0
-                and not self.config.mtp_load_weight_only
-            )
+            assert mtp_layers_active(self.config)
             assert len(logits) == self.config.num_nextn_predict_layers + 1
             labels_ori = labels
             # Under use_erndata=True labels are already [B, L]
             # (no L+K trailing padding). The main-decoder logits also live
             # at length L (no L→L-K slicing was performed upstream), so
-            # skip the L+K→L trim; likewise per-depth MTP labels come from
-            # a per-depth roll — approximated here by shifting labels_ori
-            # left by (depth+1) positions with -100 fill at the tail.
+            # skip the L+K→L trim. Per-depth MTP labels come from
+            # _megatron_label_for_depth (packed roll + slice_erndata_cp).
             _mtp_is_megatron = getattr(self.config, "use_erndata", False)
             # Under CP>1 the megatron path keeps labels_ori full-length on
             # every rank. The rank-local slice must be extracted here so that
@@ -962,11 +956,7 @@ class MainLanguageLoss(LanguageLoss):
         super().__init__(config=config, pg_collection=pg_collection)
 
     def forward(self, dict_args: dict | list, labels: Tensor) -> Tensor:
-        assert (
-            self.config.num_nextn_predict_layers is not None
-            and self.config.num_nextn_predict_layers > 0
-            and not self.config.mtp_load_weight_only
-        )
+        assert mtp_layers_active(self.config)
         labels_ori = labels
         if getattr(self.config, "use_erndata", False):
             # erndata: labels are length-L already; main logits are length-L
@@ -1048,11 +1038,7 @@ class MTPLanguageLoss(LanguageLoss):
             "separate mtp loss must provide mtp_logits"
         )
         assert labels is not None, "separate mtp loss must provide labels"
-        assert (
-            self.config.num_nextn_predict_layers is not None
-            and self.config.num_nextn_predict_layers > 0
-            and not self.config.mtp_load_weight_only
-        )
+        assert mtp_layers_active(self.config)
         labels_ori = labels
         _mtp_is_megatron = getattr(self.config, "use_erndata", False)
         if _mtp_is_megatron:

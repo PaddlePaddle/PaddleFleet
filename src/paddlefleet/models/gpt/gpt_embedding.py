@@ -30,6 +30,7 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
 from paddlefleet.context_parallel_utils import (
     ContextParallelScatterOp,
     mark_context_parallel_parameter_disable_scale_grad,
+    slice_erndata_cp,
 )
 from paddlefleet.models.gpt.utils import fill_feature
 from paddlefleet.parallel_state import get_context_parallel_world_size
@@ -39,7 +40,7 @@ from paddlefleet.tensor_parallel.mappings import (
 from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.kimi_delta_attention import build_cu_seqlens
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.transformer.multi_token_prediction import slice_erndata_cp
+from paddlefleet.transformer.transformer_config import mtp_layers_active
 from paddlefleet.utils import use_dsv4_accuracy_compatible
 
 if TYPE_CHECKING:
@@ -96,12 +97,7 @@ class GPTEmbedding(FleetLayer):
 
         self.multimodal_embedding = config.multimodal_embedding
         if self.sequence_parallel and (
-            self.multimodal_embedding
-            or (
-                config.num_nextn_predict_layers is not None
-                and self.config.num_nextn_predict_layers > 0
-                and not config.mtp_load_weight_only
-            )
+            self.multimodal_embedding or mtp_layers_active(config)
         ):
             self.embedding.embed_tokens.reduce_scatter_embeddings = False
             self.embedding.scatter_to_sequence_parallel = False
@@ -464,11 +460,7 @@ class GPTEmbedding(FleetLayer):
                     deepstack_video_embeds,
                 )
 
-            if (
-                self.config.num_nextn_predict_layers is not None
-                and self.config.num_nextn_predict_layers > 0
-                and not self.config.mtp_load_weight_only
-            ):
+            if mtp_layers_active(self.config):
                 # ------------------------------------------------------------
                 # erndata branch: input_ids is [B, L] (no L+K append);
                 # produce K shifted embeddings by rolling decoder_input in
@@ -769,15 +761,12 @@ class GPTEmbedding(FleetLayer):
                         visual_pos_masks = visual_pos_masks[
                             ..., : -self.config.num_nextn_predict_layers
                         ]
-            # CP scatter for the plain (no-MTP, no-multimodal) path must happen
-            # before rope generation so that get_rotary_seq_len sees local seq len.
+            # CP shard for the plain (MTP inactive, no-multimodal) path must
+            # happen before rope generation so that get_rotary_seq_len sees
+            # local seq len.
             _is_plain_cp_path = (
                 not self.multimodal_embedding
-                and not (
-                    self.config.num_nextn_predict_layers
-                    and self.config.num_nextn_predict_layers > 0
-                    and not self.config.mtp_load_weight_only
-                )
+                and not mtp_layers_active(self.config)
                 and get_context_parallel_world_size() > 1
             )
             if _is_plain_cp_path and (
@@ -791,9 +780,22 @@ class GPTEmbedding(FleetLayer):
                         else "a local CP slice"
                     )
                     raise ValueError(
-                        "sequence_parallel is not supported when "
+                        "sequence_parallel="
+                        f"{self.sequence_parallel} is not supported when "
                         f"{how} is applied in the plain path before RoPE "
-                        "generation."
+                        "generation (use_erndata="
+                        f"{bool(getattr(self.config, 'use_erndata', False))}, "
+                        "experimental_dataflow="
+                        f"{self.config.experimental_dataflow}, "
+                        "context_parallel_size="
+                        f"{get_context_parallel_world_size()}, "
+                        "num_nextn_predict_layers="
+                        f"{self.config.num_nextn_predict_layers}, "
+                        "mtp_load_weight_only="
+                        f"{self.config.mtp_load_weight_only}, "
+                        "multimodal_embedding="
+                        f"{self.multimodal_embedding}). "
+                        "Set sequence_parallel=False."
                     )
                 if self.config.experimental_dataflow:
                     decoder_input = ContextParallelScatterOp.apply(
@@ -818,8 +820,6 @@ class GPTEmbedding(FleetLayer):
         if (
             mtp_emb_res is not None
             and position_ids is not None
-            and self.config.num_nextn_predict_layers is not None
-            and self.config.num_nextn_predict_layers > 0
             # erndata keeps the main decoder at the full length L (the
             # per-doc shift happens inside the MTP layer), so position_ids
             # already matches. Under CP mtp_emb_res[0] is the rank-local
@@ -972,9 +972,7 @@ class GPTEmbedding(FleetLayer):
         if (
             getattr(self.config, "use_erndata", False)
             and self.config.enable_mtp_magic_send
-            and self.config.num_nextn_predict_layers is not None
-            and self.config.num_nextn_predict_layers > 0
-            and not self.config.mtp_load_weight_only
+            and mtp_layers_active(self.config)
         ):
             mtp_full_input_ids = input_ids.contiguous()
             mtp_full_input_ids.stop_gradient = True
@@ -1036,11 +1034,7 @@ class GPTEmbedding(FleetLayer):
                 mtp_hidden_inputs_mask_all
             )
         if mtp_emb_res is not None:
-            assert (
-                self.config.num_nextn_predict_layers is not None
-                and self.config.num_nextn_predict_layers > 0
-                and not self.config.mtp_load_weight_only
-            )
+            assert mtp_layers_active(self.config)
             assert len(mtp_emb_res) == self.config.num_nextn_predict_layers + 1
             if self.config.separate_mtp_input:
                 # Keep hidden_states free of MTP chunks so the backbone layers do not

@@ -44,7 +44,7 @@ import numpy as np
 import paddle
 
 import paddlefleet.models.common.language_loss.language_loss as ll
-import paddlefleet.transformer.multi_token_prediction as mtp
+import paddlefleet.parallel_state as ps
 from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
 
 
@@ -288,7 +288,7 @@ def _cp_ranks(cp_size, cp_rank):
 
     Unlike ``_fake_cp`` this leaves the real extract helper installed, so the
     slice actually happens and can be asserted on by value. ``slice_erndata_cp``
-    reads rank/size from ``multi_token_prediction``; LanguageLoss._forward also
+    reads rank/size from ``parallel_state``; LanguageLoss._forward also
     gates on the module-level world size.
     """
     with contextlib.ExitStack() as stack:
@@ -299,11 +299,11 @@ def _cp_ranks(cp_size, cp_rank):
         )
         stack.enter_context(
             mock.patch.object(
-                mtp, "get_context_parallel_world_size", lambda: cp_size
+                ps, "get_context_parallel_world_size", lambda: cp_size
             )
         )
         stack.enter_context(
-            mock.patch.object(mtp, "get_context_parallel_rank", lambda: cp_rank)
+            mock.patch.object(ps, "get_context_parallel_rank", lambda: cp_rank)
         )
         yield
 

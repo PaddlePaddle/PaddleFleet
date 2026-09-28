@@ -33,11 +33,14 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
 )
 
 from paddlefleet import tensor_parallel
-from paddlefleet.context_parallel_utils import ContextParallelScatterOp
-from paddlefleet.parallel_state import (
-    get_context_parallel_rank,
-    get_context_parallel_world_size,
+from paddlefleet.context_parallel_utils import (
+    ContextParallelScatterOp,
+    extract_local_contiguous_chunk as extract_local_contiguous_chunk,
+    extract_local_cp_chunks as extract_local_cp_chunks,
+    extract_local_zigzag_chunks as extract_local_zigzag_chunks,
+    slice_erndata_cp,
 )
+from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
@@ -295,173 +298,6 @@ def roll_tensor(
         else:
             rolled = rolled * keep_mask + pad_value * (1 - keep_mask)
     return rolled, rolled.sum()
-
-
-def extract_local_zigzag_chunks(tensor_full, cp_rank, cp_size, axis=1):
-    """Extract this CP rank's zigzag chunks from a full-length tensor.
-
-    Mirrors PaddleFleet's ``scatter_balance`` layout
-    (``context_parallel_utils.py:97-153``): each rank owns two chunks —
-
-    * ``chunk_start = tensor_full[..., interval*r : interval*(r+1), ...]``
-    * ``chunk_end   = tensor_full[..., L-interval*(r+1) : L-interval*r, ...]``
-
-    concatenated along the seq axis.
-
-    Extraction only — no CP communication. Use to obtain the local slice
-    without invoking ``ContextParallelScatterOp``, which avoids the
-    ``cp_size`` × embedding-lookup redundancy that would otherwise result
-    from doing embedding on the full-length ``input_ids``.
-
-    Callers under ``use_erndata=True`` typically:
-
-    1. Roll the full-length int tensor with ``roll_tensor(cu_seqlens_q=...)``.
-    2. Extract this rank's local slice via this helper.
-    3. Feed the local slice to embedding / loss.
-
-    Args:
-        tensor_full: ``[..., L, ...]`` full-length tensor available on every rank.
-        cp_rank: this rank's index within the CP group.
-        cp_size: CP world size. ``cp_size == 1`` returns ``tensor_full`` unchanged.
-        axis: sequence axis (default 1 for ``[B, L, ...]``).
-
-    Returns:
-        ``[..., L / cp_size, ...]`` tensor holding this rank's zigzag chunks.
-    """
-    if cp_size == 1:
-        return tensor_full
-    ndim = tensor_full.dim()
-    dim = axis if axis >= 0 else ndim + axis
-    seq_len = tensor_full.shape[dim]
-    if seq_len % (cp_size * 2) != 0:
-        raise ValueError(
-            f"extract_local_zigzag_chunks: seq_len={seq_len} on axis={axis} "
-            f"is not divisible by 2*cp_size={2 * cp_size}."
-        )
-    interval = seq_len // cp_size // 2
-    chunk_start = paddle.slice(
-        tensor_full,
-        axes=[dim],
-        starts=[interval * cp_rank],
-        ends=[interval * (cp_rank + 1)],
-    )
-    chunk_end = paddle.slice(
-        tensor_full,
-        axes=[dim],
-        starts=[seq_len - interval * (cp_rank + 1)],
-        ends=[seq_len - interval * cp_rank],
-    )
-    return paddle.concat([chunk_start, chunk_end], axis=dim)
-
-
-def extract_local_contiguous_chunk(tensor_full, cp_rank, cp_size, axis=1):
-    """Extract this CP rank's contiguous chunk from a full-length tensor.
-
-    Mirrors ``context_parallel_utils.scatter_contiguous``: rank ``r`` owns the
-    single slice ``tensor_full[..., chunk*r : chunk*(r+1), ...]`` with
-    ``chunk = L / cp_size``.
-
-    Extraction only — no CP communication, same contract as
-    ``extract_local_zigzag_chunks``.
-    """
-    if cp_size == 1:
-        return tensor_full
-    ndim = tensor_full.dim()
-    dim = axis if axis >= 0 else ndim + axis
-    seq_len = tensor_full.shape[dim]
-    if seq_len % cp_size != 0:
-        raise ValueError(
-            f"extract_local_contiguous_chunk: seq_len={seq_len} on axis={axis} "
-            f"is not divisible by cp_size={cp_size}."
-        )
-    chunk = seq_len // cp_size
-    # Deliberately a bare slice, unlike scatter_contiguous's paddle.assign: the
-    # per-depth caller keeps only this result, so a view holds F while a copy
-    # holds F + F/cp until the source is freed. Measured peaks over the roll
-    # loop are (2K+1)F for views vs 2F + K*F + (K+1)F/cp for assign -- worse at
-    # K=1 (every erndata model config here), even at K=3. The dominant term in
-    # both is roll_tensor's own grad-node retention, which neither changes.
-    return paddle.slice(
-        tensor_full,
-        axes=[dim],
-        starts=[chunk * cp_rank],
-        ends=[chunk * (cp_rank + 1)],
-    )
-
-
-def extract_local_cp_chunks(tensor_full, cp_rank, cp_size, axis=1, *, mode):
-    """Layout-aware local-slice extraction for the ``use_erndata`` MTP path.
-
-    That path keeps its tensors full-length on every CP rank and slices them
-    locally instead of calling ``ContextParallelScatterOp`` (which would redo the
-    embedding lookup ``cp_size`` times), so the slice must use the same layout
-    the rest of the model scatters with, i.e. ``config.cp_balance_mode``:
-
-    * ``dualchunk_allgather``  -> ``scatter_balance``    -> two zigzag chunks
-    * ``contiguous_allgather`` -> ``scatter_contiguous`` -> one contiguous chunk
-
-    ``contiguous_allgather`` is mandatory for the DSv4 hybrid stack, whose
-    attention layers assert on it under CP, so hard-coding zigzag here is wrong.
-
-    Args:
-        tensor_full: ``[..., L, ...]`` full-length tensor present on every rank.
-        cp_rank: this rank's index inside the CP group.
-        cp_size: CP world size; ``1`` returns ``tensor_full`` unchanged.
-        axis: sequence axis (default 1 for ``[B, L, ...]``).
-        mode: ``config.cp_balance_mode``. Keyword-only and required: the bug this
-            helper exists to fix was a call site that assumed a layout, and the
-            wrong layout is a silently wrong loss rather than a crash.
-
-    Returns:
-        ``[..., L / cp_size, ...]`` tensor holding this rank's slice.
-
-    Note:
-        ``cp_size == 1`` returns ``tensor_full`` itself, not a copy — do not
-        write into the result in place.
-    """
-    if cp_size == 1:
-        return tensor_full
-    if mode == "dualchunk_allgather":
-        return extract_local_zigzag_chunks(
-            tensor_full, cp_rank, cp_size, axis=axis
-        )
-    if mode == "contiguous_allgather":
-        return extract_local_contiguous_chunk(
-            tensor_full, cp_rank, cp_size, axis=axis
-        )
-    # contiguous_a2a shards the sequence contiguously too, so the slice would
-    # match, but its mask contract differs (DotProductAttention.forward skips
-    # expand_attn_mask_startend_row_indices_for_cp under a2a) and has never been
-    # run on this path. Refuse rather than guess.
-    raise ValueError(
-        f"extract_local_cp_chunks: unsupported cp_balance_mode={mode!r} for the "
-        "use_erndata path; expected 'dualchunk_allgather' or "
-        "'contiguous_allgather'."
-    )
-
-
-def slice_erndata_cp(tensor, config, axis=1):
-    """Local CP slice for the ``use_erndata`` non-dataflow path.
-
-    The erndata loader broadcasts every tensor full-length ``L`` to the whole
-    CP group; the model then takes its rank-local chunk with the layout named
-    by ``config.cp_balance_mode``. No communication: every rank already holds
-    the same ``[..., L, ...]``.
-
-    Returns ``tensor`` unchanged when it is ``None``, ``use_erndata`` is off,
-    ``experimental_dataflow`` owns the scatter, or ``cp_size == 1``.
-    """
-    if tensor is None or not getattr(config, "use_erndata", False):
-        return tensor
-    if getattr(config, "experimental_dataflow", False):
-        return tensor
-    return extract_local_cp_chunks(
-        tensor,
-        get_context_parallel_rank(),
-        get_context_parallel_world_size(),
-        axis=axis,
-        mode=config.cp_balance_mode,
-    )
 
 
 def build_startend_row_indices_from_cu_seqlens(

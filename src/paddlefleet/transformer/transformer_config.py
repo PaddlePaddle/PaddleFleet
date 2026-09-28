@@ -152,6 +152,21 @@ def dw_overlap_enabled(config, point: str) -> bool:
     )
 
 
+def mtp_layers_active(config) -> bool:
+    """Whether MTP transformer layers run on the data path.
+
+    ``mtp_load_weight_only`` loads MTP weights but skips MTP compute and
+    embedding processing, so it counts as inactive (same as K==0). Accepts
+    a real ``TransformerConfig`` or a duck-typed test config.
+    """
+    n = getattr(config, "num_nextn_predict_layers", None)
+    return (
+        n is not None
+        and n > 0
+        and not getattr(config, "mtp_load_weight_only", False)
+    )
+
+
 @dataclass
 class TransformerConfig(ModelParallelConfig):
     """Configuration object for transformers."""
@@ -2474,8 +2489,9 @@ class TransformerConfig(ModelParallelConfig):
             and self.multimodal_embedding
         ):
             raise ValueError(
-                "use_erndata=True with context_parallel_size>1 is "
-                "incompatible with multimodal_embedding=True: the CP "
+                "use_erndata=True with context_parallel_size="
+                f"{self.context_parallel_size} is incompatible with "
+                f"multimodal_embedding={self.multimodal_embedding}: the CP "
                 "slice is not applied to multimodal decoder_input, but "
                 "RoPE tables would still be sliced. Set "
                 "multimodal_embedding=False."
@@ -2485,17 +2501,15 @@ class TransformerConfig(ModelParallelConfig):
             self.use_erndata
             and self.context_parallel_size > 1
             and self.sequence_parallel
-            and (
-                self.num_nextn_predict_layers is None
-                or self.num_nextn_predict_layers <= 0
-                or self.mtp_load_weight_only
-            )
+            and not mtp_layers_active(self)
         ):
             # Plain-path CP slice runs before RoPE and cannot also scatter
             # the sequence axis. MTP+SP remains a separate, supported path.
             raise ValueError(
-                "use_erndata=True with context_parallel_size>1 is unsupported "
-                "when MTP layers are inactive "
+                "use_erndata=True with context_parallel_size="
+                f"{self.context_parallel_size} and sequence_parallel="
+                f"{self.sequence_parallel} is unsupported when MTP layers "
+                "are inactive "
                 f"(num_nextn_predict_layers={self.num_nextn_predict_layers}, "
                 f"mtp_load_weight_only={self.mtp_load_weight_only}): the "
                 "plain CP slice runs before RoPE generation. Set "

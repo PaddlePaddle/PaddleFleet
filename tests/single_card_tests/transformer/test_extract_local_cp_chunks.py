@@ -30,15 +30,13 @@ from unittest import mock
 
 import paddle
 
-import paddlefleet.transformer.multi_token_prediction as mtp
+import paddlefleet.parallel_state as ps
 from paddlefleet.context_parallel_utils import (
-    scatter_balance,
-    scatter_contiguous,
-)
-from paddlefleet.transformer.multi_token_prediction import (
     extract_local_contiguous_chunk,
     extract_local_cp_chunks,
     extract_local_zigzag_chunks,
+    scatter_balance,
+    scatter_contiguous,
     slice_erndata_cp,
 )
 
@@ -256,10 +254,8 @@ class TestSliceErndataCp(unittest.TestCase):
     def test_cp1_is_identity(self) -> None:
         t = _arange_bl(1, 8)
         with (
-            mock.patch.object(
-                mtp, "get_context_parallel_world_size", lambda: 1
-            ),
-            mock.patch.object(mtp, "get_context_parallel_rank", lambda: 0),
+            mock.patch.object(ps, "get_context_parallel_world_size", lambda: 1),
+            mock.patch.object(ps, "get_context_parallel_rank", lambda: 0),
         ):
             self.assertIs(slice_erndata_cp(t, self._cfg()), t)
 
@@ -271,12 +267,12 @@ class TestSliceErndataCp(unittest.TestCase):
                 with self.subTest(mode=mode, rank=rank):
                     with (
                         mock.patch.object(
-                            mtp,
+                            ps,
                             "get_context_parallel_world_size",
                             lambda size=cp_size: size,
                         ),
                         mock.patch.object(
-                            mtp,
+                            ps,
                             "get_context_parallel_rank",
                             lambda r=rank: r,
                         ),

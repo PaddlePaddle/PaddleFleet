@@ -48,6 +48,7 @@ from paddlefleet.context_parallel_utils import (
     ContextParallelAllGatherOp,
     ContextParallelGatherOp,
     ContextParallelScatterOp,
+    slice_erndata_cp,
 )
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
@@ -55,7 +56,6 @@ from paddlefleet.parallel_state import (
 )
 from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.moe.moe_utils import apply_random_logits
-from paddlefleet.transformer.multi_token_prediction import slice_erndata_cp
 from paddlefleet.transformer.transformer_config import dw_overlap_enabled
 from paddlefleet.utils import use_dsv4_accuracy_compatible
 
