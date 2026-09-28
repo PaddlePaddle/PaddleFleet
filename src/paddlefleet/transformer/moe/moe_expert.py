@@ -354,8 +354,12 @@ class GroupedMLPExpert(FleetLayer):
         if self.config.use_accuracy_compatible and getattr(
             self.config, "use_accuracy_compatible", False
         ):
-            self.weight1.main_grad = None
-            self.weight2.main_grad = None
+            self.weight1.main_grad = paddle.zeros_like(
+                self.weight1, dtype="float32"
+            )
+            self.weight2.main_grad = paddle.zeros_like(
+                self.weight2, dtype="float32"
+            )
             # Do not mark fused experts as sequence-parallel. E-811 IEEE
             # 1-100 (PaddleFleet-e808) left these replicas uncolored; SPGradSync
             # would all-reduce the already-local ETP=1/TP=2 shards and move
@@ -484,6 +488,11 @@ class GroupedMLPExpert(FleetLayer):
                 out_parts = []
                 x_start = 0
                 shard_split = row_owner is not None
+                row_owner_values = (
+                    row_owner.cpu().tolist()
+                    if isinstance(row_owner, paddle.Tensor)
+                    else list(row_owner)
+                )
                 for expert_idx, n_tokens in enumerate(tokens_per_expert):
                     if n_tokens == 0:
                         continue
@@ -498,13 +507,13 @@ class GroupedMLPExpert(FleetLayer):
                         else None
                     )
                     if shard_split:
-                        own = row_owner[x_start : x_start + n_tokens]
+                        own = row_owner_values[x_start : x_start + n_tokens]
                         sub = []
                         i0 = 0
                         while i0 < n_tokens:
-                            v = int(own[i0].item())
+                            v = int(own[i0])
                             i1 = i0
-                            while i1 < n_tokens and int(own[i1].item()) == v:
+                            while i1 < n_tokens and int(own[i1]) == v:
                                 i1 += 1
                             x_seg = xb[i0:i1]
                             hidden = paddle.matmul(x_seg, wt1, transpose_y=True)

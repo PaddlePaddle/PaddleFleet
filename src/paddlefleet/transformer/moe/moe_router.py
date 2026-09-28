@@ -242,12 +242,15 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
             use_accuracy_compatible and use_fp32_master and not ctx.hf_bitexact
         )
 
+        token_count = int(x.shape[0])
+        for axis in x.shape[1:-1]:
+            token_count *= int(axis)
         ctx.sequence_shards = (
             int(sequence_shards or 1)
             if ctx.use_fp32_master
             and w.dtype == paddle.float32
-            and x.ndim == 2
             and not defer_dw
+            and token_count % int(sequence_shards or 1) == 0
             else 1
         )
         ctx.dtype = paddle.float32
@@ -1971,6 +1974,12 @@ class TopKRouter(StandardMoERouter):
                         self.config.moe_router_force_load_balancing,
                         dw_overlap_enabled(self.config, "moe_router_gate"),
                         self.use_accuracy_compatible,
+                        sequence_shards=(
+                            self.tensor_model_parallel_size
+                            if self.sequence_parallel
+                            and self.config.expert_model_parallel_size <= 1
+                            else 1
+                        ),
                         use_fp32_master=self.use_fp32_master,
                     )
                     logits_1 = gate_detach_matmul(
@@ -1980,6 +1989,12 @@ class TopKRouter(StandardMoERouter):
                         self.config.moe_router_force_load_balancing,
                         dw_overlap_enabled(self.config, "moe_router_gate"),
                         self.use_accuracy_compatible,
+                        sequence_shards=(
+                            self.tensor_model_parallel_size
+                            if self.sequence_parallel
+                            and self.config.expert_model_parallel_size <= 1
+                            else 1
+                        ),
                         use_fp32_master=self.use_fp32_master,
                     )
 

@@ -129,15 +129,7 @@ from .moe_utils import (
 
 
 def use_accuracy_compatible_kernel() -> bool:
-    """Unified switch for accuracy-compatible (Megatron-aligned) numeric paths.
-
-    Controlled via the ``FLAGS_use_accuracy_compatible_kernel`` environment
-    variable. When enabled, modules switch to fp32-accumulating / Torch-aligned
-    kernels at the cost of throughput. The GLM52 alignment already requires
-    ``FLAGS_use_accuracy_compatible_kernel=1``, so gating ``expert_forward`` on
-    this flag is equivalent to the config switch for GLM52 while restoring the
-    develop-side call site that ``test_dsv4_flag_gating_moe`` pins/patches.
-    """
+    """Compatibility hook retained for callers that patch the legacy flag."""
     return os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
 
 
@@ -1094,11 +1086,7 @@ class MoELayer(nn.Layer):
             dispatched_input, num_or_sections=tokens_per_expert, axis=0
         )
         scale_chunks = None
-        # The env flag and the config switch are equivalent for GLM52 at
-        # runtime; honour both so config-driven callers keep the aligned path.
-        if use_accuracy_compatible_kernel() or getattr(
-            self, "use_accuracy_compatible", False
-        ):
+        if getattr(self, "use_accuracy_compatible", False):
             per_token_scale = getattr(
                 self.token_dispatcher, "global_input_probs", None
             )
@@ -2313,15 +2301,18 @@ class MoELayer(nn.Layer):
                 _, expert_indices = paddle.where(expert_mask[expert_idx])
                 if tokens_per_expert[expert_idx] > 0.1:
                     expert_token_indices.append(expert_indices.reshape([-1]))
-            token_indices = paddle.concat(expert_token_indices, axis=0)
-            gathered_states = _AccuracyCompatibleExpertInputGather.apply(
-                hidden_states, token_indices, tokens_per_expert
-            )
-            gathered_state_chunks = paddle.split(
-                gathered_states,
-                num_or_sections=token_counts,
-                axis=0,
-            )
+            if expert_token_indices:
+                token_indices = paddle.concat(expert_token_indices, axis=0)
+                gathered_states = _AccuracyCompatibleExpertInputGather.apply(
+                    hidden_states, token_indices, tokens_per_expert
+                )
+                gathered_state_chunks = paddle.split(
+                    gathered_states,
+                    num_or_sections=token_counts,
+                    axis=0,
+                )
+            else:
+                gathered_state_chunks = [hidden_states[:0]] * self.num_experts
 
         # Loop over all available experts in the model and perform the computation on each expert
         for expert_idx in range(self.num_experts):
