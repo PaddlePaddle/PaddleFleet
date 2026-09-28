@@ -24,6 +24,11 @@ from functools import partial
 
 import numpy as np
 import paddle
+from transformers.utils import (
+    FEATURE_EXTRACTOR_NAME,
+    PROCESSOR_NAME,
+    VIDEO_PROCESSOR_NAME,
+)
 
 from paddlefleet.cli.utils.process import add_new_special_tokens
 from paddlefleet.data.causal_dataset import (
@@ -94,6 +99,25 @@ from paddlefleet.cli.utils import (
 )
 
 
+def _declares_processor(model_name_or_path):
+    """Whether a processor load failure must propagate instead of falling back.
+
+    Only a local weights directory without any processor metadata may use the
+    tokenizer as its processor; a remote source or a declared processor that
+    fails to load is a real error.
+    """
+    if not os.path.isdir(model_name_or_path):
+        return True
+    return any(
+        os.path.isfile(os.path.join(model_name_or_path, name))
+        for name in (
+            PROCESSOR_NAME,
+            FEATURE_EXTRACTOR_NAME,
+            VIDEO_PROCESSOR_NAME,
+        )
+    )
+
+
 def load_tokenizer_and_processor(model_args, data_args):
     tokenizer_path = (
         model_args.tokenizer_name_or_path or model_args.model_name_or_path
@@ -110,15 +134,16 @@ def load_tokenizer_and_processor(model_args, data_args):
         )
     except (OSError, ValueError):
         # Extracted GLM-5.2 weights keep an independent tokenizer path and
-        # have no processor files. Published GLM-4 SFT still needs
-        # AutoProcessor; swallowing that failure moved first-train/resume
-        # loss off the published GT (12.635027885 vs 12.63612175).
+        # have no processor files. Any other load failure must surface:
+        # published GLM-4 SFT depends on the real AutoProcessor.
         independent_tokenizer = (
             model_args.tokenizer_name_or_path
             and model_args.tokenizer_name_or_path
             != model_args.model_name_or_path
         )
-        if not independent_tokenizer:
+        if not independent_tokenizer or _declares_processor(
+            model_args.model_name_or_path
+        ):
             raise
         logger.info(
             f"No AutoProcessor at {model_args.model_name_or_path}; using tokenizer as processor"
@@ -164,7 +189,10 @@ def validate_pretokenized_offline_dataset(dataset, expected_length):
                 raise ValueError(
                     f"pretokenized {name} length {len(values)} != {expected_length}"
                 )
-            if any(not isinstance(value, int) for value in values):
+            if any(
+                isinstance(value, bool) or not isinstance(value, int)
+                for value in values
+            ):
                 raise TypeError(
                     f"pretokenized {name} must contain integer values"
                 )
@@ -184,6 +212,14 @@ def apply_glm_moe_dsa_training_contract(
         getattr(training_args, "num_nextn_predict_layers", 0) or 0
     )
     explicit_mtp = int(getattr(training_args, "mtp_num_layers", 0) or 0)
+    for name, depth in (
+        ("num_nextn_predict_layers", requested_mtp),
+        ("mtp_num_layers", explicit_mtp),
+    ):
+        if depth < 0:
+            raise ValueError(
+                f"GLM MoE DSA {name} must be non-negative, got {depth}"
+            )
     if requested_mtp and explicit_mtp and requested_mtp != explicit_mtp:
         raise ValueError(
             f"GLM MoE DSA MTP depth mismatch: num_nextn_predict_layers={requested_mtp}, "

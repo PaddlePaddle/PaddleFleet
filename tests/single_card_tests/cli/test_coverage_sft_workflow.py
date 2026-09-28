@@ -125,12 +125,37 @@ class TokenizerLoadingTests(unittest.TestCase):
         _, tokenizer = self._patch_loaders(OSError("no processor files"))
         loaded_tokenizer, loaded_processor = wf.load_tokenizer_and_processor(
             SimpleNamespace(
-                tokenizer_name_or_path="/tok", model_name_or_path="/model"
+                tokenizer_name_or_path="/tok",
+                model_name_or_path=str(_tmpdir(self)),
             ),
             SimpleNamespace(processor_use_fast=False),
         )
         self.assertIs(loaded_tokenizer, tokenizer)
         self.assertIs(loaded_processor, tokenizer)
+
+    def test_a_declared_processor_keeps_its_failure(self):
+        weights = _tmpdir(self)
+        (weights / wf.PROCESSOR_NAME).write_text("{}")
+        self._patch_loaders(ValueError("broken processor"))
+        with self.assertRaises(ValueError):
+            wf.load_tokenizer_and_processor(
+                SimpleNamespace(
+                    tokenizer_name_or_path="/tok",
+                    model_name_or_path=str(weights),
+                ),
+                SimpleNamespace(processor_use_fast=False),
+            )
+
+    def test_a_remote_weights_source_keeps_its_failure(self):
+        self._patch_loaders(OSError("hub unreachable"))
+        with self.assertRaises(OSError):
+            wf.load_tokenizer_and_processor(
+                SimpleNamespace(
+                    tokenizer_name_or_path="/tok",
+                    model_name_or_path="org/remote-model",
+                ),
+                SimpleNamespace(processor_use_fast=False),
+            )
 
     def test_a_shared_path_keeps_the_processor_failure(self):
         self._patch_loaders(ValueError("broken processor"))
@@ -232,6 +257,16 @@ class PretokenizedValidationTests(unittest.TestCase):
             )
         self.assertIn(
             "pretokenized position_ids must contain integer values",
+            str(caught.exception),
+        )
+
+    def test_boolean_values_are_rejected(self):
+        with self.assertRaises(TypeError) as caught:
+            wf.validate_pretokenized_offline_dataset(
+                [[_sequence(labels=[0, 1, True, 3])]], 4
+            )
+        self.assertIn(
+            "pretokenized labels must contain integer values",
             str(caught.exception),
         )
 
@@ -346,6 +381,16 @@ class GlmMoeDsaContractTests(unittest.TestCase):
                 ),
             )
         self.assertIn("MTP depth mismatch", str(caught.exception))
+
+    def test_negative_mtp_depths_are_rejected(self):
+        for name in ("num_nextn_predict_layers", "mtp_num_layers"):
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(
+                    ValueError, f"{name} must be non-negative"
+                ),
+            ):
+                self._apply(_dsa_config(), _dsa_training_args(**{name: -1}))
 
     def test_the_mtp_loss_weight_is_taken_as_a_float(self):
         config = _dsa_config()

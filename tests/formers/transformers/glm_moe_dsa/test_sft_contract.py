@@ -88,11 +88,13 @@ def test_load_processor_uses_autoprocessor_on_text_sft():
     assert actual_processor is not tokenizer
 
 
-def test_load_processor_falls_back_to_tokenizer_without_processor_files():
+def test_load_processor_falls_back_to_tokenizer_without_processor_files(
+    tmp_path,
+):
     tokenizer = SimpleNamespace()
     model_args = SimpleNamespace(
         tokenizer_name_or_path="/tokenizer-only",
-        model_name_or_path="/extracted-GLM-5.2-weights",
+        model_name_or_path=str(tmp_path),
         stage="SFT",
     )
     data_args = SimpleNamespace(processor_use_fast=None)
