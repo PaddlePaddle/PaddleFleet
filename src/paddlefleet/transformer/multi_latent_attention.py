@@ -53,7 +53,14 @@ from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_sequence_parallel_region,
 )
-from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
+from paddlefleet.train_infer_consistent_ops.inspect_util import (
+    get_current_layer,
+    inspect_tensor,
+    inspect_tensor_set_current_layer,
+    interleave_rope_segment,
+    interleave_rope_segment_inplace,
+    to_interleave_rope_layout_,
+)
 from paddlefleet.train_infer_consistent_ops.slice_util import (
     last_dim_segment,
     scatter_last_dim_segment,
@@ -820,6 +827,8 @@ class MultiLatentAttention(Attention):
             past_key_values, layer_idx, use_cache
         )
 
+        inspect_tensor_set_current_layer(self.layer_number)
+
         # =====================
         # Query, Key, and Value
         # =====================
@@ -1025,7 +1034,7 @@ class MultiLatentAttention(Attention):
             )
             # Ablation boundary: core attention output (static-batch branch).
             core_attn_out = inspect_tensor(
-                "mla_core_attn_out", layer_num, core_attn_out
+                "mla_core_attn_out", get_current_layer(), core_attn_out
             )
 
         if self.recompute_qkv_up_porj_and_rope and self.training:
@@ -1094,7 +1103,7 @@ class MultiLatentAttention(Attention):
 
         # Gated-attention boundary: value entering the gated-attn step.
         core_attn_out = inspect_tensor(
-            "mla_gate_input", layer_num, core_attn_out
+            "mla_gate_input", get_current_layer(), core_attn_out
         )
 
         # Apply gated attention
@@ -1134,7 +1143,7 @@ class MultiLatentAttention(Attention):
         # the input above when gated_attention is off). Placed after the whole
         # gate block so both the recompute and direct paths are covered.
         core_attn_out = inspect_tensor(
-            "mla_gate_output", layer_num, core_attn_out
+            "mla_gate_output", get_current_layer(), core_attn_out
         )
 
         output, bias = deferrable_linear(
@@ -1145,7 +1154,9 @@ class MultiLatentAttention(Attention):
             gate_recompute.discard_output_and_register_recompute(output)
 
         # Ablation boundary: o_proj output (final attention output + bias).
-        output = inspect_tensor("mla_o_proj_output", layer_num, output)
+        output = inspect_tensor(
+            "mla_o_proj_output", get_current_layer(), output
+        )
 
         _log(output, "attn_o_proj_out", layer_num)
 
@@ -1638,7 +1649,7 @@ class MLASelfAttention(MultiLatentAttention):
         # q_a_proj / kv_a_proj (and the gate source when gated_attn_use_q_lora
         # is set). The mla_* prefix keeps these distinct from DSv4 attn_*.
         hidden_states = inspect_tensor(
-            "mla_hidden_states_input", self.layer_number, hidden_states
+            "mla_hidden_states_input", get_current_layer(), hidden_states
         )
 
         # =========================================
@@ -1792,7 +1803,7 @@ class MLASelfAttention(MultiLatentAttention):
                     )
             # Ablation boundary: q_a_proj output (post TP-gather / SP-scatter).
             q_compressed = inspect_tensor(
-                "mla_q_a_proj_output", self.layer_number, q_compressed
+                "mla_q_a_proj_output", get_current_layer(), q_compressed
             )
         else:
             q_compressed = hidden_states
@@ -1839,7 +1850,7 @@ class MLASelfAttention(MultiLatentAttention):
         # TP-gather / split / SP-scatter). Input is hidden_states, already
         # probed at mla_hidden_states_input.
         kv_compressed = inspect_tensor(
-            "mla_kv_a_proj_output", self.layer_number, kv_compressed
+            "mla_kv_a_proj_output", get_current_layer(), kv_compressed
         )
 
         # if packed_seq_params is not None:
@@ -1859,14 +1870,14 @@ class MLASelfAttention(MultiLatentAttention):
             q_compressed = self.q_a_layernorm(q_compressed)
             # Ablation boundary: q_a_layernorm output.
             q_compressed = inspect_tensor(
-                "mla_q_a_norm_output", self.layer_number, q_compressed
+                "mla_q_a_norm_output", get_current_layer(), q_compressed
             )
 
         kv_compressed = self.kv_a_layernorm(kv_compressed)
         # Ablation boundary: kv_a_layernorm output (feeds kv_b_proj; input is
         # the value already probed at mla_kv_a_proj_output).
         kv_compressed = inspect_tensor(
-            "mla_kv_a_norm_output", self.layer_number, kv_compressed
+            "mla_kv_a_norm_output", get_current_layer(), kv_compressed
         )
 
         # === MD5 probes for MLA intermediate values ===
@@ -1908,7 +1919,7 @@ class MLASelfAttention(MultiLatentAttention):
                 q, _ = deferrable_linear(
                     self.config, "attn_q_proj", self.q_proj, q_compressed
                 )
-            q = inspect_tensor("mla_q_b_proj_output", self.layer_number, q)
+            q = inspect_tensor("mla_q_b_proj_output", get_current_layer(), q)
 
             # q: [num_tokens, n, q_head_dim]
             q = q.view(
@@ -1934,7 +1945,7 @@ class MLASelfAttention(MultiLatentAttention):
                 # Ablation boundary: kv_b_proj output (before head-view; this
                 # same value feeds fused_apply_mla_rope_for_kv).
                 kv = inspect_tensor(
-                    "mla_kv_b_proj_output", self.layer_number, kv
+                    "mla_kv_b_proj_output", get_current_layer(), kv
                 )
 
                 # kv: [num_tokens, n, (qk_nope_head_dim + v_head_dim)]
@@ -2016,7 +2027,7 @@ class MLASelfAttention(MultiLatentAttention):
                 # recompute. `full=q` binds the live buffer before the rebinding.
                 q = inspect_tensor(
                     "mla_query_before_rope_pe",
-                    self.layer_number,
+                    get_current_layer(),
                     q,
                     pre_save_func=lambda t: last_dim_segment(
                         t, self.qk_nope_head_dim
@@ -2041,7 +2052,7 @@ class MLASelfAttention(MultiLatentAttention):
                 # and the RoPE segment ([..., qk_nope_head_dim:], rotated).
                 query = inspect_tensor(
                     "mla_query_after_rope_nope",
-                    self.layer_number,
+                    get_current_layer(),
                     query,
                     pre_save_func=lambda t: last_dim_segment(
                         t, 0, self.qk_nope_head_dim
@@ -2053,9 +2064,9 @@ class MLASelfAttention(MultiLatentAttention):
                 )
                 query = inspect_tensor(
                     "mla_query_after_rope_pe",
-                    self.layer_number,
+                    get_current_layer(),
                     query,
-                    pre_save_func=lambda t: last_dim_segment(
+                    pre_save_func=lambda t: interleave_rope_segment(
                         t, self.qk_nope_head_dim
                     ),
                     post_load_func=lambda seg,
@@ -2066,7 +2077,7 @@ class MLASelfAttention(MultiLatentAttention):
 
                 # Ablation boundary: RoPE-applied query (fused MLA path).
                 query = inspect_tensor(
-                    "mla_query_after_rope", self.layer_number, query
+                    "mla_query_after_rope", get_current_layer(), query
                 )
                 key, value = fused_apply_mla_rope_for_kv(
                     kv,
@@ -2085,9 +2096,9 @@ class MLASelfAttention(MultiLatentAttention):
                 # from kv, then the rotated part at offset qk_nope_head_dim.
                 key = inspect_tensor(
                     "mla_key_pe_after_rope",
-                    self.layer_number,
+                    get_current_layer(),
                     key,
-                    pre_save_func=lambda t: last_dim_segment(
+                    pre_save_func=lambda t: interleave_rope_segment(
                         t, self.qk_nope_head_dim
                     ),
                     post_load_func=lambda seg,
@@ -2323,6 +2334,11 @@ class MLASelfAttention(MultiLatentAttention):
                     # the pe view is rotated: one pe-sized read and write.
                     from paddlefleet.triton_ops import fused_apply_rope_half
 
+                    q_pos_emb = inspect_tensor(
+                        "mla_query_before_rope_pe",
+                        get_current_layer(),
+                        q_pos_emb,
+                    )
                     q_pos_emb = fused_apply_rope_half(
                         q_pos_emb,
                         rotary_pos_emb,
@@ -2330,10 +2346,29 @@ class MLASelfAttention(MultiLatentAttention):
                         mscale,
                         adjacent_in=mqa_rope_adjacent,
                     )
+
+                    q_no_pe = inspect_tensor(
+                        "mla_query_after_rope_nope",
+                        get_current_layer(),
+                        q_no_pe,
+                    )
+                    q_pos_emb = inspect_tensor(
+                        "mla_query_after_rope_pe",
+                        get_current_layer(),
+                        q_pos_emb,
+                        pre_save_func=lambda t: to_interleave_rope_layout_(t),
+                    )
+
                     # Defer k's rope to ``fused_rope_cat_key`` below, which
                     # rotates and concatenates in one pass.
                     k_rope_fused_with_cat = True
                 else:
+                    q_pos_emb = inspect_tensor(
+                        "mla_query_before_rope_pe",
+                        get_current_layer(),
+                        q_pos_emb,
+                    )
+
                     # q_pos_emb: [num_tokens, n, qk_rope_head_dim]
                     q_pos_emb = apply_rotary_pos_emb(
                         q_pos_emb,
@@ -2347,6 +2382,17 @@ class MLASelfAttention(MultiLatentAttention):
                         apply_rope_fusion=bool(self.config.apply_rope_fusion)
                         and not self.mqa_latent,
                         **rope_pairing_kwargs,
+                    )
+                    q_no_pe = inspect_tensor(
+                        "mla_query_after_rope_nope",
+                        get_current_layer(),
+                        q_no_pe,
+                    )
+                    q_pos_emb = inspect_tensor(
+                        "mla_query_after_rope_pe",
+                        get_current_layer(),
+                        q_pos_emb,
+                        pre_save_func=lambda t: to_interleave_rope_layout_(t),
                     )
                     # k_pos_emb:[num_tokens, 1, qk_rope_head_dim]
                     k_pos_emb = apply_rotary_pos_emb(
@@ -2417,6 +2463,11 @@ class MLASelfAttention(MultiLatentAttention):
                         [q_no_pe_absorbed, q_pos_emb],
                         axis=-1,
                     )
+                    query = inspect_tensor(
+                        "mla_query_after_absorb",
+                        get_current_layer(),
+                        query,
+                    )
                     # key: [num_tokens, 1, kv_lora_rank + qk_rope_head_dim].
                     # Its leading kv_lora_rank channels are the (absorbed) value.
                     if k_rope_fused_with_cat:
@@ -2442,6 +2493,14 @@ class MLASelfAttention(MultiLatentAttention):
                         key = paddle.cat(
                             [kv_compressed.unsqueeze(-2), k_pos_emb], axis=-1
                         )
+                    key = inspect_tensor(
+                        "mla_key_after_absorb",
+                        get_current_layer(),
+                        key,
+                        pre_save_func=lambda t: interleave_rope_segment_inplace(
+                            t, self.kv_lora_rank
+                        ),
+                    )
                     value = None
                 else:
                     query = paddle.cat([q_no_pe, q_pos_emb], axis=-1)

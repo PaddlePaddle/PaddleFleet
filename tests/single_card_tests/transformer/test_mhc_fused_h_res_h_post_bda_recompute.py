@@ -55,6 +55,7 @@ from paddlefleet.tensor_parallel.random import (
     model_parallel_cuda_manual_seed,
 )
 from paddlefleet.transformer import hyper_connection
+from paddlefleet.transformer.hyper_connection import MhcAggregateRecompute
 from paddlefleet.transformer.transformer_config import TransformerConfig
 from paddlefleet.transformer.transformer_layer import (
     HyperConnectionTransformerLayer,
@@ -164,26 +165,26 @@ def _half_layer(layer, hc, hidden_states, w, bias, wrap_aggregate, wrap_bda):
     ori_dtype = hidden_states.dtype
 
     if wrap_aggregate:
-        agg_span = RecomputeWithoutOutput()
-        aggregated, h_res, h_post = agg_span.recompute(
+        agg_recompute = MhcAggregateRecompute()
+        aggregated, h_res, h_post = agg_recompute.recompute(
             hc, hidden_states, preserve_rng_state=False, share_grad_holder=True
         )
     else:
-        agg_span = None
+        agg_recompute = None
         aggregated, h_res, h_post = hc(hidden_states)
     aggregated = aggregated.to(ori_dtype)
 
     x = paddle.matmul(aggregated, w)
 
-    hidden_states, bda_span = layer._fused_h_res_h_post_bda(
+    hidden_states, bda_recompute = layer._fused_h_res_h_post_bda(
         hc, h_res, original_residual, h_post, (x, bias), wrap_bda
     )
-    if agg_span is not None:
-        agg_span.discard_output_and_register_recompute(hidden_states)
+    if agg_recompute is not None:
+        agg_recompute.discard_output_and_register_recompute(hidden_states)
     hidden_states = layer._cast_and_discard_fused_bda(
-        hidden_states, ori_dtype, bda_span
+        hidden_states, ori_dtype, bda_recompute
     )
-    return hidden_states, bda_span
+    return hidden_states, bda_recompute
 
 
 def _inputs(resid_np, w_np, bias_np, dtype):
@@ -618,13 +619,18 @@ class TestFusedHResHPostBDASpanMemory(unittest.TestCase):
 
 
 def _span_spy(created, force_disable=False):
-    """Patch the helper to record span creation, optionally forcing it off."""
+    """Patch the helper to record span creation, optionally forcing it off.
+
+    ``enable_recompute`` is the last positional argument; ``manager`` only ever
+    arrives as a keyword, and only under ``recompute_modules=['mhc_block']``,
+    which these tests do not exercise.
+    """
     real = HyperConnectionTransformerLayer._fused_h_res_h_post_bda
 
-    def wrapper(self, *args):
+    def wrapper(self, *args, **kwargs):
         if force_disable:
             args = (*args[:-1], False)
-        output, span = real(self, *args)
+        output, span = real(self, *args, **kwargs)
         created.append(span is not None)
         return output, span
 

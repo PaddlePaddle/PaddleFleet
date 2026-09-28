@@ -2189,5 +2189,60 @@ class TestNonQBFusionForward(unittest.TestCase):
         )
 
 
+class TestTrainerAdapterFreezeTraining(unittest.TestCase):
+    """freeze_training guard on the trainer-level QB callback adapter.
+
+    The adapter
+    (paddlefleet.trainer.trainer_callback.MoEQuantileBalancingCallback)
+    wraps the optimizer-step QB update. Under freeze_training it must not run
+    the update -- and therefore must not touch e_score_correction_bias --
+    mirroring the noaux_tc PaddleFleetMoECorrectionBiasAdjustCallback.
+    """
+
+    def _make_adapter(self):
+        from paddlefleet.trainer.trainer_callback import (
+            MoEQuantileBalancingCallback as TrainerAdapter,
+        )
+
+        adapter = TrainerAdapter()
+        # Replace the underlying optimizer-step update with a spy so we can
+        # assert whether the QB bias update was (not) invoked.
+        adapter._callback = MagicMock()
+        return adapter
+
+    def test_freeze_training_skips_bias_update(self):
+        adapter = self._make_adapter()
+        control = object()
+        ret = adapter.on_optimizer_end(
+            args=SimpleNamespace(freeze_training=True),
+            state=None,
+            control=control,
+            model=MagicMock(),
+        )
+        adapter._callback.on_optimizer_end.assert_not_called()
+        self.assertIs(ret, control)
+
+    def test_no_freeze_delegates_to_underlying_callback(self):
+        adapter = self._make_adapter()
+        adapter.on_optimizer_end(
+            args=SimpleNamespace(freeze_training=False),
+            state=None,
+            control=None,
+            model=MagicMock(),
+        )
+        adapter._callback.on_optimizer_end.assert_called_once()
+
+    def test_missing_freeze_attr_defaults_to_delegating(self):
+        adapter = self._make_adapter()
+        # args without a freeze_training attribute -> getattr default False.
+        adapter.on_optimizer_end(
+            args=SimpleNamespace(),
+            state=None,
+            control=None,
+            model=MagicMock(),
+        )
+        adapter._callback.on_optimizer_end.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

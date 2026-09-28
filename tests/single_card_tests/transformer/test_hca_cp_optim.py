@@ -164,19 +164,10 @@ class TestCompressTopkIdxsCache(unittest.TestCase):
 class TestPrependPrevWindowLocal(unittest.TestCase):
     """Single-process behaviour and the one-hop range guard."""
 
-    def test_zeros_prefix_and_gradient(self):
+    def test_requires_cp_group(self):
         x = paddle.randn([2, 8, 4], dtype="float32")
-        x.stop_gradient = False
-        out = prepend_prev_window(x, 3, None)
-        self.assertEqual(out.shape, [2, 11, 4])
-        np.testing.assert_array_equal(
-            out[:, :3].numpy(), np.zeros([2, 3, 4], "float32")
-        )
-        np.testing.assert_array_equal(out[:, 3:].numpy(), x.numpy())
-        (out * 2).sum().backward()
-        np.testing.assert_array_equal(
-            x.grad.numpy(), np.full([2, 8, 4], 2.0, "float32")
-        )
+        with self.assertRaises(ValueError):
+            prepend_prev_window(x, 3, None)
 
     def test_zero_window_is_identity(self):
         x = paddle.randn([1, 4, 2], dtype="float32")

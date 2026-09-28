@@ -26,6 +26,7 @@ import paddle
 import paddle.distributed as dist
 import paddle.nn.functional as F
 from paddle.distributed.communication.reduce_scatter import _reduce_scatter_base
+from paddle.distributed.flex_checkpoint.aoa.generation import resolve_names
 from paddle.distributed.flex_checkpoint.dcp.sharded_weight import (
     build_sharded_state_dict,
 )
@@ -45,6 +46,7 @@ from ..utils import (
     get_pg_size,
     get_tensor_model_parallel_group_if_none,
     prepare_input_tensors_for_wgrad_compute,
+    use_dsv4_accuracy_compatible,
 )
 from .mappings import (
     copy_to_tensor_model_parallel_region,
@@ -500,7 +502,12 @@ class LinearWithFrozenWeight(paddle.autograd.Function):
     def backward(ctx, grad_output):
         """Backward with frozen weight."""
         (weight, bias) = ctx.saved_tensor()
-        grad_input = grad_output.matmul(weight.t())
+        if use_dsv4_accuracy_compatible():
+            from paddlefleet.accuracy_compatible_patch import te_matmul
+
+            grad_input = te_matmul(grad_output, weight)
+        else:
+            grad_input = grad_output.matmul(weight.t())
 
         if ctx.allreduce_dgrad:
             # All-reduce. Note: here async and sync are effectively the same.
@@ -1027,6 +1034,10 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
                         ctx.use_pow2_scale, ctx.use_ue8m0
                     ),
                 )
+            elif use_dsv4_accuracy_compatible():
+                from paddlefleet.accuracy_compatible_patch import te_matmul
+
+                grad_input = te_matmul(grad_output, weight)
             else:
                 dgrad_groups = ctx.hf_dgrad_groups
                 if dgrad_groups:
@@ -1086,6 +1097,20 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
         if ctx.sequence_parallel and wgrad_compute:
             # pylint: disable=possibly-used-before-assignment
             handle.wait()
+
+        seqfirst_grad_weight = None
+        if (
+            wgrad_compute
+            and input is not None
+            and use_dsv4_accuracy_compatible()
+        ):
+            from paddlefleet.accuracy_compatible_patch import (
+                linear_seqfirst_wgrad,
+            )
+
+            seqfirst_grad_weight = linear_seqfirst_wgrad(
+                input, grad_output, weight
+            )
 
         if wgrad_compute:
             if total_input is not None:
@@ -1158,7 +1183,11 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
 
         elif ctx.gradient_accumulation_fusion:
             if wgrad_compute:
-                if weight.main_grad.dtype == paddle.float32:
+                if seqfirst_grad_weight is not None:
+                    weight.main_grad.add_(
+                        seqfirst_grad_weight.cast(weight.main_grad.dtype)
+                    )
+                elif weight.main_grad.dtype == paddle.float32:
                     fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
                         total_input, grad_output, weight.main_grad
                     )
@@ -1195,7 +1224,9 @@ class LinearWithGradAccumulationAndAsyncCommunication(paddle.autograd.Function):
             else:
                 grad_weight = None
         else:
-            if (
+            if seqfirst_grad_weight is not None:
+                grad_weight = seqfirst_grad_weight
+            elif (
                 wgrad_compute
                 and ctx.use_accuracy_compatible
                 and getattr(weight, "is_expert_param", False)
@@ -1452,6 +1483,83 @@ def linear_with_grad_accumulation_and_async_allreduce(
 
 
 linear_with_grad_accumulation_and_async_allreduce.warned = False
+
+
+def gen_linear_aoa_statements(
+    layer,
+    ctx,
+    *,
+    structured_name_prefix="",
+    checkpoint_lookup_drop_segment=None,
+):
+    """Checkpoint->model generator for the Linear family.
+
+    Weight carries a ``^T`` transpose; bias and any persistable buffer use
+    identity, and an identity whose two names already match is omitted --
+    ``AOAEngine`` fills any destination key that no statement produced from the
+    same-named source. This is a plain module-level helper (not a base class) so
+    ``Linear`` / ``ColumnParallelLinear`` / ``RowParallelLinear`` share one
+    implementation without introducing a common ``LinearBase``. The transpose is
+    unconditional, so an owner whose embedded ``paddle.nn.Linear`` leaf may or
+    may not be transposed in the checkpoint (e.g.
+    ``HyperConnectionModule.mapping_proj``) emits that leaf inline instead of
+    calling this helper. The inverse direction has an independent helper and is
+    never derived from this one.
+    """
+    statements = []
+    local_state_dict = layer.state_dict(
+        structured_name_prefix="", include_sublayers=False
+    )
+    for name in local_state_dict:
+        checkpoint_name, model_name = resolve_names(
+            name,
+            ctx.checkpoint_name_prefix,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            ctx.checkpoint_name_mapping,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            model_name_prefix=ctx.model_name_prefix,
+        )
+        if name == "weight":
+            statements.append(f"{checkpoint_name}^T -> {model_name}")
+        elif checkpoint_name != model_name:
+            statements.append(f"{checkpoint_name} -> {model_name}")
+    return statements
+
+
+def gen_linear_inv_aoa_statements(
+    layer,
+    ctx,
+    *,
+    structured_name_prefix="",
+    checkpoint_lookup_drop_segment=None,
+):
+    """Inverse (model -> checkpoint) generator for the Linear family.
+
+    Mirror of :func:`gen_linear_aoa_statements` for the opposite direction:
+    weight is transposed back (``^T`` stays on the source side) and bias /
+    buffers use identity. Fully independent of the checkpoint->model helper,
+    never derived from its output text.
+    """
+    statements = []
+    local_state_dict = layer.state_dict(
+        structured_name_prefix="", include_sublayers=False
+    )
+    for name in local_state_dict:
+        checkpoint_name, model_name = resolve_names(
+            name,
+            ctx.checkpoint_name_prefix,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            ctx.checkpoint_name_mapping,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            model_name_prefix=ctx.model_name_prefix,
+        )
+        if name == "weight":
+            statements.append(f"{model_name}^T -> {checkpoint_name}")
+        elif checkpoint_name != model_name:
+            statements.append(f"{model_name} -> {checkpoint_name}")
+    return statements
 
 
 class Linear(paddle.nn.Layer):
@@ -1764,6 +1872,44 @@ class Linear(paddle.nn.Layer):
         state_dict = self.state_dict(structured_name_prefix="")
         return build_sharded_state_dict(
             state_dict, None, structured_name_prefix
+        )
+
+    def gen_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Checkpoint->model AOA for this Linear.
+
+        Weight is transposed (``^T``); bias / persistable buffers use identity,
+        which is omitted when the two resolved names already match.
+        """
+        return gen_linear_aoa_statements(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+
+    def gen_inv_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Inverse (model -> checkpoint) AOA for this Linear.
+
+        Independently generated, not derived from the checkpoint->model text:
+        weight is transposed back and the identity endpoints are swapped.
+        """
+        return gen_linear_inv_aoa_statements(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
         )
 
     def set_extra_state(self, state):
@@ -2294,6 +2440,44 @@ class ColumnParallelLinear(paddle.nn.Layer):
             state_dict, shard_rules, structured_name_prefix
         )
 
+    def gen_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Checkpoint->model AOA for this Linear.
+
+        Weight is transposed (``^T``); bias / persistable buffers use identity,
+        which is omitted when the two resolved names already match.
+        """
+        return gen_linear_aoa_statements(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+
+    def gen_inv_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Inverse (model -> checkpoint) AOA for this Linear.
+
+        Independently generated, not derived from the checkpoint->model text:
+        weight is transposed back and the identity endpoints are swapped.
+        """
+        return gen_linear_inv_aoa_statements(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+
     def set_extra_state(self, state):
         """Extra state is ignored"""
 
@@ -2610,6 +2794,44 @@ class RowParallelLinear(paddle.nn.Layer):
         shard_rules = None if self.world_size == 1 else {"weight": 0}
         return build_sharded_state_dict(
             state_dict, shard_rules, structured_name_prefix
+        )
+
+    def gen_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Checkpoint->model AOA for this Linear.
+
+        Weight is transposed (``^T``); bias / persistable buffers use identity,
+        which is omitted when the two resolved names already match.
+        """
+        return gen_linear_aoa_statements(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+
+    def gen_inv_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Inverse (model -> checkpoint) AOA for this Linear.
+
+        Independently generated, not derived from the checkpoint->model text:
+        weight is transposed back and the identity endpoints are swapped.
+        """
+        return gen_linear_inv_aoa_statements(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
         )
 
     def set_extra_state(self, state):

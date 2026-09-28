@@ -553,9 +553,18 @@ class ZeroCostCheckpointEMAProcessor:
             if tensor_meta["buffer_index"].startswith("unshard_"):
                 # unshard_ type tensors use the entire buffer directly
                 if k in state_dict:
-                    self.ema_buffer_model_params[tensor_meta["buffer_index"]][
-                        :
-                    ] = state_dict[k].flatten()
+                    dst = self.ema_buffer_model_params[
+                        tensor_meta["buffer_index"]
+                    ]
+                    if dst.ndim == 0:
+                        # 0-D scalar buffers (e.g. QB router's
+                        # gate.qb_bin_min / gate.qb_bin_max) cannot be sliced
+                        # with [:] -- that raises "Too many indices (1) for
+                        # tensor of dimension 0". Write the scalar value in
+                        # place instead.
+                        paddle.assign(state_dict[k].reshape(dst.shape), dst)
+                    else:
+                        dst[:] = state_dict[k].flatten()
                 continue
             start = tensor_meta["start"]
             end = tensor_meta["end"]
@@ -879,11 +888,11 @@ class ZeroCostCheckpointCallback(TrainerCallback):
                 (save_infos, non_cached_objects)
             )
             self.runtime_timer.stop()
-            if not (
-                args.pipeline_model_parallel_size > 1
-                and isinstance(model, PipelineLayer)
-            ):
-                self.manager.zcc_pipeline_hook(0)
+        if not (
+            args.pipeline_model_parallel_size > 1
+            and isinstance(model, PipelineLayer)
+        ):
+            self.manager.zcc_pipeline_hook(0)
 
     def get_rng_states(self, args):
         if not args.save_rng_states:
@@ -1149,6 +1158,7 @@ class ZeroCostCheckpointManager:
         self.ready_to_save = False
         self.ema_shared_metas = None
         self._ema_tensor_refs = None
+        self._ema_shm_release_pending = False
         atexit.register(self.terminate_workers)
 
     def set_ema_state_dict(self, path):
@@ -1214,7 +1224,7 @@ class ZeroCostCheckpointManager:
             )
         logger.info("[ZCC manager] update all zcc workers done")
 
-        # Send EMA shared memory data to workers if pending (from reshard)
+        # Hand the resharded EMA shared-memory metas to workers
         if self.ema_shared_metas is not None:
             for worker in self.workers:
                 worker.ema_shm_consumed.clear()
@@ -1226,40 +1236,37 @@ class ZeroCostCheckpointManager:
                     )
                 )
             logger.info(
-                "[EMA Reshard] Shared memory metas sent to workers, waiting for consumption..."
-            )
-            for worker in self.workers:
-                logger.info(
-                    f"[EMA Reshard] Waiting worker{worker.worker_id} to consume shared memory..."
-                )
-                worker.ema_shm_consumed.wait()
-                logger.info(
-                    f"[EMA Reshard] Worker{worker.worker_id} consumed shared memory."
-                )
-            # Now safe to release shared memory tensor references
-            num_refs = (
-                len(self._ema_tensor_refs) if self._ema_tensor_refs else 0
-            )
-            num_files = len(self._ema_shm_filenames)
-            logger.info(
-                f"[EMA Reshard] Releasing {num_refs} tensor refs ({num_files} tracked shm files)..."
+                "[EMA Reshard] Shared memory metas sent to workers (async); "
+                "refs released once consumed"
             )
             self.ema_shared_metas = None
-            self._ema_tensor_refs = None
-            # Verify specific shm files are gone
-            leaked = self._check_shm_files_released(self._ema_shm_filenames)
-            if leaked:
-                logger.warning(
-                    f"[EMA Reshard] LEAK DETECTED: {len(leaked)}/{num_files} shm files still exist! "
-                    f"Examples: {leaked[:5]}"
-                )
-            else:
-                logger.info(
-                    f"[EMA Reshard] All {num_files} shm files released successfully, no leak"
-                )
-            self._ema_shm_filenames = []
+            self._ema_shm_release_pending = True
 
         self.ready_to_save = True
+
+    def _release_ema_shm(self):
+        if not getattr(self, "_ema_shm_release_pending", False):
+            return
+        if not all(w.ema_shm_consumed.is_set() for w in self.workers):
+            return  # some worker still consuming; retry at next poll
+        num_refs = len(self._ema_tensor_refs) if self._ema_tensor_refs else 0
+        num_files = len(self._ema_shm_filenames)
+        logger.info(
+            f"[EMA Reshard] Releasing {num_refs} tensor refs ({num_files} tracked shm files)..."
+        )
+        self._ema_tensor_refs = None
+        leaked = self._check_shm_files_released(self._ema_shm_filenames)
+        if leaked:
+            logger.warning(
+                f"[EMA Reshard] LEAK DETECTED: {len(leaked)}/{num_files} shm files still exist! "
+                f"Examples: {leaked[:5]}"
+            )
+        else:
+            logger.info(
+                f"[EMA Reshard] All {num_files} shm files released successfully, no leak"
+            )
+        self._ema_shm_filenames = []
+        self._ema_shm_release_pending = False
 
     def get_idle_worker_for_saving(
         self, save_infos_and_non_cached_objects=None
@@ -1267,6 +1274,7 @@ class ZeroCostCheckpointManager:
         """
         if `save_infos_and_non_cached_objects` is None, do offload without dumping.
         """
+        self._release_ema_shm()
         self.report_error_worker()
         assert self.current_worker is None, (
             "[ZCC manager] current_worker must be None"
@@ -1364,6 +1372,7 @@ class ZeroCostCheckpointManager:
             for i in range(self.pipeline_hooks_steps):
                 self.zcc_pipeline_hook(i)
             self.sync_offload_status()
+        self._release_ema_shm()
         self.ready_to_save = False
         self.terminate_workers()
 
@@ -1442,6 +1451,9 @@ class ZeroCostCheckpointWorker:
         self.flash_device_save_dir = None
         self.persistent_save_dir = None
         self.zcc_ema_processor = None
+        self.pending_ema_ckpt_path = None
+        self.pending_ema_shared_metas = None
+        self.pending_ema_rebuild = False
 
     def process_update_task(self, updates):
         """
@@ -1530,6 +1542,7 @@ class ZeroCostCheckpointWorker:
             self.global_step.value = global_step
 
             if self.ema_coef is not None:
+                self._maybe_prepare_ema()
                 self.zcc_ema_processor.ema_accumulate(
                     self.trainer_state.global_step,
                     self.trainer_state.loss,
@@ -1550,6 +1563,40 @@ class ZeroCostCheckpointWorker:
             )
             return True
         return False
+
+    def _maybe_prepare_ema(self):
+        if self.pending_ema_rebuild:
+            self.zcc_ema_processor = ZeroCostCheckpointEMAProcessor(
+                self.optimizer_fusion_storage_helper,
+                self.param_fusion_storage_helper,
+                self.ema_coef,
+            )
+            self.pending_ema_rebuild = False
+        # Path A: main process completed EMA reshard, pass via shared memory
+        if self.pending_ema_shared_metas is not None:
+            with device_guard("cpu"):
+                self._load_ema_from_shared_memory(self.pending_ema_shared_metas)
+            self.pending_ema_shared_metas = None
+            self.ema_shm_consumed.set()  # signal main it can release the shm refs
+            return
+
+        # Path B: no reshard needed, subprocess loads from file (existing logic)
+        if self.pending_ema_ckpt_path is None:
+            return
+        ema_ckpt_path = self.pending_ema_ckpt_path
+        logger.info(f"[ZCC EMA] load state dict from {ema_ckpt_path}")
+        with device_guard("cpu"):
+            state_dict = paddle.load(ema_ckpt_path)
+            # Reverse unified name mapping: saved with unified names, but
+            # load_ema_state_dict expects original param names
+            state_dict = self._reverse_unified_name_for_ema(state_dict)
+            if self.use_expert_parallel and self.dp_rank > 0:
+                state_dict = self._filter_moe_no_sync_optimizer_params(
+                    self.model_meta_content, state_dict
+                )
+            self.zcc_ema_processor.load_ema_state_dict(state_dict)
+        logger.info("[ZCC EMA] done loading")
+        self.pending_ema_ckpt_path = None
 
     def process_dump_task(self):
         """
@@ -1751,7 +1798,6 @@ class ZeroCostCheckpointWorker:
         logger.info(
             f"[ZCC Worker{self.worker_id}] Worker{self.worker_id} started."
         )
-        ema_ckpt_path = None
         save_info_tuple = None  # save dir...
         start_time = None
         try:
@@ -1766,34 +1812,7 @@ class ZeroCostCheckpointWorker:
                 elif task_type == ZCCTaskType.UPDATE:
                     self.process_update_task(task_body)
                     if self.ema_coef is not None:
-                        self.zcc_ema_processor = ZeroCostCheckpointEMAProcessor(  # 在 update task 后刷新 EMA buffer
-                            self.optimizer_fusion_storage_helper,
-                            self.param_fusion_storage_helper,
-                            self.ema_coef,
-                        )
-                        if ema_ckpt_path is not None:  # update ema if needed
-                            logger.info(
-                                f"[ZCC EMA] load state dict from {ema_ckpt_path}"
-                            )
-                            with device_guard("cpu"):
-                                state_dict = paddle.load(ema_ckpt_path)
-                                # Reverse unified name mapping: saved with unified names, but
-                                # load_ema_state_dict expects original param names
-                                state_dict = self._reverse_unified_name_for_ema(
-                                    state_dict
-                                )
-                                if (
-                                    self.use_expert_parallel
-                                    and self.dp_rank > 0
-                                ):
-                                    state_dict = self._filter_moe_no_sync_optimizer_params(
-                                        self.model_meta_content, state_dict
-                                    )
-                                self.zcc_ema_processor.load_ema_state_dict(
-                                    state_dict
-                                )
-                            logger.info("[ZCC EMA] done loading")
-                        ema_ckpt_path = None
+                        self.pending_ema_rebuild = True
                 elif task_type == ZCCTaskType.PREPARE:
                     start_time = time.time()
                     save_info_tuple = task_body
@@ -1808,11 +1827,9 @@ class ZeroCostCheckpointWorker:
                             f"[ZCC Worker{self.worker_id}] used time {used_time:.3f} sec"
                         )
                 elif task_type == ZCCTaskType.SET_EMA_STATE_DICT:
-                    ema_ckpt_path = task_body  # mark ema state dict path
+                    self.pending_ema_ckpt_path = task_body
                 elif task_type == ZCCTaskType.LOAD_EMA_FROM_SHARED_MEM:
-                    with device_guard("cpu"):
-                        self._load_ema_from_shared_memory(task_body)
-                    self.ema_shm_consumed.set()
+                    self.pending_ema_shared_metas = task_body
                 else:
                     raise ValueError(
                         f"[ZCC Worker{self.worker_id}] Unknown task type: {task_type}"

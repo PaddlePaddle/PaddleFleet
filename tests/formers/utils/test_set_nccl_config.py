@@ -15,6 +15,8 @@
 import unittest
 from pathlib import Path
 
+import paddle
+import pytest
 from paddle.distributed import fleet
 
 from paddlefleet.trainer import PdArgumentParser, TrainingArguments
@@ -24,6 +26,18 @@ try:
     from paddle.distributed import create_nccl_config
 except ImportError:
     create_nccl_config = None
+
+
+@pytest.fixture(autouse=True)
+def _pin_gpu_device():
+    # TrainingArguments.__post_init__ probes paddle.device.get_device_
+    # capability(), which raises "The device type Place(cpu) is not expected"
+    # when the default device is CPU. On the single-worker CI run an earlier
+    # module (e.g. test_optimizer.setUpModule) leaves Place(cpu); pin GPU so
+    # this test does not depend on collection order.
+    if paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0:
+        paddle.set_device("gpu")
+
 
 nccl_config = """
 {

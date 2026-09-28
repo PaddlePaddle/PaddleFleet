@@ -1050,6 +1050,14 @@ class TransformerConfig(ModelParallelConfig):
     "dualchunk_allgather": balanced front+rear chunk splitting (default).
     "contiguous_allgather": simple rank-order contiguous slicing.
     "contiguous_a2a".
+    An optional "_overlap"/"_nonoverlap" suffix selects `flashmask_cp_overlap`; it is
+    stripped from this field during post-init.
+    """
+
+    flashmask_cp_overlap: bool = False
+    """Whether context parallel FlashMask attention overlaps the KV
+    communication inside the attention kernel. Normally set through the
+    "_overlap" suffix of `cp_balance_mode`.
     """
 
     linear_cp_mode: str = "chunkwise"
@@ -1234,6 +1242,17 @@ class TransformerConfig(ModelParallelConfig):
     the bias stays at zero, which makes H_pre = sigmoid(~0) = 0.5 and H_res a
     uniform doubly-stochastic matrix: every sub-layer reads and writes an
     averaged mixture of the n residual streams from step 0."""
+
+    mhc_recompute_layer_num: int | None = None
+    """Layers per mHC recompute block, or one whole pipeline chunk when ``None``.
+
+    A block never crosses a pipeline stage and replays in forward order from a
+    hook on its final residual state. Must be positive when set.
+
+    Sizes every block uniformly. To place them by hand, give
+    ``recompute_modules['mhc_block']`` a nested layer list (e.g.
+    ``[[3, 4, 5], [9, 10]]``) and leave this unset; layers outside every block
+    then do no mHC recompute."""
 
     ####################
     # miscellaneous
@@ -1562,6 +1581,12 @@ class TransformerConfig(ModelParallelConfig):
 
     Corresponds to ``linear_attn_config["gate_lower_bound"]``."""
 
+    linear_cp_use_tf32x3_affine_chain: bool = False
+    """KDA only, and only when context parallel is on. Use tf32x3 instead of
+    ieee for the affine-chain dots of fla's CP pre-process / merge kernels,
+    which trades a little accuracy in the cross-rank state fixup for speed.
+    NVIDIA-only; fla falls back to ieee (with a warning) on other backends."""
+
     ####################
     # DSA (DeepSeek Sparse Attention)
     ####################
@@ -1728,6 +1753,13 @@ class TransformerConfig(ModelParallelConfig):
     csa_dense_mode: bool = False
     """If True, skip CSAIndexer for CSA layers (1 < ratio < 128) and attend to all
     compressed positions.
+    """
+
+    cp_compress_p2p: bool = False
+    """If True, the CSA/HCA compressor pools each group on the CP rank owning its
+    start via a one-hop P2P window instead of an all-gather of the whole projected
+    sequence. Only takes effect for non-overlapping (ratio 128) layers under CP;
+    off falls back to the all-gather baseline, bit-for-bit.
     """
 
     indexer_init_from_scratch: bool | None = None
@@ -1948,6 +1980,16 @@ class TransformerConfig(ModelParallelConfig):
     ``paddlefleet.accuracy_target.targets_hf`` only where the two references
     require different arithmetic. Normalized in ``__post_init__``."""
 
+    use_dsv4_accuracy: bool = False
+    """Enable the DSV4 accuracy-compatible replay paths.
+
+    Distinct from ``use_accuracy_compatible``: other alignment targets (for
+    example MinimaxV2.5 and GLM45Air) run with ``use_accuracy_compatible`` set
+    but without this switch, so a DSV4-only numeric path must key off this
+    field. ``__post_init__`` publishes it to the single runtime read point
+    ``paddlefleet.utils.use_dsv4_accuracy_compatible`` and installs the Paddle
+    runtime patches when enabled."""
+
     moe_topk_fusion: bool = False
     """If True, use Triton fused MoE TopK kernel for expert selection."""
 
@@ -2111,6 +2153,25 @@ class TransformerConfig(ModelParallelConfig):
             )
         else:
             setattr(self, key, value)
+            if key == "use_dsv4_accuracy" and value:
+                # Publish as soon as the switch lands on the config, not only in
+                # ``__post_init__``. A checkpoint ``config.json`` carrying
+                # ``"use_dsv4_accuracy": true`` reaches the config through this
+                # attribute copy, which runs at ``AutoConfig.from_pretrained``
+                # time -- i.e. before ``from_pretrained`` converts the weights.
+                # The DSV4 AOA conversion picks the mHC parameter dtype from
+                # ``use_dsv4_accuracy_compatible()``
+                # (``deepseek_v4/modeling.py:544``), so if the switch were still
+                # off here, ``mapping_proj.weight`` would be materialized FP32
+                # while the forward takes the BF16 replay matmul -> operand dtype
+                # mismatch at step 0. Turn-on only; both writers are idempotent.
+                from paddlefleet.accuracy_compatible_patch import (
+                    install_accuracy_compatible_paddle_patches,
+                )
+                from paddlefleet.utils import set_dsv4_accuracy_compatible
+
+                set_dsv4_accuracy_compatible(True)
+                install_accuracy_compatible_paddle_patches()
 
     def get(self, key: str, default=None):
         return getattr(self, key, default)
@@ -2129,6 +2190,27 @@ class TransformerConfig(ModelParallelConfig):
         self.use_accuracy_compatible = normalize_accuracy_target(
             self.use_accuracy_compatible
         )
+        # Publish the DSV4 replay switch to its single runtime read point and
+        # install the Paddle runtime patches, so the slice-shape bookkeeping is
+        # in place before the Stage1 optimizer is built.
+        #
+        # Turn-on only, never reset: config objects are constructed many times
+        # per run (sub-configs, ``text_config``, per-stage pipeline copies), and
+        # those extras carry the ``False`` default. Publishing ``False`` from
+        # here would silently switch the replay off *after*
+        # ``LlmMetaConfig.set_llm_config`` turned it on but *before* the layers
+        # are built, so e.g. the mHC ``mapping_proj`` would be created in FP32
+        # while the forward still took the BF16 replay matmul -- an operand
+        # dtype mismatch at step 0. ``set_llm_config`` is the authoritative
+        # writer for both directions; it runs once, before model construction.
+        if self.use_dsv4_accuracy:
+            from paddlefleet.accuracy_compatible_patch import (
+                install_accuracy_compatible_paddle_patches,
+            )
+            from paddlefleet.utils import set_dsv4_accuracy_compatible
+
+            set_dsv4_accuracy_compatible(True)
+            install_accuracy_compatible_paddle_patches()
         # Normalize the indexer loss coefficient: None (e.g. from a HuggingFace
         # config.json ``"indexer_loss_coeff": null`` or explicit config) means
         # "disabled" and collapses to 0.0, so this config object never exposes
@@ -2295,35 +2377,33 @@ class TransformerConfig(ModelParallelConfig):
                 )
 
         if self.use_erndata and self.num_nextn_predict_layers > 0:
-            # erndata + MTP selects the packed-doc (MCore 8c4df6b07) contract.
-            if self.enable_mtp_magic_send:
-                # Refused by design, not for lack of implementation. erndata
-                # already puts full-length input_ids and cu_seqlens_q into
-                # preproc_output and no backbone layer consumes them (
-                # transformer_layer only re-slices input_ids when it is longer
-                # than the backbone sequence, which never happens for length-L
-                # erndata tensors), so they reach the MTP layer intact without
-                # magic send.
-                #
-                # What the flag would still add is its other half: a second
-                # *trainable* vocab table (`mtp_embed`) on the MTP stage, tied to
-                # the stage-0 embedding logically but physically replicated
-                # whenever stage 0 is a different rank -- exactly the PP>1 case
-                # the flag exists for. That costs V*H in weights, the same in
-                # gradients and 3x in fp32 master+m+v (only the optimizer state
-                # is sharded) to shrink the hidden-state P2P payload from (K+1)x
-                # to 1x, traffic overlap_p2p_comm already hides. Keep the default
-                # batch-axis carrier, which already supports any PP depth here.
+            # erndata + MTP selects the packed-doc contract. With magic send the
+            # backbone carries only its 1x hidden state while full input ids and
+            # cu_seqlens_q travel as explicit pipeline metadata; each MTP stage
+            # re-embeds and rolls locally. The generic magic-send constraints
+            # above (notably PP > 1) still apply.
+            if self.enable_mtp_magic_send and not self.variable_seq_lengths:
                 raise ValueError(
-                    "use_erndata=True with MTP does not need (and does not "
-                    "support) enable_mtp_magic_send=True. erndata already "
-                    "delivers full-length input_ids and cu_seqlens_q to the MTP "
-                    "stage through the pipeline dict, so magic send would only "
-                    "add a replicated trainable vocab table on that stage in "
-                    "order to shrink a P2P payload that overlap_p2p_comm "
-                    "already hides. Set enable_mtp_magic_send=False; the "
-                    "default batch-axis MTP carrier works at any "
-                    "pipeline_model_parallel_size."
+                    "use_erndata=True with enable_mtp_magic_send=True requires "
+                    "variable_seq_lengths=True because packed cu_seqlens_q metadata "
+                    "can have a different shape in each microbatch."
+                )
+            if self.enable_mtp_magic_send and self.hidden_dropout_prob != 0.0:
+                raise ValueError(
+                    "use_erndata=True with enable_mtp_magic_send=True requires "
+                    "hidden_dropout_prob=0.0: the MTP stage cannot reproduce the "
+                    "stage-0 embedding dropout mask exactly across PP ranks."
+                )
+            if (
+                self.enable_mtp_magic_send
+                and getattr(self, "position_embedding_type", "rope")
+                == "learned_absolute"
+            ):
+                raise ValueError(
+                    "use_erndata=True with enable_mtp_magic_send=True does not "
+                    "support position_embedding_type='learned_absolute': the MTP "
+                    "stage owns only the token mtp_embed table and cannot reproduce "
+                    "GPTEmbedding's learned position embeddings. Use rope or none."
                 )
             if self.experimental_dataflow:
                 # experimental_dataflow specifically produces
@@ -3463,6 +3543,16 @@ class TransformerConfig(ModelParallelConfig):
                 )
             _warnings.warn(f"[MULTIMAX-CONFIG] multimax_modules={_multimax}")
 
+        # Split the optional overlap suffix off the layout name, so that every
+        # cp_balance_mode comparison keeps matching the plain layout. Configs
+        # written before the suffix existed carry no suffix and stay
+        # non-overlap.
+        for _suffix, _overlap in (("_overlap", True), ("_nonoverlap", False)):
+            if self.cp_balance_mode.endswith(_suffix):
+                self.cp_balance_mode = self.cp_balance_mode[: -len(_suffix)]
+                self.flashmask_cp_overlap = _overlap
+                break
+
         valid_cp_balance_modes = {
             "dualchunk_allgather",
             "contiguous_allgather",
@@ -3686,3 +3776,11 @@ class TransformerConfig(ModelParallelConfig):
                 f"{self.flash_attn_fa3_backend!r}"
             )
         set_fa3_backend(self.flash_attn_fa3_backend)
+        if self.flashmask_cp_overlap and self.cp_balance_mode not in {
+            "dualchunk_allgather",
+            "contiguous_allgather",
+        }:
+            raise ValueError(
+                "Overlapped context parallel attention only supports "
+                f"cp_balance_mode='dualchunk_allgather' and 'contiguous_allgather', got {self.cp_balance_mode!r}."
+            )

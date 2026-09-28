@@ -57,6 +57,7 @@ from paddlefleet.transformer.dw_overlap import (
 from paddlefleet.transformer.paddle_norm import WrappedPaddleNorm
 from paddlefleet.transformer.transformer_config import dw_overlap_enabled
 from paddlefleet.transformer.utils import profile
+from paddlefleet.utils import use_dsv4_accuracy_compatible
 
 from .fp8_utils import fused_stack_quant_without_cache
 from .fused_a2a import configure_buffer
@@ -156,8 +157,12 @@ class ThreePathCloneAlignMG(PyLayer):
 
     @staticmethod
     def backward(ctx, g_router, g_dispatcher, g_shared):
-        partial = g_dispatcher + g_shared
-        out = partial + g_router
+        if use_dsv4_accuracy_compatible():
+            partial = g_dispatcher + g_router
+            out = partial + g_shared
+        else:
+            partial = g_dispatcher + g_shared
+            out = partial + g_router
         return out
 
 
@@ -326,7 +331,25 @@ class MoELayer(nn.Layer):
             "ringmoe",
         )
         self.moe_allgather_gate_overlap = config.moe_allgather_gate_overlap
-        if self.use_accuracy_compatible:
+        if self.use_accuracy_compatible and not use_dsv4_accuracy_compatible():
+            # The rewrite swaps the communication implementation only: the
+            # layout flags above stay keyed to the *configured* dispatcher so
+            # expert construction and the checkpoint shard declarations keep
+            # agreeing. That is consistent only for dispatchers using the plain
+            # per-device expert layout, so reject the intermediate-EP ones
+            # instead of pairing all-to-all communication with I // EP experts.
+            if self.use_intermediate_ep_sharding:
+                raise ValueError(
+                    "use_accuracy_compatible=True forces the all-to-all token "
+                    "dispatcher, which is incompatible with "
+                    "moe_token_dispatcher_type="
+                    f"'{self.moe_token_dispatcher_type}': 'allgather' and "
+                    "'ringmoe' shard every expert along its intermediate "
+                    "dimension, so the experts would be built for a layout "
+                    "the all-to-all path never produces. Please set "
+                    "moe_token_dispatcher_type='alltoall' (or 'deepep') in "
+                    "the configuration yaml."
+                )
             self.moe_token_dispatcher_type = "alltoall"
         self.use_hybrid_ep_backend = False
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
@@ -750,6 +773,19 @@ class MoELayer(nn.Layer):
                     fp8_dispatch=self.fp8_dispatch,
                     use_ue8m0=self.use_ue8m0,
                 )
+                if self.use_ring_moe and hasattr(
+                    getattr(self, "grouped_gemm_experts", None),
+                    "set_calls_per_micro_batch",
+                ):
+                    # The ring runs the expert once per round, so the expert's
+                    # fp8 weight-release counter (which counts forward() calls
+                    # against accumulate_steps) would fire N times too early and
+                    # drop the fp8 weights mid-step. No-op on the bf16 path.
+                    # Only SonicMoEExpert tracks this, and ringmoe already
+                    # requires using_sonic_moe, so the guard is defensive.
+                    self.grouped_gemm_experts.set_calls_per_micro_batch(
+                        self.token_dispatcher.N
+                    )
             else:
                 raise NotImplementedError(
                     f"Unsupported moe_token_dispatcher_type {self.moe_token_dispatcher_type}"
@@ -983,14 +1019,19 @@ class MoELayer(nn.Layer):
             per_token_scale = getattr(
                 self.token_dispatcher, "global_input_probs", None
             )
-            if per_token_scale is None:
+            # All-to-all may dispatch probabilities for expert-side scaling.
+            # DeepEP retains them in its communication manager and applies
+            # them exactly once during the aligned unpermute/combine path.
+            if per_token_scale is None and not use_dsv4_accuracy_compatible():
                 raise RuntimeError(
                     "FLAGS_use_accuracy_compatible_kernel requires dispatched "
                     "router probabilities from the token dispatcher."
                 )
-            else:
+            if per_token_scale is not None:
                 scale_chunks = paddle.split(
-                    per_token_scale, num_or_sections=tokens_per_expert, axis=0
+                    per_token_scale,
+                    num_or_sections=tokens_per_expert,
+                    axis=0,
                 )
         for i, chunk in enumerate(chunks):
             if tokens_per_expert[i] == 0:
@@ -1000,6 +1041,8 @@ class MoELayer(nn.Layer):
             expert = self.experts[current_expert_idx]
             if (
                 getattr(self, "use_accuracy_compatible", False)
+                and getattr(self, "moe_token_dispatcher_type", "alltoall")
+                == "alltoall"
                 and 0 < int(chunk.shape[0]) < 17
             ):
                 num_rows = int(chunk.shape[0])
@@ -1130,20 +1173,46 @@ class MoELayer(nn.Layer):
         return self.unpermute(expert_outs)
 
     def _maybe_pre_allgather_overlap(self, hidden_states: paddle.Tensor):
-        """Pre-issue the flat EP token AllGather on the comm stream, before the gate.
+        """Pre-issue round 0's token AllGather on the comm stream, before the gate.
 
-        Needs ``moe_allgather_gate_overlap``, EP>1 and the 'allgather'
-        dispatcher, whose ``dispatch_preprocess`` is what consumes the handle.
-        'ringmoe' deliberately does not prefetch: the only thing it could hide
-        behind the gate is round 0's intra-node AllGather, and issuing that on
-        the comm stream ahead of time cost more in contention with the
-        inter-node shift than the gate was worth. Only the tokens can be
-        prefetched; the routing idx/weight AllGathers need the gate output.
+        Two branches, by dispatcher:
+          * 'allgather': runs only with ``moe_allgather_gate_overlap`` and EP>1;
+            pre-issues the flat EP token gather, consumed by
+            ``dispatch_preprocess``.
+          * 'ringmoe': runs for EVERY forward (EP>1), NOT gated on
+            ``moe_allgather_gate_overlap`` -- the prefetched intra gather is the
+            ring's single, always-on token-gather path, so ``pre_gate_token_ag``
+            must issue round 0's gather here for both fp8 and bf16.
+        Only the tokens can be prefetched; the routing idx/weight AllGathers need
+        the gate output.
 
         For latent MoE, ``fc1_latent_proj`` is hoisted here so the AllGather runs
         in latent space; ``_project_to_latent`` reuses it via
         ``self._latent_hidden``.
         """
+        if (
+            self.expert_model_parallel_size > 1
+            and self.moe_token_dispatcher_type == "ringmoe"
+        ):
+            # RingMoE always prefetches round 0's intra token AllGather onto its
+            # own comm stream ahead of the gate: it is the ring's only
+            # token-gather path (ring_forward has no inline fallback), so this is
+            # unconditional for ringmoe rather than gated on
+            # moe_allgather_gate_overlap. Mirrors the allgather branch below for
+            # the latent projection; the handle is consumed as round 0's prefetch
+            # in ring_forward.
+            if self.use_latent_moe:
+                self._latent_hidden = deferrable_linear_bare(
+                    self.config,
+                    "moe_latent_proj",
+                    self.fc1_latent_proj,
+                    hidden_states,
+                )
+                self.token_dispatcher.pre_gate_token_ag(self._latent_hidden)
+            else:
+                self._latent_hidden = None
+                self.token_dispatcher.pre_gate_token_ag(hidden_states)
+            return
         if not (
             self.expert_model_parallel_size > 1
             and self.moe_allgather_gate_overlap
@@ -1554,7 +1623,7 @@ class MoELayer(nn.Layer):
         # One scope for the whole ring: it interleaves the rounds' collectives
         # with their GEMMs, so there is no point where dispatch ends and combine
         # begins. Compare against dispatch + fusion_mlp + combine on the other
-        # dispatchers. ``fusion_mlp`` is timed inside (see _node_slice), so
+        # dispatchers. ``fusion_mlp`` is timed inside ring_forward, so
         # ringmoe - fusion_mlp is the ring's exposed communication.
         with profile("ringmoe"):
             hidden_states = self.token_dispatcher.ring_forward(
@@ -1839,6 +1908,18 @@ class MoELayer(nn.Layer):
             if residual is not None:
                 residual = GatherOp.apply(residual)
 
+        sequence_first_moe = (
+            use_dsv4_accuracy_compatible()
+            and self.use_accuracy_compatible
+            and hidden_states.ndim == 3
+        )
+        if sequence_first_moe:
+            hidden_states = hidden_states.transpose([1, 0, 2]).contiguous()
+            if input_ids is not None and input_ids.ndim == 2:
+                input_ids = input_ids.transpose([1, 0]).contiguous()
+            if residual is not None and residual.ndim == 3:
+                residual = residual.transpose([1, 0, 2]).contiguous()
+
         orig_shape = hidden_states.shape
         residuals = hidden_states
 
@@ -2056,6 +2137,8 @@ class MoELayer(nn.Layer):
 
         _log_moe_md5(output, "moe_final_output", layer_idx)
 
+        if sequence_first_moe:
+            output = output.transpose([1, 0, 2]).contiguous()
         if self.expert_model_parallel_size <= 1 and self.sequence_parallel:
             output = ScatterOp.apply(output)
         return output, None  # None is bias

@@ -41,12 +41,17 @@ from paddlefleet.models.common.embeddings.rope_utils import (
 )
 from paddlefleet.transformer import FleetLayer
 from paddlefleet.transformer.dw_overlap import deferrable_linear
+from paddlefleet.utils import use_dsv4_accuracy_compatible
 
 _ACCURACY_COMPATIBLE_KERNEL: bool = (
     os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
 )
 from paddlefleet.context_parallel_utils import ContextParallelGatherOp
 from paddlefleet.parallel_state import get_context_parallel_world_size
+from paddlefleet.train_infer_consistent_ops.inspect_util import (
+    get_current_layer,
+    inspect_tensor,
+)
 from paddlefleet.transformer.dsa_attention import (
     DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
@@ -65,6 +70,7 @@ if TYPE_CHECKING:
 from paddlefleet.fp8.qat import fp8_simulate_qat
 from paddlefleet.transformer.cp_utils import (
     all_gather_cp,
+    append_next_window,
     build_causal_mask_cp,
     get_compress_topk_idxs_cp,
     get_window_topk_idxs_cp,
@@ -291,6 +297,27 @@ def _build_valid_range_from_doc_bounds(
     return paddle.stack([range_start, range_end], axis=-1).cast("int32")
 
 
+def _reverse_window_and_topk(
+    origin_topk_idxs: Tensor, top_k: Tensor | None, window: Tensor
+) -> Tensor:
+    """Re-lay the slots as ``[compress | window]``, the order inference uses.
+
+    This function is used for train-inference consistency comparison only; it
+    is not used during training.
+
+    Training lays the slots out as ``[window, compress]``; inference
+    concatenates them in ``[compress, window]`` order. Training is aligned to
+    inference so the two ``indices`` line up slot by slot, which is what
+    comparing them needs. This avoids the train-infer mismatch that the
+    different accumulation order would cause when computing ``attn_scores``
+    -- attention softmaxes over a set, so the reorder only moves the
+    accumulation order (the last bits), not the value.
+    """
+    if top_k is not None:
+        return paddle.concat([top_k, window], axis=-1)
+    return origin_topk_idxs
+
+
 class LinearBF16FP32Func(paddle.autograd.PyLayer):
     """BF16 activation x BF16 weight -> FP32 output autograd function.
 
@@ -463,6 +490,8 @@ class CSADocMaskMetadata:
     # window/compressed layout does not reuse a stale entry. Layer-independent,
     # so the compaction sort runs once per batch and all HCA layers reuse it.
     _compacted_attn_topk: dict | None = None
+    # CP pooling plan; layer-independent like the above, so one build per batch.
+    _cp_compress_plan: dict | None = None
 
     @classmethod
     def build(
@@ -694,6 +723,50 @@ class CSADocMaskMetadata:
             cached = _csa_compact_topk_idxs(topk_idxs)
             self._compacted_attn_topk[key] = cached
         return cached
+
+    def cp_compress_plan(self, cp_size: int, cp_rank: int):
+        """Return this rank's cutoff columns and the rank-major -> dense perm.
+
+        A group pools ``ratio`` consecutive kept positions of one document, so
+        the rank holding a group's start can pool it from its own rows plus at
+        most ``ratio - 1`` rows of the next rank.
+        """
+        if self._cp_compress_plan is None:
+            self._cp_compress_plan = {}
+        plan = self._cp_compress_plan.get((cp_size, cp_rank))
+        if plan is None:
+            ratio = self.ratio
+            sq_local = self.seqlen // cp_size
+            cutoff = self.cutoff_gather_indices
+            starts = cutoff.reshape([-1, ratio])[:, 0]
+            # starts ascend, so rank r owns groups [bounds[r], bounds[r + 1]),
+            # never more than sq_local // ratio of them
+            bounds = paddle.searchsorted(
+                starts,
+                paddle.arange(cp_size + 1, dtype=starts.dtype) * sq_local,
+            )
+            rows = bounds[cp_rank] * ratio + paddle.arange(
+                sq_local, dtype=starts.dtype
+            )
+            # rebase onto [local | next window]; slots past the run read row 0
+            # and are dropped by perm, which names only real groups
+            local = paddle.where(
+                rows < bounds[cp_rank + 1] * ratio,
+                paddle.gather(
+                    cutoff, paddle.clip(rows, max=cutoff.shape[0] - 1)
+                )
+                - cp_rank * sq_local,
+                paddle.zeros_like(rows),
+            )
+            owner = starts // sq_local
+            perm = (
+                owner * (sq_local // ratio)
+                + paddle.arange(starts.shape[0], dtype=starts.dtype)
+                - paddle.gather(bounds, owner)
+            )
+            plan = (local, perm)
+            self._cp_compress_plan[(cp_size, cp_rank)] = plan
+        return plan
 
     def get_compressed_causal_mask(self) -> Tensor:
         """Return ``[batch_size, seqlen, n_compressed]`` float32 causal mask.
@@ -1606,7 +1679,8 @@ class Compressor(nn.Layer):
                 else 0.02
             ),
         )
-        self._cast_to_low_precision = False
+        if not use_dsv4_accuracy_compatible():
+            self._cast_to_low_precision = False
 
         self.norm = build_spec_layer(
             sublayers_spec.norm,
@@ -1620,7 +1694,12 @@ class Compressor(nn.Layer):
         self.swa_high_precision_norm = getattr(
             config, "swa_high_precision_norm", False
         )
-        self.high_precision_rope = config.high_precision_rope
+        self.high_precision_rope = getattr(config, "high_precision_rope", False)
+        # When True, CP compression pools each group on the rank owning its
+        # start via a one-hop window (append_next_window) instead of gathering
+        # the whole projected sequence. False keeps the all-gather baseline,
+        # bit-for-bit.
+        self.cp_compress_p2p = getattr(config, "cp_compress_p2p", False)
 
     def muon_slice_specs(self, muon_configs):
         """Muon orthogonal-slice specs for the compressor (overlap/ratio-4 only).
@@ -1734,11 +1813,21 @@ class Compressor(nn.Layer):
 
         cp_size = getattr(cp_group, "nranks", 1) if cp_group is not None else 1
         cp_rank = cp_group.rank if cp_size > 1 else 0
+        # Without the overlap transform a group pools ``ratio`` consecutive kept
+        # positions, so the rank owning a group's start needs only its own rows
+        # plus a one-hop window instead of the whole projected sequence. Gated
+        # by config; off falls back to the all-gather baseline below.
+        pool_by_owner = (
+            self.cp_compress_p2p
+            and cp_size > 1
+            and not self.overlap
+            and docmask_meta is not None
+        )
 
-        # CP: gather projected KV globally before pooling (Miles pattern).
-        # After all-gather, kv/score are global and sq is updated to sq_global.
-        # The rest of the compression logic is shared with the non-CP path.
-        if cp_size > 1:
+        if pool_by_owner:
+            kv = append_next_window(kv, ratio - 1, cp_group)
+            score = append_next_window(score, ratio - 1, cp_group)
+        elif cp_size > 1:
             kv = all_gather_cp(kv, dim=1, group=cp_group)
             score = all_gather_cp(score, dim=1, group=cp_group)
             b, sq, _ = kv.shape
@@ -1746,34 +1835,43 @@ class Compressor(nn.Layer):
         # Shared compression logic for both CP and non-CP paths.
         if docmask_meta is not None:
             # per-document cutoff, pack contiguously without padding
-            n_compressed = sq // ratio
+            n_compressed = (
+                docmask_meta.n_compressed if pool_by_owner else sq // ratio
+            )
             actual_n_compressed = docmask_meta.actual_n_compressed
             cutoff_gather_indices = docmask_meta.cutoff_gather_indices
 
-            # Without the overlap transform a compressed group only reads its own
-            # ``ratio`` cutoff tokens, so the groups can be split across CP ranks.
-            n_shard = (
-                (actual_n_compressed + cp_size - 1) // cp_size
-                if cp_size > 1 and not self.overlap
-                else 0
-            )
-            if n_shard:
-                start = cp_rank * n_shard * ratio
-                cutoff_gather_indices = cutoff_gather_indices[
-                    start : start + n_shard * ratio
-                ]
-                pad_len = n_shard * ratio - cutoff_gather_indices.shape[0]
-                if pad_len > 0:
-                    # Slots past the last real group; dropped after the gather.
-                    cutoff_gather_indices = paddle.concat(
-                        [
-                            cutoff_gather_indices,
-                            paddle.zeros(
-                                [pad_len], dtype=cutoff_gather_indices.dtype
-                            ),
-                        ]
-                    )
-                actual_n_compressed = n_shard
+            if pool_by_owner:
+                cutoff_gather_indices, perm = docmask_meta.cp_compress_plan(
+                    cp_size, cp_rank
+                )
+                actual_n_compressed = n_compressed // cp_size
+            else:
+                # Baseline: split the groups across CP ranks by index, pool each
+                # rank's shard, then all-gather the pooled results back.
+                n_shard = (
+                    (actual_n_compressed + cp_size - 1) // cp_size
+                    if cp_size > 1 and not self.overlap
+                    else 0
+                )
+                if n_shard:
+                    start = cp_rank * n_shard * ratio
+                    cutoff_gather_indices = cutoff_gather_indices[
+                        start : start + n_shard * ratio
+                    ]
+                    pad_len = n_shard * ratio - cutoff_gather_indices.shape[0]
+                    if pad_len > 0:
+                        # Slots past the last real group; dropped after gather.
+                        cutoff_gather_indices = paddle.concat(
+                            [
+                                cutoff_gather_indices,
+                                paddle.zeros(
+                                    [pad_len],
+                                    dtype=cutoff_gather_indices.dtype,
+                                ),
+                            ]
+                        )
+                    actual_n_compressed = n_shard
 
             # Pack only valid cutoff data contiguously (no padding)
             kv = paddle.gather(kv, cutoff_gather_indices, axis=1)
@@ -1811,7 +1909,14 @@ class Compressor(nn.Layer):
             else:
                 kv = self.norm(kv.cast(x.dtype))
 
-            if n_shard:
+            if pool_by_owner:
+                # Undo the rank-major order; ``perm`` only names real groups, so
+                # the slots nobody owns drop out here.
+                kv = paddle.gather(
+                    all_gather_cp(kv, dim=1, group=cp_group), perm, axis=1
+                )
+                actual_n_compressed = docmask_meta.actual_n_compressed
+            elif n_shard:
                 # Shards concatenate into the dense group order; the tail beyond
                 # the last real group is padding and is re-added below.
                 actual_n_compressed = docmask_meta.actual_n_compressed
@@ -2406,7 +2511,8 @@ class CompressedSparseAttention(FleetLayer):
             dtype="float32",
             default_initializer=nn.initializer.Constant(0.0),
         )
-        self._cast_to_low_precision = False
+        if not use_dsv4_accuracy_compatible():
+            self._cast_to_low_precision = False
 
         # Conditionally build Compressor (ratio > 1)
         if self.compress_ratio > 1:
@@ -2504,6 +2610,8 @@ class CompressedSparseAttention(FleetLayer):
         indexer_backend = getattr(
             self.config, "csa_indexer_backend", "tilelang"
         )
+        if use_dsv4_accuracy_compatible():
+            indexer_backend = "unfused"
         # The indexer loss path is only active during the grad-enabled forward.
         # Full recompute runs the first forward under no_grad; that pass should
         # only materialize main-attention indices. The backend branch remains
@@ -2977,6 +3085,11 @@ class CompressedSparseAttention(FleetLayer):
                 sq=sq,
                 is_first_fwd=not framework._dygraph_tracer()._has_grad,
             )
+            kv_full = inspect_tensor(
+                "attn_compressor_kv_full",
+                get_current_layer(),
+                kv_full,
+            )
             # Read both back off kv_full rather than recomputing them: the
             # compressor zero-pads its output up to `seqlen // ratio` (see
             # Compressor.forward), so the number of compressed slots is NOT
@@ -3006,6 +3119,7 @@ class CompressedSparseAttention(FleetLayer):
         tilelang_indexer_loss_state = None
         indexer_topk = 0
         lse_indexer = None
+        compress_topk_idxs = None
 
         if (
             self.compress_ratio > 1
@@ -3056,6 +3170,15 @@ class CompressedSparseAttention(FleetLayer):
             topk_idxs = paddle.concat(topk_idxs, axis=-1)
         else:
             topk_idxs = window_idxs
+
+        topk_idxs = inspect_tensor(
+            "attn_compressor_topk_idxs",
+            get_current_layer(),
+            topk_idxs,
+            pre_save_func=lambda t: _reverse_window_and_topk(
+                t, compress_topk_idxs, window_idxs
+            ),
+        )
 
         # Step 5: Sparse attention
         output = self.compressed_sparse_attn(
@@ -3381,6 +3504,8 @@ class CompressedSparseAttention(FleetLayer):
                 indexer_backend = getattr(
                     self.config, "csa_indexer_backend", "tilelang"
                 )
+                if use_dsv4_accuracy_compatible():
+                    indexer_backend = "unfused"
                 use_tilelang_indexer = indexer_backend == "tilelang"
                 use_cudnn_indexer = indexer_backend == "cudnn"
                 # coeff == 0 disables the indexer-loss path entirely (matching
@@ -3690,6 +3815,8 @@ class CompressedSparseAttention(FleetLayer):
         sparse_attn_backend = getattr(
             self.config, "csa_sparse_attn_backend", "tilelang"
         )
+        if use_dsv4_accuracy_compatible():
+            sparse_attn_backend = "unfused"
         # Compact once per batch via the shared docmask-metadata cache -- but
         # ONLY for layers with no indexer (``self.indexer is None``: HCA /
         # attend-to-all). Their ``topk_idxs = concat([window, compressed])`` is

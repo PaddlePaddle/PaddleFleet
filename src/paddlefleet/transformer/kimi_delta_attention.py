@@ -749,6 +749,9 @@ class KimiDeltaAttention(FleetLayer):
                 self.pg_collection.cp,
                 conv1d_kernel_size=self.conv_kernel_dim,
                 cu_seqlens_cpu=cu_seqlens_cpu,
+                use_tf32x3_affine_chain=(
+                    self.config.linear_cp_use_tf32x3_affine_chain
+                ),
             )
             cu_seqlens = cu_seqlens_cpu = None
         # Variable length is expressed as one packed sequence, which is what the

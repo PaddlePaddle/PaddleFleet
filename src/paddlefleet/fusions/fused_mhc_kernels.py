@@ -1762,6 +1762,16 @@ else:
     class FusedHPostBDA(paddle.autograd.PyLayer):
         """Fused: output = H_res @ orig_res + H_post * (x [+ bias]) (cuTile).
 
+        Takes the residual **flat** as ``[s, b, n*C]`` and reshapes it here, so
+        that what ``save_for_backward`` keeps is the caller's own tensor rather
+        than a view of it. A ``reshape`` view is a separate ``DenseTensor``
+        holding its own reference to the same ``phi::Allocation``, so keeping one
+        alive makes the caller's ``_clear_data()`` free nothing -- which is how
+        the block-boundary BDA used to pin a whole ``[.., n*C]`` residual state.
+        The reshape is metadata only, so redoing it in backward costs nothing.
+        ``native_h_post_bda`` takes the same flat argument for symmetry but makes
+        no such promise: its ops save the internal view.
+
         See ``FusedSinkhornKnopp`` for why the ``stop_gradient`` flags are
         recorded in forward and honored in backward.
         """
@@ -1777,8 +1787,12 @@ else:
             fuse_cast: bool = False,
         ):
             """cuTile fused h_post_bda forward."""
+            n = h_res.shape[-1]
+            residual_4d = original_residual.reshape(
+                [*original_residual.shape[:-1], n, -1]
+            )
             output = _cutile_h_post_bda_fwd(
-                h_res, original_residual, h_post, x, bias, fuse_cast
+                h_res, residual_4d, h_post, x, bias, fuse_cast
             )
             if bias is not None:
                 ctx.save_for_backward(h_res, original_residual, h_post, x, bias)
@@ -1786,6 +1800,7 @@ else:
             else:
                 ctx.save_for_backward(h_res, original_residual, h_post, x)
                 ctx.has_bias = False
+            ctx.n = n
             ctx.fuse_cast = fuse_cast
             ctx.h_res_stop_gradient = h_res.stop_gradient
             ctx.original_residual_stop_gradient = (
@@ -1803,19 +1818,23 @@ else:
             """cuTile fused h_post_bda backward."""
             if ctx.has_bias:
                 h_res, orig_res, h_post, x, bias = ctx.saved_tensor()
-                g_hr, g_res, g_hp, g_x, g_bias = _cutile_h_post_bda_bwd(
-                    grad_output, h_res, orig_res, h_post, x, bias, ctx.fuse_cast
-                )
             else:
                 h_res, orig_res, h_post, x = ctx.saved_tensor()
-                g_hr, g_res, g_hp, g_x, _ = _cutile_h_post_bda_bwd(
-                    grad_output, h_res, orig_res, h_post, x, None, ctx.fuse_cast
-                )
+                bias = None
+            flat_shape = orig_res.shape
+            orig_res_4d = orig_res.reshape([*flat_shape[:-1], ctx.n, -1])
+            g_hr, g_res, g_hp, g_x, g_bias = _cutile_h_post_bda_bwd(
+                grad_output, h_res, orig_res_4d, h_post, x, bias, ctx.fuse_cast
+            )
+            if not ctx.has_bias:
                 g_bias = None
             if ctx.h_res_stop_gradient:
                 g_hr = None
             if ctx.original_residual_stop_gradient:
                 g_res = None
+            else:
+                # Match the flat input this node was handed.
+                g_res = g_res.reshape(flat_shape)
             if ctx.h_post_stop_gradient:
                 g_hp = None
             if ctx.x_stop_gradient:
@@ -1834,6 +1853,11 @@ else:
         bites in practice: it is a frozen backbone parameter of the mHC block
         under ``train_indexer_only``, which used to abort backward with
         ``... should return None at 1 position``.
+
+        ``save_for_backward`` keeps the original ``x`` and recreates the reshape
+        in backward. A saved reshape alias owns a separate ``DenseTensor``, which
+        keeps the residual buffer alive against ``_clear_data()``; the original
+        tensor follows the clear, as block recompute requires.
         """
 
         @staticmethod
@@ -1847,9 +1871,10 @@ else:
             """cuTile fused proj_rms forward."""
             original_shape = x.shape
             K = original_shape[-1]
-            x_2d = x.reshape([-1, K])
-            proj, norm, r = _cutile_proj_rms_fwd(x_2d, weight, eps, fuse_cast)
-            ctx.save_for_backward(x_2d, weight, norm)
+            proj, norm, r = _cutile_proj_rms_fwd(
+                x.reshape([-1, K]), weight, eps, fuse_cast
+            )
+            ctx.save_for_backward(x, weight, norm)
             ctx.eps = eps
             ctx.fuse_cast = fuse_cast
             ctx.original_shape = original_shape
@@ -1862,8 +1887,9 @@ else:
         @staticmethod
         def backward(ctx, grad_proj, grad_r):
             """cuTile fused proj_rms backward."""
-            x_2d, weight, norm = ctx.saved_tensor()
+            x, weight, norm = ctx.saved_tensor()
             original_shape = ctx.original_shape
+            x_2d = x.reshape([-1, original_shape[-1]])
             grad_proj_2d = grad_proj.reshape([-1, grad_proj.shape[-1]])
             grad_r_2d = grad_r.reshape([-1, 1])
             grad_x, grad_weight = _cutile_proj_rms_bwd(
@@ -2013,7 +2039,10 @@ else:
 
         Args:
             h_res: [s, b, n, n] residual mixing matrix
-            original_residual: [s, b, n, C] n-stream residual
+            original_residual: [s, b, n*C] n-stream residual, **flat**. Passed
+                un-reshaped so that :class:`FusedHPostBDA` saves the caller's own
+                tensor: a ``[s, b, n, C]`` view of it would keep the buffer alive
+                against the caller's ``_clear_data()``.
             h_post: [s, b, n] expansion weights
             x: [s, b, C] layer output
             bias: [C] or None
@@ -2031,21 +2060,22 @@ else:
         assert h_res.ndim == 4 and h_res.shape[-1] == h_res.shape[-2], (
             f"fused_h_post_bda: h_res must be 4D [s,b,n,n], got shape {list(h_res.shape)}"
         )
-        assert original_residual.ndim == 4, (
-            f"fused_h_post_bda: original_residual must be 4D [s,b,n,C], got shape {list(original_residual.shape)}"
+        assert original_residual.ndim == 3, (
+            f"fused_h_post_bda: original_residual must be 3D [s,b,n*C], got shape {list(original_residual.shape)}"
         )
         n = h_res.shape[-1]
-        assert original_residual.shape[2] == n, (
-            f"fused_h_post_bda: original_residual dim2={original_residual.shape[2]} != n={n}"
+        assert original_residual.shape[-1] % n == 0, (
+            f"fused_h_post_bda: original_residual last dim {original_residual.shape[-1]} "
+            f"is not divisible by n={n}"
         )
+        C = original_residual.shape[-1] // n
         assert h_post.ndim == 3 and h_post.shape[-1] == n, (
             f"fused_h_post_bda: h_post must be 3D [s,b,n], got shape {list(h_post.shape)}"
         )
-        assert x.ndim == 3 and x.shape[-1] == original_residual.shape[-1], (
-            f"fused_h_post_bda: x must be 3D [s,b,C] with C={original_residual.shape[-1]}, got shape {list(x.shape)}"
+        assert x.ndim == 3 and x.shape[-1] == C, (
+            f"fused_h_post_bda: x must be 3D [s,b,C] with C={C}, got shape {list(x.shape)}"
         )
         s, b = original_residual.shape[:2]
-        C = original_residual.shape[-1]
         assert s * b <= _INT32_MAX, (
             f"fused_h_post_bda: s*b={s * b} exceeds int32 max ({_INT32_MAX})"
         )

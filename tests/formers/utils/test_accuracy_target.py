@@ -28,6 +28,9 @@ import dataclasses
 import types
 import unittest
 
+import paddle
+import pytest
+
 from paddlefleet.cli.hparams.finetuning_args import FinetuningArguments
 from paddlefleet.transformers.configuration_utils import LlmMetaConfig
 from paddlefleet.utils.accuracy_target import (
@@ -36,6 +39,16 @@ from paddlefleet.utils.accuracy_target import (
     normalize_accuracy_target,
     targets_hf,
 )
+
+
+@pytest.fixture(autouse=True)
+def _pin_gpu_device():
+    # FinetuningArguments construction probes paddle.device.get_device_
+    # capability(), which raises "The device type Place(cpu) is not expected"
+    # when the default device is CPU. Pin GPU so this test does not depend on
+    # an earlier test on the same pytest-xdist worker having set the device.
+    if paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0:
+        paddle.set_device("gpu")
 
 
 class TestNormalizeAccuracyTarget(unittest.TestCase):

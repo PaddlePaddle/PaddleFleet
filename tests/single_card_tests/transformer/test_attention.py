@@ -14,9 +14,12 @@
 
 import unittest
 
+import numpy as np
 import paddle
 
 from paddlefleet.transformer.attention import (
+    CrossAttention,
+    CrossAttentionSublayersSpec,
     SelfAttention,
     SelfAttentionSublayersSpec,
 )
@@ -479,6 +482,336 @@ class TestMLAUseVarlenSelfAttention(TestMLASelfAttention):
     def setUp(self):
         super().setUp()
         self.config.flashmask_use_varlen = True
+
+
+def _build_attention_config(**overrides):
+    """Build a fully-populated TransformerConfig for attention construction.
+
+    Mirrors the attribute set the existing ``TestSelfAttention.setUp`` relies
+    on so the added behavior tests exercise the real constructor. ``overrides``
+    are applied last, so callers can flip a single knob (recompute flags, kv
+    head count, gated_attention, ...) and observe the resulting behavior.
+    """
+    num_hidden_layers = overrides.pop("num_hidden_layers", 1)
+    num_attention_heads = overrides.pop("num_attention_heads", 4)
+    hidden_size = overrides.pop("hidden_size", 128)
+    config = TransformerConfig(
+        num_hidden_layers=num_hidden_layers,
+        hidden_size=hidden_size,
+        num_attention_heads=num_attention_heads,
+    )
+    config.num_key_value_heads = num_attention_heads
+    config.head_dim = hidden_size // num_attention_heads
+    config.softmax_scale = None
+    config.use_bias = True
+    config.no_rope_freq = None
+    config.recompute_granularity = None
+    config.fused_single_qkv_rope = False
+    config.rotary_interleaved = False
+    config.multi_latent_attention = False
+    config.init_method = init_method_normal(0.02)
+    config.output_layer_init_method = scaled_init_method_normal(0.02, 1, 2.0)
+    config.rms_norm_eps = 1e-5
+    config.context_parallel_size = 1
+    config.apply_query_key_layer_scaling = False
+    config.sliding_window = None
+    config.window_attn_skip_freq = None
+    config.fp16 = False
+    config.bf16 = False
+    config.masked_softmax_fusion = False
+    config.attention_softmax_in_fp32 = True
+    config.attention_dropout = 0.0
+    config.softmax_type = "vanilla"
+    for key, value in overrides.items():
+        setattr(config, key, value)
+    return config
+
+
+class TestSelfAttentionRecomputeConfig(unittest.TestCase):
+    """SelfAttention constructor consumes recompute_* config into flags.
+
+    Each test flips a single recompute knob and observes the resulting
+    attribute, so a constructor that ignored the config (or wired the wrong
+    module) would be caught rather than passing on a bare ``is True`` check.
+    """
+
+    def _build(self, **overrides):
+        config = _build_attention_config(**overrides)
+        return SelfAttention(
+            config,
+            SelfAttentionSublayersSpec(
+                qkv_proj=BiasedLinear,
+                core_attention=DotProductAttention,
+                o_proj=BiasedLinear,
+            ),
+            attn_mask_type=AttnMaskType.causal,
+            layer_number=1,
+        )
+
+    def test_core_attn_recompute_off_by_default(self):
+        attn = self._build()
+        self.assertFalse(attn.recompute_core_attention)
+        self.assertFalse(attn.use_rr_flash_attention)
+
+    def test_selective_core_attn_enables_core_recompute_only(self):
+        attn = self._build(
+            recompute_granularity="selective",
+            recompute_modules=["core_attn"],
+        )
+        # core_attn listed -> core recompute on; flash_attn absent -> RR off.
+        self.assertTrue(attn.recompute_core_attention)
+        self.assertFalse(attn.use_rr_flash_attention)
+
+    def test_flash_attn_module_enables_refined_recompute(self):
+        attn = self._build(
+            recompute_granularity="selective",
+            recompute_modules=["core_attn", "flash_attn"],
+        )
+        self.assertTrue(attn.recompute_core_attention)
+        self.assertTrue(attn.use_rr_flash_attention)
+
+    def test_block_method_selects_layers_by_num_layers(self):
+        # num_hidden_layers=2 -> chunk covers layers [0, 1]; layer_number=1.
+        # recompute_num_layers=1 selects only layer 0, =2 selects both. The
+        # boundary proves need_recompute_in_block actually consumes the count.
+        attn_excluded = self._build(
+            num_hidden_layers=2,
+            recompute_granularity="selective",
+            recompute_modules=["core_attn"],
+            recompute_method="block",
+            recompute_num_layers=1,
+        )
+        self.assertFalse(attn_excluded.recompute_core_attention)
+
+        attn_included = self._build(
+            num_hidden_layers=2,
+            recompute_granularity="selective",
+            recompute_modules=["core_attn"],
+            recompute_method="block",
+            recompute_num_layers=2,
+        )
+        self.assertTrue(attn_included.recompute_core_attention)
+
+    def test_set_for_recompute_input_layernorm_not_implemented(self):
+        attn = self._build()
+        with self.assertRaises(NotImplementedError):
+            attn.set_for_recompute_input_layernorm()
+
+
+class TestSelfAttentionQKVProjectionLayout(unittest.TestCase):
+    """get_query_key_value_tensors emits the documented per-group QKV layout.
+
+    The reference is the fused projection recomputed independently (x @ W + b
+    read off the real qkv_proj weights) then sliced by hand according to the
+    per-group interleaved layout. This distinguishes the correct
+    ``[Q | K | V]`` (and gated ``[Q | Gate | K | V]``) grouping from a plain
+    ``[all_Q | all_K | all_V]`` split, a Q/K/V swap, or a wrong group stride --
+    none of which a shape-only check would catch.
+    """
+
+    def _build(self, **overrides):
+        config = _build_attention_config(**overrides)
+        attn = SelfAttention(
+            config,
+            SelfAttentionSublayersSpec(
+                qkv_proj=BiasedLinear,
+                core_attention=DotProductAttention,
+                o_proj=BiasedLinear,
+                q_norm=None,
+                k_norm=None,
+            ),
+            attn_mask_type=AttnMaskType.causal,
+            layer_number=1,
+        )
+        attn.eval()
+        return attn
+
+    def _reference_mixed_qkv(self, attn, hidden_states):
+        # paddle.nn.Linear computes x @ weight + bias with weight [in, out].
+        weight = attn.qkv_proj.linear.weight.numpy()
+        bias = attn.qkv_proj.linear.bias.numpy()
+        return hidden_states.numpy() @ weight + bias
+
+    def test_split_qkv_true_matches_independent_layout(self):
+        attn = self._build()
+        batch, seq = 2, 4
+        heads, head_dim = 4, 32
+        group_dim = 3 * head_dim  # Q | K | V per group, one head per group
+        hidden_states = paddle.randn([batch, seq, 128], dtype="float32")
+
+        query, key, value = attn.get_query_key_value_tensors(
+            hidden_states, split_qkv=True
+        )
+        self.assertEqual(query.shape, [batch, seq, heads, head_dim])
+        self.assertEqual(key.shape, [batch, seq, heads, head_dim])
+        self.assertEqual(value.shape, [batch, seq, heads, head_dim])
+
+        mixed = self._reference_mixed_qkv(attn, hidden_states)
+        exp_q = np.stack(
+            [
+                mixed[:, :, g * group_dim : g * group_dim + head_dim]
+                for g in range(heads)
+            ],
+            axis=2,
+        )
+        exp_k = np.stack(
+            [
+                mixed[
+                    :,
+                    :,
+                    g * group_dim + head_dim : g * group_dim + 2 * head_dim,
+                ]
+                for g in range(heads)
+            ],
+            axis=2,
+        )
+        exp_v = np.stack(
+            [
+                mixed[
+                    :,
+                    :,
+                    g * group_dim + 2 * head_dim : g * group_dim + 3 * head_dim,
+                ]
+                for g in range(heads)
+            ],
+            axis=2,
+        )
+        np.testing.assert_allclose(query.numpy(), exp_q, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(key.numpy(), exp_k, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(value.numpy(), exp_v, rtol=1e-5, atol=1e-5)
+
+    def test_split_qkv_false_returns_unsplit_with_arg_list(self):
+        attn = self._build()
+        batch, seq = 2, 4
+        groups, group_dim = 4, 96
+        hidden_states = paddle.randn([batch, seq, 128], dtype="float32")
+
+        mixed_qkv, split_arg_list = attn.get_query_key_value_tensors(
+            hidden_states, split_qkv=False
+        )
+        # q_dim, k head_dim, v head_dim for one head per group.
+        self.assertEqual(split_arg_list, [32, 32, 32])
+        self.assertEqual(sum(split_arg_list), group_dim)
+        self.assertEqual(mixed_qkv.shape, [batch, seq, groups, group_dim])
+
+        ref = self._reference_mixed_qkv(attn, hidden_states)
+        ref = ref.reshape(batch, seq, groups, group_dim)
+        np.testing.assert_allclose(mixed_qkv.numpy(), ref, rtol=1e-5, atol=1e-5)
+
+    def test_gated_qkv_layout_places_gate_between_q_and_k(self):
+        attn = self._build(gated_attention=True)
+        batch, seq = 2, 4
+        heads, head_dim = 4, 32
+        group_dim = 4 * head_dim  # Q | Gate | K | V per group
+        hidden_states = paddle.randn([batch, seq, 128], dtype="float32")
+
+        result = attn.get_query_key_value_tensors(hidden_states, split_qkv=True)
+        self.assertEqual(len(result), 4)
+        query, key, value, gate = result
+        self.assertEqual(query.shape, [batch, seq, heads, head_dim])
+        self.assertEqual(gate.shape, [batch, seq, heads * head_dim])
+
+        mixed = self._reference_mixed_qkv(attn, hidden_states)
+        exp_q = np.stack(
+            [
+                mixed[:, :, g * group_dim : g * group_dim + head_dim]
+                for g in range(heads)
+            ],
+            axis=2,
+        )
+        exp_k = np.stack(
+            [
+                mixed[
+                    :,
+                    :,
+                    g * group_dim + 2 * head_dim : g * group_dim + 3 * head_dim,
+                ]
+                for g in range(heads)
+            ],
+            axis=2,
+        )
+        exp_v = np.stack(
+            [
+                mixed[
+                    :,
+                    :,
+                    g * group_dim + 3 * head_dim : g * group_dim + 4 * head_dim,
+                ]
+                for g in range(heads)
+            ],
+            axis=2,
+        )
+        # Gate sits at columns [head_dim, 2*head_dim) of each group and is
+        # flattened head-major into [batch, seq, heads * head_dim].
+        exp_gate = np.concatenate(
+            [
+                mixed[
+                    :,
+                    :,
+                    g * group_dim + head_dim : g * group_dim + 2 * head_dim,
+                ]
+                for g in range(heads)
+            ],
+            axis=-1,
+        )
+        np.testing.assert_allclose(query.numpy(), exp_q, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(key.numpy(), exp_k, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(value.numpy(), exp_v, rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(gate.numpy(), exp_gate, rtol=1e-5, atol=1e-5)
+
+
+class TestCrossAttentionContracts(unittest.TestCase):
+    """CrossAttention construction and its documented rejection contracts.
+
+    CrossAttention is otherwise untested in this file. These lock in the
+    supported (MHA-only) construction and the three explicit failure modes,
+    using assertRaises on the exact exception type rather than swallowing.
+    """
+
+    def _spec(self):
+        return CrossAttentionSublayersSpec(
+            linear_q=BiasedLinear,
+            linear_kv=BiasedLinear,
+            core_attention=DotProductAttention,
+            o_proj=BiasedLinear,
+        )
+
+    def _build(self, **overrides):
+        config = _build_attention_config(**overrides)
+        return CrossAttention(
+            config,
+            self._spec(),
+            attn_mask_type=AttnMaskType.padding,
+            layer_number=1,
+        )
+
+    def test_mha_construction_wires_projections(self):
+        attn = self._build()
+        self.assertEqual(attn.attention_type, "cross")
+        self.assertIsNotNone(attn.linear_q)
+        self.assertIsNotNone(attn.linear_kv)
+        # Equal head counts -> equal query/key projection sizes (asserted in
+        # the constructor); expose that the invariant actually held.
+        self.assertEqual(attn.query_projection_size, attn.key_projection_size)
+
+    def test_group_query_attention_rejected(self):
+        with self.assertRaises(ValueError):
+            self._build(num_key_value_heads=2)
+
+    def test_split_qkv_false_rejected(self):
+        attn = self._build()
+        hidden_states = paddle.randn([2, 4, 128], dtype="float32")
+        key_value_states = paddle.randn([2, 4, 128], dtype="float32")
+        with self.assertRaises(AssertionError):
+            attn.get_query_key_value_tensors(
+                hidden_states, key_value_states, split_qkv=False
+            )
+
+    def test_backward_dw_not_available(self):
+        attn = self._build()
+        # backward_dw is a SelfAttention-only weight-update hook.
+        with self.assertRaises(AttributeError):
+            attn.backward_dw()
 
 
 if __name__ == "__main__":

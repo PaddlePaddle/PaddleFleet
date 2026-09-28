@@ -148,6 +148,7 @@ setup_paddle_venv() {
     # venv/paddle/bin/paddlefleet-cli fails to import paddle at runtime.
     uv pip install --python "${paddle_py}" "${paddle_index[@]}" \
         --force-reinstall \
+        --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ \
         "${PADDLEFLEET_WHEEL}"
     # (
     #     cd ./PaddleFleet

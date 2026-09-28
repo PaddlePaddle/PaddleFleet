@@ -34,7 +34,10 @@ import numpy as np
 import paddle
 
 from paddlefleet.transformer.transformer_config import TransformerConfig
-from paddlefleet.transformer.transformer_layer import TransformerLayer
+from paddlefleet.transformer.transformer_layer import (
+    HySparseTransformerLayer,
+    TransformerLayer,
+)
 
 SEQ = 5
 HIDDEN = 8
@@ -56,9 +59,9 @@ def _make_config(**overrides):
     return TransformerConfig(**defaults)
 
 
-def _make_layer(config):
+def _make_layer(config, cls=TransformerLayer):
     """A ``TransformerLayer`` whose core computation is a stub."""
-    layer = TransformerLayer.__new__(TransformerLayer)
+    layer = cls.__new__(cls)
     layer.__dict__.setdefault("_parameters", {})
     layer.__dict__.setdefault("_buffers", {})
     layer.__dict__.setdefault("_sub_layers", {})
@@ -153,6 +156,97 @@ class TestTransformerLayerMTPPositionIds(unittest.TestCase):
 
         # untouched: neither sliced nor re-concatenated
         self.assertIs(rst["position_ids"], position_ids)
+
+    def test_magic_metadata_bypasses_forward_impl_and_round_trips(self):
+        config = _make_config(
+            num_nextn_predict_layers=0,
+            enable_mtp_magic_send=False,
+            use_erndata=True,
+        )
+        layer = _make_layer(config)
+        captured = {}
+
+        def _forward_impl(hidden_states, **kwargs):
+            captured.update(kwargs)
+            return hidden_states
+
+        object.__setattr__(layer, "_forward_impl", _forward_impl)
+        hidden_states = paddle.randn([1, SEQ, HIDDEN])
+        full_ids = paddle.arange(SEQ, dtype="int64").reshape([1, SEQ])
+        cu = paddle.to_tensor([0, SEQ], dtype="int32")
+        with patch(
+            "paddlefleet.transformer.transformer_layer.has_recovered",
+            return_value=True,
+        ):
+            rst = layer.forward(
+                {
+                    "hidden_states": hidden_states,
+                    "mtp_full_input_ids": full_ids,
+                    "cu_seqlens_q": cu,
+                }
+            )
+        self.assertNotIn("mtp_full_input_ids", captured)
+        self.assertIn("cu_seqlens_q", captured)
+        self.assertIs(rst["mtp_full_input_ids"], full_ids)
+        self.assertIs(rst["cu_seqlens_q"], cu)
+
+
+class TestHySparseLayerMagicMetadata(unittest.TestCase):
+    """``HySparseTransformerLayer.forward`` must forward magic metadata too.
+
+    The KV-sharing layer overrides ``forward``, so it needs its own pop /
+    restore of ``mtp_full_input_ids``: leaving the key in ``dict_args`` makes
+    ``_forward_impl`` reject it as an unexpected keyword, and dropping it
+    starves the MTP depths further down the pipeline stage.
+    """
+
+    def _run(self, dict_args, captured):
+        config = _make_config(
+            num_nextn_predict_layers=0,
+            enable_mtp_magic_send=False,
+            use_erndata=True,
+        )
+        layer = _make_layer(config, cls=HySparseTransformerLayer)
+
+        def _forward_impl(hidden_states, **kwargs):
+            captured.update(kwargs)
+            return hidden_states
+
+        object.__setattr__(layer, "_forward_impl", _forward_impl)
+        with patch(
+            "paddlefleet.transformer.transformer_layer.has_recovered",
+            return_value=True,
+        ):
+            return layer.forward(dict_args)
+
+    def test_magic_metadata_bypasses_forward_impl_and_round_trips(self):
+        captured = {}
+        hidden_states = paddle.randn([1, SEQ, HIDDEN])
+        full_ids = paddle.arange(SEQ, dtype="int64").reshape([1, SEQ])
+        cu = paddle.to_tensor([0, SEQ], dtype="int32")
+
+        rst = self._run(
+            {
+                "hidden_states": hidden_states,
+                "mtp_full_input_ids": full_ids,
+                "cu_seqlens_q": cu,
+            },
+            captured,
+        )
+
+        self.assertNotIn("mtp_full_input_ids", captured)
+        self.assertIn("cu_seqlens_q", captured)
+        self.assertIs(rst["mtp_full_input_ids"], full_ids)
+        self.assertIs(rst["cu_seqlens_q"], cu)
+
+    def test_absent_magic_metadata_is_not_invented(self):
+        """The last MTP depth stops forwarding it; the key must stay absent."""
+        captured = {}
+        hidden_states = paddle.randn([1, SEQ, HIDDEN])
+
+        rst = self._run({"hidden_states": hidden_states}, captured)
+
+        self.assertNotIn("mtp_full_input_ids", rst)
 
 
 if __name__ == "__main__":

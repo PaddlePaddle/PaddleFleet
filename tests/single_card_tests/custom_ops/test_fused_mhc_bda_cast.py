@@ -142,8 +142,10 @@ class TestFuseCastEquivalence(unittest.TestCase):
         # residual / layer output enter the layer in the low-precision dtype.
         # They stay the leaves in both configurations, with the widening inside
         # the graph, so the gradients being compared are the ones that actually
-        # reach the residual stream -- both bf16.
-        orig_leaf = mk(_S, _B, _N, _C, dtype="bfloat16")
+        # reach the residual stream -- both bf16. ``original_residual`` is the
+        # flat ``[s, b, n*C]`` the kernel now takes; it reshapes internally so
+        # ``FusedHPostBDA`` saves this leaf rather than a pinning view.
+        orig_leaf = mk(_S, _B, _N * _C, dtype="bfloat16")
         x_leaf = mk(_S, _B, _C, dtype="bfloat16")
         bias_leaf = mk(_C, dtype="bfloat16") if with_bias else None
         leaves = [h_res, h_post, orig_leaf, x_leaf]
@@ -246,7 +248,7 @@ class TestFuseCastEquivalence(unittest.TestCase):
         paddle.seed(7)
         h_res = _rand(_S, _B, _N, _N)
         h_post = _rand(_S, _B, _N)
-        orig_bf16 = _rand(_S, _B, _N, _C, dtype="bfloat16")
+        orig_bf16 = _rand(_S, _B, _N * _C, dtype="bfloat16")
         x_bf16 = _rand(_S, _B, _C, dtype="bfloat16")
 
         fused = fused_h_post_bda(

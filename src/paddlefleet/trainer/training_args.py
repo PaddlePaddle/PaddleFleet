@@ -786,6 +786,16 @@ class TrainingArguments:
             )
         },
     )
+    sharding_machine_balanced_2d_partition: bool = field(
+        default=False,
+        metadata={
+            "help": (
+                "Whether to balance the 2D (Muon) parameter bytes across machines when partitioning them "
+                "to owner ranks, instead of the default greedy per-group partition. This only takes effect "
+                "when using the Muon optimizer."
+            )
+        },
+    )
     sharding_offload_opt_buffersize_GB: int = field(
         default=-1,
         metadata={
@@ -1927,6 +1937,17 @@ class TrainingArguments:
             )
         },
     )
+    muon_epsilon: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Epsilon for the Muon (Newton-Schulz orthogonalization) direction, "
+                "kept separate from adam_epsilon so muon and adamw can use different "
+                "values. Default: None -> falls back to adam_epsilon (previous "
+                "shared behaviour). Only used when optim=muon."
+            )
+        },
+    )
     muon_version: int = field(
         default=3,
         metadata={
@@ -2750,6 +2771,24 @@ class TrainingArguments:
                                 "sharding_configs"
                             ].comm_group_call_opt = True
 
+                        if self.sharding_machine_balanced_2d_partition:
+                            if self.optim != OptimizerNames.MUON:
+                                raise ValueError(
+                                    "sharding_machine_balanced_2d_partition only supports Muon "
+                                    f"optimizer, but got optim={self.optim}."
+                                )
+                            if not hasattr(
+                                strategy.hybrid_configs["sharding_configs"],
+                                "machine_balanced_2d_partition",
+                            ):
+                                raise ValueError(
+                                    "sharding_machine_balanced_2d_partition is not supported by "
+                                    "current version of Paddle. Please try latest develop Paddle."
+                                )
+                            strategy.hybrid_configs[
+                                "sharding_configs"
+                            ].machine_balanced_2d_partition = True
+
                         if self.split_param:
                             strategy.hybrid_configs[
                                 "sharding_configs"
@@ -3312,13 +3351,12 @@ class TrainingArguments:
             assert self.fuse_optimizer_states, (
                 "zero cost checkpoint must be used when fuse_optimizer_states is enabled in sharding parallel config"
             )
-
-        assert self.flash_device_save_steps % self.zcc_ema_interval == 0, (
-            f"flash_device_save_steps[{self.flash_device_save_steps}] must be divisible by zcc_ema_interval[{self.zcc_ema_interval}]"
-        )
-        assert self.save_steps % self.zcc_ema_interval == 0, (
-            f"save_steps[{self.save_steps}] must be divisible by zcc_ema_interval[{self.zcc_ema_interval}]"
-        )
+            assert self.flash_device_save_steps % self.zcc_ema_interval == 0, (
+                f"flash_device_save_steps[{self.flash_device_save_steps}] must be divisible by zcc_ema_interval[{self.zcc_ema_interval}]"
+            )
+            assert self.save_steps % self.zcc_ema_interval == 0, (
+                f"save_steps[{self.save_steps}] must be divisible by zcc_ema_interval[{self.zcc_ema_interval}]"
+            )
         if (
             self.enable_zero_cost_checkpoint
             and self.zcc_save_ema_coef is not None
