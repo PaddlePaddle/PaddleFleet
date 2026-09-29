@@ -19,7 +19,7 @@ import hashlib
 import logging
 import os
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import paddle
@@ -39,11 +39,22 @@ if TYPE_CHECKING:
     from paddlefleet.process_groups_config import ProcessGroupCollection
     from paddlefleet.transformer.transformer_config import TransformerConfig
 
+from paddle.distributed.flex_checkpoint.aoa.generation import (
+    join_name,
+    resolve_checkpoint_name_from_anchor,
+    resolve_single_name,
+    strip_name_suffix,
+)
+
 from paddlefleet import utils
 from paddlefleet.accuracy_target import targets_hf
 from paddlefleet.recompute_utils import (
     module_needs_recompute,
     module_needs_refined_recompute,
+)
+from paddlefleet.tensor_parallel.layers import (
+    gen_linear_aoa_statements,
+    gen_linear_inv_aoa_statements,
 )
 from paddlefleet.train_infer_consistent_ops.inspect_util import (
     inspect_tensor,
@@ -773,6 +784,19 @@ class MoELayer(nn.Layer):
                     fp8_dispatch=self.fp8_dispatch,
                     use_ue8m0=self.use_ue8m0,
                 )
+                if self.use_ring_moe and hasattr(
+                    getattr(self, "grouped_gemm_experts", None),
+                    "set_calls_per_micro_batch",
+                ):
+                    # The ring runs the expert once per round, so the expert's
+                    # fp8 weight-release counter (which counts forward() calls
+                    # against accumulate_steps) would fire N times too early and
+                    # drop the fp8 weights mid-step. No-op on the bf16 path.
+                    # Only SonicMoEExpert tracks this, and ringmoe already
+                    # requires using_sonic_moe, so the guard is defensive.
+                    self.grouped_gemm_experts.set_calls_per_micro_batch(
+                        self.token_dispatcher.N
+                    )
             else:
                 raise NotImplementedError(
                     f"Unsupported moe_token_dispatcher_type {self.moe_token_dispatcher_type}"
@@ -1160,20 +1184,46 @@ class MoELayer(nn.Layer):
         return self.unpermute(expert_outs)
 
     def _maybe_pre_allgather_overlap(self, hidden_states: paddle.Tensor):
-        """Pre-issue the flat EP token AllGather on the comm stream, before the gate.
+        """Pre-issue round 0's token AllGather on the comm stream, before the gate.
 
-        Needs ``moe_allgather_gate_overlap``, EP>1 and the 'allgather'
-        dispatcher, whose ``dispatch_preprocess`` is what consumes the handle.
-        'ringmoe' deliberately does not prefetch: the only thing it could hide
-        behind the gate is round 0's intra-node AllGather, and issuing that on
-        the comm stream ahead of time cost more in contention with the
-        inter-node shift than the gate was worth. Only the tokens can be
-        prefetched; the routing idx/weight AllGathers need the gate output.
+        Two branches, by dispatcher:
+          * 'allgather': runs only with ``moe_allgather_gate_overlap`` and EP>1;
+            pre-issues the flat EP token gather, consumed by
+            ``dispatch_preprocess``.
+          * 'ringmoe': runs for EVERY forward (EP>1), NOT gated on
+            ``moe_allgather_gate_overlap`` -- the prefetched intra gather is the
+            ring's single, always-on token-gather path, so ``pre_gate_token_ag``
+            must issue round 0's gather here for both fp8 and bf16.
+        Only the tokens can be prefetched; the routing idx/weight AllGathers need
+        the gate output.
 
         For latent MoE, ``fc1_latent_proj`` is hoisted here so the AllGather runs
         in latent space; ``_project_to_latent`` reuses it via
         ``self._latent_hidden``.
         """
+        if (
+            self.expert_model_parallel_size > 1
+            and self.moe_token_dispatcher_type == "ringmoe"
+        ):
+            # RingMoE always prefetches round 0's intra token AllGather onto its
+            # own comm stream ahead of the gate: it is the ring's only
+            # token-gather path (ring_forward has no inline fallback), so this is
+            # unconditional for ringmoe rather than gated on
+            # moe_allgather_gate_overlap. Mirrors the allgather branch below for
+            # the latent projection; the handle is consumed as round 0's prefetch
+            # in ring_forward.
+            if self.use_latent_moe:
+                self._latent_hidden = deferrable_linear_bare(
+                    self.config,
+                    "moe_latent_proj",
+                    self.fc1_latent_proj,
+                    hidden_states,
+                )
+                self.token_dispatcher.pre_gate_token_ag(self._latent_hidden)
+            else:
+                self._latent_hidden = None
+                self.token_dispatcher.pre_gate_token_ag(hidden_states)
+            return
         if not (
             self.expert_model_parallel_size > 1
             and self.moe_allgather_gate_overlap
@@ -1584,7 +1634,7 @@ class MoELayer(nn.Layer):
         # One scope for the whole ring: it interleaves the rounds' collectives
         # with their GEMMs, so there is no point where dispatch ends and combine
         # begins. Compare against dispatch + fusion_mlp + combine on the other
-        # dispatchers. ``fusion_mlp`` is timed inside (see _node_slice), so
+        # dispatchers. ``fusion_mlp`` is timed inside ring_forward, so
         # ringmoe - fusion_mlp is the ring's exposed communication.
         with profile("ringmoe"):
             hidden_states = self.token_dispatcher.ring_forward(
@@ -2443,6 +2493,560 @@ class MoELayer(nn.Layer):
             if color not in (None, -1):
                 continue
             p.color = {"color": color_key, "group": self.moe_grad_group}
+
+    def gen_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Checkpoint->model generator for MoELayer.
+
+        Composes gate (TopKRouter), optional MoE latent projection
+        (``fc1/fc2_latent_proj`` Linears), optional shared experts (MLP), then
+        the routed experts: the grouped-GEMM / sonic cross-expert fusion via a
+        direction-inner helper, or the per-expert live layout enumerated by
+        global expert id (see :meth:`_global_expert_ctx`) so every rank emits
+        the same statement set. Inverse is generated independently.
+        """
+        statements = self.gate.gen_aoa_statements(
+            ctx,
+            structured_name_prefix=f"{structured_name_prefix}gate.",
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+        if getattr(self, "fc1_latent_proj", None) is not None:
+            statements += gen_linear_aoa_statements(
+                self.fc1_latent_proj,
+                ctx,
+                structured_name_prefix=(
+                    f"{structured_name_prefix}fc1_latent_proj."
+                ),
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+            statements += gen_linear_aoa_statements(
+                self.fc2_latent_proj,
+                ctx,
+                structured_name_prefix=(
+                    f"{structured_name_prefix}fc2_latent_proj."
+                ),
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+        if getattr(self, "shared_experts", None) is not None:
+            statements += self.shared_experts.gen_aoa_statements(
+                ctx,
+                structured_name_prefix=(
+                    f"{structured_name_prefix}shared_experts."
+                ),
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+        if getattr(self, "grouped_gemm_experts", None) is not None:
+            statements += self._gen_grouped_expert_aoa_statements(
+                ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+            )
+        else:
+            # Per-expert live layout: enumerate every global expert id (not just
+            # the ones local to this rank) through the template expert so all EP
+            # ranks emit the same statement set.
+            aug_ctx, template_expert = self._global_expert_ctx(
+                ctx, structured_name_prefix
+            )
+            for expert_id in range(self.num_experts):
+                statements += template_expert.gen_aoa_statements(
+                    aug_ctx,
+                    structured_name_prefix=(
+                        f"{structured_name_prefix}experts.{expert_id}."
+                    ),
+                    checkpoint_lookup_drop_segment=(
+                        checkpoint_lookup_drop_segment
+                    ),
+                )
+        return statements
+
+    def gen_inv_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Inverse (model -> checkpoint) generator for MoELayer.
+
+        Independently mirrors :meth:`gen_aoa_statements` without deriving from
+        its output text: gate, latent projection, shared experts, then the
+        routed experts (grouped-fusion inverse helper, or the per-expert MLP
+        inverse enumerated by global expert id).
+        """
+        statements = self.gate.gen_inv_aoa_statements(
+            ctx,
+            structured_name_prefix=f"{structured_name_prefix}gate.",
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
+        if getattr(self, "fc1_latent_proj", None) is not None:
+            statements += gen_linear_inv_aoa_statements(
+                self.fc1_latent_proj,
+                ctx,
+                structured_name_prefix=(
+                    f"{structured_name_prefix}fc1_latent_proj."
+                ),
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+            statements += gen_linear_inv_aoa_statements(
+                self.fc2_latent_proj,
+                ctx,
+                structured_name_prefix=(
+                    f"{structured_name_prefix}fc2_latent_proj."
+                ),
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+        if getattr(self, "shared_experts", None) is not None:
+            statements += self.shared_experts.gen_inv_aoa_statements(
+                ctx,
+                structured_name_prefix=(
+                    f"{structured_name_prefix}shared_experts."
+                ),
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+        if getattr(self, "grouped_gemm_experts", None) is not None:
+            statements += self._gen_inv_grouped_expert_aoa_statements(
+                ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+            )
+        else:
+            aug_ctx, template_expert = self._global_expert_ctx(
+                ctx, structured_name_prefix
+            )
+            for expert_id in range(self.num_experts):
+                statements += template_expert.gen_inv_aoa_statements(
+                    aug_ctx,
+                    structured_name_prefix=(
+                        f"{structured_name_prefix}experts.{expert_id}."
+                    ),
+                    checkpoint_lookup_drop_segment=(
+                        checkpoint_lookup_drop_segment
+                    ),
+                )
+        return statements
+
+    def _global_expert_ctx(self, ctx, structured_name_prefix):
+        """Augment ``pp_to_single_mapping`` with the non-local expert ids.
+
+        The per-expert live layout keeps only this rank's experts in
+        ``self.experts`` (the rest are ``None``), so ``pp_to_single_mapping``
+        only carries the local experts' single names. To let every rank emit
+        the full global statement set, derive the single name of every expert
+        id from a local template expert and return an augmented ctx plus that
+        template.
+
+        The derivation uses no digit-string surgery: a MoE layer's experts
+        share one pipeline layer, so ``_set_pipeline_name_mapping`` rewrites
+        only the structured name's first segment and copies the tail verbatim.
+        Strip the template entry's tail off its single name to recover the
+        mapped head, then re-attach each target expert's tail. ``setdefault``
+        keeps the real local entries authoritative; a rank with zero local
+        experts (only possible when ``num_experts < ep_size``) cannot template
+        and asserts.
+        """
+        template_id, template_expert = next(
+            ((i, e) for i, e in enumerate(self.experts) if e is not None),
+            (None, None),
+        )
+        assert template_expert is not None, (
+            "per-expert MoE layer has no local expert on this rank; "
+            "cannot template global expert names"
+        )
+        leaf_names = list(
+            template_expert.state_dict(structured_name_prefix="").keys()
+        )
+        augmented = dict(ctx.pp_to_single_mapping)
+        for leaf in leaf_names:
+            tpl_structured = (
+                f"{structured_name_prefix}experts.{template_id}.{leaf}"
+            )
+            tpl_single = ctx.pp_to_single_mapping[tpl_structured]
+            tail = tpl_structured.split(".", 1)[1]
+            assert tpl_single.endswith(tail)
+            head_single = tpl_single[: len(tpl_single) - len(tail)]
+            for expert_id in range(self.num_experts):
+                structured = (
+                    f"{structured_name_prefix}experts.{expert_id}.{leaf}"
+                )
+                augmented.setdefault(
+                    structured, head_single + structured.split(".", 1)[1]
+                )
+        return replace(ctx, pp_to_single_mapping=augmented), template_expert
+
+    def _intermediate_ep_size(self):
+        """EP degree when the fused expert weights are intermediate-sharded.
+
+        ``None`` on the ordinary layout (deepep, or EP disabled), where
+        ``weight1`` / ``weight2`` carry disjoint experts on their leading axis
+        and the checkpoint-facing statements need no un-interleaving.
+
+        A degree means the 'allgather' dispatcher layout: this rank holds every
+        expert but only ``I // EP`` of each one's intermediate dim, so
+        ``GroupedMLPExpert._get_intermediate_sharded_state_dict`` declares
+        ``weight1`` 4-D ``[E, io, 2, I_local]`` sharded on ``axis=3`` and
+        ``weight2`` 3-D ``[E, I_local, io]`` sharded on ``axis=1``. The
+        checkpoint directions run against a 2-D re-declaration of those shards
+        (AOA cannot lower a tensor's rank on save), and that re-declared
+        *global* layout is rank-major interleaved -- ``weight1`` columns are
+        ``gate_r0|up_r0|gate_r1|up_r1|...`` and ``weight2`` rows are
+        ``(r0: e0..eE-1)|(r1: e0..eE-1)|...`` -- because each rank's block has
+        to stay one contiguous rectangle. Un-interleaving that ordering is all
+        the two intermediate-sharded branches below do.
+
+        Predicate and degree are both read off the live expert, the same source
+        ``sharded_state_dict`` dispatches on, so the statements cannot drift
+        from the shards they describe. ``intermediate_ep_sharded`` implies a
+        real EP group with ``nranks > 1``, so the ``ep_group`` read is safe.
+        """
+        experts = self.grouped_gemm_experts
+        if not experts.intermediate_ep_sharded:
+            return None
+        return experts.ep_group.nranks
+
+    def _reject_nongated_grouped_experts(self):
+        """Guard the non-gated grouped-expert layout, which is not implemented.
+
+        Both grouped paths assume a gated linear unit: ``weight1`` is sized
+        ``[E, io, 2I]`` and its last axis is cut into a gate half and an up
+        half, and the checkpoint is expected to carry a ``gate_proj`` per
+        expert. A non-gated MoE builds ``weight1`` as ``[E, io, I]`` with no
+        gate half and its checkpoint has no ``gate_proj``, so emitting these
+        statements would reference a nonexistent key and fuse on a nonexistent
+        half instead of failing.
+        """
+        if not self.config.gated_linear_unit:
+            raise NotImplementedError(
+                "grouped-GEMM routed experts currently assume a gated linear "
+                "unit; the non-gated expert layout is not implemented."
+            )
+
+    def _gen_grouped_expert_aoa_statements(
+        self, ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+    ):
+        """Checkpoint->model generator for the grouped-GEMM / sonic cross-expert
+        fusion.
+
+        Routed experts are stored as two packed tensors:
+        ``grouped_gemm_experts.weight1`` (every expert's fused gate+up,
+        concatenated on the expert axis) and ``grouped_gemm_experts.weight2``
+        (every expert's down projection). The checkpoint carries one
+        ``gate_proj`` / ``up_proj`` / ``down_proj`` per expert. The build is
+        two-stage: (1) per expert, fuse ``gate``+``up`` into a transient
+        model-side ``up_gate_proj`` and stage the ``down`` projection into a
+        transient ``down_proj``; (2) concatenate the per-expert transients on
+        ``axis=0`` into the packed ``weight1`` / ``weight2``.
+
+        Every expert type shares one checkpoint-facing layout, the grouped-GEMM
+        one: ``weight1`` is ``[E, io, 2I]`` with ``gate``/``up`` as the two
+        contiguous halves of the last axis and ``weight2`` is ``[E, I, io]``.
+        So every checkpoint tensor is transposed (``^T``) and ``gate``/``up``
+        fuse on ``axis=1``. :class:`SonicMoEExpert` holds a different layout
+        while computing, but its ``sharded_state_dict()`` converts back to the
+        grouped layout first, so the expert type must not be branched on here.
+
+        When the live weights are intermediate-sharded (allgather with EP > 1,
+        see :meth:`_intermediate_ep_size`) each checkpoint tensor is first cut
+        into ``ep_size`` intermediate slices and the gate/up slices are then
+        re-interleaved rank-major into the per-expert transient, matching the
+        2-D re-declaration the checkpoint load path feeds the engine. The
+        cross-expert concat is unchanged for ``weight1`` (rows stay
+        expert-major) while ``weight2`` concatenates rank-major.
+
+        Inverse is independent.
+        """
+        self._reject_nongated_grouped_experts()
+        ep_size = self._intermediate_ep_size()
+        w1_local = "grouped_gemm_experts.weight1"
+        w2_local = "grouped_gemm_experts.weight2"
+        w1_model = resolve_single_name(
+            w1_local,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            ctx.model_name_prefix,
+        )
+        w2_model = resolve_single_name(
+            w2_local,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            ctx.model_name_prefix,
+        )
+        # Enclosing single-name scope (e.g. "...mlp") obtained by stripping the
+        # leaf local name off the resolved single name; used to build the
+        # transient per-expert model names that the concat consumes.
+        scope = strip_name_suffix(w1_model, w1_local)
+        up_gate_models = []
+        down_models = []
+        down_parts = []
+        statements = []
+        for e in range(self.num_experts):
+            gate_ckpt = resolve_checkpoint_name_from_anchor(
+                w1_model,
+                w1_local,
+                f"experts.{e}.gate_proj.weight",
+                ctx.checkpoint_name_prefix,
+                ctx.checkpoint_name_mapping,
+                model_name_prefix=ctx.model_name_prefix,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+            up_ckpt = resolve_checkpoint_name_from_anchor(
+                w1_model,
+                w1_local,
+                f"experts.{e}.up_proj.weight",
+                ctx.checkpoint_name_prefix,
+                ctx.checkpoint_name_mapping,
+                model_name_prefix=ctx.model_name_prefix,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+            down_ckpt = resolve_checkpoint_name_from_anchor(
+                w2_model,
+                w2_local,
+                f"experts.{e}.down_proj.weight",
+                ctx.checkpoint_name_prefix,
+                ctx.checkpoint_name_mapping,
+                model_name_prefix=ctx.model_name_prefix,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+            # Per-expert model-side transient targets (not real params); the
+            # cross-expert concat below consumes them into the packed weights.
+            up_gate_model = join_name(scope, f"experts.{e}.up_gate_proj.weight")
+            down_model = join_name(scope, f"experts.{e}.down_proj.weight")
+            up_gate_models.append(up_gate_model)
+            if ep_size is None:
+                down_models.append(down_model)
+                # Grouped-GEMM checkpoint layout (the only one, see the
+                # docstring): transpose every checkpoint tensor and fuse
+                # gate/up on axis=1.
+                statements.append(
+                    f"{gate_ckpt}^T, {up_ckpt}^T -> {up_gate_model}, axis=1"
+                )
+                statements.append(f"{down_ckpt}^T -> {down_model}")
+                continue
+            # Intermediate-sharded: cut each checkpoint matrix into the
+            # ``ep_size`` intermediate slices the re-declared global layout
+            # expects, then re-interleave gate/up rank-major.
+            gate_slices = [
+                f"{up_gate_model}.gate_ep{r}" for r in range(ep_size)
+            ]
+            up_slices = [f"{up_gate_model}.up_ep{r}" for r in range(ep_size)]
+            down_slices = [f"{down_model}.ep{r}" for r in range(ep_size)]
+            interleaved = [
+                var
+                for r in range(ep_size)
+                for var in (gate_slices[r], up_slices[r])
+            ]
+            statements.append(
+                f"{gate_ckpt}^T -> {','.join(gate_slices)}, axis=1"
+            )
+            statements.append(f"{up_ckpt}^T -> {','.join(up_slices)}, axis=1")
+            statements.append(
+                f"{','.join(interleaved)} -> {up_gate_model}, axis=1"
+            )
+            statements.append(
+                f"{down_ckpt}^T -> {','.join(down_slices)}, axis=0"
+            )
+            down_parts.append(down_slices)
+
+        # Cross-expert concat: per-expert transients (left) -> packed weight
+        # (right), matching the ernie5_v2 reference grouped-GEMM statements.
+        # ``weight1`` rows are expert-major under both layouts. ``weight2`` rows
+        # are expert-major on the ordinary layout but rank-major-then-expert on
+        # the re-declared intermediate-sharded one, so its sources are walked
+        # rank-outer there.
+        statements.append(f"{','.join(up_gate_models)} -> {w1_model}, axis=0")
+        if ep_size is None:
+            w2_sources = down_models
+        else:
+            w2_sources = [
+                down_parts[e][r]
+                for r in range(ep_size)
+                for e in range(self.num_experts)
+            ]
+        statements.append(f"{','.join(w2_sources)} -> {w2_model}, axis=0")
+        return statements
+
+    def _gen_inv_grouped_expert_aoa_statements(
+        self, ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+    ):
+        """Model->checkpoint generator for the grouped-GEMM / sonic cross-expert
+        fusion.
+
+        Independently mirrors :meth:`_gen_grouped_expert_aoa_statements` without
+        deriving from its text. Two stages: (1) split the packed ``weight1`` on
+        ``axis=0`` into per-expert transient ``up_gate_proj`` tensors and split
+        ``weight2`` on ``axis=0`` straight into the per-expert checkpoint
+        ``down_proj`` tensors; (2) per expert, de-fuse the ``up_gate_proj``
+        transient into the checkpoint ``gate``/``up``. The de-fuse is always on
+        ``axis=1`` with a per-tensor transpose of every checkpoint tensor
+        (``gate``/``up``/``down``), because the checkpoint-facing layout is the
+        grouped-GEMM one for every expert type -- :class:`SonicMoEExpert`
+        converts back to it in ``sharded_state_dict()``, so its compute-time
+        layout never reaches a checkpoint and must not be branched on here.
+
+        When the live weights are intermediate-sharded (allgather with EP > 1,
+        see :meth:`_intermediate_ep_size`) only stage (1) changes: the packed
+        weights are un-interleaved out of the rank-major re-declared layout
+        into exactly the same per-expert transients the ordinary layout
+        produces, so stage (2) is shared verbatim.
+        """
+        self._reject_nongated_grouped_experts()
+        ep_size = self._intermediate_ep_size()
+        w1_local = "grouped_gemm_experts.weight1"
+        w2_local = "grouped_gemm_experts.weight2"
+        w1_model = resolve_single_name(
+            w1_local,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            ctx.model_name_prefix,
+        )
+        w2_model = resolve_single_name(
+            w2_local,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            ctx.model_name_prefix,
+        )
+        scope = strip_name_suffix(w1_model, w1_local)
+
+        gate_ckpts = []
+        up_ckpts = []
+        down_ckpts = []
+        up_gate_models = []
+        for e in range(self.num_experts):
+            gate_ckpts.append(
+                resolve_checkpoint_name_from_anchor(
+                    w1_model,
+                    w1_local,
+                    f"experts.{e}.gate_proj.weight",
+                    ctx.checkpoint_name_prefix,
+                    ctx.checkpoint_name_mapping,
+                    model_name_prefix=ctx.model_name_prefix,
+                    checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+                )
+            )
+            up_ckpts.append(
+                resolve_checkpoint_name_from_anchor(
+                    w1_model,
+                    w1_local,
+                    f"experts.{e}.up_proj.weight",
+                    ctx.checkpoint_name_prefix,
+                    ctx.checkpoint_name_mapping,
+                    model_name_prefix=ctx.model_name_prefix,
+                    checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+                )
+            )
+            down_ckpts.append(
+                resolve_checkpoint_name_from_anchor(
+                    w2_model,
+                    w2_local,
+                    f"experts.{e}.down_proj.weight",
+                    ctx.checkpoint_name_prefix,
+                    ctx.checkpoint_name_mapping,
+                    model_name_prefix=ctx.model_name_prefix,
+                    checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+                )
+            )
+            up_gate_models.append(
+                join_name(scope, f"experts.{e}.up_gate_proj.weight")
+            )
+
+        # Split/de-fuse into per-expert intermediate names (model layout), then
+        # transpose each intermediate into its final checkpoint name. Distinct
+        # intermediate names keep every checkpoint target single-assignment;
+        # reusing a final name as its own transpose intermediate
+        # (``w1^T -> w1``) trips the inverse duplicate-target guard even though
+        # AOAEngine chains it correctly.
+        gate_intermediates = [
+            join_name(scope, f"experts.{e}.gate_proj.weight.intermediate")
+            for e in range(self.num_experts)
+        ]
+        up_intermediates = [
+            join_name(scope, f"experts.{e}.up_proj.weight.intermediate")
+            for e in range(self.num_experts)
+        ]
+        down_intermediates = [
+            join_name(scope, f"experts.{e}.down_proj.weight.intermediate")
+            for e in range(self.num_experts)
+        ]
+        if ep_size is None:
+            statements = [
+                f"{w1_model} -> {','.join(up_gate_models)}, axis=0",
+                f"{w2_model} -> {','.join(down_intermediates)}, axis=0",
+            ]
+        else:
+            statements = self._inv_intermediate_ep_unpack_statements(
+                w1_model,
+                w2_model,
+                up_gate_models,
+                down_intermediates,
+                ep_size,
+            )
+        for e in range(self.num_experts):
+            statements.append(
+                f"{up_gate_models[e]} -> {gate_intermediates[e]}, "
+                f"{up_intermediates[e]}, axis=1"
+            )
+            statements.append(f"{gate_intermediates[e]}^T -> {gate_ckpts[e]}")
+            statements.append(f"{up_intermediates[e]}^T -> {up_ckpts[e]}")
+            statements.append(f"{down_intermediates[e]}^T -> {down_ckpts[e]}")
+        return statements
+
+    def _inv_intermediate_ep_unpack_statements(
+        self,
+        w1_model,
+        w2_model,
+        up_gate_models,
+        down_intermediates,
+        ep_size,
+    ):
+        """Stage (1) of the inverse on the intermediate-sharded layout.
+
+        Replaces the two plain per-expert splits with an un-interleaving of the
+        rank-major re-declared global layout, landing on exactly the transients
+        the ordinary layout produces (``up_gate_models[e]`` holding gate/up as
+        the two contiguous halves of ``axis=1``, ``down_intermediates[e]``
+        holding the whole per-expert down projection), so the caller's stage (2)
+        is shared unchanged.
+
+        ``weight1`` ``[E*io, 2*I_full]``: columns are ``gate_r0|up_r0|gate_r1|
+        ...`` in ``I_local`` blocks, so cutting into ``2*ep_size`` blocks and
+        taking the even / odd ones regroups the full gate and up. Rows are
+        expert-major, hence the plain ``axis=0`` split afterwards.
+
+        ``weight2`` ``[E*I_full, io]``: rows are rank-outer, expert-inner, so
+        one expert's rows are ``ep_size`` disjoint blocks that have to be
+        gathered back per expert -- a plain ``axis=0`` split into ``E`` pieces
+        would mix experts.
+        """
+        num_experts = self.num_experts
+        blocks = [f"{w1_model}.ep_blk{i}" for i in range(2 * ep_size)]
+        gate_all = f"{w1_model}.gate_all"
+        up_all = f"{w1_model}.up_all"
+        gates = [f"{w1_model}.gate_e{e}" for e in range(num_experts)]
+        ups = [f"{w1_model}.up_e{e}" for e in range(num_experts)]
+        parts = [
+            [f"{w2_model}.r{r}e{e}" for e in range(num_experts)]
+            for r in range(ep_size)
+        ]
+        statements = [
+            f"{w1_model} -> {','.join(blocks)}, axis=1",
+            f"{','.join(blocks[0::2])} -> {gate_all}, axis=1",
+            f"{','.join(blocks[1::2])} -> {up_all}, axis=1",
+            f"{gate_all} -> {','.join(gates)}, axis=0",
+            f"{up_all} -> {','.join(ups)}, axis=0",
+        ]
+        statements += [
+            f"{gates[e]},{ups[e]} -> {up_gate_models[e]}, axis=1"
+            for e in range(num_experts)
+        ]
+        flat_parts = [part for row in parts for part in row]
+        statements.append(f"{w2_model} -> {','.join(flat_parts)}, axis=0")
+        statements += [
+            f"{','.join(parts[r][e] for r in range(ep_size))} -> "
+            f"{down_intermediates[e]}, axis=0"
+            for e in range(num_experts)
+        ]
+        return statements
 
 
 class Gemma4TopKRouter(TopKRouter):

@@ -109,9 +109,10 @@ def _plain(module, x):
     return module(x)
 
 
-def _plain_apply(module, x, build_graph):
+def _plain_apply(module, x, build_graph, mappings_cache=None):
     """What the node wraps, called directly: no detached branches, no fixed order."""
     del build_graph  # the plain composition has no inner graph to gate
+    del mappings_cache  # and nothing to reuse across a span's two passes
     h_pre, h_post, h_res = module.compute_mappings(x)
     return module.aggregate(x, h_pre), h_res, h_post
 

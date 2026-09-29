@@ -654,6 +654,15 @@ def triton_prefix_lm_backward(
         BLOCK_M=block_m,
     )
     warps, stages = num_warps, num_stages
+    # Blackwell (SM >= 10.0): the prefix-LM backward kernels return wrong/NaN
+    # gradients when software-pipelined with num_stages > 1. Force stages=1 there
+    # — this only changes the Triton pipelining schedule, not the math.
+    try:
+        _cc = paddle.device.cuda.get_device_capability()
+        if _cc is not None and _cc[0] >= 10 and stages > 1:
+            stages = 1
+    except Exception:
+        pass
     ks["_prefix_lm_dkdv_kernel"][(p["n_kv_blocks"], b * h)](
         query,
         key,

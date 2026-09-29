@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import importlib
+import importlib.util
 
 try:
     from importlib import metadata
@@ -204,3 +205,151 @@ class TestToolHelpers(unittest.TestCase):
         self._test_build_blending_indices(
             num_datasets, size, dataset_index_dtype, verbose, seed, assert_true
         )
+
+
+class _ListDataset:
+    """Minimal real constituent dataset with content-distinguishable samples.
+
+    Each sample carries a text tag and a numeric value derived from the
+    dataset tag and the in-dataset sample index, so that a routing error
+    (wrong constituent dataset or wrong in-dataset sample index) yields a
+    distinguishable, independently predictable output.
+    """
+
+    def __init__(self, tag, num_samples):
+        self.tag = tag
+        self.desc = f"list-dataset-{tag}"
+        self._samples = [
+            {"text": f"{tag}-sample-{i}", "value": tag * 1000 + i}
+            for i in range(num_samples)
+        ]
+
+    def __len__(self):
+        return len(self._samples)
+
+    def __getitem__(self, idx):
+        return dict(self._samples[int(idx)])
+
+
+_PADDLE_INSTALLED = importlib.util.find_spec("paddle") is not None
+
+
+@unittest.skipUnless(
+    _PADDLE_INSTALLED,
+    "paddle is required to import "
+    "paddlefleet.data.blendable_dataset.BlendableDataset",
+)
+class TestBlendableDatasetIndexing(unittest.TestCase):
+    """Behavior tests for how BlendableDataset consumes indices in __getitem__.
+
+    These exercise the real __getitem__ routing on CPU. __init__ is bypassed
+    via __new__ because the production constructor needs the fast_dataindex
+    extension plus file I/O to build the index arrays; here we install
+    deterministic index arrays and observe how the real routing consumes them.
+    Weight -> per-dataset sample proportions (index construction) is already
+    covered by TestToolHelpers against the production fast_dataindex helper,
+    so it is not duplicated here.
+    """
+
+    def _make_blendable(self, dataset_index, dataset_sample_index, datasets):
+        from paddlefleet.data.blendable_dataset import BlendableDataset
+
+        blend = BlendableDataset.__new__(BlendableDataset)
+        blend.datasets = datasets
+        blend.size = len(dataset_index)
+        blend.dataset_index = np.asarray(dataset_index, dtype=np.int16)
+        blend.dataset_sample_index = np.asarray(
+            dataset_sample_index, dtype=np.int64
+        )
+        blend.desc = "test-blendable"
+        return blend
+
+    def test_getitem_routes_to_correct_dataset_and_sample(self):
+        datasets = [
+            _ListDataset(tag=0, num_samples=4),
+            _ListDataset(tag=1, num_samples=4),
+            _ListDataset(tag=2, num_samples=4),
+        ]
+        # Interleave constituent datasets and pick distinct in-dataset samples
+        # so a swapped dataset or a mis-mapped sample index is observable.
+        dataset_index = [0, 1, 2, 1, 0, 2]
+        dataset_sample_index = [3, 0, 2, 1, 1, 3]
+        blend = self._make_blendable(
+            dataset_index, dataset_sample_index, datasets
+        )
+
+        # Independently computed expected output for each global index.
+        expected = [
+            {"dataset_idx": 0, "text": "0-sample-3", "value": 3},
+            {"dataset_idx": 1, "text": "1-sample-0", "value": 1000},
+            {"dataset_idx": 2, "text": "2-sample-2", "value": 2002},
+            {"dataset_idx": 1, "text": "1-sample-1", "value": 1001},
+            {"dataset_idx": 0, "text": "0-sample-1", "value": 1},
+            {"dataset_idx": 2, "text": "2-sample-3", "value": 2003},
+        ]
+        self.assertEqual(len(expected), blend.size)
+        for i, exp in enumerate(expected):
+            item = blend[i]
+            self.assertEqual(int(item["dataset_idx"]), exp["dataset_idx"])
+            self.assertEqual(item["text"], exp["text"])
+            self.assertEqual(item["value"], exp["value"])
+            # The merged sample keys must accompany the injected dataset_idx.
+            self.assertEqual(set(item), {"dataset_idx", "text", "value"})
+
+    def test_getitem_preserves_sample_identity_per_dataset(self):
+        # Two datasets with overlapping in-dataset indices but disjoint
+        # content ranges; every global slot maps to exactly one (ds, sample).
+        datasets = [
+            _ListDataset(tag=0, num_samples=3),
+            _ListDataset(tag=1, num_samples=3),
+        ]
+        dataset_index = [0, 0, 0, 1, 1, 1]
+        dataset_sample_index = [0, 1, 2, 0, 1, 2]
+        blend = self._make_blendable(
+            dataset_index, dataset_sample_index, datasets
+        )
+        seen = [
+            (blend[i]["text"], blend[i]["value"]) for i in range(blend.size)
+        ]
+        self.assertEqual(
+            seen,
+            [
+                ("0-sample-0", 0),
+                ("0-sample-1", 1),
+                ("0-sample-2", 2),
+                ("1-sample-0", 1000),
+                ("1-sample-1", 1001),
+                ("1-sample-2", 1002),
+            ],
+        )
+
+    def test_len_returns_blend_size_not_constituent_totals(self):
+        # Blend size (5) differs from any constituent length (4) and from
+        # their total (8), so __len__ must return the requested blend size.
+        datasets = [
+            _ListDataset(tag=0, num_samples=4),
+            _ListDataset(tag=1, num_samples=4),
+        ]
+        dataset_index = [0, 1, 0, 1, 0]
+        dataset_sample_index = [0, 0, 1, 1, 2]
+        blend = self._make_blendable(
+            dataset_index, dataset_sample_index, datasets
+        )
+        self.assertEqual(len(blend), 5)
+
+    def test_getitem_out_of_range_raises_index_error(self):
+        # __init__ relies on __getitem__(size) raising IndexError as its
+        # bound check; the index arrays hold exactly `size` entries.
+        datasets = [
+            _ListDataset(tag=0, num_samples=2),
+            _ListDataset(tag=1, num_samples=2),
+        ]
+        blend = self._make_blendable([0, 1, 0], [0, 0, 1], datasets)
+        # In-range access at the last valid slot succeeds.
+        self.assertEqual(blend[blend.size - 1]["text"], "0-sample-1")
+        with self.assertRaises(IndexError):
+            _ = blend[blend.size]
+
+
+if __name__ == "__main__":
+    unittest.main()

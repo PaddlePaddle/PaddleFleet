@@ -15,6 +15,19 @@
 import unittest
 
 import paddle
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _pin_gpu_device():
+    # These are GPU-only Triton RoPE kernel tests. Pin the default device to
+    # GPU so they never inherit a Place(cpu) left behind by an earlier test
+    # on the same pytest-xdist worker (many sibling tests call
+    # paddle.set_device("cpu")). Without this the Triton launch fails with
+    # "Pointer argument cannot be accessed from Triton (cpu tensor?)" or
+    # "The device type Place(cpu) is not expected".
+    if paddle.is_compiled_with_cuda() and paddle.device.cuda.device_count() > 0:
+        paddle.set_device("gpu")
 
 
 def apply_rotary_ref(x, cos, sin, conjugate=False):

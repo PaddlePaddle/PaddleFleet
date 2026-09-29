@@ -104,6 +104,39 @@ class TestLoraLayer(unittest.TestCase):
 
 
 class TestLoraModel(unittest.TestCase):
+    def setUp(self):
+        # These tests build a real Qwen3 model via
+        # ``AutoModelForCausalLM.from_pretrained`` -> ``GPTModel`` ->
+        # ``PipelineLayer.__init__``, which constructs ``dist.ParallelEnv()``.
+        # On a CUDA build that reads ``int(FLAGS_selected_gpus[0])``
+        # (parallel.py:764). A real launcher/fleet exports
+        # ``FLAGS_selected_gpus`` when it selects a card, but the CI runner
+        # leaves it as an empty string -> ``int('')`` raises ``ValueError``.
+        # Replicate the launcher-provided single-card environment here
+        # (legitimate setup a launcher would perform, not masking a bug).
+        # The model runs on a real GPU, so skip honestly on a CPU-only build.
+        if (
+            not paddle.is_compiled_with_cuda()
+            or paddle.device.cuda.device_count() == 0
+        ):
+            self.skipTest(
+                "LoRAModel builds a real GPTModel whose PipelineLayer init "
+                "constructs ParallelEnv on a CUDA device; this build has no "
+                "usable CUDA device"
+            )
+        self._orig_device = paddle.get_device()
+        self._orig_selected_gpus = os.environ.get("FLAGS_selected_gpus")
+        os.environ["FLAGS_selected_gpus"] = "0"
+        paddle.set_device("gpu:0")
+        self.addCleanup(self._restore_gpu_env)
+
+    def _restore_gpu_env(self):
+        paddle.set_device(self._orig_device)
+        if self._orig_selected_gpus is None:
+            os.environ.pop("FLAGS_selected_gpus", None)
+        else:
+            os.environ["FLAGS_selected_gpus"] = self._orig_selected_gpus
+
     @parameterized.expand([(None,), ("all",), ("lora",)])
     def test_lora_model_constructor(self, bias):
         lora_config = LoRAConfig(

@@ -111,7 +111,7 @@ class _FakeMTPSpec:
         self.transformer_layer = tl
 
 
-def _build_mtp_layer(config, layer_number=0):
+def _build_mtp_layer(config, layer_number=0, *, replace_mtp_embed=True):
     from paddlefleet.transformer.multi_token_prediction import (
         MultiTokenPredictionLayer,
     )
@@ -147,7 +147,7 @@ def _build_mtp_layer(config, layer_number=0):
     if hasattr(layer, "norm") and layer.norm is not None:
         layer.norm = _FakeNorm()
     layer.transformer_layer = _FakeTransformerLayer()
-    if layer.mtp_embed is not None:
+    if layer.mtp_embed is not None and replace_mtp_embed:
         layer.mtp_embed = nn.Embedding(config.vocab_size, config.hidden_size)
     return layer
 
@@ -507,6 +507,30 @@ class TestWrappedPaddleNormPipe(unittest.TestCase):
 
 class TestMTPLayerForward(unittest.TestCase):
     """MultiTokenPredictionLayer.forward() magic send branch."""
+
+    def test_erndata_does_not_register_magic_instance(self):
+        layer = _build_mtp_layer(
+            _cfg(use_erndata=True, variable_seq_lengths=True)
+        )
+        self.assertIsNotNone(layer.mtp_embed)
+        self.assertFalse(hasattr(layer, "magic_key"))
+
+    def test_erndata_keeps_default_context_parallel_grad_scaling(self):
+        layer = _build_mtp_layer(
+            _cfg(
+                use_erndata=True,
+                variable_seq_lengths=True,
+                context_parallel_size=2,
+            ),
+            replace_mtp_embed=False,
+        )
+        self.assertFalse(
+            getattr(
+                layer.mtp_embed.weight,
+                "context_parallel_disable_scale_grad",
+                False,
+            )
+        )
 
     def test_basic_forward(self):
         """Shape, keys, stop_gradient, and rotary passthrough."""
@@ -1284,6 +1308,9 @@ class TestGPTModelMTPMethods(unittest.TestCase):
         model2, _ = self._make_model(num_mtp=0)
         model2.run_function = []
         model2.config.params_dtype = "float16"
+        model2.config.vocab_size = 1000
+        model2.config.tensor_model_parallel_size = 1
+        model2.config.make_vocab_size_divisible_by = 128
         with (
             patch(
                 "paddlefleet.models.gpt.gpt_model.fleet.get_hybrid_communicate_group",
@@ -1293,6 +1320,27 @@ class TestGPTModelMTPMethods(unittest.TestCase):
         ):
             model2._synchronize_mtp_embed_weight()
         bcast2.assert_called_once()
+        self.assertEqual(
+            list(bcast2.call_args.args[0].shape),
+            [1000, model2.config.hidden_size],
+        )
+
+    def test_synchronize_weight_rejects_nondivisible_vocab(self):
+        model, _ = self._make_model(num_mtp=0)
+        model.run_function = []
+        model.config.vocab_size = 1001
+        model.config.tensor_model_parallel_size = 2
+        hcg = MagicMock()
+        hcg.get_rank_from_stage.return_value = 0
+        hcg.get_pipe_parallel_group.return_value = MagicMock()
+        with (
+            patch(
+                "paddlefleet.models.gpt.gpt_model.fleet.get_hybrid_communicate_group",
+                return_value=hcg,
+            ),
+            self.assertRaisesRegex(ValueError, "must be divisible"),
+        ):
+            model._synchronize_mtp_embed_weight()
 
     def test_mark_shared_flags(self):
         model, layers = self._make_model(num_mtp=1)
@@ -1346,12 +1394,57 @@ class TestGPTModelMTPMethods(unittest.TestCase):
             model.allreduce_shared_weight_gradients()
         self.assertEqual(ar.call_count, 2)
 
-        # No grad => no call
+        # No local gradient still participates with a zero contribution so every
+        # rank in the dedicated group issues a symmetric collective.
         w.grad = None
         model.shared_comm = {}
-        with patch("paddle.distributed.all_reduce") as ar2:
+        with patch(
+            "paddle.distributed.all_reduce",
+            side_effect=lambda tensor, group=None: tensor.set_value(
+                paddle.full_like(tensor, 7)
+            ),
+        ) as ar2:
             model.allreduce_shared_weight_gradients()
-        ar2.assert_not_called()
+        ar2.assert_called_once()
+        self.assertIsNotNone(w.grad)
+        self.assertTrue(paddle.equal_all(w.grad, paddle.full_like(w, 7)))
+
+    def test_allreduce_deduplicates_by_parameter_identity(self):
+        model, _ = self._make_model(num_mtp=0)
+        model._mtp_embed_global_group = None
+        shared = paddle.create_parameter(shape=[8], dtype="float32")
+        shared.grad = paddle.ones_like(shared)
+        owner = MagicMock()
+        owner.first = shared
+        owner.second = shared
+        model.shared_comm = {
+            "x": {
+                "weight_attr": ["first", "second"],
+                "layer": owner,
+                "group": MagicMock(),
+            }
+        }
+        with patch("paddle.distributed.all_reduce") as all_reduce:
+            model.allreduce_shared_weight_gradients()
+        all_reduce.assert_called_once()
+
+    def test_allreduce_same_parameter_in_two_groups(self):
+        model, _ = self._make_model(num_mtp=0)
+        model._mtp_embed_global_group = None
+        shared = paddle.create_parameter(shape=[8], dtype="float32")
+        shared.grad = paddle.ones_like(shared)
+        owner = MagicMock()
+        owner.p = shared
+        group_a, group_b = MagicMock(), MagicMock()
+        model.shared_comm = {
+            "a": {"weight_attr": ["p"], "layer": owner, "group": group_a},
+            "b": {"weight_attr": ["p"], "layer": owner, "group": group_b},
+        }
+        with patch("paddle.distributed.all_reduce") as all_reduce:
+            model.allreduce_shared_weight_gradients()
+        self.assertEqual(all_reduce.call_count, 2)
+        self.assertIs(all_reduce.call_args_list[0].kwargs["group"], group_a)
+        self.assertIs(all_reduce.call_args_list[1].kwargs["group"], group_b)
 
     def test_allreduce_main_grad(self):
         model, layers = self._make_model(num_mtp=1)
@@ -1363,6 +1456,25 @@ class TestGPTModelMTPMethods(unittest.TestCase):
         with patch("paddle.distributed.all_reduce") as ar:
             model.allreduce_shared_weight_gradients()
         ar.assert_called_once()
+
+    def test_allreduce_missing_main_grad_is_attached(self):
+        model, layers = self._make_model(num_mtp=1)
+        model._mtp_embed_global_group = MagicMock()
+        weight = layers[0].mtp_embed.weight
+        weight.main_grad = None
+        model.shared_comm = {}
+        with patch(
+            "paddle.distributed.all_reduce",
+            side_effect=lambda tensor, group=None: tensor.set_value(
+                paddle.full_like(tensor, 3)
+            ),
+        ):
+            model.allreduce_shared_weight_gradients()
+        self.assertIsNotNone(weight.main_grad)
+        self.assertEqual(weight.main_grad.dtype, paddle.float32)
+        self.assertTrue(
+            paddle.equal_all(weight.main_grad, paddle.full_like(weight, 3))
+        )
 
     def test_edge_cases_no_layers(self):
         model, _ = self._make_model(num_mtp=0)

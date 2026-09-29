@@ -1939,6 +1939,8 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             # DSv4 reference uses pure norm-preserving RoPE; YaRN's mscale is not applied.
             mscale = 1.0
 
+            freqs = inspect_tensor("attn_freqs", get_current_layer(), freqs)
+
             # Q RoPE: split nope/pe, apply RoPE to pe part
             if (
                 self.config.apply_rope_fusion

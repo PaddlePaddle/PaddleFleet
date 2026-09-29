@@ -114,7 +114,7 @@ class PreTrainingArguments(TrainingArguments):
             "(moe_health per-expert, mhc_health per hyper-connection cell). These are "
             "~48% of the keys per step, so they are off by default and only worth the "
             "cross-rank payload while debugging a specific model. "
-            "See internal_medicine.core.metric_families.DEBUG_ONLY_FAMILIES."
+            "See paddlefleet.internal_medicine.core.metric_families.DEBUG_ONLY_FAMILIES."
         },
     )
     internal_medicine_qk_row_stride: int = field(

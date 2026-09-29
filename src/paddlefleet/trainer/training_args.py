@@ -1937,6 +1937,17 @@ class TrainingArguments:
             )
         },
     )
+    muon_epsilon: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Epsilon for the Muon (Newton-Schulz orthogonalization) direction, "
+                "kept separate from adam_epsilon so muon and adamw can use different "
+                "values. Default: None -> falls back to adam_epsilon (previous "
+                "shared behaviour). Only used when optim=muon."
+            )
+        },
+    )
     muon_version: int = field(
         default=3,
         metadata={
@@ -3340,13 +3351,12 @@ class TrainingArguments:
             assert self.fuse_optimizer_states, (
                 "zero cost checkpoint must be used when fuse_optimizer_states is enabled in sharding parallel config"
             )
-
-        assert self.flash_device_save_steps % self.zcc_ema_interval == 0, (
-            f"flash_device_save_steps[{self.flash_device_save_steps}] must be divisible by zcc_ema_interval[{self.zcc_ema_interval}]"
-        )
-        assert self.save_steps % self.zcc_ema_interval == 0, (
-            f"save_steps[{self.save_steps}] must be divisible by zcc_ema_interval[{self.zcc_ema_interval}]"
-        )
+            assert self.flash_device_save_steps % self.zcc_ema_interval == 0, (
+                f"flash_device_save_steps[{self.flash_device_save_steps}] must be divisible by zcc_ema_interval[{self.zcc_ema_interval}]"
+            )
+            assert self.save_steps % self.zcc_ema_interval == 0, (
+                f"save_steps[{self.save_steps}] must be divisible by zcc_ema_interval[{self.zcc_ema_interval}]"
+            )
         if (
             self.enable_zero_cost_checkpoint
             and self.zcc_save_ema_coef is not None

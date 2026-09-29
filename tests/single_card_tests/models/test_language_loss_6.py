@@ -46,6 +46,7 @@ none of them silently pass.
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -234,6 +235,22 @@ class TestMainLanguageLossErnie5Forward(unittest.TestCase):
         loss.ignored_index = IGNORED
         # Cached in __init__ (skipped by __new__); MainLanguageLoss.forward reads it.
         loss.calculate_per_token_loss = False
+        # Isolate the global training-log sink (a non-tested collaborator).
+        p = mock.patch(
+            "paddlefleet.models.common.language_loss.language_loss."
+            "get_global_training_logs",
+            return_value=None,
+        )
+        p.start()
+        self.addCleanup(p.stop)
+        # mtp_loss_tracker is class-level global state: snapshot & restore.
+        orig = dict(MainLanguageLoss.mtp_loss_tracker)
+        self.addCleanup(
+            lambda: (
+                MainLanguageLoss.mtp_loss_tracker.clear(),
+                MainLanguageLoss.mtp_loss_tracker.update(orig),
+            )
+        )
         return loss
 
     def test_main_label_trimmed_to_L_minus_K(self):
