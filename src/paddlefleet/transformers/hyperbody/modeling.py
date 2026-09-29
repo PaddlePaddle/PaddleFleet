@@ -1309,6 +1309,233 @@ class HyperBodyPretrainedModel(PretrainedModel):
 
         return {"aoa_statements": st}
 
+    @classmethod
+    def _gen_inv_aoa_config(cls, config):
+        """Reverse weight mapping (fleet structured name -> HF checkpoint name).
+
+        Exact inverse of :meth:`_gen_aoa_config`, used by ``save_pretrained`` to
+        materialise a HuggingFace ``model.safetensors`` from this model's fleet
+        LOGICAL keys. Every forward statement is reversed by the same three
+        rules that DeepSeek-V4 / GLM4-MoE use:
+
+        * ``A -> B``            (rename)     becomes ``B -> A``.
+        * ``A^T -> B``          (transpose)  becomes ``B^T -> A`` (the ``^T``
+          follows the tensor onto the new source side).
+        * a fusion ``a, b -> C, fused_*`` (or ``axis=``) becomes a de-fusion
+          ``C -> a, b, fused_*`` that first splits into intermediate tensors,
+          which are then transposed in place to reach the HF layout.
+
+        Because ``fused_qkv`` / ``fused_ffn`` / grouped-GEMM operate on the
+        UN-transposed fleet layout, the de-fusion split MUST run before the
+        per-piece ``^T``, and a grouped-GEMM ``weight1/2`` must be un-stacked
+        back to per-expert tensors before those are split. The order below
+        honours both constraints.
+        """
+        st = []
+
+        # =============== DECODER region (fleet model.* -> HF model.*) =========== #
+        dec_cfg = config.decoder_config
+        dec_experts = dec_cfg.n_routed_experts
+        dec_freq = dec_cfg.moe_layer_freq
+        dec_nh = dec_cfg.num_attention_heads
+        dec_kvh = dec_cfg.num_key_value_heads
+
+        st += [
+            "model.embedding.embed_tokens.weight -> model.embed_tokens.weight",
+            "model.norm.weight -> model.norm.weight",
+        ]
+        # Tied head shares the embedding source, so drop the duplicate on save.
+        if config.tie_word_embeddings:
+            st.append("model.lm_head.weight -> _")
+        else:
+            st.append("model.lm_head.weight -> lm_head.weight")
+
+        for L in range(dec_cfg.num_hidden_layers):
+            pd = f"model.layers.{L}"
+            hf = f"model.layers.{L}"
+            st += [
+                f"{pd}.input_layernorm.weight -> {hf}.input_layernorm.weight",
+                f"{pd}.post_attention_layernorm.weight -> {hf}.post_attention_layernorm.weight",
+                f"{pd}.self_attn.o_proj.weight^T -> {hf}.self_attn.o_proj.weight",
+                # split fused qkv -> per-proj (fleet layout), then transpose each
+                f"{pd}.self_attn.qkv_proj.weight -> {pd}.self_attn.q_proj.weight, "
+                f"{pd}.self_attn.k_proj.weight, {pd}.self_attn.v_proj.weight, "
+                f"fused_qkv, num_heads={dec_nh}, num_key_value_groups={dec_kvh}",
+                f"{pd}.self_attn.q_proj.weight^T -> {hf}.self_attn.q_proj.weight",
+                f"{pd}.self_attn.k_proj.weight^T -> {hf}.self_attn.k_proj.weight",
+                f"{pd}.self_attn.v_proj.weight^T -> {hf}.self_attn.v_proj.weight",
+            ]
+            if not dec_freq[L]:
+                st += [
+                    f"{pd}.mlp.up_gate_proj.weight -> {pd}.mlp.gate_proj.weight, "
+                    f"{pd}.mlp.up_proj.weight, fused_ffn",
+                    f"{pd}.mlp.gate_proj.weight^T -> {hf}.mlp.gate_proj.weight",
+                    f"{pd}.mlp.up_proj.weight^T -> {hf}.mlp.up_proj.weight",
+                    f"{pd}.mlp.down_proj.weight^T -> {hf}.mlp.down_proj.weight",
+                ]
+                continue
+            # MoE: un-stack grouped GEMM first (if fused), then split per expert.
+            if config.moe_expert_fusion:
+                w1 = ",".join(
+                    f"{pd}.mlp.experts.{e}.up_gate_proj.weight"
+                    for e in range(dec_experts)
+                )
+                w2 = ",".join(
+                    f"{pd}.mlp.experts.{e}.down_proj.weight"
+                    for e in range(dec_experts)
+                )
+                st += [
+                    f"{pd}.mlp.grouped_gemm_experts.weight1 -> {w1}, axis=0",
+                    f"{pd}.mlp.grouped_gemm_experts.weight2 -> {w2}, axis=0",
+                ]
+            st += [
+                f"{pd}.mlp.gate.weight -> {hf}.mlp.gate.weight, "
+                f"src_dtype='float32',dst_dtype='bfloat16'",
+                f"{pd}.mlp.shared_experts.up_gate_proj.weight "
+                f"-> {pd}.mlp.shared_experts.gate_proj.weight, "
+                f"{pd}.mlp.shared_experts.up_proj.weight, fused_ffn",
+                f"{pd}.mlp.shared_experts.gate_proj.weight^T "
+                f"-> {hf}.mlp.shared_experts.gate_proj.weight",
+                f"{pd}.mlp.shared_experts.up_proj.weight^T "
+                f"-> {hf}.mlp.shared_experts.up_proj.weight",
+                f"{pd}.mlp.shared_experts.down_proj.weight^T "
+                f"-> {hf}.mlp.shared_experts.down_proj.weight",
+            ]
+            for e in range(dec_experts):
+                st += [
+                    f"{pd}.mlp.experts.{e}.up_gate_proj.weight "
+                    f"-> {pd}.mlp.experts.{e}.gate_proj.weight, "
+                    f"{pd}.mlp.experts.{e}.up_proj.weight, axis=1",
+                    f"{pd}.mlp.experts.{e}.gate_proj.weight^T "
+                    f"-> {hf}.mlp.experts.{e}.gate_proj.weight",
+                    f"{pd}.mlp.experts.{e}.up_proj.weight^T "
+                    f"-> {hf}.mlp.experts.{e}.up_proj.weight",
+                    f"{pd}.mlp.experts.{e}.down_proj.weight^T "
+                    f"-> {hf}.mlp.experts.{e}.down_proj.weight",
+                ]
+
+        # =============== ENCODER region (fleet encoder.* -> HF model.encoder.*) === #
+        enc = "model.encoder"
+        enc_dec = "model.encoder.decoder.model.model"
+        enc_cfg = config.encoder_config
+        enc_layers = enc_cfg.num_hidden_layers
+        enc_experts = enc_cfg.n_routed_experts
+        enc_nh = enc_cfg.num_attention_heads
+        enc_kvh = enc_cfg.num_key_value_heads
+        enc_dense = set(range(int(enc_cfg.first_k_dense_replace or 0)))
+
+        # front-end towers / embedding / query tables (conv+pos_embed no ^T)
+        for name in (
+            "image_encoder.pos_embed",
+            "image_encoder.patch_embed.proj.weight",
+            "image_encoder.patch_embed.proj.bias",
+            "audio_encoder.pos_embed",
+            "audio_encoder.conv1.weight",
+            "audio_encoder.conv1.bias",
+            "audio_encoder.conv2.weight",
+            "audio_encoder.conv2.bias",
+        ):
+            st.append(f"encoder.{name} -> {enc}.{name}")
+        st.append(
+            f"encoder.projector.layers.weight^T -> {enc}.projector.layers.weight"
+        )
+        st.append(
+            f"encoder.projector.layers.bias -> {enc}.projector.layers.bias"
+        )
+        st.append(
+            f"encoder.embed_tokens.weight -> {enc_dec}.embed_tokens.weight"
+        )
+        st.append(
+            f"encoder.query_short.weight -> {enc}.decoder.query_short.weight"
+        )
+        st.append(
+            f"encoder.query_long.weight -> {enc}.decoder.query_long.weight"
+        )
+        # bridge: encoder backbone final norm + encoder->LLM output projection
+        st.append(f"encoder.bridge.final_norm.weight -> {enc_dec}.norm.weight")
+        st.append(
+            "encoder.bridge.out_projector.weight^T -> model.projector.weight"
+        )
+        st.append("encoder.bridge.out_projector.bias -> model.projector.bias")
+
+        for L in range(enc_layers):
+            pd = f"encoder.layers.{L}"
+            hf = f"{enc_dec}.layers.{L}"
+            st.append(
+                f"{pd}.input_layernorm.weight -> {hf}.input_layernorm.weight"
+            )
+            st.append(
+                f"{pd}.post_attention_layernorm.weight -> {hf}.post_attention_layernorm.weight"
+            )
+            st.append(
+                f"{pd}.self_attn.o_proj.weight^T -> {hf}.self_attn.o_proj.weight"
+            )
+            # split fused qkv -> per-proj (fleet layout), then transpose each
+            st.append(
+                f"{pd}.self_attn.qkv_proj.weight -> {pd}.self_attn.q_proj.weight, "
+                f"{pd}.self_attn.k_proj.weight, {pd}.self_attn.v_proj.weight, "
+                f"fused_qkv, num_heads={enc_nh}, num_key_value_groups={enc_kvh}"
+            )
+            st += [
+                f"{pd}.self_attn.q_proj.weight^T -> {hf}.self_attn.q_proj.weight",
+                f"{pd}.self_attn.k_proj.weight^T -> {hf}.self_attn.k_proj.weight",
+                f"{pd}.self_attn.v_proj.weight^T -> {hf}.self_attn.v_proj.weight",
+            ]
+            if L in enc_dense:
+                st += [
+                    f"{pd}.mlp.up_gate_proj.weight -> {pd}.mlp.gate_proj.weight, "
+                    f"{pd}.mlp.up_proj.weight, fused_ffn",
+                    f"{pd}.mlp.gate_proj.weight^T -> {hf}.mlp.gate_proj.weight",
+                    f"{pd}.mlp.up_proj.weight^T -> {hf}.mlp.up_proj.weight",
+                    f"{pd}.mlp.down_proj.weight^T -> {hf}.mlp.down_proj.weight",
+                ]
+                continue
+            # MoE: un-stack grouped GEMM first (if fused), then split per expert.
+            if config.moe_expert_fusion:
+                w1 = ",".join(
+                    f"{pd}.mlp.experts.{e}.up_gate_proj.weight"
+                    for e in range(enc_experts)
+                )
+                w2 = ",".join(
+                    f"{pd}.mlp.experts.{e}.down_proj.weight"
+                    for e in range(enc_experts)
+                )
+                st += [
+                    f"{pd}.mlp.grouped_gemm_experts.weight1 -> {w1}, axis=0",
+                    f"{pd}.mlp.grouped_gemm_experts.weight2 -> {w2}, axis=0",
+                ]
+            st.append(
+                f"{pd}.mlp.gate.weight -> {hf}.mlp.gate.weight, "
+                f"src_dtype='float32',dst_dtype='bfloat16'"
+            )
+            st += [
+                f"{pd}.mlp.shared_experts.up_gate_proj.weight "
+                f"-> {pd}.mlp.shared_experts.gate_proj.weight, "
+                f"{pd}.mlp.shared_experts.up_proj.weight, fused_ffn",
+                f"{pd}.mlp.shared_experts.gate_proj.weight^T "
+                f"-> {hf}.mlp.shared_experts.gate_proj.weight",
+                f"{pd}.mlp.shared_experts.up_proj.weight^T "
+                f"-> {hf}.mlp.shared_experts.up_proj.weight",
+                f"{pd}.mlp.shared_experts.down_proj.weight^T "
+                f"-> {hf}.mlp.shared_experts.down_proj.weight",
+            ]
+            # Encoder routed experts fuse up/gate with ``fused_ffn`` (matching the
+            # forward encoder branch), unlike the decoder which uses ``axis=1``.
+            for e in range(enc_experts):
+                st += [
+                    f"{pd}.mlp.experts.{e}.up_gate_proj.weight "
+                    f"-> {pd}.mlp.experts.{e}.gate_proj.weight, "
+                    f"{pd}.mlp.experts.{e}.up_proj.weight, fused_ffn",
+                    f"{pd}.mlp.experts.{e}.gate_proj.weight^T "
+                    f"-> {hf}.mlp.experts.{e}.gate_proj.weight",
+                    f"{pd}.mlp.experts.{e}.up_proj.weight^T "
+                    f"-> {hf}.mlp.experts.{e}.up_proj.weight",
+                    f"{pd}.mlp.experts.{e}.down_proj.weight^T "
+                    f"-> {hf}.mlp.experts.{e}.down_proj.weight",
+                ]
+
+        return {"aoa_statements": st}
+
 
 class HyperBodyModelDist(HyperBodyPretrainedModel):
     """Factory returning the unified ``HyperBodyUnifiedModel`` (a PipelineLayer).
@@ -1324,10 +1551,22 @@ class HyperBodyModelDist(HyperBodyPretrainedModel):
         # entry applies pipe._loss_fn[0] manually, so have_criterion does not
         # change the assembled graph here.
         pipe = build_hyperbody_unified_model(config, num_stages=1)
-        pipe._gen_aoa_config = cls._gen_aoa_config
-        # No _gen_inv_aoa_config: flex_checkpoint auto-derives the save (reverse)
-        # mapping from _gen_aoa_config (model_utils.py:3834). Leaving it unset is
-        # required -- setting a stub would make hasattr() true and trip the save.
+        # Bind the AOA weight-conversion rules through a closure that locks in the
+        # real HyperBodyConfig. At save time the trainer calls these as
+        # ``pipe._gen_aoa_config(model.config)``, but ``pipe.config`` is the
+        # decoder provider (a SimpleNamespace), NOT a HyperBodyConfig -- it lacks
+        # ``decoder_config`` / ``encoder_config`` and would break the mapping. The
+        # closure ignores the passed-in config and always uses the one captured
+        # here. ``_gen_inv_aoa_config`` (save / reverse mapping; flex_checkpoint
+        # would otherwise auto-derive it, but the fused_qkv / fused_ffn /
+        # grouped-GEMM statements need the hand-written de-fusion order) is bound
+        # the same way.
+        pipe._gen_aoa_config = lambda _cfg=None, _c=config: cls._gen_aoa_config(
+            _c
+        )
+        pipe._gen_inv_aoa_config = (
+            lambda _cfg=None, _c=config: cls._gen_inv_aoa_config(_c)
+        )
         pipe.config_to_save = config
         return pipe
 

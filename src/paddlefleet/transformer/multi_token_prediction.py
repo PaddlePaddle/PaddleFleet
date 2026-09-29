@@ -32,6 +32,9 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
     ScatterOp,
     mark_as_sequence_parallel_parameter,
 )
+from paddle.distributed.flex_checkpoint.aoa.generation import (
+    resolve_single_name,
+)
 
 from paddlefleet import tensor_parallel
 from paddlefleet.context_parallel_utils import ContextParallelScatterOp
@@ -40,6 +43,10 @@ from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
 )
 from paddlefleet.process_groups_config import ProcessGroupCollection
+from paddlefleet.tensor_parallel.layers import (
+    gen_linear_aoa_statements,
+    gen_linear_inv_aoa_statements,
+)
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_sequence_parallel_region,
@@ -844,6 +851,14 @@ def resolve_mtp_sampled_depth(owner, config, dict_args):
     k = draw_mtp_sampled_depth(owner, config)
     dict_args["mtp_sampled_depth"] = k
     return k
+# The checkpoint holds an MTP block's transformer tensors directly under the
+# layer, one module shallower than the live tree, which nests them under
+# ``transformer_layer``. Dropping that segment before every checkpoint-name
+# lookup in this subtree is what lets one ``checkpoint_name_mapping`` layer
+# entry cover an ordinary layer and an MTP block's inner transformer alike; the
+# model-side names keep the segment. Children that do not carry it (``enorm``,
+# ``hnorm``, ``eh_proj``, ...) are unaffected.
+_AOA_DROP_SEGMENT = "transformer_layer"
 
 
 class MultiTokenPredictionLayer(FleetLayer):
@@ -1116,6 +1131,120 @@ class MultiTokenPredictionLayer(FleetLayer):
             if name.startswith("mtp_embed."):
                 continue
             yield name, param
+    def _mtp_embed_model_names(self, ctx, structured_name_prefix):
+        """Yields the model-side name of every tensor ``mtp_embed`` owns.
+
+        ``enable_mtp_magic_send`` gives this block a private copy of the token
+        embedding, so the copy has model keys of its own while the checkpoint
+        still holds a single embedding tensor. The standard recursion resolves
+        those keys to themselves and so emits nothing for them, which is why
+        both directions state the copy's rule here. Yields nothing when the
+        block has no copy.
+
+        Both directions call this: it only computes names, so neither
+        direction's statements are derived from the other's.
+        """
+        if self.mtp_embed is None:
+            return
+        own_state_dict = self.mtp_embed.state_dict(
+            structured_name_prefix="", include_sublayers=False
+        )
+        for local_name in own_state_dict:
+            yield resolve_single_name(
+                local_name,
+                f"{structured_name_prefix}mtp_embed.",
+                ctx.pp_to_single_mapping,
+                ctx.model_name_prefix,
+            )
+
+    def gen_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Checkpoint->model AOA for this block and everything under it.
+
+        Declares the subtree's drop segment and otherwise leaves the walk to
+        the standard recursion, so the inner transformer layer and its
+        components emit their own rules. An MTP block is always registered as a
+        top-level pipeline layer, never inside another subtree, so there is no
+        inherited segment to keep.
+
+        Two children need a rule stated here. In the experimental version
+        ``eh_proj`` is an upstream ``paddle.incubate.nn.FusedLinear`` with no AOA
+        override of its own, so the recursion only same-name passes its
+        ``[in, out]`` weight and its ``^T`` is supplied via the shared Linear
+        helper; other versions build ``eh_proj`` as a Linear-family layer that
+        already emits that ``^T`` in the recursion, so nothing is added here.
+        A private embedding copy is filled from the one embedding tensor the
+        checkpoint holds, the same tensor the model root's embedding reads.
+        """
+        # Function-local: the GPT model package imports this module, so a
+        # module-level import back into it would be circular.
+        from paddlefleet.models.gpt.lm_head import (
+            resolve_embedding_checkpoint_name,
+        )
+
+        statements = super().gen_aoa_statements(
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            checkpoint_lookup_drop_segment=_AOA_DROP_SEGMENT,
+        )
+        if (
+            self.eh_proj is not None
+            and self.config.gpt_model_use_experimental_version
+        ):
+            statements += gen_linear_aoa_statements(
+                self.eh_proj,
+                ctx,
+                structured_name_prefix=f"{structured_name_prefix}eh_proj.",
+                checkpoint_lookup_drop_segment=_AOA_DROP_SEGMENT,
+            )
+        for model_name in self._mtp_embed_model_names(
+            ctx, structured_name_prefix
+        ):
+            statements.append(
+                f"{resolve_embedding_checkpoint_name(ctx)} -> {model_name}"
+            )
+        return statements
+
+    def gen_inv_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Inverse (model -> checkpoint) AOA, independently generated.
+
+        In the experimental version ``eh_proj``'s weight is transposed back here
+        for the same reason the forward direction supplies its ``^T``; other
+        versions leave it to the recursion. A private embedding copy is not
+        written: the checkpoint keeps one embedding tensor and the model root's
+        embedding is what writes it.
+        """
+        statements = super().gen_inv_aoa_statements(
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            checkpoint_lookup_drop_segment=_AOA_DROP_SEGMENT,
+        )
+        if (
+            self.eh_proj is not None
+            and self.config.gpt_model_use_experimental_version
+        ):
+            statements += gen_linear_inv_aoa_statements(
+                self.eh_proj,
+                ctx,
+                structured_name_prefix=f"{structured_name_prefix}eh_proj.",
+                checkpoint_lookup_drop_segment=_AOA_DROP_SEGMENT,
+            )
+        for model_name in self._mtp_embed_model_names(
+            ctx, structured_name_prefix
+        ):
+            statements.append(f"{model_name} -> _")
+        return statements
 
     def _concat_embeddings(
         self,

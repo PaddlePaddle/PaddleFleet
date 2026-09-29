@@ -24,6 +24,44 @@ from tests.formers.testing_utils import require_package
 
 
 class TestMergeModel(unittest.TestCase):
+    def setUp(self):
+        # Building a real model here goes through
+        # ``AutoModelForCausalLM.from_pretrained`` -> ``GPTModel`` ->
+        # ``PipelineLayer.__init__`` (pp_layers.py:446), which constructs
+        # ``dist.ParallelEnv()``. On a CUDA build that reads
+        # ``int(FLAGS_selected_gpus[0])`` (parallel.py:764). A real
+        # launcher/fleet exports ``FLAGS_selected_gpus`` when it selects a card,
+        # but the CI runner leaves it as an empty string -> ``int('')`` raises
+        # ``ValueError``. Replicate the launcher-provided single-card
+        # environment here (this is legitimate setup a launcher would perform,
+        # not masking a bug). These merges build real GPU models, so skip
+        # honestly on a CPU-only build rather than fake a pass.
+        import paddle
+
+        if (
+            not paddle.is_compiled_with_cuda()
+            or paddle.device.cuda.device_count() == 0
+        ):
+            self.skipTest(
+                "mergekit builds a real GPTModel whose PipelineLayer init "
+                "constructs ParallelEnv on a CUDA device; this build has no "
+                "usable CUDA device"
+            )
+        self._orig_device = paddle.get_device()
+        self._orig_selected_gpus = os.environ.get("FLAGS_selected_gpus")
+        os.environ["FLAGS_selected_gpus"] = "0"
+        paddle.set_device("gpu:0")
+        self.addCleanup(self._restore_gpu_env)
+
+    def _restore_gpu_env(self):
+        import paddle
+
+        paddle.set_device(self._orig_device)
+        if self._orig_selected_gpus is None:
+            os.environ.pop("FLAGS_selected_gpus", None)
+        else:
+            os.environ["FLAGS_selected_gpus"] = self._orig_selected_gpus
+
     @parameterized.expand([("slerp",), ("della",), ("dare_linear",), ("ties",)])
     def test_merge_model_np(self, merge_method):
         with TemporaryDirectory() as tempdir:

@@ -94,17 +94,31 @@ for test_file in $(find $test_dir -type f -name "test_*.py"); do
     echo "Running multi-card test: $test_file with $num_gpus GPUs ($gpus_arg)"
 
     run_count=$((run_count + 1))
-    coverage run -m paddle.distributed.launch --gpus "$gpus_arg" "$test_file" | tee "./$(basename ${test_file%.*})_multi_card.log"
+    # Cap every multi-card case at 10 minutes. Without this a single hanging
+    # test (e.g. a deadlocked collective) stalls the whole job until the
+    # 90-minute job-level timeout and blocks all remaining cases from ever
+    # running. ``timeout`` sends SIGTERM at 10m and, if the launcher has not
+    # exited 30s later, SIGKILL to reap stray ``paddle.distributed.launch``
+    # workers; it returns 124 on timeout, which falls through to the FAILED
+    # path so the loop continues with the next test.
+    timeout --kill-after=30s 10m \
+        coverage run -m paddle.distributed.launch --gpus "$gpus_arg" "$test_file" \
+        | tee "./$(basename ${test_file%.*})_multi_card.log"
     check_exit_code=${PIPESTATUS[0]}
     if [ $check_exit_code -ne 0 ]; then
-        echo "Test FAILED: $test_file, see log for details..."
-        python $work_dir/ci/check_log_for_exitcode.py "./$(basename ${test_file%.*})_multi_card.log" "OK"
-        exit_code=$?
-        if [ $exit_code -ne 0 ]; then
+        if [ $check_exit_code -eq 124 ]; then
+            echo "Test TIMEOUT: $test_file exceeded the 10m per-case limit and was killed."
             failed_tests+=("$test_file")
-            echo "Log check failed for $test_file."
         else
-            echo "Log check passed for $test_file."
+            echo "Test FAILED: $test_file, see log for details..."
+            python $work_dir/ci/check_log_for_exitcode.py "./$(basename ${test_file%.*})_multi_card.log" "OK"
+            exit_code=$?
+            if [ $exit_code -ne 0 ]; then
+                failed_tests+=("$test_file")
+                echo "Log check failed for $test_file."
+            else
+                echo "Log check passed for $test_file."
+            fi
         fi
     else
         echo "Test PASSED: $test_file"
