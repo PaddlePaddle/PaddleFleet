@@ -30,14 +30,24 @@ never from the simulator or from the coverage-test source.
 
 import os
 
-# The simulator's module imports matplotlib (used only by the draw_* helpers).
-# Force a headless backend so importing it and exercising the broken draw path
-# does not require a display. matplotlib is not the surface under test.
+# The simulator's draw_* helpers use matplotlib. Force a headless backend so
+# importing it and exercising the broken draw path does not require a display.
+# matplotlib is optional here and not the surface under test: when it is absent
+# only the single draw-path test is skipped, the schedule-math tests still run.
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import unittest
 
-import matplotlib.pyplot as plt
+try:
+    import matplotlib.pyplot as plt
+
+    _MATPLOTLIB_IMPORT_ERROR = None
+except (
+    ImportError
+) as exc:  # matplotlib is optional; only the draw path needs it
+    plt = None
+    _MATPLOTLIB_IMPORT_ERROR = exc
+
 from paddle.distributed import fleet
 
 from paddlefleet.pipeline_parallel.vpp_simulator import (
@@ -285,6 +295,11 @@ class TestKnownScheduleBugs(unittest.TestCase):
         with self.assertRaises(AssertionError):
             sim.schedule()
 
+    @unittest.skipUnless(
+        plt is not None,
+        f"matplotlib is not installed in this environment: "
+        f"{_MATPLOTLIB_IMPORT_ERROR!r}",
+    )
     def test_draw_chunks_is_broken(self):
         # draw_chunks() first reaches `plt.cm.get_cmap` (removed in newer
         # matplotlib -> AttributeError) and, where that still resolves, then

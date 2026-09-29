@@ -36,6 +36,7 @@ Paddle is required for the real numeric behavior. When it is unavailable the
 whole module skips with an honest reason rather than reporting a fake pass.
 """
 
+import inspect
 import os
 import sys
 import unittest
@@ -68,6 +69,31 @@ _SKIP_REASON = (
 )
 
 
+# The ``use_accuracy_compatible`` keyword only exists on the branches that carry
+# the Megatron-aligned dispatch path. On older release lines ``permute`` /
+# ``unpermute`` gate that behaviour through the ``FLAGS_use_accuracy_compatible_kernel``
+# environment variable and take no such parameter, so this whole suite has no
+# contract to assert there. Detect the parameter and skip honestly rather than
+# failing with a spurious ``TypeError``.
+def _accepts_accuracy_kwarg() -> bool:
+    if permute is None or unpermute is None:
+        return False
+    try:
+        params = inspect.signature(permute).parameters
+    except (TypeError, ValueError):
+        return False
+    return "use_accuracy_compatible" in params
+
+
+_ACCURACY_KWARG_SUPPORTED = _accepts_accuracy_kwarg()
+_KWARG_SKIP_REASON = (
+    "this build's permute/unpermute take no use_accuracy_compatible keyword "
+    "(accuracy-compatible path is env-gated via FLAGS_use_accuracy_compatible_kernel)"
+)
+_SUITE_ENABLED = paddle is not None and _ACCURACY_KWARG_SUPPORTED
+_SUITE_SKIP_REASON = _SKIP_REASON if paddle is None else _KWARG_SKIP_REASON
+
+
 def _tokens():
     """Three tokens with pairwise-distinct, position-distinguishable content."""
     return paddle.to_tensor(
@@ -89,7 +115,7 @@ def _routing_map_with_padding():
     )
 
 
-@unittest.skipUnless(paddle is not None, _SKIP_REASON)
+@unittest.skipUnless(_SUITE_ENABLED, _SUITE_SKIP_REASON)
 class TestPermute(unittest.TestCase):
     def test_default_forward_groups_tokens_by_expert(self):
         # Expert-major scan of the map yields sorted_indices [0,2,0,1,1,2];
@@ -194,7 +220,7 @@ class TestPermute(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(paddle is not None, _SKIP_REASON)
+@unittest.skipUnless(_SUITE_ENABLED, _SUITE_SKIP_REASON)
 class TestUnpermute(unittest.TestCase):
     def test_default_roundtrip_sums_topk_copies(self):
         # unpermute scatter-adds each token's top-k copies back, so the round
