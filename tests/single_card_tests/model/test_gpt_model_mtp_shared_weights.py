@@ -539,6 +539,46 @@ class TestMTPDepthSampling(unittest.TestCase):
             "no config-level sampling state should exist"
         )
 
+    def _lm_head(self, model):
+        return next(
+            layer
+            for layer in model.run_function
+            if type(layer).__name__ == "GPTLMHead"
+        )
+
+    def test_lm_head_reads_k_back_instead_of_drawing(self):
+        """The head must not own a draw counter any more.
+
+        It used to re-derive K whenever its stage held no MTP depth, which is the
+        construct that deadlocks under VPP / p2p overlap. Now the MTP block is
+        pinned to one chunk and the head reads the published value, so a counter
+        appearing on the head is a regression back to the independent draw.
+        """
+        cfg = self._cfg([0.34, 0.33, 0.33])
+        model = gpt_builder(cfg, num_stages=1)
+        head = self._lm_head(model)
+        _run_step(model, cfg, self.strategy)
+        assert not hasattr(head, "_mtp_sampling_counter"), (
+            "the LM head must read K from dict_args, never draw it"
+        )
+
+    def test_lm_head_raises_when_k_was_never_published(self):
+        """Sampling on but no K in dict_args must fail loudly, not fall back to D.
+
+        Falling back would project the depths the MTP layers skipped and average
+        the loss over D, i.e. train on garbage slices without any symptom.
+        """
+        cfg = self._cfg([1.0, 0.0, 0.0])
+        head = self._lm_head(gpt_builder(cfg, num_stages=1))
+        hidden = paddle.zeros([cfg.num_nextn_predict_layers + 1, 8])
+        with (
+            mock.patch.object(head, "_forward", side_effect=lambda t: t),
+            self.assertRaisesRegex(
+                RuntimeError, r"no MTP depth published mtp_sampled_depth"
+            ),
+        ):
+            head.forward({"hidden_states": hidden})
+
     def test_lm_head_emits_none_for_skipped_depths(self):
         """The LM head must place None at every sampled-out depth and keep the
         list length at D+1, which is how the loss detects the skipped depths."""
@@ -713,8 +753,8 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
     def _sampling_colocation_check(self, layout):
         """Run the sampling placement check with a faked PP / chunk layout.
 
-        Each gathered entry is one rank's list of (mtp_depths, holds_lm_head) for
-        the chunks that hold any MTP depth.
+        Each gathered element is one rank's list of (mtp_depths, mtp_lm_heads),
+        one entry per chunk that rank runs.
         """
         model, _ = self._independent_model(num_nextn=3)
 
@@ -730,8 +770,8 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
 
     def test_sampling_accepts_whole_mtp_block_in_one_chunk(self):
         """K rides in dict_args, so every consumer must be in the drawing chunk."""
-        self._sampling_colocation_check([[([0, 1, 2], True)], []])
-        self._sampling_colocation_check([[], [([0, 1, 2], True)]])
+        self._sampling_colocation_check([[([0, 1, 2], 1)], [([], 0)]])
+        self._sampling_colocation_check([[([], 0)], [([0, 1, 2], 1)]])
 
     def test_sampling_rejects_split_depths(self):
         """Split depths would make two chunks derive K independently -- the case
@@ -739,16 +779,31 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
         with self.assertRaisesRegex(
             RuntimeError, r"mtp_depth_sampling requires every MTP depth"
         ):
-            self._sampling_colocation_check(
-                [[([0], True)], [([1, 2], False)]]
-            )
+            self._sampling_colocation_check([[([0], 1)], [([1, 2], 0)]])
+
+    def test_sampling_rejects_missing_depth(self):
+        """The holder chunk must carry the whole 0..D-1 range, not a subset."""
+        with self.assertRaisesRegex(
+            RuntimeError, r"mtp_depth_sampling requires every MTP depth"
+        ):
+            self._sampling_colocation_check([[([0, 2], 1)], [([], 0)]])
 
     def test_sampling_rejects_lm_head_in_another_chunk(self):
         """The head reads K back rather than deriving it, so it must be able to."""
         with self.assertRaisesRegex(
             RuntimeError, r"mtp_depth_sampling requires every MTP depth"
         ):
-            self._sampling_colocation_check([[([0, 1, 2], False)], []])
+            self._sampling_colocation_check([[([0, 1, 2], 0)], [([], 1)]])
+
+    def test_sampling_ignores_an_undetectable_lm_head(self):
+        """No K-consuming head visible anywhere -> do not fail the build.
+
+        GPTMainLMHead / GPTMTPLMHead override forward and never read K, so a model
+        wired that way legitimately reports zero heads. GPTLMHead.forward still
+        raises at the first step if K really is missing, so skipping the head half
+        of the check here cannot hide a silent divergence.
+        """
+        self._sampling_colocation_check([[([0, 1, 2], 0)], [([], 0)]])
 
     def test_sampling_is_idempotent_under_recompute(self):
         """A recompute replay must reuse the forward's K, not draw a new one.

@@ -2398,6 +2398,7 @@ class TransformerConfig(ModelParallelConfig):
                 "separate_mtp_headloss",
                 "mtp_distillation_loss",
                 "use_erndata",
+                "mtp_load_weight_only",
             ):
                 if getattr(self, _flag, False):
                     raise ValueError(
@@ -2409,7 +2410,11 @@ class TransformerConfig(ModelParallelConfig):
                         "of mtp_logits and would dereference those placeholders; "
                         "use_erndata dispatches MultiTokenPredictionLayer.forward "
                         "to _forward_megatron_style before the sampling hook, so "
-                        "depths would silently not be skipped."
+                        "depths would silently not be skipped; "
+                        "mtp_load_weight_only swaps in WeightOnlyMTPLayer, whose "
+                        "forward returns dict_args before the sampling hook and "
+                        "whose LM head branch is skipped entirely, so sampling "
+                        "would be accepted and never applied."
                     )
             _d = self.num_nextn_predict_layers
             if (
