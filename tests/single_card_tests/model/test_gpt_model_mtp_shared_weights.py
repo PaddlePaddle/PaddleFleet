@@ -631,7 +631,10 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
         requires pipeline_model_parallel_size > 1."""
         _, mtp = self._independent_model()
         layer = mtp[0]
-        assert layer.mtp_embed is None, (
+        # Probe with getattr: develop sets ``self.mtp_embed = None``
+        # unconditionally, but release branches only create the attribute under
+        # enable_mtp_magic_send, and this assertion should hold on both.
+        assert getattr(layer, "mtp_embed", None) is None, (
             "expected no mtp_embed without magic send"
         )
         layer.add_sublayer("mtp_embed", paddle.nn.Linear(4, 4))
