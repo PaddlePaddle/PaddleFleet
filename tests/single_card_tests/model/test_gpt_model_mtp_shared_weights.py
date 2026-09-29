@@ -34,6 +34,7 @@ from paddlefleet.models.gpt import GPTConfig
 from paddlefleet.transformer.multi_token_prediction import (
     MultiTokenPredictionLayer,
     resolve_mtp_sampled_depth,
+    resume_mtp_sampling_offset,
 )
 from paddlefleet.transformer.transformer_layer import TransformerLayer
 
@@ -578,6 +579,74 @@ class TestMTPDepthSampling(unittest.TestCase):
             ),
         ):
             head.forward({"hidden_states": hidden})
+
+    def test_resume_offset_helper_sets_or_stays_out_of_the_way(self):
+        """The trainer-side hook: set the offset when sampling is on, no-op else.
+
+        One optimizer step consumes gradient_accumulation_steps draws, so the
+        offset is global_step times that. Returning None rather than raising is
+        deliberate -- the trainer calls this on the resume path and a resume must
+        never fail over a sampling detail.
+        """
+
+        class _Wrapper:
+            def __init__(self, config=None, layers=None):
+                if config is not None:
+                    self.config = config
+                if layers is not None:
+                    self._layers = layers
+
+        cfg = self._cfg([0.34, 0.33, 0.33])
+        self.assertEqual(
+            resume_mtp_sampling_offset(_Wrapper(config=cfg), 7, 4), 28
+        )
+        self.assertEqual(cfg.mtp_depth_sampling_seed_offset, 28)
+
+        # a distributed wrapper keeps the model under _layers
+        wrapped_cfg = self._cfg([0.34, 0.33, 0.33])
+        inner = _Wrapper(config=wrapped_cfg)
+        self.assertEqual(
+            resume_mtp_sampling_offset(_Wrapper(layers=inner), 3, 2), 6
+        )
+        self.assertEqual(wrapped_cfg.mtp_depth_sampling_seed_offset, 6)
+
+        disabled = self._cfg(None)
+        self.assertIsNone(
+            resume_mtp_sampling_offset(_Wrapper(config=disabled), 7, 4)
+        )
+        self.assertEqual(disabled.mtp_depth_sampling_seed_offset, 0)
+
+        # nothing that carries a config at all
+        self.assertIsNone(resume_mtp_sampling_offset(_Wrapper(), 7, 4))
+
+    def test_local_chunks_walks_virtual_pipeline_chunks(self):
+        """Under VPP one rank holds several chunks, each its own p2p island.
+
+        _assert_mtp_sampling_sites_colocated has to look per chunk rather than per
+        rank because of this: dict_args does not survive a chunk boundary either.
+        """
+        cfg = self._cfg([0.34, 0.33, 0.33])
+        model = gpt_builder(cfg, num_stages=1)
+
+        class _Chunk:
+            def __init__(self, run_function):
+                self.run_function = run_function
+
+        first, second = ["depth-0"], ["depth-1", "lm-head"]
+        with (
+            mock.patch.object(
+                model, "_num_virtual_pipeline_stages", 2, create=True
+            ),
+            mock.patch.object(
+                model,
+                "_model_chunks",
+                [_Chunk(first), _Chunk(second)],
+                create=True,
+            ),
+        ):
+            chunks = model._local_chunks()
+
+        self.assertEqual(chunks, [first, second])
 
     def test_local_chunks_keeps_the_mtp_block_together(self):
         """At one stage the whole MTP block must land in a single chunk.

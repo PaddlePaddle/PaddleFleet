@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -61,6 +62,8 @@ if TYPE_CHECKING:
     from paddlefleet.models.backends import BackendSpecProvider
     from paddlefleet.packed_seq_params import PackedSeqParams
     from paddlefleet.transformer.transformer_config import TransformerConfig
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_ATTN_MASK = [
     AttnMaskType.padding,
@@ -835,6 +838,36 @@ def draw_mtp_sampled_depth(owner, config):
     rng = np.random.default_rng(seed)
     k = int(rng.choice(len(probs), p=probs)) + 1
     return max(1, min(k, d))
+
+
+def resume_mtp_sampling_offset(model, global_step, gradient_accumulation_steps):
+    """Point the depth sampler at the draw a resumed run should continue from.
+
+    The per-call counter behind :func:`draw_mtp_sampled_depth` starts at 0 in a
+    fresh process, so without this a resumed job replays the K sequence from its
+    beginning. One optimizer step consumes ``gradient_accumulation_steps``
+    micro-batches and therefore that many draws, so ``global_step`` times that is
+    the number already spent. The offset only has to be rank-identical and
+    monotonic across restarts -- being a few draws off changes nothing -- and the
+    trainer reads ``global_step`` from the checkpoint after all_gather-checking it
+    across ranks, which supplies both properties.
+
+    ``model`` may already be a distributed wrapper, so the config is looked up on
+    it and then on the layers it wraps. Returns the offset it set, or None when
+    there is nothing to do: sampling off, or no config reachable at all. The whole
+    thing lives here rather than in the trainer so it stays unit-testable, and it
+    returns instead of raising because it runs on the resume path -- a resume must
+    never fail over a sampling detail.
+    """
+    config = getattr(model, "config", None)
+    if config is None:
+        config = getattr(getattr(model, "_layers", None), "config", None)
+    if config is None or not getattr(config, "mtp_depth_sampling", None):
+        return None
+    offset = int(global_step) * int(gradient_accumulation_steps)
+    config.mtp_depth_sampling_seed_offset = offset
+    logger.info(f"Continuing MTP depth sampling from draw {offset}")
+    return offset
 
 
 def resolve_mtp_sampled_depth(owner, config, dict_args):
