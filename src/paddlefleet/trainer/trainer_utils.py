@@ -2341,6 +2341,9 @@ class EMAStateAssembler:
         memory_growth_threshold=8 * (2**30),
         post_save_hook=None,
         zcc_manager=None,
+        save_checkpoint_format=None,
+        optimizer_name_suffix=None,
+        start_step=None,
     ):
         self.output_dir = Path(output_dir)
         self.save_hf_steps = save_hf_steps
