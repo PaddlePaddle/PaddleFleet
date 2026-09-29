@@ -793,12 +793,14 @@ def draw_mtp_sampled_depth(owner, config):
     used elsewhere is untouched.
 
     Restart behaviour: the counter is runtime state and resets to 0, so a resumed
-    job replays the draw sequence from its start. ``P(K)`` and therefore the
-    effective per-depth weight ``w_j = E[1{K>=j}/K]`` depend only on the
-    configured distribution, not on where the sequence starts, so the loss stays
-    correctly normalised (``sum_j w_j == 1``); what is lost is continuity and
-    reproducibility of the stream. Bump ``mtp_depth_sampling_seed_offset`` by the
-    number of micro-batches already consumed if you need it to continue.
+    job would replay the draw sequence from its start. ``Trainer.train()`` sets
+    ``config.mtp_depth_sampling_seed_offset`` to the number of draws already
+    consumed when it restores a checkpoint, which makes the sequence continue
+    instead. Even without that, ``P(K)`` and therefore the effective per-depth
+    weight ``w_j = E[1{K>=j}/K]`` depend only on the configured distribution, not
+    on where the sequence starts, so the loss stays correctly normalised
+    (``sum_j w_j == 1``); what the offset buys is continuity and reproducibility
+    of the stream.
 
     The counter only advances outside a recompute replay, mirroring the
     magic-count handling further down this file. The caller's primary guard is

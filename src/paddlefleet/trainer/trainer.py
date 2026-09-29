@@ -3038,6 +3038,34 @@ class Trainer:
                     f"Error, get different global step, please check! step list: {[x.item() for x in global_step_list]}"
                 )
 
+            # MTP depth sampling draws K from a per-call counter that starts at
+            # 0 in a fresh process, so a resumed job would replay the draw
+            # sequence from its beginning instead of continuing it. global_step
+            # was just restored -- and all_gather'd above to prove every rank
+            # agrees on it -- so translate it into the number of draws already
+            # consumed and hand that to the sampler as its starting offset. The
+            # offset only has to be rank-identical and monotonic across
+            # restarts; being a few draws off changes nothing.
+            #
+            # self.model may be a distributed wrapper by now, so look for the
+            # config on it and then on the layers it wraps, and skip quietly if
+            # neither carries one -- this must never break a resume.
+            _mtp_cfg = getattr(self.model, "config", None)
+            if _mtp_cfg is None:
+                _mtp_cfg = getattr(
+                    getattr(self.model, "_layers", None), "config", None
+                )
+            if _mtp_cfg is not None and getattr(
+                _mtp_cfg, "mtp_depth_sampling", None
+            ):
+                _mtp_cfg.mtp_depth_sampling_seed_offset = (
+                    self.state.global_step * args.gradient_accumulation_steps
+                )
+                logger.info(
+                    "  Continuing MTP depth sampling from draw "
+                    f"{_mtp_cfg.mtp_depth_sampling_seed_offset}"
+                )
+
             epochs_trained = (
                 self.state.global_step // num_update_steps_per_epoch
             )

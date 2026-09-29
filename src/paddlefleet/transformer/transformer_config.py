@@ -278,12 +278,19 @@ class TransformerConfig(ModelParallelConfig):
     """Offset added to the mtp_depth_sampling draw sequence, measured in draws.
 
     The per-call counter behind the draw is runtime state and resets to 0 when a
-    job restarts, so a resumed run replays the K sequence from its start. P(K) --
-    and therefore w_j = E[1{K>=j}/K] -- depends only on the configured
+    job restarts, so a resumed run would replay the K sequence from its start.
+    P(K) -- and therefore w_j = E[1{K>=j}/K] -- depends only on the configured
     distribution, not on where the sequence starts, so the loss stays correctly
-    normalised either way; what resets is continuity and reproducibility of the
-    stream. Set this to the number of micro-batches already consumed to have the
-    sequence continue instead. Ignored when mtp_depth_sampling is None."""
+    normalised either way; what would reset is continuity and reproducibility of
+    the stream.
+
+    Trainer.train() sets this automatically when resuming from a checkpoint, to
+    global_step * gradient_accumulation_steps, i.e. the number of draws already
+    consumed; global_step is all_gather-checked there, so every rank gets the
+    same offset. Set it by hand only when driving the training loop yourself.
+    A warm start (ignore_load_lr_and_optim=True) is a fresh run rather than a
+    resumed one, so it deliberately keeps the offset at 0. Ignored when
+    mtp_depth_sampling is None."""
 
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
