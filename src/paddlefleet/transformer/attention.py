@@ -30,6 +30,10 @@ import paddle
 from paddle import Tensor, nn
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 from paddle.distributed.fleet.utils import recompute
+from paddle.distributed.flex_checkpoint.aoa.generation import (
+    resolve_checkpoint_name_from_anchor,
+    resolve_single_name,
+)
 
 from paddlefleet import tensor_parallel
 from paddlefleet.accuracy_target import targets_hf
@@ -52,6 +56,10 @@ from paddlefleet.tensor_parallel import RecomputeWithoutOutput
 from paddlefleet.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_tensor_model_parallel_region,
+)
+from paddlefleet.transformer.gated_qkv_aoa import (
+    gen_gated_qkv_aoa,
+    gen_gated_qkv_inv_aoa,
 )
 from paddlefleet.transformer.layer import FleetLayer
 from paddlefleet.transformer.utils import (
@@ -1259,6 +1267,240 @@ class SelfAttention(Attention):
     def _backward_output_proj(self):
         """Update weights for output projection layer"""
         self.o_proj.backward_dw()
+
+    def gen_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Checkpoint->model generator for standard SelfAttention.
+
+        ``qkv_proj`` fuses checkpoint q/k/v (each transposed) via the
+        ``fused_qkv`` macro; every other direct child (``o_proj``, ``q_norm``,
+        ``k_norm``, ``core_attention`` ...) is recursed generically so Linear
+        leaves get their transpose and Norm/buffer leaves get identity. The qkv
+        head is dispatched by gate presence in
+        :meth:`_gen_qkv_head_aoa_statements`. ``SelfAttention`` owns no direct
+        parameter or buffer (every leaf lives in a sublayer), so there is no
+        own-parameter fallback. Inverse is implemented independently.
+        """
+        statements = self._gen_qkv_head_aoa_statements(
+            ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+        )
+        for layer_name, sublayer in self._sub_layers.items():
+            if sublayer is None or layer_name == "qkv_proj":
+                continue
+            statements += sublayer.gen_aoa_statements(
+                ctx,
+                structured_name_prefix=(
+                    f"{structured_name_prefix}{layer_name}."
+                ),
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+        return statements
+
+    def gen_inv_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Inverse (model -> checkpoint) generator for standard SelfAttention.
+
+        Independently splits the fused ``qkv_proj`` back into checkpoint q/k/v
+        via ``fused_qkv``, then recurses every other direct child. The inverse
+        ``fused_qkv`` carries no ``^T``. ``SelfAttention`` owns no direct
+        parameter or buffer, so there is no own-parameter fallback. Not derived
+        from the checkpoint->model text.
+        """
+        statements = self._gen_inv_qkv_head_aoa_statements(
+            ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+        )
+        for layer_name, sublayer in self._sub_layers.items():
+            if sublayer is None or layer_name == "qkv_proj":
+                continue
+            statements += sublayer.gen_inv_aoa_statements(
+                ctx,
+                structured_name_prefix=(
+                    f"{structured_name_prefix}{layer_name}."
+                ),
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+        return statements
+
+    def _gen_qkv_head_aoa_statements(
+        self, ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+    ):
+        """Checkpoint->model qkv head (weight + optional bias).
+
+        A gate fused into ``qkv_proj`` (non-experimental path) uses the
+        per-KV-group ``[Q, Gate, K, V]`` regroup of :func:`gen_gated_qkv_aoa`;
+        otherwise the standard ``fused_qkv`` over separate q/k/v keys. Head
+        counts are read per layer (SWA-aware) off ``self``.
+        """
+        if self.gated_attention and not getattr(
+            self.config, "gpt_model_use_experimental_version", False
+        ):
+            return gen_gated_qkv_aoa(
+                self,
+                ctx,
+                structured_name_prefix,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+        qkv_local_name = "qkv_proj.weight"
+        qkv_model_name = resolve_single_name(
+            qkv_local_name,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            model_name_prefix=ctx.model_name_prefix,
+        )
+
+        def _anchor(local):
+            return resolve_checkpoint_name_from_anchor(
+                qkv_model_name,
+                qkv_local_name,
+                local,
+                ctx.checkpoint_name_prefix,
+                ctx.checkpoint_name_mapping,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+                model_name_prefix=ctx.model_name_prefix,
+            )
+
+        q_checkpoint_name = _anchor("q_proj.weight")
+        k_checkpoint_name = _anchor("k_proj.weight")
+        v_checkpoint_name = _anchor("v_proj.weight")
+        statements = [
+            f"{q_checkpoint_name}^T, {k_checkpoint_name}^T, "
+            f"{v_checkpoint_name}^T "
+            f"-> {qkv_model_name}, fused_qkv, "
+            f"num_heads={self.num_attention_heads}, "
+            f"num_key_value_groups={self.num_key_value_heads}"
+        ]
+        if self.qkv_proj.bias is not None:
+            statements += self._gen_qkv_bias_aoa_statements(
+                ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+            )
+        return statements
+
+    def _gen_qkv_bias_aoa_statements(
+        self, ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+    ):
+        """Checkpoint->model helper: fuse checkpoint q/k/v 1-D bias into the
+        model fused bias (``axis=0``, no transpose). Anchored on the real
+        ``qkv_proj.bias``."""
+        bias_local_name = "qkv_proj.bias"
+        bias_model_name = resolve_single_name(
+            bias_local_name,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            model_name_prefix=ctx.model_name_prefix,
+        )
+
+        def _anchor(local):
+            return resolve_checkpoint_name_from_anchor(
+                bias_model_name,
+                bias_local_name,
+                local,
+                ctx.checkpoint_name_prefix,
+                ctx.checkpoint_name_mapping,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+                model_name_prefix=ctx.model_name_prefix,
+            )
+
+        q_checkpoint_name = _anchor("q_proj.bias")
+        k_checkpoint_name = _anchor("k_proj.bias")
+        v_checkpoint_name = _anchor("v_proj.bias")
+        return [
+            f"{q_checkpoint_name}, {k_checkpoint_name}, "
+            f"{v_checkpoint_name} -> {bias_model_name}, "
+            f"fused_qkv, num_heads={self.num_attention_heads}, "
+            f"num_key_value_groups={self.num_key_value_heads}, axis=0"
+        ]
+
+    def _gen_inv_qkv_head_aoa_statements(
+        self, ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+    ):
+        """Model->checkpoint qkv head (weight + optional bias). Mirrors
+        :meth:`_gen_qkv_head_aoa_statements` but implemented independently."""
+        if self.gated_attention and not getattr(
+            self.config, "gpt_model_use_experimental_version", False
+        ):
+            return gen_gated_qkv_inv_aoa(
+                self,
+                ctx,
+                structured_name_prefix,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+        qkv_local_name = "qkv_proj.weight"
+        qkv_model_name = resolve_single_name(
+            qkv_local_name,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            model_name_prefix=ctx.model_name_prefix,
+        )
+
+        def _anchor(local):
+            return resolve_checkpoint_name_from_anchor(
+                qkv_model_name,
+                qkv_local_name,
+                local,
+                ctx.checkpoint_name_prefix,
+                ctx.checkpoint_name_mapping,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+                model_name_prefix=ctx.model_name_prefix,
+            )
+
+        q_checkpoint_name = _anchor("q_proj.weight")
+        k_checkpoint_name = _anchor("k_proj.weight")
+        v_checkpoint_name = _anchor("v_proj.weight")
+        statements = [
+            f"{qkv_model_name} -> {q_checkpoint_name}, "
+            f"{k_checkpoint_name}, {v_checkpoint_name}, "
+            f"fused_qkv, num_heads={self.num_attention_heads}, "
+            f"num_key_value_groups={self.num_key_value_heads}"
+        ]
+        if self.qkv_proj.bias is not None:
+            statements += self._gen_inv_qkv_bias_aoa_statements(
+                ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+            )
+        return statements
+
+    def _gen_inv_qkv_bias_aoa_statements(
+        self, ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+    ):
+        """Inverse-only helper: split the model fused 1-D bias back into
+        checkpoint q/k/v bias (``axis=0``, no transpose)."""
+        bias_local_name = "qkv_proj.bias"
+        bias_model_name = resolve_single_name(
+            bias_local_name,
+            structured_name_prefix,
+            ctx.pp_to_single_mapping,
+            model_name_prefix=ctx.model_name_prefix,
+        )
+
+        def _anchor(local):
+            return resolve_checkpoint_name_from_anchor(
+                bias_model_name,
+                bias_local_name,
+                local,
+                ctx.checkpoint_name_prefix,
+                ctx.checkpoint_name_mapping,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+                model_name_prefix=ctx.model_name_prefix,
+            )
+
+        q_checkpoint_name = _anchor("q_proj.bias")
+        k_checkpoint_name = _anchor("k_proj.bias")
+        v_checkpoint_name = _anchor("v_proj.bias")
+        return [
+            f"{bias_model_name} -> {q_checkpoint_name}, "
+            f"{k_checkpoint_name}, {v_checkpoint_name}, "
+            f"fused_qkv, num_heads={self.num_attention_heads}, "
+            f"num_key_value_groups={self.num_key_value_heads}, axis=0"
+        ]
 
 
 class SelfAttentionVHA(Attention):
