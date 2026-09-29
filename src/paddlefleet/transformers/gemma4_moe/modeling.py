@@ -355,12 +355,6 @@ class Gemma4MoeForCausalLM(Gemma4MoePreTrainedModel):
     def _gen_aoa_config(cls, config):
         model_prefix = "model."
         num_hidden_layers = config.num_hidden_layers
-        num_head_empty_layers = (
-            config.num_empty_layers_add_in_head
-            if hasattr(config, "num_empty_layers_add_in_head")
-            and config.num_empty_layers_add_in_head
-            else 0
-        )
         aoa_config = {
             "aoa_statements": [
                 f"model.language_model.norm.weight -> {model_prefix}norm.weight",
@@ -372,9 +366,8 @@ class Gemma4MoeForCausalLM(Gemma4MoePreTrainedModel):
                 f"model.language_model.embed_tokens.weight -> {model_prefix}lm_head.weight"
             )
         for layer_idx in range(num_hidden_layers):
-            lo = layer_idx + num_head_empty_layers
             hf = f"model.language_model.layers.{layer_idx}"
-            pf = f"{model_prefix}layers.{lo}"
+            pf = f"{model_prefix}layers.{layer_idx}"
             # Heterogeneous attention: global layers have different kv_heads
             layer_types = getattr(config, "layer_types", None)
             is_global = (
@@ -436,12 +429,6 @@ class Gemma4MoeForCausalLM(Gemma4MoePreTrainedModel):
         """PF -> HF weight mapping for saving checkpoints."""
         model_prefix = "model."
         num_hidden_layers = config.num_hidden_layers
-        num_head_empty_layers = (
-            config.num_empty_layers_add_in_head
-            if hasattr(config, "num_empty_layers_add_in_head")
-            and config.num_empty_layers_add_in_head
-            else 0
-        )
         aoa_statements = [
             f"{model_prefix}norm.weight -> model.language_model.norm.weight",
             f"{model_prefix}embedding.embed_tokens.weight -> model.language_model.embed_tokens.weight",
@@ -450,9 +437,8 @@ class Gemma4MoeForCausalLM(Gemma4MoePreTrainedModel):
             aoa_statements.append(f"{model_prefix}lm_head.weight -> _")
 
         for layer_idx in range(num_hidden_layers):
-            lo = layer_idx + num_head_empty_layers
             hf = f"model.language_model.layers.{layer_idx}"
-            pf = f"{model_prefix}layers.{lo}"
+            pf = f"{model_prefix}layers.{layer_idx}"
             layer_types = getattr(config, "layer_types", None)
             is_global = (
                 layer_types is not None

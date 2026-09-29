@@ -37,8 +37,9 @@ independently hand-derived expectations:
 2. ``TransformerEncoder.get_layer_desc_list`` /
    ``get_encoder_layer_desc_list`` / ``get_sequential_layers`` /
    ``get_sequential_name_prefixes`` -- assemble the ordered layer-desc
-   list. Expected order, the shared ``model[.<modal>].layers.<i>`` index
-   counter that runs head -> transformer -> tail, and the wrapping
+   list. Expected order, the ``empty_layers.<n>`` counter for head/tail
+   empties kept separate from the ``model[.<modal>].layers.<i>`` counter for
+   transformer layers, and the wrapping
    asymmetry (embedding / head / transformer / tail are wrapped in a fresh
    ``LayerDesc`` while ``layer_norm`` is appended raw) are all derived by
    hand and checked by content/identity, not by count.
@@ -259,16 +260,17 @@ class TestLayerDescList(unittest.TestCase):
         # Expected order: embedding, head, transformer x2, tail, layer_norm.
         self.assertEqual(len(layers), 6)
 
-        # Shared "model.layers.<i>" counter runs head(0) -> t(1) -> t(2)
-        # -> tail(3); embedding and layer_norm carry the bare "model".
+        # Head/tail empties live in the ``empty_layers.<n>`` namespace (shared
+        # 0-based counter); the two transformer layers number from ``layers.0``;
+        # embedding and layer_norm carry the bare "model".
         self.assertEqual(
             encoder.get_sequential_name_prefixes(),
             {
                 "0": "model",
-                "1": "model.layers.0",
-                "2": "model.layers.1",
-                "3": "model.layers.2",
-                "4": "model.layers.3",
+                "1": "model.empty_layers.0",
+                "2": "model.layers.0",
+                "3": "model.layers.1",
+                "4": "model.empty_layers.1",
                 "5": "model",
             },
         )
@@ -303,17 +305,18 @@ class TestLayerDescList(unittest.TestCase):
             encoder.get_sequential_name_prefixes(),
             {
                 "0": "model.vision",
-                "1": "model.vision.layers.0",
-                "2": "model.vision.layers.1",
-                "3": "model.vision.layers.2",
-                "4": "model.vision.layers.3",
+                "1": "model.vision.empty_layers.0",
+                "2": "model.vision.layers.0",
+                "3": "model.vision.layers.1",
+                "4": "model.vision.empty_layers.1",
                 "5": "model.vision",
             },
         )
 
     def test_encoder_layer_desc_list_index_counter(self):
         # get_encoder_layer_desc_list mutates ``layers`` in place, returns
-        # None, and numbers head -> transformer -> tail with one counter.
+        # None, and numbers empties in ``empty_layers.<n>`` (shared counter)
+        # separately from the transformer layers' ``layers.<i>`` counter.
         encoder = self._bare_encoder(modal=None)
         spec = self._make_spec()
 
@@ -325,10 +328,10 @@ class TestLayerDescList(unittest.TestCase):
         self.assertEqual(
             [e["name_prefix"] for e in layers],
             [
+                "model.empty_layers.0",
                 "model.layers.0",
                 "model.layers.1",
-                "model.layers.2",
-                "model.layers.3",
+                "model.empty_layers.1",
             ],
         )
         self.assertEqual(

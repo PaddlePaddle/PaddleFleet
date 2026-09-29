@@ -143,17 +143,18 @@ class TestTransformerEncoderDescriptorHelpers(unittest.TestCase):
 
         layers = model.get_layer_desc_list(self._spec())
 
-        # Hand-derived: embedding, head(0), transformer(1), transformer(2),
-        # tail(3) each carry ".layers.<i>"; embedding and the trailing
-        # layer_norm both use the bare "model" prefix.
+        # Hand-derived: the embedding and trailing layer_norm use the bare
+        # "model" prefix; the head/tail empties live in the ``empty_layers.<n>``
+        # namespace (shared 0-based counter) while the two transformer layers
+        # number from ``layers.0``.
         self.assertEqual(
             [entry["name_prefix"] for entry in layers],
             [
                 "model",
+                "model.empty_layers.0",
                 "model.layers.0",
                 "model.layers.1",
-                "model.layers.2",
-                "model.layers.3",
+                "model.empty_layers.1",
                 "model",
             ],
         )
@@ -179,10 +180,10 @@ class TestTransformerEncoderDescriptorHelpers(unittest.TestCase):
             [entry["name_prefix"] for entry in layers],
             [
                 "model.vision",
+                "model.vision.empty_layers.0",
                 "model.vision.layers.0",
                 "model.vision.layers.1",
-                "model.vision.layers.2",
-                "model.vision.layers.3",
+                "model.vision.empty_layers.1",
                 "model.vision",
             ],
         )
@@ -196,10 +197,10 @@ class TestTransformerEncoderDescriptorHelpers(unittest.TestCase):
             model.get_sequential_name_prefixes(),
             {
                 "0": "model",
-                "1": "model.layers.0",
-                "2": "model.layers.1",
-                "3": "model.layers.2",
-                "4": "model.layers.3",
+                "1": "model.empty_layers.0",
+                "2": "model.layers.0",
+                "3": "model.layers.1",
+                "4": "model.empty_layers.1",
                 "5": "model",
             },
         )

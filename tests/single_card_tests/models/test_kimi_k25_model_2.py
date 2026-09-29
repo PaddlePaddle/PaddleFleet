@@ -144,14 +144,16 @@ class TestKimiK25VisionModelGetLayerDescList(unittest.TestCase):
 
         layers = model.get_layer_desc_list(spec)
 
-        # Hand-derived: embedding, then head(0)/transformer(1,2)/tail(3) under a
-        # single running index, then final_layernorm, sdtpool_merger, merger.
+        # Hand-derived: embedding, then the head/tail empties under a shared
+        # 0-based ``empty_layers.{n}`` counter and the two transformer layers
+        # under a separate ``layers.{i}`` counter, then final_layernorm,
+        # sdtpool_merger, merger.
         expected = [
             ("model.vision.patch_embed", emb),
-            ("model.vision.layers.0", h0),
-            ("model.vision.layers.1", t0),
-            ("model.vision.layers.2", t1),
-            ("model.vision.layers.3", tail),
+            ("model.vision.empty_layers.0", h0),
+            ("model.vision.layers.0", t0),
+            ("model.vision.layers.1", t1),
+            ("model.vision.empty_layers.1", tail),
             ("model.vision.final_layernorm", fln),
             ("model.vision.sdtpool_merger", sd),
             ("model.vision.mm_projector", mg),

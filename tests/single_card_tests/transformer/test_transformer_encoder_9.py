@@ -21,8 +21,9 @@ CPU without an accelerator and without a Fleet hybrid-communicate group:
 * ``get_layer_desc_list`` / ``get_encoder_layer_desc_list`` -- the descriptor
   assembly that turns a ``sublayers_spec`` into an ordered list of
   ``{"layer": ..., "name_prefix": ...}`` entries.  The exact prefix strings,
-  the continuous ``.layers.<i>`` index shared across the head / transformer /
-  tail loops, and the *asymmetry* whereby the embedding is wrapped in a
+  the ``empty_layers.<n>`` counter for head/tail empties kept separate from the
+  ``.layers.<i>`` counter for transformer layers, and the *asymmetry* whereby
+  the embedding is wrapped in a
   ``LayerDesc`` but the trailing ``layer_norm`` is passed through raw are all
   derived by hand from the production source and asserted in full.
 
@@ -156,15 +157,17 @@ class TestTransformerEncoderDescriptorAssembly(unittest.TestCase):
 
         enc.get_encoder_layer_desc_list(layers, self._spec(), "model")
 
-        # Hand-derived: head -> .0, transformer -> .1 & .2, tail -> .3. A bug
-        # that reset the counter per loop would put the tail at .0/.1.
+        # Head/tail empties share the ``empty_layers.<n>`` counter (head -> .0,
+        # tail -> .1) spanning both empty loops; the transformer layers use a
+        # separate ``layers.<i>`` counter (t -> .0 & .1). A bug that reset a
+        # counter per loop would misplace the tail empty or the second layer.
         self.assertEqual(
             [entry["name_prefix"] for entry in layers],
             [
+                "model.empty_layers.0",
                 "model.layers.0",
                 "model.layers.1",
-                "model.layers.2",
-                "model.layers.3",
+                "model.empty_layers.1",
             ],
         )
         expected_funcs = [_Head, _T0, _T1, _Tail]
@@ -181,10 +184,10 @@ class TestTransformerEncoderDescriptorAssembly(unittest.TestCase):
             [entry["name_prefix"] for entry in layers],
             [
                 "model",
+                "model.empty_layers.0",
                 "model.layers.0",
                 "model.layers.1",
-                "model.layers.2",
-                "model.layers.3",
+                "model.empty_layers.1",
                 "model",
             ],
         )
@@ -209,10 +212,10 @@ class TestTransformerEncoderDescriptorAssembly(unittest.TestCase):
             [entry["name_prefix"] for entry in layers],
             [
                 "model.vision",
+                "model.vision.empty_layers.0",
                 "model.vision.layers.0",
                 "model.vision.layers.1",
-                "model.vision.layers.2",
-                "model.vision.layers.3",
+                "model.vision.empty_layers.1",
                 "model.vision",
             ],
         )

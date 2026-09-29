@@ -996,18 +996,12 @@ class Glm4MoePreTrainedModel(PretrainedModel):
             ]
 
         num_hidden_layers = config.num_hidden_layers
-        num_head_empty_layers = (
-            config.num_empty_layers_add_in_head
-            if hasattr(config, "num_empty_layers_add_in_head")
-            and config.num_empty_layers_add_in_head
-            else 0
-        )
         for layer_idx in range(config.first_k_dense_replace):
             aoa_config["aoa_statements"] += [
-                f"model.layers.{layer_idx}.mlp.down_proj.weight^T -> {model_prefix}layers.{layer_idx + num_head_empty_layers}.mlp.down_proj.weight"
+                f"model.layers.{layer_idx}.mlp.down_proj.weight^T -> {model_prefix}layers.{layer_idx}.mlp.down_proj.weight"
             ]
             aoa_config["aoa_statements"] += [
-                f"model.layers.{layer_idx}.mlp.gate_proj.weight^T, model.layers.{layer_idx}.mlp.up_proj.weight^T -> {model_prefix}layers.{layer_idx + num_head_empty_layers}.mlp.up_gate_proj.weight, fused_ffn",
+                f"model.layers.{layer_idx}.mlp.gate_proj.weight^T, model.layers.{layer_idx}.mlp.up_proj.weight^T -> {model_prefix}layers.{layer_idx}.mlp.up_gate_proj.weight, fused_ffn",
             ]
 
         if config.mtp_num_layers > 0:
@@ -1024,44 +1018,42 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                 num_hidden_layers, num_hidden_layers + num_nextn_predict_layers
             )
         ):
-            layer_idx_offset = layer_idx + num_head_empty_layers
             prefix = f"model.layers.{layer_idx}"
-            prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
+            fleet_prefix = f"{model_prefix}layers.{layer_idx}"
             aoa_config["aoa_statements"] += [
-                f"{prefix}.eh_proj.weight^T -> {prefix_offset}.eh_proj.weight",
-                f"{prefix}.enorm.weight -> {prefix_offset}.enorm.weight",
-                f"{prefix}.hnorm.weight -> {prefix_offset}.hnorm.weight",
-                f"{prefix}.shared_head.norm.weight -> {prefix_offset}.norm.weight",
+                f"{prefix}.eh_proj.weight^T -> {fleet_prefix}.eh_proj.weight",
+                f"{prefix}.enorm.weight -> {fleet_prefix}.enorm.weight",
+                f"{prefix}.hnorm.weight -> {fleet_prefix}.hnorm.weight",
+                f"{prefix}.shared_head.norm.weight -> {fleet_prefix}.norm.weight",
             ]
 
         # layer0 - layer_num_hidden_layers
         for layer_idx in reversed(
             range(0, num_hidden_layers + num_nextn_predict_layers)
         ):
-            layer_idx_offset = layer_idx + num_head_empty_layers
             prefix = f"model.layers.{layer_idx}"
-            prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
+            fleet_prefix = f"{model_prefix}layers.{layer_idx}"
             if layer_idx >= num_hidden_layers:
                 # for mtp
-                prefix_offset += ".transformer_layer"
+                fleet_prefix += ".transformer_layer"
             aoa_config["aoa_statements"] += [
-                f"{prefix}.input_layernorm.weight -> {prefix_offset}.input_layernorm.weight",
-                f"{prefix}.post_attention_layernorm.weight -> {prefix_offset}.post_attention_layernorm.weight",
-                f"{prefix}.self_attn.o_proj.weight^T -> {prefix_offset}.self_attn.o_proj.weight",
+                f"{prefix}.input_layernorm.weight -> {fleet_prefix}.input_layernorm.weight",
+                f"{prefix}.post_attention_layernorm.weight -> {fleet_prefix}.post_attention_layernorm.weight",
+                f"{prefix}.self_attn.o_proj.weight^T -> {fleet_prefix}.self_attn.o_proj.weight",
             ]
             if config.use_qk_norm:
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.self_attn.q_norm.weight -> {prefix_offset}.self_attn.q_norm.weight",
-                    f"{prefix}.self_attn.k_norm.weight -> {prefix_offset}.self_attn.k_norm.weight",
+                    f"{prefix}.self_attn.q_norm.weight -> {fleet_prefix}.self_attn.q_norm.weight",
+                    f"{prefix}.self_attn.k_norm.weight -> {fleet_prefix}.self_attn.k_norm.weight",
                 ]
 
             # attention qkv
             aoa_config["aoa_statements"] += [
-                f"{prefix}.self_attn.q_proj.weight^T, {prefix}.self_attn.k_proj.weight^T, {prefix}.self_attn.v_proj.weight^T -> {prefix_offset}.self_attn.qkv_proj.weight, fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups={config.num_key_value_heads}",
+                f"{prefix}.self_attn.q_proj.weight^T, {prefix}.self_attn.k_proj.weight^T, {prefix}.self_attn.v_proj.weight^T -> {fleet_prefix}.self_attn.qkv_proj.weight, fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups={config.num_key_value_heads}",
             ]
             if config.attention_bias:
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.self_attn.q_proj.bias, {prefix}.self_attn.k_proj.bias, {prefix}.self_attn.v_proj.bias -> {prefix_offset}.self_attn.qkv_proj.bias, fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups={config.num_key_value_heads}, axis=0",
+                    f"{prefix}.self_attn.q_proj.bias, {prefix}.self_attn.k_proj.bias, {prefix}.self_attn.v_proj.bias -> {fleet_prefix}.self_attn.qkv_proj.bias, fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups={config.num_key_value_heads}, axis=0",
                 ]
         # layer1 - layer_num_hidden_layers
         for layer_idx in reversed(
@@ -1070,54 +1062,53 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                 num_hidden_layers + num_nextn_predict_layers,
             )
         ):
-            layer_idx_offset = layer_idx + num_head_empty_layers
             prefix = f"model.layers.{layer_idx}"
-            prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
+            fleet_prefix = f"{model_prefix}layers.{layer_idx}"
             if layer_idx >= num_hidden_layers:
                 # for mtp
-                prefix_offset += ".transformer_layer"
+                fleet_prefix += ".transformer_layer"
             use_accuracy_compatible = getattr(
                 config, "use_accuracy_compatible", False
             )
 
             if use_accuracy_compatible:
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.mlp.gate.e_score_correction_bias -> {prefix_offset}.mlp.gate.e_score_correction_bias",
-                    f"{prefix}.mlp.gate.weight -> {prefix_offset}.mlp.gate.weight, dtype='bfloat16'",
-                    f"{prefix}.mlp.shared_experts.down_proj.weight^T -> {prefix_offset}.mlp.shared_experts.down_proj.weight",
+                    f"{prefix}.mlp.gate.e_score_correction_bias -> {fleet_prefix}.mlp.gate.e_score_correction_bias",
+                    f"{prefix}.mlp.gate.weight -> {fleet_prefix}.mlp.gate.weight, dtype='bfloat16'",
+                    f"{prefix}.mlp.shared_experts.down_proj.weight^T -> {fleet_prefix}.mlp.shared_experts.down_proj.weight",
                 ]
             else:
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.mlp.gate.e_score_correction_bias -> {prefix_offset}.mlp.gate.e_score_correction_bias",
-                    f"{prefix}.mlp.gate.weight -> {prefix_offset}.mlp.gate.weight, dtype='float32'",
-                    f"{prefix}.mlp.shared_experts.down_proj.weight^T -> {prefix_offset}.mlp.shared_experts.down_proj.weight",
+                    f"{prefix}.mlp.gate.e_score_correction_bias -> {fleet_prefix}.mlp.gate.e_score_correction_bias",
+                    f"{prefix}.mlp.gate.weight -> {fleet_prefix}.mlp.gate.weight, dtype='float32'",
+                    f"{prefix}.mlp.shared_experts.down_proj.weight^T -> {fleet_prefix}.mlp.shared_experts.down_proj.weight",
                 ]
             if using_sonic_moe:
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.mlp.experts.$EXPERT_ID.down_proj.weight -> {prefix_offset}.mlp.experts.$EXPERT_ID.down_proj.weight",
+                    f"{prefix}.mlp.experts.$EXPERT_ID.down_proj.weight -> {fleet_prefix}.mlp.experts.$EXPERT_ID.down_proj.weight",
                 ]
             else:
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.mlp.experts.$EXPERT_ID.down_proj.weight^T -> {prefix_offset}.mlp.experts.$EXPERT_ID.down_proj.weight",
+                    f"{prefix}.mlp.experts.$EXPERT_ID.down_proj.weight^T -> {fleet_prefix}.mlp.experts.$EXPERT_ID.down_proj.weight",
                 ]
 
             # FFN
             aoa_config["aoa_statements"] += [
-                f"{prefix}.mlp.shared_experts.gate_proj.weight^T, {prefix}.mlp.shared_experts.up_proj.weight^T -> {prefix_offset}.mlp.shared_experts.up_gate_proj.weight, fused_ffn",
+                f"{prefix}.mlp.shared_experts.gate_proj.weight^T, {prefix}.mlp.shared_experts.up_proj.weight^T -> {fleet_prefix}.mlp.shared_experts.up_gate_proj.weight, fused_ffn",
             ]
             if is_fleet:
                 if using_sonic_moe:
                     aoa_config["aoa_statements"] += [
-                        f"{prefix}.mlp.experts.$EXPERT_ID.gate_proj.weight, {prefix}.mlp.experts.$EXPERT_ID.up_proj.weight -> {prefix_offset}.mlp.experts.$EXPERT_ID.up_gate_proj.weight, axis=0",
+                        f"{prefix}.mlp.experts.$EXPERT_ID.gate_proj.weight, {prefix}.mlp.experts.$EXPERT_ID.up_proj.weight -> {fleet_prefix}.mlp.experts.$EXPERT_ID.up_gate_proj.weight, axis=0",
                     ]
                 else:
                     aoa_config["aoa_statements"] += [
-                        f"{prefix}.mlp.experts.$EXPERT_ID.gate_proj.weight^T, {prefix}.mlp.experts.$EXPERT_ID.up_proj.weight^T -> {prefix_offset}.mlp.experts.$EXPERT_ID.up_gate_proj.weight, axis=1",
+                        f"{prefix}.mlp.experts.$EXPERT_ID.gate_proj.weight^T, {prefix}.mlp.experts.$EXPERT_ID.up_proj.weight^T -> {fleet_prefix}.mlp.experts.$EXPERT_ID.up_gate_proj.weight, axis=1",
                     ]
 
             else:
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.mlp.experts.$EXPERT_ID.gate_proj.weight^T, {prefix}.mlp.experts.$EXPERT_ID.up_proj.weight^T -> {prefix_offset}.mlp.experts.$EXPERT_ID.up_gate_proj.weight, fused_ffn",
+                    f"{prefix}.mlp.experts.$EXPERT_ID.gate_proj.weight^T, {prefix}.mlp.experts.$EXPERT_ID.up_proj.weight^T -> {fleet_prefix}.mlp.experts.$EXPERT_ID.up_gate_proj.weight, fused_ffn",
                 ]
 
             if is_fleet and (config.moe_expert_fusion or using_sonic_moe):
@@ -1125,16 +1116,16 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                 ep_weight2 = []
                 for expert_id in range(num_experts):
                     ep_weight1.append(
-                        f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                        f"{fleet_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight"
                     )
                     ep_weight2.append(
-                        f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight"
+                        f"{fleet_prefix}.mlp.experts.{expert_id}.down_proj.weight"
                     )
                 group_gemm1 = ",".join(ep_weight1)
                 group_gemm2 = ",".join(ep_weight2)
                 aoa_config["aoa_statements"] += [
-                    f"{group_gemm1} -> {prefix_offset}.mlp.grouped_gemm_experts.weight1, axis=0",
-                    f"{group_gemm2} -> {prefix_offset}.mlp.grouped_gemm_experts.weight2, axis=0",
+                    f"{group_gemm1} -> {fleet_prefix}.mlp.grouped_gemm_experts.weight1, axis=0",
+                    f"{group_gemm2} -> {fleet_prefix}.mlp.grouped_gemm_experts.weight2, axis=0",
                 ]
             else:
                 if config.get("fd_fallback", False):
@@ -1142,16 +1133,16 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                     ep_weight2 = []
                     for expert_id in range(num_experts):
                         ep_weight1.append(
-                            f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                            f"{fleet_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight"
                         )
                         ep_weight2.append(
-                            f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight"
+                            f"{fleet_prefix}.mlp.experts.{expert_id}.down_proj.weight"
                         )
                     group1 = ",".join(ep_weight1)
                     group2 = ",".join(ep_weight2)
                     aoa_config["aoa_statements"] += [
-                        f"{group1} -> {prefix_offset}.mlp.experts.gate_up_proj, axis=0",
-                        f"{group2} -> {prefix_offset}.mlp.experts.down_proj, axis=0",
+                        f"{group1} -> {fleet_prefix}.mlp.experts.gate_up_proj, axis=0",
+                        f"{group2} -> {fleet_prefix}.mlp.experts.down_proj, axis=0",
                     ]
 
         return aoa_config
@@ -1185,22 +1176,16 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                 f"{model_prefix}embed_tokens.weight -> model.embed_tokens.weight",
             ]
         num_hidden_layers = config.num_hidden_layers
-        num_head_empty_layers = (
-            config.num_empty_layers_add_in_head
-            if hasattr(config, "num_empty_layers_add_in_head")
-            and config.num_empty_layers_add_in_head
-            else 0
-        )
 
         # layer 0
         for layer_idx in range(config.first_k_dense_replace):
             aoa_statements += [
-                f"{model_prefix}layers.{num_head_empty_layers + layer_idx}.mlp.down_proj.weight^T -> model.layers.{layer_idx}.mlp.down_proj.weight",
+                f"{model_prefix}layers.{layer_idx}.mlp.down_proj.weight^T -> model.layers.{layer_idx}.mlp.down_proj.weight",
             ]
             aoa_statements += [
-                f"{model_prefix}layers.{num_head_empty_layers + layer_idx}.mlp.up_gate_proj.weight -> model.layers.{num_head_empty_layers + layer_idx}.mlp.gate_proj.weight, model.layers.{num_head_empty_layers + layer_idx}.mlp.up_proj.weight, fused_ffn",
-                f"model.layers.{num_head_empty_layers + layer_idx}.mlp.gate_proj.weight^T -> model.layers.{layer_idx}.mlp.gate_proj.weight",
-                f"model.layers.{num_head_empty_layers + layer_idx}.mlp.up_proj.weight^T -> model.layers.{layer_idx}.mlp.up_proj.weight",
+                f"{model_prefix}layers.{layer_idx}.mlp.up_gate_proj.weight -> model.layers.{layer_idx}.mlp.gate_proj.weight, model.layers.{layer_idx}.mlp.up_proj.weight, fused_ffn",
+                f"model.layers.{layer_idx}.mlp.gate_proj.weight^T -> model.layers.{layer_idx}.mlp.gate_proj.weight",
+                f"model.layers.{layer_idx}.mlp.up_proj.weight^T -> model.layers.{layer_idx}.mlp.up_proj.weight",
             ]
 
         num_nextn_predict_layers = (
@@ -1214,38 +1199,36 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                 num_hidden_layers, num_hidden_layers + num_nextn_predict_layers
             )
         ):
-            layer_idx_offset = layer_idx + num_head_empty_layers
             prefix = f"model.layers.{layer_idx}"
-            prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
+            fleet_prefix = f"{model_prefix}layers.{layer_idx}"
             aoa_statements += [
-                f"{prefix_offset}.eh_proj.weight^T -> {prefix}.eh_proj.weight",
-                f"{prefix_offset}.enorm.weight -> {prefix}.enorm.weight",
-                f"{prefix_offset}.hnorm.weight -> {prefix}.hnorm.weight",
-                f"{prefix_offset}.norm.weight -> {prefix}.shared_head.norm.weight",
+                f"{fleet_prefix}.eh_proj.weight^T -> {prefix}.eh_proj.weight",
+                f"{fleet_prefix}.enorm.weight -> {prefix}.enorm.weight",
+                f"{fleet_prefix}.hnorm.weight -> {prefix}.hnorm.weight",
+                f"{fleet_prefix}.norm.weight -> {prefix}.shared_head.norm.weight",
             ]
 
         # layer 0 -> layer num_hidden_layers-1
         for layer_idx in range(0, num_hidden_layers + num_nextn_predict_layers):
-            layer_idx_offset = layer_idx + num_head_empty_layers
-            prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
+            fleet_prefix = f"{model_prefix}layers.{layer_idx}"
             prefix = f"model.layers.{layer_idx}"
             if layer_idx >= num_hidden_layers:
                 # for mtp
-                prefix_offset += ".transformer_layer"
+                fleet_prefix += ".transformer_layer"
 
             if config.use_qk_norm:
                 aoa_statements += [
-                    f"{prefix_offset}.self_attn.q_norm.weight -> {prefix}.self_attn.q_norm.weight",
-                    f"{prefix_offset}.self_attn.k_norm.weight -> {prefix}.self_attn.k_norm.weight",
+                    f"{fleet_prefix}.self_attn.q_norm.weight -> {prefix}.self_attn.q_norm.weight",
+                    f"{fleet_prefix}.self_attn.k_norm.weight -> {prefix}.self_attn.k_norm.weight",
                 ]
 
             aoa_statements += [
-                f"{prefix_offset}.input_layernorm.weight -> {prefix}.input_layernorm.weight",
-                f"{prefix_offset}.post_attention_layernorm.weight -> {prefix}.post_attention_layernorm.weight",
-                f"{prefix_offset}.self_attn.o_proj.weight^T -> {prefix}.self_attn.o_proj.weight",
+                f"{fleet_prefix}.input_layernorm.weight -> {prefix}.input_layernorm.weight",
+                f"{fleet_prefix}.post_attention_layernorm.weight -> {prefix}.post_attention_layernorm.weight",
+                f"{fleet_prefix}.self_attn.o_proj.weight^T -> {prefix}.self_attn.o_proj.weight",
             ]
             aoa_statements += [
-                f"{prefix_offset}.self_attn.qkv_proj.weight -> {prefix}.self_attn.q_proj.weight, {prefix}.self_attn.k_proj.weight, {prefix}.self_attn.v_proj.weight , fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups = {config.num_key_value_heads}",
+                f"{fleet_prefix}.self_attn.qkv_proj.weight -> {prefix}.self_attn.q_proj.weight, {prefix}.self_attn.k_proj.weight, {prefix}.self_attn.v_proj.weight , fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups = {config.num_key_value_heads}",
             ]
             aoa_statements += [
                 f"{prefix}.self_attn.{x}_proj.weight^T -> {prefix}.self_attn.{x}_proj.weight"
@@ -1253,7 +1236,7 @@ class Glm4MoePreTrainedModel(PretrainedModel):
             ]
             if config.attention_bias:
                 aoa_statements += [
-                    f"{prefix_offset}.self_attn.qkv_proj.bias -> {prefix}.self_attn.q_proj.bias, {prefix}.self_attn.k_proj.bias, {prefix}.self_attn.v_proj.bias , fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups = {config.num_key_value_heads}, axis = 0",
+                    f"{fleet_prefix}.self_attn.qkv_proj.bias -> {prefix}.self_attn.q_proj.bias, {prefix}.self_attn.k_proj.bias, {prefix}.self_attn.v_proj.bias , fused_qkv, num_heads={config.num_attention_heads}, num_key_value_groups = {config.num_key_value_heads}, axis = 0",
                 ]
 
         # layer 1 -> layer num_hidden_layers-1
@@ -1261,28 +1244,27 @@ class Glm4MoePreTrainedModel(PretrainedModel):
             config.first_k_dense_replace,
             num_hidden_layers + num_nextn_predict_layers,
         ):
-            layer_idx_offset = layer_idx + num_head_empty_layers
-            prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
+            fleet_prefix = f"{model_prefix}layers.{layer_idx}"
             prefix = f"model.layers.{layer_idx}"
             if layer_idx >= num_hidden_layers:
                 # for mtp
-                prefix_offset += ".transformer_layer"
+                fleet_prefix += ".transformer_layer"
 
             if is_fleet and (config.moe_expert_fusion or using_sonic_moe):
                 ep_weight1 = []
                 ep_weight2 = []
                 for expert_id in range(config.n_routed_experts):
                     ep_weight1.append(
-                        f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                        f"{fleet_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight"
                     )
                     ep_weight2.append(
-                        f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight"
+                        f"{fleet_prefix}.mlp.experts.{expert_id}.down_proj.weight"
                     )
                 group_gemm1 = ",".join(ep_weight1)
                 group_gemm2 = ",".join(ep_weight2)
                 aoa_statements += [
-                    f"{prefix_offset}.mlp.grouped_gemm_experts.weight1 -> {group_gemm1}, axis=0",
-                    f"{prefix_offset}.mlp.grouped_gemm_experts.weight2 -> {group_gemm2}, axis=0",
+                    f"{fleet_prefix}.mlp.grouped_gemm_experts.weight1 -> {group_gemm1}, axis=0",
+                    f"{fleet_prefix}.mlp.grouped_gemm_experts.weight2 -> {group_gemm2}, axis=0",
                 ]
             else:
                 if config.get("fd_fallback", False):
@@ -1290,59 +1272,59 @@ class Glm4MoePreTrainedModel(PretrainedModel):
                     ep_weight2 = []
                     for expert_id in range(num_experts):
                         ep_weight1.append(
-                            f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                            f"{fleet_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight"
                         )
                         ep_weight2.append(
-                            f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight"
+                            f"{fleet_prefix}.mlp.experts.{expert_id}.down_proj.weight"
                         )
                     group1 = ",".join(ep_weight1)
                     group2 = ",".join(ep_weight2)
                     aoa_statements += [
-                        f"{prefix_offset}.mlp.experts.gate_up_proj -> {group1}, axis=0",
-                        f"{prefix_offset}.mlp.experts.down_proj -> {group2}, axis=0",
+                        f"{fleet_prefix}.mlp.experts.gate_up_proj -> {group1}, axis=0",
+                        f"{fleet_prefix}.mlp.experts.down_proj -> {group2}, axis=0",
                     ]
 
             aoa_statements += [
                 # do cast
-                f"{prefix_offset}.mlp.gate.weight -> {prefix}.mlp.gate.weight, dtype='bfloat16'",
+                f"{fleet_prefix}.mlp.gate.weight -> {prefix}.mlp.gate.weight, dtype='bfloat16'",
                 # do transpose
-                f"{prefix_offset}.mlp.gate.e_score_correction_bias -> {prefix}.mlp.gate.e_score_correction_bias",
-                f"{prefix_offset}.mlp.shared_experts.down_proj.weight^T -> {prefix}.mlp.shared_experts.down_proj.weight",
+                f"{fleet_prefix}.mlp.gate.e_score_correction_bias -> {prefix}.mlp.gate.e_score_correction_bias",
+                f"{fleet_prefix}.mlp.shared_experts.down_proj.weight^T -> {prefix}.mlp.shared_experts.down_proj.weight",
             ]
 
             aoa_statements += [
-                f"{prefix_offset}.mlp.shared_experts.up_gate_proj.weight -> {prefix_offset}.mlp.shared_experts.gate_proj.weight, {prefix_offset}.mlp.shared_experts.up_proj.weight, fused_ffn",
-                f"{prefix_offset}.mlp.shared_experts.gate_proj.weight^T -> {prefix}.mlp.shared_experts.gate_proj.weight",
-                f"{prefix_offset}.mlp.shared_experts.up_proj.weight^T -> {prefix}.mlp.shared_experts.up_proj.weight",
+                f"{fleet_prefix}.mlp.shared_experts.up_gate_proj.weight -> {fleet_prefix}.mlp.shared_experts.gate_proj.weight, {fleet_prefix}.mlp.shared_experts.up_proj.weight, fused_ffn",
+                f"{fleet_prefix}.mlp.shared_experts.gate_proj.weight^T -> {prefix}.mlp.shared_experts.gate_proj.weight",
+                f"{fleet_prefix}.mlp.shared_experts.up_proj.weight^T -> {prefix}.mlp.shared_experts.up_proj.weight",
             ]
             if is_fleet:
                 if using_sonic_moe:
                     aoa_statements += [
-                        f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight -> {prefix_offset}.mlp.experts.{expert_id}.gate_proj.weight, {prefix_offset}.mlp.experts.{expert_id}.up_proj.weight, axis=0"
+                        f"{fleet_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight -> {fleet_prefix}.mlp.experts.{expert_id}.gate_proj.weight, {fleet_prefix}.mlp.experts.{expert_id}.up_proj.weight, axis=0"
                         for expert_id in range(config.n_routed_experts)
                     ]
                 else:
                     aoa_statements += [
-                        f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight -> {prefix_offset}.mlp.experts.{expert_id}.gate_proj.weight, {prefix_offset}.mlp.experts.{expert_id}.up_proj.weight, axis=1"
+                        f"{fleet_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight -> {fleet_prefix}.mlp.experts.{expert_id}.gate_proj.weight, {fleet_prefix}.mlp.experts.{expert_id}.up_proj.weight, axis=1"
                         for expert_id in range(config.n_routed_experts)
                     ]
             else:
                 aoa_statements += [
-                    f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight -> {prefix_offset}.mlp.experts.{expert_id}.gate_proj.weight, {prefix_offset}.mlp.experts.{expert_id}.up_proj.weight, fused_ffn"
+                    f"{fleet_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight -> {fleet_prefix}.mlp.experts.{expert_id}.gate_proj.weight, {fleet_prefix}.mlp.experts.{expert_id}.up_proj.weight, fused_ffn"
                     for expert_id in range(config.n_routed_experts)
                 ]
             if not using_sonic_moe:
                 aoa_statements += (
                     [
-                        f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight^T -> {prefix}.mlp.experts.{expert_id}.down_proj.weight"
+                        f"{fleet_prefix}.mlp.experts.{expert_id}.down_proj.weight^T -> {prefix}.mlp.experts.{expert_id}.down_proj.weight"
                         for expert_id in range(config.n_routed_experts)
                     ]
                     + [
-                        f"{prefix_offset}.mlp.experts.{expert_id}.gate_proj.weight^T -> {prefix}.mlp.experts.{expert_id}.gate_proj.weight"
+                        f"{fleet_prefix}.mlp.experts.{expert_id}.gate_proj.weight^T -> {prefix}.mlp.experts.{expert_id}.gate_proj.weight"
                         for expert_id in range(config.n_routed_experts)
                     ]
                     + [
-                        f"{prefix_offset}.mlp.experts.{expert_id}.up_proj.weight^T -> {prefix}.mlp.experts.{expert_id}.up_proj.weight"
+                        f"{fleet_prefix}.mlp.experts.{expert_id}.up_proj.weight^T -> {prefix}.mlp.experts.{expert_id}.up_proj.weight"
                         for expert_id in range(config.n_routed_experts)
                     ]
                 )

@@ -116,23 +116,6 @@ class TestExtractParamsAliases(unittest.TestCase):
         self.assertTrue(with_get.fd_fallback)
         self.assertFalse(without_get.fd_fallback)
 
-    def test_num_head_empty_layers_alias_and_falsy(self):
-        base = {
-            "num_hidden_layers": 1,
-            "num_attention_heads": 8,
-            "num_key_value_heads": 2,
-        }
-        aliased = MoEAOAConfigGenerator._extract_params(
-            _Config(num_empty_layers_add_in_head=3, **base)
-        )
-        zeroed = MoEAOAConfigGenerator._extract_params(
-            _Config(num_empty_layers_add_in_head=0, **base)
-        )
-        absent = MoEAOAConfigGenerator._extract_params(_Config(**base))
-        self.assertEqual(aliased.num_head_empty_layers, 3)
-        self.assertEqual(zeroed.num_head_empty_layers, 0)
-        self.assertEqual(absent.num_head_empty_layers, 0)
-
     def test_num_nextn_predict_layers_none_coerced_to_zero(self):
         params = MoEAOAConfigGenerator._extract_params(
             _Config(
@@ -472,12 +455,11 @@ class TestLayerRangeAndOffset(unittest.TestCase):
         self.assertIn("model.layers.0.input_layernorm.weight", joined)
         self.assertIn("fused_ffn", joined)
 
-    def test_num_head_empty_layers_offsets_target_index(self):
-        # Source dense layer 0 must map to target layers.2 when empty-head
-        # offset is 2 (attention weights land on the offset side).
+    def test_dense_layer_target_index_is_not_offset(self):
+        # Decoupled naming: the target (model) layer index is 0-based and
+        # carries no empty-head-layer offset, matching the checkpoint side.
         params = MoEAOAConfigParams(
             first_k_dense_replace=1,
-            num_head_empty_layers=2,
             num_attention_heads=8,
             num_key_value_heads=2,
             model_prefix="model.",
@@ -485,7 +467,7 @@ class TestLayerRangeAndOffset(unittest.TestCase):
         stmts = MoEAOAConfigGenerator._get_dense_layer_statements(params)
         self.assertIn(
             "model.layers.0.input_layernorm.weight -> "
-            "model.layers.2.input_layernorm.weight",
+            "model.layers.0.input_layernorm.weight",
             stmts,
         )
 
@@ -628,6 +610,117 @@ class TestInverseConfig(unittest.TestCase):
         # Sonic un-fuses on axis=0 and skips the transpose-back rows.
         self.assertTrue(so[0].endswith("axis=0"))
         self.assertEqual(len(so), 1)
+
+
+class TestMtpAndDenseLayerSuffixes(unittest.TestCase):
+    """Forward + inverse handling of MTP layers (``.transformer_layer`` suffix)
+    and inverse dense layers -- the branches that only fire when
+    ``num_nextn_predict_layers`` / ``first_k_dense_replace`` are positive.
+    """
+
+    def test_forward_grouped_gemm_mtp_gets_transformer_layer_suffix(self):
+        # end_layer = num_hidden(1) + mtp(1) = 2; layer 1 is the MTP layer and
+        # must carry the .transformer_layer suffix on the grouped-GEMM target.
+        params = MoEAOAConfigParams(
+            num_hidden_layers=1,
+            num_nextn_predict_layers=1,
+            first_k_dense_replace=0,
+            num_experts=2,
+            moe_expert_fusion=True,
+            model_prefix="model.",
+        )
+        stmts = MoEAOAConfigGenerator._get_grouped_gemm_statements(params)
+        joined = "\n".join(stmts)
+        self.assertIn(
+            "model.layers.1.transformer_layer.mlp.grouped_gemm_experts.weight1",
+            joined,
+        )
+        # Plain hidden layer 0 has no such suffix.
+        self.assertIn("model.layers.0.mlp.grouped_gemm_experts.weight1", joined)
+
+    def test_forward_fd_fallback_mtp_gets_transformer_layer_suffix(self):
+        params = MoEAOAConfigParams(
+            num_hidden_layers=1,
+            num_nextn_predict_layers=1,
+            first_k_dense_replace=0,
+            num_experts=2,
+            moe_expert_fusion=False,
+            using_sonic_moe=False,
+            fp8=False,
+            fd_fallback=True,
+            model_prefix="model.",
+        )
+        stmts = MoEAOAConfigGenerator._get_fd_fallback_statements(params)
+        joined = "\n".join(stmts)
+        self.assertIn(
+            "model.layers.1.transformer_layer.mlp.experts.up_gate_proj", joined
+        )
+        self.assertIn("model.layers.0.mlp.experts.up_gate_proj", joined)
+
+    def test_inverse_dense_layers_only_below_first_k_dense_replace(self):
+        none_dense = MoEAOAConfigParams(first_k_dense_replace=0)
+        self.assertEqual(
+            MoEAOAConfigGenerator._get_inv_dense_layer_statements(none_dense),
+            [],
+        )
+        params = MoEAOAConfigParams(
+            first_k_dense_replace=1, model_prefix="model."
+        )
+        stmts = MoEAOAConfigGenerator._get_inv_dense_layer_statements(params)
+        joined = "\n".join(stmts)
+        # Inverse dense layer 0: un-fuse up_gate_proj back to gate/up + down.
+        self.assertIn(
+            "model.layers.0.mlp.down_proj.weight^T -> "
+            "model.layers.0.mlp.down_proj.weight",
+            stmts,
+        )
+        self.assertIn("fused_ffn", joined)
+
+    def test_inverse_mtp_layers_gated_and_indexed(self):
+        no_mtp = MoEAOAConfigParams(num_nextn_predict_layers=0)
+        self.assertEqual(
+            MoEAOAConfigGenerator._get_inv_mtp_layer_statements(no_mtp), []
+        )
+        params = MoEAOAConfigParams(
+            num_hidden_layers=1,
+            num_nextn_predict_layers=1,
+            model_prefix="model.",
+        )
+        stmts = MoEAOAConfigGenerator._get_inv_mtp_layer_statements(params)
+        joined = "\n".join(stmts)
+        # MTP layer occupies index 1 (num_hidden_layers + 0).
+        self.assertIn(
+            "model.layers.1.eh_proj.weight^T -> model.layers.1.eh_proj.weight",
+            stmts,
+        )
+        self.assertIn("shared_head.norm.weight", joined)
+
+    def test_inverse_moe_layer_mtp_gets_transformer_layer_suffix(self):
+        params = MoEAOAConfigParams(
+            num_hidden_layers=1,
+            num_nextn_predict_layers=1,
+            first_k_dense_replace=0,
+            num_experts=2,
+            num_attention_heads=8,
+            num_key_value_heads=2,
+            model_prefix="model.",
+        )
+        stmts = MoEAOAConfigGenerator._get_inv_moe_layer_statements(params)
+        joined = "\n".join(stmts)
+        # MTP layer 1 carries the suffix on both the attention rows and the
+        # expert rows; the model (HF) target index stays plain 0-based.
+        self.assertIn(
+            "model.layers.1.transformer_layer.input_layernorm.weight -> "
+            "model.layers.1.input_layernorm.weight",
+            joined,
+        )
+        self.assertIn("model.layers.1.transformer_layer.mlp", joined)
+        # Plain hidden layer 0 has no suffix.
+        self.assertIn(
+            "model.layers.0.input_layernorm.weight -> "
+            "model.layers.0.input_layernorm.weight",
+            joined,
+        )
 
 
 if __name__ == "__main__":

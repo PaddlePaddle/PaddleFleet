@@ -265,11 +265,11 @@ class TestGetLayerDescList(unittest.TestCase):
             _prefixes(layers),
             [
                 "model",  # plain LayerDesc embedding
-                "model.layers.0",  # head_empty
-                "model.layers.1",  # transformer 0
-                "model.layers.2",  # transformer 1
+                "model.empty_layers.0",  # head_empty
+                "model.layers.0",  # transformer 0
+                "model.layers.1",  # transformer 1
                 "model",  # layer_norm (before tail, non-experimental)
-                "model.layers.3",  # tail_empty
+                "model.empty_layers.1",  # tail_empty
                 "model.lm_head",  # plain lm_head (no tie, no mtp_lm_head)
             ],
         )
@@ -299,10 +299,10 @@ class TestGetLayerDescList(unittest.TestCase):
             _prefixes(layers),
             [
                 "model.language_model",  # tied embedding (SharedLayerDesc)
-                "model.language_model.layers.0",  # head_empty
-                "model.language_model.layers.1",  # transformer 0
-                "model.language_model.layers.2",  # transformer 1
-                "model.language_model.layers.3",  # mtp layer
+                "model.language_model.empty_layers.0",  # head_empty
+                "model.language_model.layers.0",  # transformer 0
+                "model.language_model.layers.1",  # transformer 1
+                "model.language_model.layers.2",  # mtp layer
                 "model.language_model.shared_mtp_lm_head",  # mtp_lm_head (shared)
                 "model.language_model.mtp_loss",  # mtp_loss
                 "model.language_model",  # layer_norm (after MTP: experimental)
