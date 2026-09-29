@@ -78,6 +78,9 @@ def _make_loss(
     cfg.recompute_modules = None
     loss.config = cfg
     loss.ignored_index = -100
+    # Cached in LanguageLoss.__init__, which __new__ skips; the forward paths
+    # read the plain instance attribute (not config), so set the legacy default.
+    loss.calculate_per_token_loss = False
 
     def _stub_forward(logits, labels):
         return paddle.to_tensor(1.0, dtype="float32")

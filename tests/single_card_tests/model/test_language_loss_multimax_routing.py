@@ -76,6 +76,9 @@ class _StubLanguageLoss:
         # forward_impl's per-token eval guard reads self.training; a real
         # LanguageLoss gets it from nn.Layer.__init__, which this stub skips.
         self.training = True
+        # calculate_per_token_loss is cached in LanguageLoss.__init__ (also
+        # skipped here); forward_impl reads the instance attr, not config.
+        self.calculate_per_token_loss = False
 
 
 class TestLanguageLossMultimaxRouting(unittest.TestCase):

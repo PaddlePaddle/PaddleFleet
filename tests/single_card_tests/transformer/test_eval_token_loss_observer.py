@@ -78,6 +78,8 @@ def _make_loss():
     # Normally set in __init__, which __new__ skips; the plain reduction
     # branch reads it directly.
     loss.use_accuracy_compatible = False
+    # Also cached in __init__; forward_impl reads the instance attr, not config.
+    loss.calculate_per_token_loss = False
 
     def _stub_loss_func(logits, labels):
         # Per-token CE shaped like labels, distinct per position so a
