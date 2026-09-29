@@ -194,14 +194,60 @@ class TestIndexerTypeForLayer(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no entry for decoder layer 1"):
             MoEAOAConfigGenerator._indexer_type_for_layer(params, 1)
 
-    def test_indexer_types_require_a_valid_decoder_layer(self):
-        params = _mla_params(num_hidden_layers=0, indexer_types=["shared"])
-
-        with self.assertRaisesRegex(ValueError, "no entry for decoder layer 0"):
-            MoEAOAConfigGenerator._indexer_type_for_layer(params, 0)
-
 
 class TestMlaIndexerStatements(unittest.TestCase):
+    def test_periodic_layout_maps_only_existing_decoder_indexers(self):
+        for freq, offset, types, full_layers in (
+            (4, 0, None, {0, 4}),
+            (2, 3, None, {0, 1, 2, 4}),
+            (1, 0, None, {0, 1, 2, 3, 4}),
+            (4, 0, ["full", "shared", "full", "shared"], {0, 2, 4}),
+        ):
+            for provider_spelling in (False, True):
+                fields = (
+                    {
+                        "dsa_index_n_heads": 2,
+                        "dsa_indexer_topk_freq": freq,
+                        "dsa_indexer_skip_topk_offset": offset,
+                        "dsa_indexer_types": types,
+                    }
+                    if provider_spelling
+                    else {
+                        "index_n_heads": 2,
+                        "index_topk_freq": freq,
+                        "index_skip_topk_offset": offset,
+                        "indexer_types": types,
+                    }
+                )
+                config = _StubConfig(
+                    first_k_dense_replace=4,
+                    multi_latent_attention=True,
+                    num_empty_layers_add_in_head=2,
+                    num_nextn_predict_layers=1,
+                    **fields,
+                )
+                for generate in (
+                    MoEAOAConfigGenerator.gen_aoa_config,
+                    MoEAOAConfigGenerator.gen_inv_aoa_config,
+                ):
+                    with self.subTest(
+                        freq=freq,
+                        offset=offset,
+                        types=types,
+                        provider_spelling=provider_spelling,
+                        direction=generate.__name__,
+                    ):
+                        statements = generate(config)["aoa_statements"]
+                        for layer in range(5):
+                            self.assertEqual(
+                                any(
+                                    f"model.layers.{layer}.self_attn.indexer."
+                                    in statement
+                                    for statement in statements
+                                ),
+                                layer in full_layers,
+                            )
+
     def test_full_indexer_adds_projections_and_norms(self):
         params = _mla_params(indexer_types=["full", "shared"])
 

@@ -55,6 +55,7 @@ from paddlefleet.transformer.transformer_layer import (
     TransformerLayer,
     TransformerLayerNode,
     TransformerLayerOverlappedScheduleNode,
+    TransformerLayerWithOverlap,
 )
 
 logger = logging.getLogger(__name__)
@@ -280,14 +281,23 @@ class GPTModel(PipelineLayer):
         # Tie GPTMTPLMHead weight to GPTMainLMHead weight on the same stage.
         self._tie_mtp_lm_head_weight()
 
+    def forward(self, input, chunk_id=None):
+        # Keep local metadata out of the scheduler's received-tensor ownership.
+        if isinstance(input, dict):
+            input = input.copy()
+        output = super().forward(input, chunk_id=chunk_id)
+        if isinstance(output, dict):
+            # Stage-local metadata cannot enter Paddle's tensor-only PP transport.
+            # Recompute closures retain the holder itself until backward finishes.
+            output.pop("_block_cache_meta", None)
+        return output
+
     def _validate_dsa_pipeline_sharing(self):
         """Reject shared-indexer layouts the top-k holder cannot serve.
 
-        The holder is process-local and keeps one top-k per producer. It
-        cannot carry top-k across ranks or interleaved chunks, so producer and
-        consumer must share a PP segment. Under pipelining a stage also runs
-        later micro-batches' forwards before an earlier one's backward, so a
-        recompute replay of a consumer would read a newer micro-batch's top-k.
+        Producer and consumer must share a PP segment. Overlap schedulers
+        bypass the forward path that owns the holder's lifetime; pipelined
+        consumer recompute is also unsupported.
 
         Segmentation is already resolved here, but no local layers have been
         constructed. Inspect the global descriptors so every rank rejects the
@@ -335,9 +345,18 @@ class GPTModel(PipelineLayer):
                 )
             layer_number = kwargs["layer_number"]
             is_mtp = kwargs.get("is_mtp_layer", False)
-            _, skip_topk, _, source = resolve_dsa_indexer_layout(
+            _, skip_topk, index_share, source = resolve_dsa_indexer_layout(
                 self.config, layer_number, is_mtp
             )
+            if index_share and (
+                self._use_dualpipev
+                or issubclass(spec.layer, TransformerLayerWithOverlap)
+            ):
+                raise ValueError(
+                    "DSA top-k sharing is not supported by overlap pipeline "
+                    "schedulers. Disable overlap scheduling or configure full "
+                    "indexers."
+                )
             segment = bisect_right(self.segment_parts, index) - 1
             if skip_topk:
                 consumers.append((layer_number, is_mtp, source, segment))
@@ -364,9 +383,8 @@ class GPTModel(PipelineLayer):
             ):
                 raise ValueError(
                     f"DSA shared {kind} layer {layer_number} is recomputed "
-                    "under pipeline parallelism, so its replay would read "
-                    f"decoder top-k producer {source}'s indices from a later "
-                    "micro-batch. Exclude this layer from recompute or "
+                    "under pipeline parallelism, which is not supported for "
+                    "shared indexers. Exclude this layer from recompute or "
                     "configure full indexers."
                 )
 

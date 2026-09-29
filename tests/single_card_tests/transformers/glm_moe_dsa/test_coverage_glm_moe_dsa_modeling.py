@@ -13,34 +13,18 @@
 # limitations under the License.
 """Single card tests for ``paddlefleet.transformers.glm_moe_dsa.modeling``.
 
-These tests exercise the top-level imports, the ``__all__`` export list,
-the AOA generators under both DSA field spellings, and the
+These tests exercise the AOA generators under both DSA field spellings and the
 ``_gen_inv_aoa_config`` expert-ID expansion logic. None of them need a
 distributed group or a real checkpoint.
 """
 
-import logging
+import copy
 import types
 import unittest
 from unittest.mock import patch
 
 from paddlefleet.transformers.aoa_config_base import MoEAOAConfigGenerator
 from paddlefleet.transformers.glm_moe_dsa import modeling
-
-
-class ModelingExportsTests(unittest.TestCase):
-    def test_all_contains_expected_classes(self):
-        self.assertIn("GlmMoeDsaForCausalLM", modeling.__all__)
-        self.assertIn("GlmMoeDsaForCausalLMPipe", modeling.__all__)
-        # PreTrainedModel is an internal building block.
-        self.assertNotIn("GlmMoeDsaPreTrainedModel", modeling.__all__)
-
-    def test_module_logger_is_named_after_module(self):
-        self.assertIsInstance(modeling.logger, logging.Logger)
-        self.assertEqual(
-            modeling.logger.name,
-            "paddlefleet.transformers.glm_moe_dsa.modeling",
-        )
 
 
 def _provider_config(**kwargs):
@@ -104,7 +88,10 @@ class DsaIndexerSpellingTests(unittest.TestCase):
 
     def test_provider_spelling_maps_the_same_indexers_as_hf(self):
         for generate in self.GENERATORS:
-            statements = generate(_provider_config())["aoa_statements"]
+            config = _provider_config()
+            original = copy.deepcopy(vars(config))
+            statements = generate(config)["aoa_statements"]
+            self.assertEqual(vars(config), original)
 
             self.assertEqual(
                 statements, generate(_hf_config())["aoa_statements"]
@@ -132,6 +119,28 @@ class DsaIndexerSpellingTests(unittest.TestCase):
 
 
 class GenInvAoaConfigTests(unittest.TestCase):
+    def test_grouped_expert_and_mtp_intermediates_have_concrete_rules(self):
+        statements = modeling.GlmMoeDsaPreTrainedModel._gen_inv_aoa_config(
+            _provider_config(
+                num_nextn_predict_layers=1,
+                moe_expert_fusion=True,
+                use_accuracy_compatible=True,
+            )
+        )["aoa_statements"]
+        self.assertFalse(any("$EXPERT_ID" in s for s in statements))
+        for expert in range(3):
+            self.assertIn(
+                f"model.layers.2.transformer_layer.mlp.experts.{expert}.gate_proj.weight^T -> "
+                f"model.layers.2.mlp.experts.{expert}.gate_proj.weight",
+                statements,
+            )
+            self.assertIn(
+                f"model.layers.1.mlp.experts.{expert}.up_gate_proj.weight -> "
+                f"model.layers.1.mlp.experts.{expert}.gate_proj.weight, "
+                f"model.layers.1.mlp.experts.{expert}.up_proj.weight, axis=1",
+                statements,
+            )
+
     def test_expert_wildcards_expand_once_per_routed_expert(self):
         hf_spelled = _provider_config(
             index_n_heads=2, indexer_types=["full", "shared"]

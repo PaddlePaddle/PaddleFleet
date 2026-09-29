@@ -83,9 +83,16 @@ class GlmMoeDsaConfigIdentityTests(unittest.TestCase):
         self.assertFalse(config.fd_fallback)
 
     def test_optional_switches_are_passed_through(self):
-        config = _small(sliding_window=512, fd_fallback=True)
+        config = _small(
+            sliding_window=512,
+            fd_fallback=True,
+            use_qk_norm=False,
+            fp32_residual_connection=True,
+        )
         self.assertEqual(config.sliding_window, 512)
         self.assertTrue(config.fd_fallback)
+        self.assertFalse(config.use_qk_norm)
+        self.assertTrue(config.fp32_residual_connection)
 
 
 class GlmMoeDsaConfigRopeTests(unittest.TestCase):
@@ -171,6 +178,10 @@ class GlmMoeDsaConfigRopeTests(unittest.TestCase):
         self.assertFalse(indexer_layout.rope_interleave)
         self.assertTrue(indexer_layout.indexer_rope_interleave)
         self.assertTrue(indexer_layout.rotary_interleaved)
+
+        alias_layout = _small(rope_interleave=False, rotary_interleaved=True)
+        self.assertFalse(alias_layout.rope_interleave)
+        self.assertTrue(alias_layout.indexer_rope_interleave)
 
     def test_official_indexer_field_reads_back_through_the_alias(self):
         config = GlmMoeDsaConfig.from_dict({"indexer_rope_interleave": True})

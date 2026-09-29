@@ -1647,9 +1647,10 @@ class TransformerConfig(ModelParallelConfig):
 
     Official GLM-5.2 config.json field ``index_share_for_mtp_iteration``.
     False (default) keeps an independent MTP indexer. True makes each MTP
-    layer a shared consumer of the last decoder layer's top-k, so that
-    decoder layer must itself be a producer (``full``, or the last layer
-    when ``indexer_types`` is unset).
+    layer reuse the last decoder layer's producer, which can be an earlier
+    full layer when the final decoder layer is shared. The dormant MTP indexer
+    weights remain available for checkpoint conversion. Accuracy-compatible
+    execution with tensor parallel size > 1 keeps an independent MTP indexer.
     """
 
     dsa_indexer_loss_coeff: float = 0.0
@@ -2322,16 +2323,6 @@ class TransformerConfig(ModelParallelConfig):
                     "dsa_index_share_for_mtp_iteration=True requires "
                     "num_hidden_layers >= 1 so MTP can reuse a decoder indexer."
                 )
-            if (
-                self.dsa_indexer_types is not None
-                and "full" not in self.dsa_indexer_types
-            ):
-                raise ValueError(
-                    "dsa_index_share_for_mtp_iteration=True requires at least "
-                    "one decoder 'full' indexer to publish top-k, got "
-                    f"{self.dsa_indexer_types!r}."
-                )
-
         if self.p2p_overlap_dw_calc is not None:
             if isinstance(self.p2p_overlap_dw_calc, str):
                 self.p2p_overlap_dw_calc = [self.p2p_overlap_dw_calc]

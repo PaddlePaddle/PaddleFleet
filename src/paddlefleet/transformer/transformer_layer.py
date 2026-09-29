@@ -684,13 +684,9 @@ class TransformerLayer(nn.Layer):
     def _dsa_topk_holder_kwargs(self, dict_args: dict) -> dict:
         """Create or retrieve the current micro-batch's DSA top-k holder.
 
-        The holder travels with ``dict_args`` through one local pipeline
-        segment. It lives below ``_block_cache_meta``, a metadata key that
-        Fleet's pipeline tuple conversion deliberately drops at a PP boundary;
-        the holder therefore cannot be sent to another stage as a non-tensor.
-        Recompute receives the same object explicitly, so producer and
-        consumer never fall back to a config-global slot shared by other
-        micro-batches or virtual pipeline chunks.
+        ``GPTModel.forward`` removes the stage-local metadata before pipeline
+        transport. Recompute receives the holder explicitly and keeps it alive
+        independently of later micro-batches and virtual pipeline chunks.
         """
         indexer_types = getattr(self.config, "dsa_indexer_types", None)
         share_enabled = bool(
@@ -1110,6 +1106,7 @@ class TransformerLayer(nn.Layer):
         blocks: list | tuple | None = None,
         cu_seqlens: Tensor | None = None,
         docmask_mb_idx: int = -1,
+        dsa_topk_holder: dict | None = None,
         **kwargs,
     ):
         def need_do_attention():
@@ -1182,6 +1179,7 @@ class TransformerLayer(nn.Layer):
                         input_ids=input_ids,
                         cu_seqlens=cu_seqlens,
                         docmask_mb_idx=docmask_mb_idx,
+                        dsa_topk_holder=dsa_topk_holder,
                         **kwargs,
                     )
 
@@ -1239,6 +1237,7 @@ class TransformerLayer(nn.Layer):
                         input_ids=input_ids,
                         cu_seqlens=cu_seqlens,
                         docmask_mb_idx=docmask_mb_idx,
+                        dsa_topk_holder=dsa_topk_holder,
                         **kwargs,
                     )
             self._log_md5(

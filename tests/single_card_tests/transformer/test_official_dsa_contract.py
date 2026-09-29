@@ -16,17 +16,11 @@
 from __future__ import annotations
 
 from dataclasses import fields
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest import TestCase
 
-from paddle.distributed.fleet.meta_parallel import zero_bubble_utils
-
-if not hasattr(zero_bubble_utils, "RecomputeStore"):
-
-    class RecomputeStore:  # paddle nightly used by this venv is older than upstream develop
-        pass
-
-    zero_bubble_utils.RecomputeStore = RecomputeStore
+import paddle
+from paddle.distributed.fleet.utils import recompute
 
 from paddlefleet.transformer.transformer_config import TransformerConfig
 
@@ -47,17 +41,32 @@ class TestGlm52OfficialDsaHfFields(TestCase):
                 TransformerConfig.transform_rules[official], internal
             )
 
-    def test_register_attributes_copies_official_keys_onto_internal_fields(
+    def test_cli_overrides_reach_the_runtime_config(
         self,
     ):
-        cfg = object.__new__(TransformerConfig)
-        src = SimpleNamespace(
-            index_topk_freq=4,
-            index_skip_topk_offset=3,
-            indexer_types=["full", "full", "full", "shared"],
-            index_share_for_mtp_iteration=True,
+        from paddlefleet.transformers.configuration_utils import LlmMetaConfig
+        from paddlefleet.transformers.glm_moe_dsa.configuration import (
+            GlmMoeDsaConfig,
         )
-        TransformerConfig.register_attributes(cfg, src)
+
+        src = GlmMoeDsaConfig(
+            num_hidden_layers=4,
+            hidden_size=64,
+            num_attention_heads=4,
+            index_topk_freq=1,
+            indexer_types=["full"] * 4,
+        )
+        LlmMetaConfig.set_llm_config(
+            src,
+            SimpleNamespace(
+                num_nextn_predict_layers=1,
+                dsa_indexer_topk_freq=4,
+                dsa_indexer_skip_topk_offset=3,
+                dsa_indexer_types=["full", "full", "full", "shared"],
+                dsa_index_share_for_mtp_iteration=True,
+            ),
+        )
+        cfg = TransformerConfig.from_config(src)
         self.assertEqual(cfg.dsa_indexer_topk_freq, 4)
         self.assertEqual(cfg.dsa_indexer_skip_topk_offset, 3)
         self.assertEqual(
@@ -741,6 +750,7 @@ class TestDsaPipelineSharing(TestCase):
         )
         model = object.__new__(GPTModel)
         object.__setattr__(model, "config", config)
+        object.__setattr__(model, "_use_dualpipev", False)
         object.__setattr__(
             model, "_layers_desc", [LayerDesc(spec) for spec in specs]
         )
@@ -787,7 +797,10 @@ class TestDsaPipelineSharing(TestCase):
         with self.assertRaisesRegex(ValueError, "no layer_number"):
             model._validate_dsa_pipeline_sharing()
 
-    def test_dsa_holder_stays_in_dropped_pipeline_metadata(self):
+    def test_dsa_holder_is_removed_before_pipeline_transport(self):
+        from paddle.distributed.fleet.meta_parallel import dict_to_tuple_helper
+
+        from paddlefleet.models.gpt.gpt_model import GPTModel
         from paddlefleet.transformer.transformer_layer import TransformerLayer
 
         layer = TransformerLayer.__new__(TransformerLayer)
@@ -797,13 +810,65 @@ class TestDsaPipelineSharing(TestCase):
             num_hidden_layers=4,
             dsa_indexer_types=["full", "full", "full", "shared"],
         )
-        args = {}
-        kwargs = layer._dsa_topk_holder_kwargs(args)
-        self.assertIs(
-            kwargs["dsa_topk_holder"],
-            args["_block_cache_meta"]["dsa_topk_holder"],
+        holders = []
+
+        def stage(marker):
+            def forward(local_input):
+                holder = layer._dsa_topk_holder_kwargs(local_input)[
+                    "dsa_topk_holder"
+                ]
+                holder[2] = paddle.to_tensor([marker], dtype="int64")
+                holders.append(holder)
+                return {
+                    **local_input,
+                    "hidden_states": local_input["hidden_states"] * marker,
+                }
+
+            return forward
+
+        model = self.model(parts=[0, 2, 5])
+        object.__setattr__(model, "_recompute_interval", 0)
+        object.__setattr__(model, "_num_virtual_pipeline_stages", 2)
+        object.__setattr__(model, "run_function", [stage(3)])
+        object.__setattr__(
+            model,
+            "_model_chunks",
+            [
+                SimpleNamespace(get_run_function=lambda: [stage(1)]),
+                SimpleNamespace(get_run_function=lambda: [stage(2)]),
+            ],
         )
-        self.assertNotIn("dsa_topk_holder", args)
+        for chunk_id, marker in ((None, 3), (0, 1), (1, 2)):
+            with self.subTest(chunk_id=chunk_id):
+                args = {"hidden_states": paddle.to_tensor([1.0])}
+                output = GPTModel.forward(model, args, chunk_id=chunk_id)
+                self.assertNotIn("_block_cache_meta", args)
+                self.assertNotIn("_block_cache_meta", output)
+                transported = dict_to_tuple_helper(output)
+                self.assertEqual(len(transported), 1)
+                self.assertEqual(transported[0].tolist(), [float(marker)])
+                self.assertEqual(holders[-1][2].tolist(), [marker])
+        self.assertEqual(len({id(holder) for holder in holders}), 3)
+
+    def test_overlap_schedulers_reject_sharing_before_build(self):
+        from paddlefleet.transformer.transformer_layer import (
+            TransformerLayerWithOverlap,
+        )
+
+        for dualpipe in (False, True):
+            model = self.model(parts=[0, 2, 4], mtp=False)
+            if dualpipe:
+                object.__setattr__(model, "_use_dualpipev", True)
+            else:
+                for descriptor in model._layers_desc:
+                    descriptor.layer_spec.layer = TransformerLayerWithOverlap
+            with self.assertRaisesRegex(ValueError, "overlap pipeline"):
+                model._validate_dsa_pipeline_sharing()
+
+    def test_overlap_schedulers_keep_full_indexers_supported(self):
+        model = self.model(parts=[0, 2, 4], mtp=False, full=True)
+        object.__setattr__(model, "_use_dualpipev", True)
+        model._validate_dsa_pipeline_sharing()
 
     def test_invalid_dsa_holder_metadata_is_rejected(self):
         from paddlefleet.transformer.transformer_layer import TransformerLayer
@@ -958,21 +1023,63 @@ class TestMtpDsaHolderTransport(TestCase):
         self.assertIs(resolved["dsa_topk_holder"], producer["dsa_topk_holder"])
 
     def test_recompute_replays_with_the_same_metadata(self):
-        from unittest.mock import patch
-
         from paddlefleet.transformer import multi_token_prediction as mtp
 
-        meta = {"dsa_topk_holder": {}}
-        with patch.object(mtp, "recompute") as recompute:
-            mtp.MultiTokenPredictionLayer._checkpointed_forward(
-                self.fake_mtp(),
-                "forward_func",
-                hidden_states="hidden",
-                _block_cache_meta=meta,
-            )
-            self.assertIs(recompute.call_args.kwargs["_block_cache_meta"], meta)
+        for meta in (None, {"dsa_topk_holder": {}}):
+            with self.subTest(has_metadata=meta is not None):
+                seen = []
 
-            mtp.MultiTokenPredictionLayer._checkpointed_forward(
-                self.fake_mtp(), "forward_func", hidden_states="hidden"
-            )
-            self.assertNotIn("_block_cache_meta", recompute.call_args.kwargs)
+                def inner(inputs):
+                    seen.append(inputs.get("_block_cache_meta"))
+                    return {"hidden_states": inputs["hidden_states"].square()}
+
+                layer = self.fake_mtp(inner)
+                forward = MethodType(
+                    mtp.MultiTokenPredictionLayer._proj_and_transformer_layer,
+                    layer,
+                )
+                hidden = paddle.to_tensor([2.0, 3.0], stop_gradient=False)
+                output = mtp.MultiTokenPredictionLayer._checkpointed_forward(
+                    layer,
+                    forward,
+                    hidden_states=hidden,
+                    decoder_input=hidden,
+                    _block_cache_meta=meta,
+                )
+                output.sum().backward()
+                self.assertEqual(output.tolist(), [4.0, 9.0])
+                self.assertEqual(hidden.grad.tolist(), [4.0, 6.0])
+                self.assertEqual(len(seen), 2)
+                self.assertTrue(all(item is meta for item in seen))
+
+    def test_decoder_full_recompute_forwards_the_same_holder(self):
+        from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+        holder = {}
+        seen = []
+
+        def attention(hidden_states, **kwargs):
+            seen.append(kwargs["dsa_topk_holder"])
+            return hidden_states.square(), None
+
+        layer = SimpleNamespace(
+            config=SimpleNamespace(block_attention_residuals=False),
+            training=True,
+            mlp=None,
+            layer_number=0,
+            full_recompute=True,
+            _log_md5=lambda *args: None,
+            _forward_attention=attention,
+            _forward_mlp=lambda hidden_states, **kwargs: hidden_states,
+        )
+        forward = MethodType(TransformerLayer._forward_impl, layer)
+        hidden = paddle.to_tensor([2.0, 3.0], stop_gradient=False)
+        output = recompute(
+            forward, hidden_states=hidden, dsa_topk_holder=holder
+        )
+        output.sum().backward()
+
+        self.assertEqual(output.tolist(), [4.0, 9.0])
+        self.assertEqual(hidden.grad.tolist(), [4.0, 6.0])
+        self.assertEqual(len(seen), 2)
+        self.assertTrue(all(item is holder for item in seen))

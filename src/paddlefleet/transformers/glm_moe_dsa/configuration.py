@@ -129,13 +129,14 @@ class GlmMoeDsaConfig(PretrainedConfig):
 
     model_type = "glm_moe_dsa"
     keys_to_ignore_at_inference = ["past_key_values"]
-    # Official GLM-5.2 config.json serializes indexer RoPE as
-    # ``indexer_rope_interleave``. Keep that name as the stored attribute so
-    # from_dict/to_dict round-trips the official field; rotary_interleaved is
-    # the Fleet-facing alias used by existing tests and providers.
+    # Keep Fleet overrides and checkpoint fields in the same storage.
     attribute_map = {
         "num_classes": "num_labels",
         "rotary_interleaved": "indexer_rope_interleave",
+        "dsa_indexer_topk_freq": "index_topk_freq",
+        "dsa_indexer_skip_topk_offset": "index_skip_topk_offset",
+        "dsa_indexer_types": "indexer_types",
+        "dsa_index_share_for_mtp_iteration": "index_share_for_mtp_iteration",
     }
 
     def __init__(
@@ -180,11 +181,7 @@ class GlmMoeDsaConfig(PretrainedConfig):
         fd_fallback=False,
         **kwargs,
     ):
-        # GLM-5.2 HF config.json stores RoPE under ``rope_parameters`` and
-        # leaves ``rope_scaling`` null. Keep those two attributes distinct:
-        # copying the nested dict onto ``rope_scaling`` makes
-        # ``from_json_file`` disagree with a default-constructed config
-        # (ConfigTester.test_config).
+        # Official checkpoints keep rope_scaling null and use rope_parameters.
         rope_parameters = kwargs.pop("rope_parameters", None)
         if rope_parameters is None:
             rope_parameters = rope_scaling
@@ -223,10 +220,7 @@ class GlmMoeDsaConfig(PretrainedConfig):
         self.rotary_base = self.rope_theta
         rope_type = self.rope_parameters["rope_type"]
         self.rope_type = "rope" if rope_type == "default" else rope_type
-        # ConfigTester round-trips constructor kwargs. Nested
-        # rope_parameters.partial_rotary_factor is derived from the top-level
-        # field; drop it from the serialized nested dict so from_dict does not
-        # treat it as an unused constructor argument and wipe the nest.
+        # The top-level partial_rotary_factor owns this value on save/load.
         if isinstance(self.rope_parameters, dict):
             self.rope_parameters.pop("partial_rotary_factor", None)
         if isinstance(self.rope_scaling, dict):
@@ -260,10 +254,7 @@ class GlmMoeDsaConfig(PretrainedConfig):
             fp32_residual_connection=fp32_residual_connection,
             **kwargs,
         )
-        # rotary_base / rope_type are derived aliases. Keep official
-        # rope_parameters on the serialized dict so save_pretrained round-trips
-        # the GLM-5.2 config.json field. Nested partial_rotary_factor is
-        # already popped above so ConfigTester still round-trips.
+        # Serialize the official RoPE parameters, not their derived aliases.
         self.register_unsavable_keys(["rotary_base", "rope_type"])
 
 

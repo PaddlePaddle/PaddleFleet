@@ -23,6 +23,8 @@ like shared experts, dense-MoE hybrid layers, and MTP (Multi-Token Prediction).
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
+from paddlefleet.transformer.dsa_layout import is_dsa_skip_topk_layer
+
 
 @dataclass
 class MoEAOAConfigParams:
@@ -65,6 +67,8 @@ class MoEAOAConfigParams:
 
     index_n_heads: int = 0
     indexer_types: List[str] | None = None
+    index_topk_freq: int = 1
+    index_skip_topk_offset: int = 0
 
     # Only magic send builds the MTP layers' own ``mtp_embed`` table.
     enable_mtp_magic_send: bool = False
@@ -126,6 +130,15 @@ class MoEAOAConfigGenerator:
         if indexer_types is None:
             indexer_types = getattr(config, "dsa_indexer_types", None)
 
+        index_topk_freq = getattr(config, "index_topk_freq", None)
+        if index_topk_freq is None:
+            index_topk_freq = getattr(config, "dsa_indexer_topk_freq", 1)
+        index_skip_topk_offset = getattr(config, "index_skip_topk_offset", None)
+        if index_skip_topk_offset is None:
+            index_skip_topk_offset = getattr(
+                config, "dsa_indexer_skip_topk_offset", 0
+            )
+
         return MoEAOAConfigParams(
             num_hidden_layers=config.num_hidden_layers,
             num_attention_heads=config.num_attention_heads,
@@ -159,6 +172,8 @@ class MoEAOAConfigGenerator:
             # Providers hold these HF fields under their transform_rules names.
             index_n_heads=index_n_heads,
             indexer_types=indexer_types,
+            index_topk_freq=index_topk_freq,
+            index_skip_topk_offset=index_skip_topk_offset,
             enable_mtp_magic_send=getattr(
                 config, "enable_mtp_magic_send", False
             ),
@@ -452,7 +467,15 @@ class MoEAOAConfigGenerator:
         if params.num_hidden_layers and layer_idx >= params.num_hidden_layers:
             return "full"
         if params.indexer_types is None:
-            return "full"
+            return (
+                "shared"
+                if is_dsa_skip_topk_layer(
+                    layer_idx + 1,
+                    params.index_skip_topk_offset,
+                    params.index_topk_freq,
+                )
+                else "full"
+            )
         if not 0 <= layer_idx < len(params.indexer_types):
             raise ValueError(
                 f"indexer_types has no entry for decoder layer {layer_idx}; "
