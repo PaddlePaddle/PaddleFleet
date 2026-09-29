@@ -63,6 +63,10 @@ from safetensors.paddle import save_file
 from tqdm.auto import tqdm
 
 from ..generation import GenerationConfig, GenerationMixin
+from ..models.gpt.aoa_dispatch import (
+    resolve_aoa_config,
+    resolve_inv_aoa_config,
+)
 from ..quantization.quantization_utils import (
     convert_to_quantize_state_dict,
     convert_to_weight_quantize_state_dict,
@@ -3398,12 +3402,7 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
                 param.set_value(value)
 
         if load_checkpoint_format == "flex_checkpoint":
-            if not hasattr(cls, "_gen_aoa_config"):
-                raise RuntimeError(
-                    "When using flex_checkpoint to load Hugging Face open-source weights, "
-                    "the model must implement the _gen_aoa_config function to provide checkpoint conversion rules."
-                )
-            aoa_config = cls._gen_aoa_config(config)
+            aoa_config = resolve_aoa_config(model, config)
             sharded_state_dict = model.sharded_state_dict()
             metadata_path = os.path.join(
                 ckpt_path, FLEX_CKPT_AUTO_GENERATED_METADATA
@@ -3835,21 +3834,7 @@ class PretrainedModel(Layer, GenerationMixin, ConversionMixin):
                 logger.info(
                     f"MTP args changing for autoregressive mtp training checkpoint saving, mtp_num_layers: {model_to_save.config.mtp_num_layers}, num_nextn_predict_layers: {model_to_save.config.num_nextn_predict_layers}!!"
                 )
-            if not hasattr(self, "_gen_inv_aoa_config"):
-                if hasattr(self, "_gen_aoa_config"):
-                    aoa_config = self._gen_aoa_config(model_to_save.config)
-                    aoa_config["aoa_config_reverse"] = True
-                    logger.warning(
-                        "There is no _gen_inv_aoa_config, so we auto-derived it from _gen_aoa_config."
-                    )
-                else:
-                    raise RuntimeError(
-                        "When using flex_checkpoint to save Hugging Face weights, "
-                        "the model must implement either the _gen_inv_aoa_config function "
-                        "or the _gen_aoa_config function (which will be automatically used to derive _gen_inv_aoa_config)."
-                    )
-            else:
-                aoa_config = self._gen_inv_aoa_config(model_to_save.config)
+            aoa_config = resolve_inv_aoa_config(self, model_to_save.config)
 
             clean_unrelated_safetensors(save_dir)
 

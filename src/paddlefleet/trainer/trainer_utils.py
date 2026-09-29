@@ -66,6 +66,7 @@ from paddle.optimizer.lr import LambdaDecay
 from transformers.tokenization_utils_base import BatchEncoding
 
 from paddlefleet.accuracy_compatible_patch import has_optimizer_state
+from paddlefleet.models.gpt.aoa_dispatch import resolve_inv_aoa_config
 from paddlefleet.utils import use_dsv4_accuracy_compatible
 
 # from ..ops import Topology
@@ -2762,7 +2763,7 @@ class EMAStateAssembler:
         hf_checkpoint_folder = f"{PREFIX_EMA_HF_CHECKPOINT_DIR}-{step}"
         save_path = self.output_dir / hf_checkpoint_folder
         config = self.model.config
-        aoa_config = self.model._gen_inv_aoa_config(config)
+        aoa_config = resolve_inv_aoa_config(self.model, config)
 
         logger.info(
             f"[EMAStateAssembler] [Rank {self.rank}] Saving full EMA states to {save_path}."
