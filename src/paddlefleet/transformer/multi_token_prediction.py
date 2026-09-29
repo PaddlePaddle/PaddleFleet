@@ -771,24 +771,34 @@ def draw_mtp_sampled_depth(owner, config):
     D=num_nextn_predict_layers. Returns D when sampling is disabled.
 
     The draw is DETERMINISTIC and collective-free: a private RNG is seeded by
-    ``owner``'s own per-call counter, so every site that draws derives the SAME K
-    without any communication. ``owner`` may be an MTP layer at any depth or the
-    MTP LM head -- each is entered exactly once per micro-batch, so their counters
-    stay in lockstep and agree on K even when they sit on DIFFERENT pipeline
-    stages. That is what makes sampling work at
-    ``pipeline_model_parallel_size > 1``: K rides in ``dict_args`` within a stage,
-    but ``dict_args`` does not cross a stage boundary (p2p ships tensors only), so
-    the first consumer on each stage re-derives it instead of falling back to D.
-    A world-group ``broadcast(src=0)`` -- the original mechanism -- deadlocks
-    under pp>1 instead: only the last stage runs the MTP layers, while src=0 sits
-    on the first stage and never joins the collective.
+    ``config.seed``, ``config.mtp_depth_sampling_seed_offset`` and ``owner``'s own
+    per-call counter. A world-group ``broadcast(src=0)`` -- the original
+    mechanism -- deadlocks at pp>1, because only the last pipeline stage runs the
+    MTP layers while src=0 sits on the first stage and never joins.
 
-    Per-site counters are deliberate; a single stage-wide counter would break
-    under virtual pipeline parallelism, where one process holds several chunks and
-    would advance it once per chunk rather than once per micro-batch.
+    Who draws: exactly one site per rank per micro-batch. Within a pipeline chunk
+    the first MTP depth draws and publishes K in ``dict_args``; every later
+    consumer reads it back (``resolve_mtp_sampled_depth``). ``dict_args`` does not
+    cross a chunk boundary, so a split layout would force a second site to derive
+    K on its own -- ``GPTModel._assert_mtp_sampling_sites_colocated`` rejects
+    those layouts at build time precisely so that never happens.
+
+    Across ranks: every rank holding the MTP block runs the same schedule and
+    enters this function once per micro-batch, so the counters agree and so does
+    K. That is what keeps the MoE expert-parallel all-to-all of each computed
+    depth matched, and the per-depth loss reduction consistent, without any
+    communication.
 
     A private Generator is used (not ``np.random.*``) so the global RNG stream
     used elsewhere is untouched.
+
+    Restart behaviour: the counter is runtime state and resets to 0, so a resumed
+    job replays the draw sequence from its start. ``P(K)`` and therefore the
+    effective per-depth weight ``w_j = E[1{K>=j}/K]`` depend only on the
+    configured distribution, not on where the sequence starts, so the loss stays
+    correctly normalised (``sum_j w_j == 1``); what is lost is continuity and
+    reproducibility of the stream. Bump ``mtp_depth_sampling_seed_offset`` by the
+    number of micro-batches already consumed if you need it to continue.
 
     The counter only advances outside a recompute replay, mirroring the
     magic-count handling further down this file. The caller's primary guard is
@@ -807,7 +817,10 @@ def draw_mtp_sampled_depth(owner, config):
     counter = getattr(owner, "_mtp_sampling_counter", 0)
     owner._mtp_sampling_counter = counter
     base = int(getattr(config, "seed", 0) or 0)
-    seed = base * 1_000_003 + counter
+    # Measured in draws, so bumping it by the consumed micro-batch count resumes
+    # the sequence where the previous run left off.
+    offset = int(getattr(config, "mtp_depth_sampling_seed_offset", 0) or 0)
+    seed = base * 1_000_003 + offset + counter
     if paddle.is_grad_enabled() or not owner.training:
         owner._mtp_sampling_counter = counter + 1
     rng = np.random.default_rng(seed)
@@ -818,11 +831,11 @@ def draw_mtp_sampled_depth(owner, config):
 def resolve_mtp_sampled_depth(owner, config, dict_args):
     """Return this micro-batch's K, drawing it if nobody upstream published one.
 
-    ``dict_args`` is the within-stage carrier: the first MTP depth on a stage (or
-    the MTP LM head, when no MTP depth shares its stage) draws and publishes K,
-    and the remaining consumers on that stage read it back. Reusing the published
-    value -- rather than drawing again -- is also what makes a recompute replay
-    idempotent, since the replay re-enters with the dict the forward wrote into.
+    ``dict_args`` is the within-chunk carrier: the first MTP depth in the chunk
+    draws and publishes K, and every later consumer in that chunk -- the deeper
+    MTP layers and the MTP LM head -- reads it back. Reusing the published value
+    rather than drawing again is also what makes a recompute replay idempotent,
+    since the replay re-enters with the dict the forward wrote into.
     """
     if "mtp_sampled_depth" in dict_args:
         return dict_args["mtp_sampled_depth"]
@@ -1498,12 +1511,13 @@ class MultiTokenPredictionLayer(FleetLayer):
         # the data. This is robust to gradient_accumulation_steps>1 and recompute:
         # there is no shared/config state an interleaved micro-batch could
         # overwrite, and the recompute of a layer replays the same saved dict_args.
-        # dict_args does not cross a pipeline stage boundary, so the first MTP depth
-        # on each stage re-derives K from its own counter instead of falling back to
-        # D -- the draw is deterministic and collective-free, so every stage agrees
-        # (see draw_mtp_sampled_depth). Depths >= K return early, skipping their
-        # transformer_layer forward; the LM head then emits None logits for them and
-        # the loss drops those entries.
+        # dict_args does not cross a pipeline chunk boundary, which is why
+        # GPTModel._assert_mtp_sampling_sites_colocated pins every depth and the
+        # MTP LM head to one chunk: the first depth here draws, everyone else --
+        # including the head -- reads the published value back, so no second site
+        # ever derives K on its own (see draw_mtp_sampled_depth). Depths >= K return
+        # early, skipping their transformer_layer forward; the LM head then emits
+        # None logits for them and the loss drops those entries.
         if (
             getattr(self.config, "mtp_depth_sampling", None)
             and not self.config.enable_mtp_magic_send

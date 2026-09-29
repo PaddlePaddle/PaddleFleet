@@ -386,53 +386,60 @@ class TestMTPDepthSampling(unittest.TestCase):
         layers = _mtp_layers(model)
         return layers[0] if layers else None
 
-    def test_split_depths_derive_matching_k(self):
-        """Depths on DIFFERENT pipeline stages must agree on K without talking.
+    def test_peer_ranks_derive_matching_k(self):
+        """Two independent MTP layer instances must agree on K without talking.
 
-        dict_args does not cross a stage boundary, so each stage's first MTP depth
-        re-derives K from its own counter. This is the invariant that lets sampling
-        run at pp>1 with a split layout: same counter index -> same seed -> same K.
-        A drift here silently trains a different depth set than the loss
+        The MTP block is pinned to one pipeline chunk, so within a rank K is drawn
+        once and read back from dict_args. What is still derived independently is
+        the draw on each DP / EP peer rank holding that block: they run the same
+        schedule, so the same counter index must give the same K, or the MoE
+        all-to-all of a computed depth and the per-depth loss reduction stop
+        matching. Two layer objects with separate counters stand in for two peer
+        ranks here. A drift silently trains a different depth set than the loss
         normalises over, so the whole sequence must match, not just the first draw.
         """
         config = self._cfg([0.2, 0.3, 0.5])
         depths = _mtp_layers(gpt_builder(config, num_stages=1))
-        stage_a, stage_b = depths[0], depths[1]
-        for layer in (stage_a, stage_b):
+        rank_a, rank_b = depths[0], depths[1]
+        for layer in (rank_a, rank_b):
             layer.train()
 
         drawn_a, drawn_b = [], []
         for _ in range(8):
-            # separate dicts == separate stages: neither sees the other's K
-            drawn_a.append(resolve_mtp_sampled_depth(stage_a, config, {}))
-            drawn_b.append(resolve_mtp_sampled_depth(stage_b, config, {}))
+            # separate dicts == separate ranks: neither sees the other's K
+            drawn_a.append(resolve_mtp_sampled_depth(rank_a, config, {}))
+            drawn_b.append(resolve_mtp_sampled_depth(rank_b, config, {}))
 
         self.assertEqual(drawn_a, drawn_b)
-        self.assertEqual(stage_a._mtp_sampling_counter, 8)
-        self.assertEqual(stage_b._mtp_sampling_counter, 8)
+        self.assertEqual(rank_a._mtp_sampling_counter, 8)
+        self.assertEqual(rank_b._mtp_sampling_counter, 8)
         # a constant K would make the equality above vacuous
         self.assertGreater(len(set(drawn_a)), 1)
 
-    def test_lm_head_derives_same_k_as_mtp_depths(self):
-        """The MTP LM head may sit on a stage holding no MTP depth, so it must
-        re-derive the same K rather than fall back to D (which would project the
-        skipped depths and normalise the loss over D)."""
-        config = self._cfg([0.2, 0.3, 0.5])
-        model = gpt_builder(config, num_stages=1)
-        depth0 = self._mtp0(model)
-        head = next(
-            layer
-            for layer in model.run_function
-            if type(layer).__name__ == "GPTLMHead"
-        )
-        depth0.train()
-        head.train()
+    def test_seed_offset_continues_the_draw_sequence(self):
+        """mtp_depth_sampling_seed_offset=n must resume the stream after n draws.
 
-        for _ in range(5):
-            self.assertEqual(
-                resolve_mtp_sampled_depth(depth0, config, {}),
-                resolve_mtp_sampled_depth(head, config, {}),
-            )
+        This is the answer to a restart zeroing the per-call counter: the offset is
+        measured in draws, so setting it to the consumed micro-batch count makes
+        the resumed job continue instead of replaying from the start.
+        """
+        config = self._cfg([0.2, 0.3, 0.5])
+        layer = self._mtp0(gpt_builder(config, num_stages=1))
+        layer.train()
+        first_run = [
+            resolve_mtp_sampled_depth(layer, config, {}) for _ in range(6)
+        ]
+
+        resumed_config = self._cfg([0.2, 0.3, 0.5])
+        resumed_config.mtp_depth_sampling_seed_offset = 3
+        resumed = self._mtp0(gpt_builder(resumed_config, num_stages=1))
+        resumed.train()
+        resumed_run = [
+            resolve_mtp_sampled_depth(resumed, resumed_config, {})
+            for _ in range(3)
+        ]
+
+        self.assertEqual(resumed_run, first_run[3:])
 
     def test_published_k_is_reused_not_redrawn(self):
         """Within a stage the first depth publishes K in dict_args; later consumers
@@ -690,7 +697,7 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
 
     def test_combined_sharing_accepts_depths_on_one_stage(self):
         """Combined sharing needs the MTP depths co-located because its fusion
-        params are rank-local aliases; sampling has no such requirement."""
+        params are rank-local aliases."""
         self._combined_sharing_colocation_check([[0, 1], []])
         self._combined_sharing_colocation_check([[], [0, 1]])
 
@@ -702,6 +709,46 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
             r"mtp_shared_weights \+ mtp_shared_last_layer requires all MTP",
         ):
             self._combined_sharing_colocation_check([[0], [1]])
+
+    def _sampling_colocation_check(self, layout):
+        """Run the sampling placement check with a faked PP / chunk layout.
+
+        Each gathered entry is one rank's list of (mtp_depths, holds_lm_head) for
+        the chunks that hold any MTP depth.
+        """
+        model, _ = self._independent_model(num_nextn=3)
+
+        def _fake_all_gather_object(object_list, obj, group=None):
+            object_list.extend(layout)
+
+        with mock.patch.object(
+            paddle.distributed,
+            "all_gather_object",
+            side_effect=_fake_all_gather_object,
+        ):
+            model._assert_mtp_sampling_sites_colocated()
+
+    def test_sampling_accepts_whole_mtp_block_in_one_chunk(self):
+        """K rides in dict_args, so every consumer must be in the drawing chunk."""
+        self._sampling_colocation_check([[([0, 1, 2], True)], []])
+        self._sampling_colocation_check([[], [([0, 1, 2], True)]])
+
+    def test_sampling_rejects_split_depths(self):
+        """Split depths would make two chunks derive K independently -- the case
+        that deadlocks once their entry counts drift under VPP / p2p overlap."""
+        with self.assertRaisesRegex(
+            RuntimeError, r"mtp_depth_sampling requires every MTP depth"
+        ):
+            self._sampling_colocation_check(
+                [[([0], True)], [([1, 2], False)]]
+            )
+
+    def test_sampling_rejects_lm_head_in_another_chunk(self):
+        """The head reads K back rather than deriving it, so it must be able to."""
+        with self.assertRaisesRegex(
+            RuntimeError, r"mtp_depth_sampling requires every MTP depth"
+        ):
+            self._sampling_colocation_check([[([0, 1, 2], False)], []])
 
     def test_sampling_is_idempotent_under_recompute(self):
         """A recompute replay must reuse the forward's K, not draw a new one.

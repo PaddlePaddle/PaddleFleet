@@ -250,6 +250,11 @@ class GPTModel(PipelineLayer):
         # Tie GPTMTPLMHead weight to GPTMainLMHead weight on the same stage.
         self._tie_mtp_lm_head_weight()
         if (
+            getattr(self.config, "mtp_depth_sampling", None)
+            and self.config.pipeline_model_parallel_size > 1
+        ):
+            self._assert_mtp_sampling_sites_colocated()
+        if (
             getattr(self.config, "mtp_shared_weights", False)
             and getattr(self.config, "mtp_shared_last_layer", False)
             and self.config.pipeline_model_parallel_size > 1
@@ -259,6 +264,70 @@ class GPTModel(PipelineLayer):
             self.config, "mtp_shared_last_layer", False
         ):
             self._alias_mtp_fusion_weights()
+
+    def _local_chunks(self):
+        """The layer lists this rank runs, one per virtual pipeline chunk.
+
+        Data flows through a chunk's list in order, so a dict published by one
+        layer is visible to later layers of the SAME chunk only -- chunk
+        boundaries are p2p boundaries just like plain stage boundaries.
+        """
+        if (
+            self._num_virtual_pipeline_stages > 1
+            and getattr(self, "_model_chunks", None)
+        ):
+            return [list(chunk.run_function) for chunk in self._model_chunks]
+        return [list(self.run_function)]
+
+    def _assert_mtp_sampling_sites_colocated(self):
+        """Require every site that consumes the sampled K to share one chunk.
+
+        K is drawn once per micro-batch and published in ``dict_args``, which
+        never crosses a stage (or virtual-chunk) boundary. If the MTP depths were
+        split, or the LM head sat where no depth does, those sites would each
+        have to derive K on their own -- different code paths whose entry counts
+        nothing keeps aligned under virtual pipeline parallelism or p2p overlap.
+        A drift there makes the head's None placeholders disagree with the depths
+        that actually ran, so the per-depth loss set differs across stages and
+        the collectives mismatch, which shows up as a hang rather than an error.
+        Rejecting the layout is the only guarantee that costs no communication.
+        """
+        import paddle.distributed
+
+        chunks = [
+            (
+                sorted(
+                    layer.layer_number
+                    for layer in chunk
+                    if isinstance(layer, MultiTokenPredictionLayer)
+                ),
+                any(isinstance(layer, GPTLMHead) for layer in chunk),
+            )
+            for chunk in self._local_chunks()
+        ]
+        local = [(depths, has_head) for depths, has_head in chunks if depths]
+        hcg = fleet.get_hybrid_communicate_group()
+        gathered = []
+        paddle.distributed.all_gather_object(
+            gathered, local, group=hcg.get_pipe_parallel_group()
+        )
+        holders = [entry for per_rank in gathered for entry in per_rank]
+        expected = list(range(self.config.num_nextn_predict_layers))
+        if (
+            len(holders) != 1
+            or holders[0][0] != expected
+            or not holders[0][1]
+        ):
+            raise RuntimeError(
+                "mtp_depth_sampling requires every MTP depth AND the MTP LM "
+                "head to sit in one pipeline chunk, but the layout is "
+                f"{gathered} (entries are (mtp_depths, holds_lm_head) per "
+                "chunk that holds any depth). K is published in dict_args, "
+                "which does not cross a chunk boundary; a split layout would "
+                "make separate sites derive K independently and deadlock as "
+                "soon as they disagree. Pin the MTP block to one stage with "
+                'seg_method="layer:..." , or disable mtp_depth_sampling.'
+            )
 
     def _assert_mtp_depths_colocated_for_combined_sharing(self):
         """Require combined MTP sharing to keep all depths on one PP stage.
@@ -355,6 +424,12 @@ class GPTModel(PipelineLayer):
         ``shared_weight_attr`` is ``transformer_layer_weights``, so widening there
         would alias fusion params that shared_comm never syncs -- silently divergent
         across stages instead of loudly broken.
+
+        TODO(upstream): this override exists only because paddle's
+        ``PipelineLayer._alias_shared_layer`` hardcodes
+        ``dest_layer.transformer_layer`` and ignores the desc's
+        ``shared_weight_attr``, which it already carries. Once the alias scope is
+        driven off ``shared_weight_attr`` upstream, delete this method.
         """
         if not (
             getattr(self.config, "mtp_shared_weights", False)
@@ -562,6 +637,15 @@ class GPTModel(PipelineLayer):
                 # rather than degrading to broadcast -- depth 0 becomes the stored
                 # shared layer and depth 1 aliases against its
                 # `transformer_layer.`-prefixed names.
+                #
+                # The if/elif below picks which shared KEY this desc carries, not
+                # which flag applies at which depth count: paddle keys
+                # shared_layers by the desc's single layer_name, so one desc
+                # cannot join both groups. With both flags on the backbone key
+                # wins here and the per-depth fusion params are aliased afterwards
+                # by _alias_mtp_fusion_weights. The flags are orthogonal, with
+                # different pivots and scopes -- see
+                # TransformerConfig.mtp_shared_weights.
                 if getattr(self.config, "mtp_shared_last_layer", False):
                     desc = SharedLayerDesc(
                         "mtp_reuse_transformer",

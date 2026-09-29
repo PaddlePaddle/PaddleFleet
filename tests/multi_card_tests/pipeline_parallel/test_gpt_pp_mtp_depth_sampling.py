@@ -218,12 +218,26 @@ class TestMTPDepthSamplingPP(unittest.TestCase):
             )
 
     def test_pp_sampling_with_shared_weights(self):
-        """Cross-depth full sharing plus sampling. mtp_shared_weights exists to let
-        the depths land on different stages, and sampling now tolerates that: each
-        stage's first MTP depth re-derives the same K from its own counter."""
-        loss, mtp_layers, body_calls = _run_pp(
-            [1.0, 0.0, 0.0], mtp_shared_weights=True
-        )
+        """Cross-depth full sharing plus sampling.
+
+        mtp_shared_weights on its own tolerates depths on different stages, but
+        sampling does not: K is published in dict_args, which never crosses a
+        chunk boundary, so GPTModel._assert_mtp_sampling_sites_colocated requires
+        the whole MTP block in one chunk. Whichever way this run's segmentation
+        falls, the contract is the same -- either the block stayed together and the
+        step behaves like the non-shared case, or the layout is rejected loudly at
+        build time. What must never happen is a run that proceeds with two chunks
+        deriving K on their own.
+        """
+        try:
+            loss, mtp_layers, body_calls = _run_pp(
+                [1.0, 0.0, 0.0], mtp_shared_weights=True
+            )
+        except RuntimeError as exc:
+            assert "mtp_depth_sampling requires every MTP depth" in str(exc), (
+                f"unexpected RuntimeError from a split MTP layout: {exc}"
+            )
+            return
         self._assert_finite(loss)
         if not mtp_layers:
             return

@@ -189,12 +189,29 @@ class TransformerConfig(ModelParallelConfig):
     """When True, MTP layers use dense MLP instead of MoE in their internal transformer block."""
 
     mtp_shared_last_layer: bool = False
-    """When True, MTP layers share the last backbone TransformerLayer parameters."""
+    """When True, MTP layers share the last backbone TransformerLayer parameters.
+
+    Pivot = that backbone layer, scope = the MTP body only
+    (shared_weight_attr="transformer_layer_weights"). Orthogonal to
+    mtp_shared_weights, which has a different pivot (MTP depth 0) and a wider
+    scope (body + per-depth fusion); see that field for why one flag cannot
+    express both."""
 
     mtp_shared_weights: bool = False
     """When True, ALL MTP depths share one MultiTokenPredictionLayer's parameters --
     the internal transformer_layer body AND the per-depth fusion modules
     (enorm / hnorm / eh_proj or e_proj+h_proj / norm).
+
+    This is NOT a redundant spelling of mtp_shared_last_layer: the two differ in
+    both pivot and scope, and all four combinations are distinct.
+      - mtp_shared_last_layer: pivot = the last backbone TransformerLayer,
+        scope = transformer_layer_weights (the MTP body only).
+      - mtp_shared_weights: pivot = MTP depth 0, scope = all_weights (body plus
+        the per-depth fusion modules). Requires num_nextn_predict_layers >= 2.
+    At D=3, mtp_shared_weights alone gives three depths that share everything with
+    each other but nothing with the backbone -- a shape mtp_shared_last_layer
+    cannot express, since it would tie the bodies to the backbone and still leave
+    three independent fusion parameter sets.
 
     Implemented through paddle's SharedLayerDesc: every depth is emitted under the
     single key "mtp_shared_all" with shared_submodule_weight_only=True and
@@ -210,18 +227,23 @@ class TransformerConfig(ModelParallelConfig):
     _mtp_embed_global_group broadcast (see all_weights).
 
     The cross-stage path means this flag tolerates MTP depths split across
-    stages, and it composes with mtp_depth_sampling: every MTP layer and the MTP
-    LM head re-derive the same K from their own collective-free counter, so a
-    split layout keeps sampling correct (see mtp_depth_sampling).
+    stages. Note that mtp_depth_sampling does NOT: it needs every depth and the
+    MTP LM head in one pipeline chunk (see mtp_depth_sampling), so the two can be
+    combined only with the MTP block kept together.
 
     Can be combined with mtp_shared_last_layer. In that mode,
     mtp_shared_last_layer shares each MTP transformer's body with the last
     backbone TransformerLayer, while this flag shares the per-depth fusion
-    parameters across MTP depths. Because one SharedLayerDesc key cannot express
-    both pivots, the combined mode requires all MTP depths to be on one pipeline
-    stage; GPTModel validates that placement at build time. Requires
-    num_nextn_predict_layers >= 2. Not usable with the dualpipev scheduler, which
-    paddle rejects for SharedLayerDesc outright."""
+    parameters across MTP depths. A single SharedLayerDesc key cannot express both
+    pivots -- paddle keys shared_layers by the desc's single layer_name -- so the
+    fusion parameters are aliased rank-locally after construction
+    (GPTModel._alias_mtp_fusion_weights) and the combined mode therefore requires
+    all MTP depths on one pipeline stage, which GPTModel validates at build time.
+    Within that constraint the rank-local alias is equivalent to what shared_comm
+    would do. Expressing it through the framework instead needs paddle to let one
+    layer join several shared keys with disjoint parameter sets; that is left to a
+    follow-up. Requires num_nextn_predict_layers >= 2. Not usable with the
+    dualpipev scheduler, which paddle rejects for SharedLayerDesc outright."""
 
     mtp_depth_sampling: list | None = None
     """Per-step random sampling of how many MTP depths to actually run, to keep MTP
@@ -233,21 +255,35 @@ class TransformerConfig(ModelParallelConfig):
       only MTP depths 1..K; depths >K are skipped (no transformer_layer forward, no
       vocab projection, no loss). The loss averages over the K computed depths, so
       depth j's effective weight is w_j = E[1{K>=j}/K] and sum_j w_j == 1. K is
-      sampled once per micro-batch from a private RNG seeded by a per-call
-      counter, so every rank running the MTP layers derives the same K with no
-      collective; MoE expert-parallel all-to-all therefore stays consistent.
-    Works under pipeline_model_parallel_size > 1, including layouts that split the
-    MTP depths across stages. K is published as an int in dict_args, which never
-    crosses a stage boundary (p2p ships tensors only), so the first consumer on
-    each stage -- an MTP depth, or the MTP LM head when no depth shares its stage
-    -- re-derives K from its own counter instead of falling back to D. Every such
-    site is entered exactly once per micro-batch, so the counters stay in lockstep
-    and the derived K agrees across stages without any communication (see
-    multi_token_prediction.draw_mtp_sampled_depth). Covered by
+      sampled once per micro-batch from a private RNG seeded by config.seed,
+      mtp_depth_sampling_seed_offset and a per-call counter, so every rank running
+      the MTP layers derives the same K with no collective; MoE expert-parallel
+      all-to-all therefore stays consistent.
+    Works under pipeline_model_parallel_size > 1, but requires the whole MTP block
+    -- every depth AND the MTP LM head -- to sit in one pipeline chunk. K is
+    published as an int in dict_args, which never crosses a chunk boundary (p2p
+    ships tensors only), so a split layout would force separate sites to derive K
+    independently; that assumes two different code paths are entered the same
+    number of times, which nothing guarantees under virtual pipeline parallelism
+    or p2p overlap, and a disagreement deadlocks instead of failing. GPTModel's
+    _assert_mtp_sampling_sites_colocated rejects such layouts at build time. Pin
+    the block with seg_method="layer:..." if the default segmentation splits it.
+    Covered by
     tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_depth_sampling.py.
     Works under expert_model_parallel_size > 1: every EP rank derives the same K,
     so the MoE all-to-all of each computed depth stays matched; covered by
     tests/multi_card_tests/moe/test_gpt_mtp_depth_sampling_ep.py."""
+
+    mtp_depth_sampling_seed_offset: int = 0
+    """Offset added to the mtp_depth_sampling draw sequence, measured in draws.
+
+    The per-call counter behind the draw is runtime state and resets to 0 when a
+    job restarts, so a resumed run replays the K sequence from its start. P(K) --
+    and therefore w_j = E[1{K>=j}/K] -- depends only on the configured
+    distribution, not on where the sequence starts, so the loss stays correctly
+    normalised either way; what resets is continuity and reproducibility of the
+    stream. Set this to the number of micro-batches already consumed to have the
+    sequence continue instead. Ignored when mtp_depth_sampling is None."""
 
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
@@ -2406,6 +2442,18 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError(
                     "mtp_depth_sampling must sum to 1.0 (it is the distribution "
                     f"P(K=k)), got sum={_s} for {self.mtp_depth_sampling}"
+                )
+            # Raise, not assert: a bogus offset would silently shift the draw
+            # sequence rather than fail, and the effect is invisible in the loss.
+            if (
+                isinstance(self.mtp_depth_sampling_seed_offset, bool)
+                or not isinstance(self.mtp_depth_sampling_seed_offset, int)
+                or self.mtp_depth_sampling_seed_offset < 0
+            ):
+                raise ValueError(
+                    "mtp_depth_sampling_seed_offset must be a non-negative int "
+                    "(it counts draws already consumed), got "
+                    f"{self.mtp_depth_sampling_seed_offset!r}"
                 )
 
         if self.enable_mtp_magic_send:

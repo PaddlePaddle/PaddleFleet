@@ -352,27 +352,33 @@ class GPTLMHead(ColumnParallelLinear):
             )
             logits = [self._forward(tensor_list[0])]
             # MTP depth sampling: depths >= K were skipped by the MTP layers this
-            # step, so their slice of hidden_states carries no MTP computation. Skip
-            # the vocab projection for them and keep a None placeholder so the list
-            # length stays num_nextn_predict_layers + 1 and the loss can detect the
-            # skipped depths. K flows in dict_args (recompute / grad-accum safe);
-            # dict_args does not cross a pipeline stage boundary, so when no MTP
-            # depth shares this stage the head re-derives K from its own counter --
-            # the draw is deterministic and collective-free, so it matches the K the
-            # MTP layers used (see draw_mtp_sampled_depth).
-            sampling_on = bool(getattr(self.config, "mtp_depth_sampling", None))
-            if sampling_on:
-                from paddlefleet.transformer.multi_token_prediction import (
-                    resolve_mtp_sampled_depth,
-                )
-
-                sampled_depth = resolve_mtp_sampled_depth(
-                    self, self.config, dict_args
-                )
+            # step, so their slice of hidden_states carries no MTP computation.
+            # Skip the vocab projection for them and keep a None placeholder so
+            # the list length stays num_nextn_predict_layers + 1 and the loss can
+            # detect the skipped depths.
+            #
+            # K is READ BACK from dict_args, never re-derived here. GPTModel's
+            # _assert_mtp_sampling_sites_colocated pins every MTP depth and this
+            # head to one pipeline chunk, so the depth that drew K has already
+            # published it in this dict. Re-deriving it from a private counter --
+            # which is what this branch used to do when the head sat on a stage
+            # holding no depth -- assumes two different code paths are entered
+            # the same number of times, and nothing keeps that true under
+            # virtual pipeline parallelism or p2p overlap.
+            if getattr(self.config, "mtp_depth_sampling", None):
+                if "mtp_sampled_depth" not in dict_args:
+                    raise RuntimeError(
+                        "mtp_depth_sampling is on but no MTP depth published "
+                        "mtp_sampled_depth into dict_args before the LM head. "
+                        "The MTP depths and this head must share one pipeline "
+                        "chunk; GPTModel._assert_mtp_sampling_sites_colocated "
+                        "is supposed to have rejected this layout at build time."
+                    )
+                sampled_depth = dict_args["mtp_sampled_depth"]
             else:
                 sampled_depth = self.config.num_nextn_predict_layers
             for i in range(self.config.num_nextn_predict_layers):
-                if sampling_on and i >= sampled_depth:
+                if i >= sampled_depth:
                     logits.append(None)
                 else:
                     logits.append(self._forward(tensor_list[i + 1]))
