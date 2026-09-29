@@ -851,6 +851,8 @@ def resolve_mtp_sampled_depth(owner, config, dict_args):
     k = draw_mtp_sampled_depth(owner, config)
     dict_args["mtp_sampled_depth"] = k
     return k
+
+
 # The checkpoint holds an MTP block's transformer tensors directly under the
 # layer, one module shallower than the live tree, which nests them under
 # ``transformer_layer``. Dropping that segment before every checkpoint-name
@@ -1131,6 +1133,7 @@ class MultiTokenPredictionLayer(FleetLayer):
             if name.startswith("mtp_embed."):
                 continue
             yield name, param
+
     def _mtp_embed_model_names(self, ctx, structured_name_prefix):
         """Yields the model-side name of every tensor ``mtp_embed`` owns.
 
