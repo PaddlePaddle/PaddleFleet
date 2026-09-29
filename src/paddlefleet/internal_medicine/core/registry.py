@@ -37,6 +37,7 @@ AVAILABLE_MONITORS = {
         "mlp_update",
         "kda_health",
         "dsa_health",
+        "grad_health",
     ],
 }
 
