@@ -31,6 +31,7 @@ from paddle.distributed.fleet.meta_parallel import (
 import paddlefleet.parallel_state as ps
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
+from paddlefleet.models.gpt.gpt_model import GPTModel
 from paddlefleet.transformer.multi_token_prediction import (
     MultiTokenPredictionLayer,
     resolve_mtp_sampled_depth,
@@ -624,29 +625,37 @@ class TestMTPDepthSampling(unittest.TestCase):
 
         _assert_mtp_sampling_sites_colocated has to look per chunk rather than per
         rank because of this: dict_args does not survive a chunk boundary either.
+
+        Driven on a stub rather than a built model: patching _model_chunks onto a
+        paddle Layer and letting mock delete it again pokes at Layer.__delattr__
+        for no benefit, and _local_chunks only ever reads these two attributes.
         """
-        cfg = self._cfg([0.34, 0.33, 0.33])
-        model = gpt_builder(cfg, num_stages=1)
 
         class _Chunk:
             def __init__(self, run_function):
                 self.run_function = run_function
 
-        first, second = ["depth-0"], ["depth-1", "lm-head"]
-        with (
-            mock.patch.object(
-                model, "_num_virtual_pipeline_stages", 2, create=True
-            ),
-            mock.patch.object(
-                model,
-                "_model_chunks",
-                [_Chunk(first), _Chunk(second)],
-                create=True,
-            ),
-        ):
-            chunks = model._local_chunks()
+        class _Stub:
+            _num_virtual_pipeline_stages = 2
 
-        self.assertEqual(chunks, [first, second])
+            def __init__(self, chunks):
+                self._model_chunks = chunks
+
+        first, second = ["depth-0"], ["depth-1", "lm-head"]
+        stub = _Stub([_Chunk(first), _Chunk(second)])
+
+        self.assertEqual(
+            GPTModel._local_chunks(stub),
+            [first, second],
+        )
+
+        # no chunks registered yet -> fall back to the flat run_function
+        class _Flat:
+            _num_virtual_pipeline_stages = 2
+            _model_chunks = None
+            run_function = ["only-chunk"]
+
+        self.assertEqual(GPTModel._local_chunks(_Flat()), [["only-chunk"]])
 
     def test_local_chunks_keeps_the_mtp_block_together(self):
         """At one stage the whole MTP block must land in a single chunk.
