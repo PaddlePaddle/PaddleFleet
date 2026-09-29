@@ -579,6 +579,27 @@ class TestMTPDepthSampling(unittest.TestCase):
         ):
             head.forward({"hidden_states": hidden})
 
+    def test_local_chunks_keeps_the_mtp_block_together(self):
+        """At one stage the whole MTP block must land in a single chunk.
+
+        _assert_mtp_sampling_sites_colocated is built on this: a chunk is the unit
+        dict_args flows through, so the depths and the head being in one chunk is
+        exactly what lets K be published once and read back.
+        """
+        cfg = self._cfg([0.34, 0.33, 0.33])
+        model = gpt_builder(cfg, num_stages=1)
+        chunks = model._local_chunks()
+
+        self.assertEqual(len(chunks), 1)
+        depths = [
+            la for la in chunks[0] if isinstance(la, MultiTokenPredictionLayer)
+        ]
+        self.assertEqual(len(depths), cfg.num_nextn_predict_layers)
+        self.assertTrue(
+            any(type(la).__name__ == "GPTLMHead" for la in chunks[0]),
+            "the LM head must share the chunk that publishes K",
+        )
+
     def test_lm_head_emits_none_for_skipped_depths(self):
         """The LM head must place None at every sampled-out depth and keep the
         list length at D+1, which is how the loss detects the skipped depths."""
@@ -749,6 +770,87 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
             r"mtp_shared_weights \+ mtp_shared_last_layer requires all MTP",
         ):
             self._combined_sharing_colocation_check([[0], [1]])
+
+    def test_shared_grad_allreduce_dedups_per_param_and_group(self):
+        """A Parameter reached twice through the SAME comm group is reduced once.
+
+        The alias machinery deliberately makes several MTP depths share one
+        Parameter object, and paddle's base implementation walks every
+        (key, weight_attr, param) triple with no dedup at all, so the same
+        gradient would be all_reduced twice and come out doubled. GPTModel's
+        override keys on (id(param), id(group)).
+
+        The second half is the reason one layer must never carry two shared keys:
+        two keys mean two different groups, so the dedup cannot catch them and the
+        gradient really would be counted twice.
+        """
+        model, _ = self._independent_model()
+
+        class _Holder(paddle.nn.Layer):
+            def __init__(self):
+                super().__init__()
+                self.inner = paddle.nn.Linear(4, 4)
+
+            @property
+            def pair(self):
+                return self.inner.named_parameters()
+
+        holder = _Holder()
+        holder.inner(paddle.ones([2, 4])).sum().backward()
+        n_params = len(list(holder.pair))
+        group_a, group_b = object(), object()
+
+        def _reduce_calls(shared_comm):
+            model.shared_comm = shared_comm
+            calls = []
+            with (
+                mock.patch.object(
+                    type(model),
+                    "_get_mtp_embed_primary_weight",
+                    return_value=None,
+                ),
+                mock.patch.object(
+                    paddle.distributed,
+                    "all_reduce",
+                    side_effect=lambda tensor, group=None: calls.append(
+                        id(group)
+                    ),
+                ),
+            ):
+                model.allreduce_shared_weight_gradients()
+            return calls
+
+        same_group = _reduce_calls(
+            {
+                "k1": {
+                    "layer": holder,
+                    "weight_attr": ["pair"],
+                    "group": group_a,
+                },
+                "k2": {
+                    "layer": holder,
+                    "weight_attr": ["pair"],
+                    "group": group_a,
+                },
+            }
+        )
+        self.assertEqual(len(same_group), n_params)
+
+        two_groups = _reduce_calls(
+            {
+                "k1": {
+                    "layer": holder,
+                    "weight_attr": ["pair"],
+                    "group": group_a,
+                },
+                "k2": {
+                    "layer": holder,
+                    "weight_attr": ["pair"],
+                    "group": group_b,
+                },
+            }
+        )
+        self.assertEqual(len(two_groups), 2 * n_params)
 
     def _sampling_colocation_check(self, layout):
         """Run the sampling placement check with a faked PP / chunk layout.
