@@ -30,10 +30,11 @@ never from the simulator or from the coverage-test source.
 
 import os
 
-# The simulator's draw_* helpers use matplotlib. Force a headless backend so
-# importing it and exercising the broken draw path does not require a display.
-# matplotlib is optional here and not the surface under test: when it is absent
-# only the single draw-path test is skipped, the schedule-math tests still run.
+# The production module (vpp_simulator) imports matplotlib at import time for
+# its draw_* helpers. Force a headless backend so importing it does not require
+# a display. When matplotlib is absent the production module cannot be imported
+# at all, so the whole suite skips honestly (see setUpModule) rather than
+# crashing the launched distributed job.
 os.environ.setdefault("MPLBACKEND", "Agg")
 
 import unittest
@@ -42,20 +43,28 @@ try:
     import matplotlib.pyplot as plt
 
     _MATPLOTLIB_IMPORT_ERROR = None
-except (
-    ImportError
-) as exc:  # matplotlib is optional; only the draw path needs it
+except ImportError as exc:  # matplotlib backs the simulator's draw_* path
     plt = None
     _MATPLOTLIB_IMPORT_ERROR = exc
 
 from paddle.distributed import fleet
 
-from paddlefleet.pipeline_parallel.vpp_simulator import (
-    Chunk,
-    ChunkType,
-    PPChunkRecorder,
-    VPPSimulator,
-)
+try:
+    from paddlefleet.pipeline_parallel.vpp_simulator import (
+        Chunk,
+        ChunkType,
+        PPChunkRecorder,
+        VPPSimulator,
+    )
+
+    _SIMULATOR_IMPORT_ERROR = None
+except ImportError as exc:
+    # The production module imports matplotlib at import time, so on a CI image
+    # that ships without matplotlib the module (and therefore this whole suite)
+    # is unimportable. Record the failure and skip honestly in setUpModule
+    # rather than crashing the launched distributed job.
+    Chunk = ChunkType = PPChunkRecorder = VPPSimulator = None
+    _SIMULATOR_IMPORT_ERROR = exc
 
 # Topology under test: PP=4, MP=1 (num_gpus=4).
 PP_DEGREE = 4
@@ -74,6 +83,11 @@ def _init_pipeline_parallel():
 
 def setUpModule():
     """Bring up the real 4-way pipeline world once for the module."""
+    if _SIMULATOR_IMPORT_ERROR is not None:
+        raise unittest.SkipTest(
+            "paddlefleet.pipeline_parallel.vpp_simulator is not importable in "
+            f"this environment (matplotlib missing?): {_SIMULATOR_IMPORT_ERROR!r}"
+        )
     _init_pipeline_parallel()
 
 
