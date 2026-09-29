@@ -94,6 +94,26 @@ def _mtp_layers(model):
     ]
 
 
+def _count_mtp_body_calls(model):
+    """Count transformer_layer forward entries per MTP depth.
+
+    The sampled K is observed through its effect -- depth i runs its body iff
+    i < K -- rather than through a stashed attribute on the layer, so the
+    production path keeps no sampling state around just for the tests.
+    Mirrors the body_calls helper in
+    tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_depth_sampling.py.
+    """
+    body_calls = {}
+    for layer in _mtp_layers(model):
+        body_calls[layer.layer_number] = 0
+
+        def _count(_mod, _inp, _depth=layer.layer_number):
+            body_calls[_depth] += 1
+
+        layer.transformer_layer.register_forward_pre_hook(_count)
+    return body_calls
+
+
 def _decoder_layers(model):
     return [
         layer
@@ -456,34 +476,41 @@ class TestMTPDepthSampling(unittest.TestCase):
         assert sum(ks) / len(ks) < 3, "E[K] must be < D=3"
 
     def test_forward_backward_k1(self):
-        """K=1: step runs, loss finite, depth-0 records the sampled K."""
+        """K=1: step runs, loss finite, only depth 0 runs its body."""
         cfg = self._cfg([1.0, 0.0, 0.0])
         model = gpt_builder(cfg, num_stages=1)
-        mtp0 = self._mtp0(model)
+        body_calls = _count_mtp_body_calls(model)
         loss = _run_step(model, cfg, self.strategy)
         assert loss is not None and not paddle.isnan(loss).any(), "loss NaN"
         assert not paddle.isinf(loss).any(), "loss Inf"
-        assert getattr(mtp0, "_last_sampled_depth", None) == 1, (
-            f"expected K==1, got {getattr(mtp0, '_last_sampled_depth', None)}"
+        assert body_calls.get(0, 0) > 0, (
+            f"depth 0 must run at K=1, body_calls={body_calls}"
+        )
+        assert all(n == 0 for d, n in body_calls.items() if d >= 1), (
+            f"K=1 must skip every depth >= 1, body_calls={body_calls}"
         )
 
     def test_forward_backward_full(self):
         """K=D behaves like running all depths; loss finite."""
         cfg = self._cfg([0.0, 0.0, 1.0])
         model = gpt_builder(cfg, num_stages=1)
-        mtp0 = self._mtp0(model)
+        body_calls = _count_mtp_body_calls(model)
         loss = _run_step(model, cfg, self.strategy)
         assert loss is not None and not paddle.isnan(loss).any(), "loss NaN"
-        assert getattr(mtp0, "_last_sampled_depth", None) == 3
+        assert all(n > 0 for n in body_calls.values()), (
+            f"K=D must run every depth, body_calls={body_calls}"
+        )
 
     def test_forward_backward_train_mtp_only_k1(self):
         """train_mtp_only must honor the sampled prefix length."""
         cfg = self._cfg([1.0, 0.0, 0.0], train_mtp_only=True)
         model = gpt_builder(cfg, num_stages=1)
-        mtp0 = self._mtp0(model)
+        body_calls = _count_mtp_body_calls(model)
         loss = _run_step(model, cfg, self.strategy)
         assert loss is not None and not paddle.isnan(loss).any(), "loss NaN"
-        assert getattr(mtp0, "_last_sampled_depth", None) == 1
+        assert all(n == 0 for d, n in body_calls.items() if d >= 1), (
+            f"K=1 must skip every depth >= 1, body_calls={body_calls}"
+        )
 
     def test_sampling_rejects_non_finite_probability(self):
         """NaN and infinity must fail during config validation."""
@@ -498,7 +525,7 @@ class TestMTPDepthSampling(unittest.TestCase):
         mtp0 = self._mtp0(model)
         loss = _run_step(model, cfg, self.strategy)
         assert loss is not None and not paddle.isnan(loss).any(), "loss NaN"
-        assert not hasattr(mtp0, "_last_sampled_depth"), (
+        assert not hasattr(mtp0, "_mtp_sampling_counter"), (
             "sampling state must not be set when the feature is disabled"
         )
         assert not hasattr(cfg, "_mtp_sampled_depth"), (
@@ -696,6 +723,7 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
         )
         model = gpt_builder(config, num_stages=1)
         depth0 = next(la for la in _mtp_layers(model) if la.layer_number == 0)
+        body_calls = _count_mtp_body_calls(model)
 
         loss = _run_step(model, config, self.strategy)
         assert loss is not None and not paddle.isnan(loss).any(), (
@@ -705,8 +733,11 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
             "one micro-batch must draw K exactly once; counter="
             f"{depth0._mtp_sampling_counter} means a recompute replay re-drew it"
         )
-        assert depth0._last_sampled_depth == 2, (
-            f"P(K=2)=1 was configured, got {depth0._last_sampled_depth}"
+        assert body_calls.get(0, 0) > 0 and body_calls.get(1, 0) > 0, (
+            f"P(K=2)=1 must run depths 0 and 1, body_calls={body_calls}"
+        )
+        assert body_calls.get(2, 0) == 0, (
+            f"P(K=2)=1 must skip depth 2, body_calls={body_calls}"
         )
 
 

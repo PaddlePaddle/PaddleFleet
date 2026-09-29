@@ -828,8 +828,6 @@ def resolve_mtp_sampled_depth(owner, config, dict_args):
         return dict_args["mtp_sampled_depth"]
     k = draw_mtp_sampled_depth(owner, config)
     dict_args["mtp_sampled_depth"] = k
-    # observability only, never read by the logic
-    owner._last_sampled_depth = k
     return k
 
 

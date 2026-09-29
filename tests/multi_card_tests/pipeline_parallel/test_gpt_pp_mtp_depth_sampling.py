@@ -206,11 +206,6 @@ class TestMTPDepthSamplingPP(unittest.TestCase):
         assert all(n == 0 for n in skipped.values()), (
             f"K=1 must skip every depth >= 1, body_calls={body_calls}"
         )
-        depth0 = next((la for la in mtp_layers if la.layer_number == 0), None)
-        if depth0 is not None:
-            assert getattr(depth0, "_last_sampled_depth", None) == 1, (
-                f"expected K=1, got {getattr(depth0, '_last_sampled_depth', None)}"
-            )
 
     def test_pp_sampling_mixed(self):
         # K varies per micro-batch; every rank running the MTP layer must draw
