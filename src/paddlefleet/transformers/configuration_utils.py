@@ -244,12 +244,6 @@ class LlmMetaConfig:
     op_fusion_attributes = [
         # name, type, default_value, comment
         (
-            "bias_activation_fusion",
-            bool,
-            False,
-            "Whether to fuse bias addition with activation.",
-        ),
-        (
             "use_fused_linear_cross_entropy",
             bool,
             False,
