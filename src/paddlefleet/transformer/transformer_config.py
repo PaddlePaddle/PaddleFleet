@@ -195,7 +195,13 @@ class TransformerConfig(ModelParallelConfig):
     (shared_weight_attr="transformer_layer_weights"). Orthogonal to
     mtp_shared_weights, which has a different pivot (MTP depth 0) and a wider
     scope (body + per-depth fusion); see that field for why one flag cannot
-    express both."""
+    express both.
+
+    Neither flag implies the other. This one works at num_nextn_predict_layers=1,
+    where mtp_shared_weights is rejected outright, so the single-depth
+    configurations can only be expressed here; and at D>1 this flag alone is a
+    meaningful shape of its own -- the heavy body is tied to the backbone while
+    every depth keeps its own small fusion modules."""
 
     mtp_shared_weights: bool = False
     """When True, ALL MTP depths share one MultiTokenPredictionLayer's parameters --
