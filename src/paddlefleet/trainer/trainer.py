@@ -3974,17 +3974,18 @@ class Trainer:
             return loss
 
     def _apply_global_token_avg_loss(self, logs):
-        """When HB_LOSS_GLOBAL_TOKEN_AVG=1, override the logged loss with the
-        global token-weighted loss (ΣΣS/ΣΣn) reduced across ranks by
+        """When ``calculate_per_token_loss`` is enabled, override the logged loss
+        with the global token-weighted loss (ΣΣS/ΣΣn) reduced across ranks by
         ``LanguageLoss``; keep the original micro-average as ``loss_microavg``.
-        Logging only — backprop is unchanged. No-op when the switch is off or
-        when ``logs`` carries no ``loss`` (e.g. checkpoint-save logs).
+        Logging only — backprop is unchanged. No-op when the config field is off
+        or when ``logs`` carries no ``loss`` (e.g. checkpoint-save logs).
 
         Called from ``log()`` so it applies to every Trainer subclass (incl.
         ernie5) with zero business-side code. ``consume_token_avg_loss`` clears
         the accumulator, so a second ``log()`` in the same step is a no-op.
         """
-        if os.environ.get("HB_LOSS_GLOBAL_TOKEN_AVG", "0") != "1":
+        _cfg = getattr(self.model, "config", None)
+        if not getattr(_cfg, "calculate_per_token_loss", False):
             return
         if "loss" not in logs:
             return
@@ -7112,7 +7113,7 @@ class Trainer:
                 The values to log.
         """
 
-        # loss 统一口径（HB_LOSS_GLOBAL_TOKEN_AVG=1）：在唯一汇聚点 log() 内把
+        # loss 统一口径（calculate_per_token_loss=True）：在唯一汇聚点 log() 内把
         # logs["loss"] 覆盖为全局 token 加权 ΣΣS/ΣΣn，原微平均存 loss_microavg。
         # 放这里可对所有 Trainer 子类（含 ernie5）零业务侧改动生效；仅打印，不动反传。
         self._apply_global_token_avg_loss(logs)

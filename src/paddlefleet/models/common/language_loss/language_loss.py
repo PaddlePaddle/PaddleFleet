@@ -224,10 +224,10 @@ class LanguageLoss(FleetLayer):
     # Class-level tracker for MTP loss, read by trainer for logging.
     mtp_loss_tracker: dict[str, float] = {}
 
-    # Class-level accumulator. When HB_LOSS_GLOBAL_TOKEN_AVG=1, _reduce_loss_by_tokens
-    # accumulates this rank's (loss_sum, valid_tokens) per micro-batch here; the trainer
-    # reads it to produce the global token-weighted loss for logging. Logging only, not
-    # used in backprop.
+    # Class-level accumulator. When ``calculate_per_token_loss`` is enabled,
+    # _reduce_loss_by_tokens accumulates this rank's (loss_sum, valid_tokens) per
+    # training micro-batch here; the trainer reads it to produce the global
+    # token-weighted loss for logging. Logging only, not used in backprop.
     token_avg_tracker: dict = {}
 
     # Class-level stash for cu_seqlens_q under use_erndata=True.
@@ -284,14 +284,19 @@ class LanguageLoss(FleetLayer):
     def _reduce_loss_by_tokens(self, loss_sum, local_valid):
         """Normalize this rank's (loss_sum, valid_tokens) into a scalar loss.
 
-        HB_LOSS_GLOBAL_TOKEN_AVG off: return ``loss_sum / local_valid``.
+        ``calculate_per_token_loss`` off (default): return ``loss_sum / local_valid``.
 
-        HB_LOSS_GLOBAL_TOKEN_AVG=1: backprop still returns ``loss_sum / local_valid``
+        ``calculate_per_token_loss`` on: backprop still returns ``loss_sum / local_valid``
         (unchanged); additionally accumulate this rank's ``(loss_sum, valid_tokens)``
         into the class-level ``token_avg_tracker`` so the trainer can produce the global
         token-weighted loss for logging. This function performs no collective communication.
+
+        Accumulation is skipped outside training (``self.training`` is False during
+        ``evaluate()``), so eval / warmup forwards never leak tokens into the training
+        loss display.
         """
-        if os.environ.get("HB_LOSS_GLOBAL_TOKEN_AVG", "0") != "1":
+        enabled = getattr(self.config, "calculate_per_token_loss", False)
+        if not (enabled and getattr(self, "training", False)):
             return loss_sum / local_valid
 
         # Accumulate this rank's device scalars into the class-level tracker; the

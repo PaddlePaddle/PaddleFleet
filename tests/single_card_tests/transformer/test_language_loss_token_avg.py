@@ -14,11 +14,13 @@
 
 """Unit coverage for the global token-averaged loss display (loss 口径统一).
 
-``HB_LOSS_GLOBAL_TOKEN_AVG`` gates a logging-only convention: each rank
-accumulates its raw ``(loss_sum, valid_tokens)`` into the class-level
-``token_avg_tracker`` per micro-batch, and the trainer consumes it once per
-logging interval to emit the global token-weighted loss ΣΣS/ΣΣn (matching
-Megatron lm_loss). The backprop term is always ``loss_sum / local_valid``.
+``calculate_per_token_loss`` (a real config field) gates a logging-only
+convention: during training each rank accumulates its raw
+``(loss_sum, valid_tokens)`` into the class-level ``token_avg_tracker`` per
+micro-batch, and the trainer consumes it once per logging interval to emit the
+global token-weighted loss ΣΣS/ΣΣn (matching Megatron lm_loss). The backprop
+term is always ``loss_sum / local_valid``. Accumulation is skipped when
+``self.training`` is False, so eval forwards never pollute the training display.
 
 These are single-process unit tests: no fleet/dist init, so
 ``consume_token_avg_loss`` skips the all_reduce and just returns ΣS/Σn.
@@ -26,16 +28,29 @@ These are single-process unit tests: no fleet/dist init, so
 
 from __future__ import annotations
 
-import os
-
 import paddle
 
 from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
 
 
-def _reduce(loss_sum, local_valid):
+class _Cfg:
+    def __init__(self, enabled):
+        self.calculate_per_token_loss = enabled
+
+
+class _Self:
+    """Minimal stand-in exposing the two attributes _reduce_loss_by_tokens reads."""
+
+    def __init__(self, enabled, training=True):
+        self.config = _Cfg(enabled)
+        self.training = training
+
+
+def _reduce(loss_sum, local_valid, enabled=True, training=True):
     """Call the (self-independent) instance method without building the layer."""
-    return LanguageLoss._reduce_loss_by_tokens(object(), loss_sum, local_valid)
+    return LanguageLoss._reduce_loss_by_tokens(
+        _Self(enabled, training), loss_sum, local_valid
+    )
 
 
 def _clear_tracker():
@@ -44,12 +59,22 @@ def _clear_tracker():
 
 def test_disabled_returns_local_mean_and_leaves_tracker_empty():
     paddle.set_device("cpu")
-    os.environ.pop("HB_LOSS_GLOBAL_TOKEN_AVG", None)
     _clear_tracker()
 
     loss_sum = paddle.to_tensor(20.0)
     valid = paddle.to_tensor(4.0)
-    out = _reduce(loss_sum, valid)
+    out = _reduce(loss_sum, valid, enabled=False)
+
+    assert abs(float(out) - 5.0) < 1e-6, float(out)
+    assert LanguageLoss.token_avg_tracker == {}, LanguageLoss.token_avg_tracker
+
+
+def test_eval_does_not_accumulate_even_when_enabled():
+    """training=False (eval) must not pollute the tracker, per reviewer feedback."""
+    paddle.set_device("cpu")
+    _clear_tracker()
+
+    out = _reduce(paddle.to_tensor(20.0), paddle.to_tensor(4.0), training=False)
 
     assert abs(float(out) - 5.0) < 1e-6, float(out)
     assert LanguageLoss.token_avg_tracker == {}, LanguageLoss.token_avg_tracker
@@ -57,7 +82,6 @@ def test_disabled_returns_local_mean_and_leaves_tracker_empty():
 
 def test_enabled_backprop_value_unchanged_and_accumulates():
     paddle.set_device("cpu")
-    os.environ["HB_LOSS_GLOBAL_TOKEN_AVG"] = "1"
     _clear_tracker()
     try:
         loss_sum = paddle.to_tensor(20.0)
@@ -70,7 +94,6 @@ def test_enabled_backprop_value_unchanged_and_accumulates():
         assert abs(float(LanguageLoss.token_avg_tracker["S"]) - 20.0) < 1e-6
         assert abs(float(LanguageLoss.token_avg_tracker["n"]) - 4.0) < 1e-6
     finally:
-        os.environ.pop("HB_LOSS_GLOBAL_TOKEN_AVG", None)
         _clear_tracker()
 
 
@@ -79,7 +102,6 @@ def test_consume_is_token_weighted_across_microbatches():
     two per-batch means (that is the point of token-weighting).
     """
     paddle.set_device("cpu")
-    os.environ["HB_LOSS_GLOBAL_TOKEN_AVG"] = "1"
     _clear_tracker()
     try:
         # batch A: mean 5 over 4 tokens ; batch B: mean 2 over 96 tokens.
@@ -95,7 +117,6 @@ def test_consume_is_token_weighted_across_microbatches():
         # Tracker is cleared after consumption.
         assert LanguageLoss.token_avg_tracker == {}
     finally:
-        os.environ.pop("HB_LOSS_GLOBAL_TOKEN_AVG", None)
         _clear_tracker()
 
 
@@ -112,6 +133,7 @@ if __name__ == "__main__":
 
     try:
         test_disabled_returns_local_mean_and_leaves_tracker_empty()
+        test_eval_does_not_accumulate_even_when_enabled()
         test_enabled_backprop_value_unchanged_and_accumulates()
         test_consume_is_token_weighted_across_microbatches()
         test_consume_returns_none_when_empty()
