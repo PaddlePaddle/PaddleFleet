@@ -40,6 +40,8 @@ class _StubMoE:
     """
 
     _use_grouped_mlp_expert = False
+    # Keeps fusion_moe_forward off the GLM52 IEEE DeepEP fused-expert path.
+    moe_expert_fusion = False
 
 
 class _AddExpert:

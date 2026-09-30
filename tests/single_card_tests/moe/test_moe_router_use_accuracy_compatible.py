@@ -108,6 +108,8 @@ class _RouterConfig:
         self.use_accuracy_compatible = overrides.pop(
             "use_accuracy_compatible", True
         )
+        # TransformerConfig default: keep the gate weight in params_dtype.
+        self.moe_router_use_fp32_master = False
         self._extra = {"seq_aux": False}
         for key, value in overrides.items():
             setattr(self, key, value)

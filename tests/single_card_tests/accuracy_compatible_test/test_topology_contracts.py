@@ -69,16 +69,11 @@ class TestAccuracyCompatibleTopologyContracts(unittest.TestCase):
 
     def test_mtp_uses_own_indexer_only_for_compatible_tp2(self):
         state = SimpleNamespace(tp=1)
+        # The periodic skip helpers live in dsa_layout.py, shared with the
+        # checkpoint mapping; the layout resolver itself is in dsa_attention.py.
         ns = load(
-            "transformer/dsa_attention.py",
-            [
-                "is_dsa_skip_topk_layer",
-                "source_dsa_compute_layer",
-                "decoder_dsa_logical_layer",
-                "decoder_dsa_topk_producer_layer",
-                "_decoder_layer_publishes_shared_topk",
-                "resolve_dsa_indexer_layout",
-            ],
+            "transformer/dsa_layout.py",
+            ["is_dsa_skip_topk_layer", "source_dsa_compute_layer"],
             {
                 "get_pg_size": lambda group: (
                     1 if group is None else group.nranks
@@ -88,11 +83,23 @@ class TestAccuracyCompatibleTopologyContracts(unittest.TestCase):
                 ),
             },
         )
+        ns = load(
+            "transformer/dsa_attention.py",
+            [
+                "decoder_dsa_logical_layer",
+                "decoder_dsa_topk_producer_layer",
+                "_decoder_layer_publishes_shared_topk",
+                "resolve_dsa_indexer_layout",
+            ],
+            ns,
+        )
         config = SimpleNamespace(
             use_accuracy_compatible=True,
             num_hidden_layers=4,
             dsa_index_share_for_mtp_iteration=True,
             dsa_indexer_types=["full", "full", "full", "shared"],
+            dsa_indexer_topk_freq=1,
+            dsa_indexer_skip_topk_offset=0,
         )
         for compatible, tp, expected in [
             (True, 1, ("shared", True, True, 2)),
@@ -177,7 +184,7 @@ class TestAccuracyCompatibleTopologyContracts(unittest.TestCase):
         scaler = SimpleNamespace(apply=Mock(side_effect=lambda out, loss: out))
         ns = load(
             "transformer/dsa_attention.py",
-            ["DSAttention.forward"],
+            ["_sparse_index_mask", "DSAttention.forward"],
             {
                 "paddle": paddle,
                 "F": paddle.nn.functional,
@@ -232,12 +239,10 @@ class TestAccuracyCompatibleTopologyContracts(unittest.TestCase):
                 indexer.forward_before_topk if fused_calls else indexer.forward
             )
             consumed_x, consumed_qr = call.call_args.args[:2]
-            if compatible and tp == 1:
-                self.assertIs(consumed_x, x)
-                self.assertIs(consumed_qr, qr)
-            else:
-                self.assertIsNot(consumed_x, x)
-                self.assertIsNot(consumed_qr, qr)
+            # The indexer always sees detached inputs, so its gradients
+            # never reach the trunk, in any topology.
+            self.assertIsNot(consumed_x, x)
+            self.assertIsNot(consumed_qr, qr)
 
     def test_tp1_gather_preserves_tensor_identity_only_in_compatible_mode(self):
         gather = Mock(return_value=object())

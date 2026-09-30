@@ -1504,7 +1504,6 @@ class MoELayer(nn.Layer):
     ):
         ieee_deepep_fusion = (
             self.use_accuracy_compatible
-            and self.config.use_accuracy_compatible
             and self.moe_expert_fusion
             and self.moe_token_dispatcher_type == "deepep"
             and self.expert_model_parallel_size > 1
