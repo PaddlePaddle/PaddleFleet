@@ -293,6 +293,12 @@ def apply_glm_moe_dsa_training_contract(
         value = getattr(training_args, field_name, None)
         if value is not None:
             setattr(model_config, field_name, value)
+    register_unsavable_keys = getattr(
+        model_config, "register_unsavable_keys", None
+    )
+    if callable(register_unsavable_keys):
+        # A runtime kernel switch, not part of the exported HF config.json.
+        register_unsavable_keys("bias_activation_fusion")
     for parallel_field in (
         "tensor_model_parallel_size",
         "pipeline_model_parallel_size",
