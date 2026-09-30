@@ -349,6 +349,43 @@ class AssertUniqueSafetensorsNamesTests(unittest.TestCase):
             ):
                 assert_unique_safetensors_names(tmp)
 
+    def test_top_level_check_ignores_nested_cadence_copies(self):
+        # A final export into output_dir sits next to earlier hf_checkpoint-*
+        # snapshots holding the same names; only the top level is its output.
+        with tempfile.TemporaryDirectory() as tmp:
+            payload = {"model.layers.3.mlp.gate.weight": ONE_F32}
+            write_tiny_safetensors(
+                os.path.join(tmp, "model-00001-of-00001.safetensors"), payload
+            )
+            write_tiny_safetensors(
+                os.path.join(
+                    tmp,
+                    f"{HF_CHECKPOINT_PREFIX}-5",
+                    "model-00001-of-00001.safetensors",
+                ),
+                payload,
+            )
+            self.assertEqual(
+                [
+                    os.path.basename(path)
+                    for path in iter_safetensors_files(tmp, recursive=False)
+                ],
+                ["model-00001-of-00001.safetensors"],
+            )
+            assert_unique_safetensors_names(tmp, recursive=False)
+
+    def test_top_level_check_still_rejects_duplicates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for shard in ("00001", "00002"):
+                write_tiny_safetensors(
+                    os.path.join(tmp, f"model-{shard}-of-00002.safetensors"),
+                    {"model.norm.weight": ONE_F32},
+                )
+            with self.assertRaisesRegex(
+                ValueError, "invalid or duplicate tensor name"
+            ):
+                assert_unique_safetensors_names(tmp, recursive=False)
+
     def test_empty_tensor_name_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             write_tiny_safetensors(

@@ -140,24 +140,40 @@ def _header_tensor_names(path: str) -> List[str]:
     return [name for name in header if name != "__metadata__"]
 
 
-def iter_safetensors_files(directory: str) -> Iterable[str]:
+def iter_safetensors_files(
+    directory: str, recursive: bool = True
+) -> Iterable[str]:
+    if not recursive:
+        for filename in sorted(os.listdir(directory)):
+            path = os.path.join(directory, filename)
+            if filename.endswith(".safetensors") and os.path.isfile(path):
+                yield path
+        return
     for root, _dirs, files in os.walk(directory):
         for filename in files:
             if filename.endswith(".safetensors"):
                 yield os.path.join(root, filename)
 
 
-def collect_safetensors_names(directory: str) -> List[str]:
+def collect_safetensors_names(
+    directory: str, recursive: bool = True
+) -> List[str]:
     names: List[str] = []
-    for path in iter_safetensors_files(directory):
+    for path in iter_safetensors_files(directory, recursive=recursive):
         names.extend(_header_tensor_names(path))
     return names
 
 
-def assert_unique_safetensors_names(directory: str) -> None:
-    """Fail closed on empty or duplicate tensor names under ``directory``."""
+def assert_unique_safetensors_names(
+    directory: str, recursive: bool = True
+) -> None:
+    """Fail closed on empty or duplicate tensor names under ``directory``.
+
+    ``recursive=True`` matches the oracle, which rglob's the whole directory.
+    ``recursive=False`` checks only the files directly in ``directory``.
+    """
     seen = set()
-    for name in collect_safetensors_names(directory):
+    for name in collect_safetensors_names(directory, recursive=recursive):
         if not isinstance(name, str) or not name or name in seen:
             raise ValueError(f"invalid or duplicate tensor name: {name!r}")
         seen.add(name)

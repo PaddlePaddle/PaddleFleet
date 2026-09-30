@@ -1607,16 +1607,26 @@ class Trainer:
         if getattr(self.args, "copy_custom_file_list", None):
             self.copy_custom_files(output_dir)
 
-    @staticmethod
-    def _validate_hf_export(output_dir):
-        """Validate tensor names when an HF exporter produced safetensors."""
+    def _validate_hf_export(self, output_dir):
+        """Validate tensor names of the safetensors an HF export just wrote.
+
+        Called only after flex_checkpoint HF exports, where every rank takes
+        part in the save. Only files directly in ``output_dir`` are checked:
+        HF exporters write their shards flat, while ``output_dir`` may also
+        hold earlier ``hf_checkpoint-*`` snapshots with the same names.
+        """
         from .checkpoint_export import (
             assert_unique_safetensors_names,
             iter_safetensors_files,
         )
 
-        if any(iter_safetensors_files(output_dir)):
-            assert_unique_safetensors_names(output_dir)
+        # Each rank renames its own shards after the saver's barrier.
+        if paddle.distributed.get_world_size() > 1:
+            paddle.distributed.barrier()
+        if not self.is_local_process_zero():
+            return
+        if any(iter_safetensors_files(output_dir, recursive=False)):
+            assert_unique_safetensors_names(output_dir, recursive=False)
 
     def create_ema_state_assembler(self):
         global_steps = self.state.global_step
@@ -6960,7 +6970,6 @@ class Trainer:
                     enable_auto_parallel=True,
                     save_checkpoint_format=self.args.save_checkpoint_format,
                 )
-                self._validate_hf_export(output_dir)
             else:
                 self._save_flex_model_state(output_dir)
                 self._save_flex_optimizer_state(output_dir)
@@ -7149,7 +7158,6 @@ class Trainer:
                         save_safetensors=self.args.save_safetensors,
                         save_checkpoint_format=self.args.save_checkpoint_format,
                     )
-            self._validate_hf_export(output_dir)
             if self.args.should_save_sharding_stage1_model:
                 model_meta = self.sharding_io.gather_distributed_model_meta()
                 if self.args.should_save:
