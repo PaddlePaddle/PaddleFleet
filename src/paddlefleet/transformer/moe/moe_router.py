@@ -1747,9 +1747,7 @@ class TopKRouter(StandardMoERouter):
                 # gpt_embedding.py). Slice input_ids with the same layout here
                 # — no comm needed since every rank holds the same [B, L]
                 # tensor.
-                from paddlefleet.transformer.multi_token_prediction import (
-                    extract_local_cp_chunks,
-                )
+                from paddlefleet.cp_shard import extract_local_cp_chunks
 
                 _cp_size = get_context_parallel_world_size()
                 _cp_rank = get_context_parallel_rank()

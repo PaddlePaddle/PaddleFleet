@@ -44,11 +44,11 @@ import numpy as np
 import paddle
 
 import paddlefleet.models.gpt.gpt_embedding as ge
-from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
-from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
-from paddlefleet.transformer.multi_token_prediction import (
+from paddlefleet.cp_shard import (
     extract_local_cp_chunks,
 )
+from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
+from paddlefleet.models.gpt.gpt_embedding import GPTEmbedding
 
 
 def _make_embedding(
@@ -393,7 +393,7 @@ class TestGptEmbeddingMegatronCPRope(unittest.TestCase):
         LanguageLoss._cu_seqlens_q_stash = None
 
     def test_rope_is_zigzag_sliced(self) -> None:
-        from paddlefleet.transformer.multi_token_prediction import (
+        from paddlefleet.cp_shard import (
             extract_local_zigzag_chunks,
         )
 

@@ -34,9 +34,11 @@ import unittest
 import numpy as np
 import paddle
 
+from paddlefleet.cp_shard import (
+    extract_local_zigzag_chunks,
+)
 from paddlefleet.transformer.multi_token_prediction import (
     _roll_tensor_packed_seq,
-    extract_local_zigzag_chunks,
     roll_tensor,
 )
 

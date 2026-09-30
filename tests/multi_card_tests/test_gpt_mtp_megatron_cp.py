@@ -260,10 +260,10 @@ class TestMTPMegatronCPRope(unittest.TestCase):
         of the full-length table. A contiguous prefix -- what the code produced
         before the fix -- fails this at any CP degree > 1.
         """
-        from paddlefleet.parallel_state import get_context_parallel_rank
-        from paddlefleet.transformer.multi_token_prediction import (
+        from paddlefleet.cp_shard import (
             extract_local_zigzag_chunks,
         )
+        from paddlefleet.parallel_state import get_context_parallel_rank
 
         paddle.seed(SEED)
         model = gpt_builder(_make_config(), num_stages=1)
@@ -320,11 +320,11 @@ class TestMTPMegatronCPContiguousRope(unittest.TestCase):
     """
 
     def test_rope_matches_contiguous_layout(self):
-        from paddlefleet.parallel_state import get_context_parallel_rank
-        from paddlefleet.transformer.multi_token_prediction import (
+        from paddlefleet.cp_shard import (
             extract_local_contiguous_chunk,
             extract_local_zigzag_chunks,
         )
+        from paddlefleet.parallel_state import get_context_parallel_rank
 
         paddle.seed(SEED)
         model = gpt_builder(

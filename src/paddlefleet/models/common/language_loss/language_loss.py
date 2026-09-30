@@ -600,10 +600,8 @@ class LanguageLoss(FleetLayer):
                     pad_value=self.ignored_index,
                 )
         if get_context_parallel_world_size() > 1:
+            from paddlefleet.cp_shard import extract_local_cp_chunks
             from paddlefleet.parallel_state import get_context_parallel_rank
-            from paddlefleet.transformer.multi_token_prediction import (
-                extract_local_cp_chunks,
-            )
 
             _lbl = extract_local_cp_chunks(
                 _lbl,
@@ -640,11 +638,9 @@ class LanguageLoss(FleetLayer):
             if _cp_size_for_extract > 1:
                 from functools import partial
 
+                from paddlefleet.cp_shard import extract_local_cp_chunks
                 from paddlefleet.parallel_state import (
                     get_context_parallel_rank as _get_cp_rank,
-                )
-                from paddlefleet.transformer.multi_token_prediction import (
-                    extract_local_cp_chunks,
                 )
 
                 _extract_cp = partial(

@@ -57,10 +57,12 @@ try:
     import numpy as np
     import paddle
 
-    from paddlefleet.transformer.multi_token_prediction import (
+    from paddlefleet.cp_shard import (
         extract_local_contiguous_chunk,
         extract_local_cp_chunks,
         extract_local_zigzag_chunks,
+    )
+    from paddlefleet.transformer.multi_token_prediction import (
         roll_tensor,
     )
 

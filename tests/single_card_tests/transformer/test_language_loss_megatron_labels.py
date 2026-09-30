@@ -47,7 +47,7 @@ import paddle
 
 import paddlefleet.models.common.language_loss.language_loss as ll
 import paddlefleet.parallel_state as ps
-import paddlefleet.transformer.multi_token_prediction as mtp
+from paddlefleet import cp_shard
 from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
 
 
@@ -212,7 +212,7 @@ def _fake_cp(cp_size=2):
         )
         stack.enter_context(
             mock.patch.object(
-                mtp, "extract_local_cp_chunks", recording_identity
+                cp_shard, "extract_local_cp_chunks", recording_identity
             )
         )
         stack.enter_context(

@@ -481,9 +481,9 @@ class GPTEmbedding(FleetLayer):
                     assert not self.multimodal_embedding, (
                         "erndata MTP path does not support multimodal for now."
                     )
+                    from paddlefleet.cp_shard import extract_local_cp_chunks
                     from paddlefleet.transformer.multi_token_prediction import (
                         build_startend_row_indices_from_cu_seqlens,
-                        extract_local_cp_chunks,
                         roll_tensor,
                     )
 
@@ -856,9 +856,7 @@ class GPTEmbedding(FleetLayer):
             """
             if mtp_megatron_cp_size == 1 or rope_table is None:
                 return rope_table
-            from paddlefleet.transformer.multi_token_prediction import (
-                extract_local_cp_chunks,
-            )
+            from paddlefleet.cp_shard import extract_local_cp_chunks
 
             return extract_local_cp_chunks(
                 rope_table,
