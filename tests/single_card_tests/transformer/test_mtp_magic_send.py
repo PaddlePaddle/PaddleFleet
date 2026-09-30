@@ -758,6 +758,12 @@ class TestGPTEmbeddingForward(unittest.TestCase):
                     return_value=cp_world_size,
                 )
             )
+            stack.enter_context(
+                patch(
+                    "paddlefleet.parallel_state.get_context_parallel_world_size",
+                    return_value=cp_world_size,
+                )
+            )
             if mock_scatter:
                 sc = stack.enter_context(
                     patch("paddlefleet.models.gpt.gpt_embedding.ScatterOp")
@@ -765,9 +771,7 @@ class TestGPTEmbeddingForward(unittest.TestCase):
                 sc.apply = lambda x: x
             if mock_cp:
                 cp = stack.enter_context(
-                    patch(
-                        "paddlefleet.models.gpt.gpt_embedding.ContextParallelScatterOp"
-                    )
+                    patch("paddlefleet.cp_shard.ContextParallelScatterOp")
                 )
                 cp.apply = lambda x, axis=0, **kwargs: x
             return emb.forward({"input_ids": paddle.randint(0, 512, [2, 10])})

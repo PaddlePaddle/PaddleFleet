@@ -152,6 +152,21 @@ def dw_overlap_enabled(config, point: str) -> bool:
     )
 
 
+def mtp_layers_active(config) -> bool:
+    """Whether MTP transformer layers run on the data path.
+
+    ``mtp_load_weight_only`` loads MTP weights but skips MTP compute and
+    embedding processing, so it counts as inactive (same as K==0). Accepts
+    a real ``TransformerConfig`` or a duck-typed test config.
+    """
+    n = getattr(config, "num_nextn_predict_layers", None)
+    return (
+        n is not None
+        and n > 0
+        and not getattr(config, "mtp_load_weight_only", False)
+    )
+
+
 @dataclass
 class TransformerConfig(ModelParallelConfig):
     """Configuration object for transformers."""

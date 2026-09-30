@@ -1158,9 +1158,13 @@ class TestCuSeqlensFromEmbedding(unittest.TestCase):
                 "paddlefleet.models.gpt.gpt_embedding.get_context_parallel_world_size",
                 return_value=cp_world_size,
             ),
+            patch(
+                "paddlefleet.parallel_state.get_context_parallel_world_size",
+                return_value=cp_world_size,
+            ),
             patch("paddlefleet.models.gpt.gpt_embedding.ScatterOp") as scatter,
             patch(
-                "paddlefleet.models.gpt.gpt_embedding.ContextParallelScatterOp"
+                "paddlefleet.cp_shard.ContextParallelScatterOp"
             ) as cp_scatter,
         ):
             scatter.apply = lambda x: x

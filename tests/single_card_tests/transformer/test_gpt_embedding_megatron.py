@@ -44,6 +44,8 @@ import numpy as np
 import paddle
 
 import paddlefleet.models.gpt.gpt_embedding as ge
+import paddlefleet.parallel_state as ps
+from paddlefleet import cp_shard
 from paddlefleet.cp_shard import (
     extract_local_cp_chunks,
 )
@@ -108,19 +110,21 @@ def _make_embedding(
 
 @contextlib.contextmanager
 def _fake_cp(cp_size=2, cp_rank=0):
-    """Force ``get_context_parallel_world_size`` -> cp_size and rank -> cp_rank
-    in the gpt_embedding namespace so ``if _cp_size > 1`` branches execute.
-    ``extract_local_cp_chunks`` is left REAL (pure slicing) so shapes stay
-    correct; feed a seq length divisible by 2*cp_size.
+    """Fake a CP group of ``cp_size`` with this rank at ``cp_rank``.
+
+    Patches the gpt_embedding namespace and ``parallel_state`` (read by
+    ``cp_shard.to_cp_local``). ``extract_local_cp_chunks`` is left REAL (pure
+    slicing) so shapes stay correct; feed a seq length divisible by 2*cp_size.
     """
     with contextlib.ExitStack() as stack:
-        stack.enter_context(
-            mock.patch.object(
-                ge, "get_context_parallel_world_size", lambda: cp_size
+        for mod in (ge, ps):
+            stack.enter_context(
+                mock.patch.object(
+                    mod, "get_context_parallel_world_size", lambda: cp_size
+                )
             )
-        )
         stack.enter_context(
-            mock.patch.object(ge, "get_context_parallel_rank", lambda: cp_rank)
+            mock.patch.object(ps, "get_context_parallel_rank", lambda: cp_rank)
         )
         yield
 
@@ -137,7 +141,9 @@ def _identity_scatter():
     with contextlib.ExitStack() as stack:
         stack.enter_context(mock.patch.object(ge.ScatterOp, "apply", identity))
         stack.enter_context(
-            mock.patch.object(ge.ContextParallelScatterOp, "apply", identity)
+            mock.patch.object(
+                cp_shard.ContextParallelScatterOp, "apply", identity
+            )
         )
         yield
 
@@ -424,8 +430,8 @@ class TestGptEmbeddingMegatronCPRope(unittest.TestCase):
         )
 
     def test_rope_slice_follows_cp_balance_mode(self) -> None:
-        # _slice_rope_for_mtp_megatron_cp is a second, independent call site of
-        # extract_local_cp_chunks. Every channel of the stub table holds the
+        # The RoPE table enters local coordinates through its own to_cp_local
+        # call, after the hidden states did. Every channel of the stub table holds the
         # global position index, so the sliced table reads out directly as the
         # position set this rank owns -- and the two layouts disagree at rank 1
         # of 2 with L=8 (zigzag [2,3,4,5] vs contiguous [4,5,6,7]).
