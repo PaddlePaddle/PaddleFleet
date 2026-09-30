@@ -515,10 +515,12 @@ class AccuracyCompatibleConstructionTest(unittest.TestCase):
     def test_accuracy_compatible_claims_both_buffers(self):
         expert = self._expert(True)
 
-        # Claimed but empty: the fp32 capture allocates on first use, and
-        # MixPrecision skips a Parameter that already owns main_grad.
-        self.assertIsNone(expert.weight1.main_grad)
-        self.assertIsNone(expert.weight2.main_grad)
+        # Claimed as zeroed fp32 buffers so MixPrecision skips these
+        # Parameters; the fp32 capture accumulates into them in place.
+        for weight in (expert.weight1, expert.weight2):
+            self.assertEqual(weight.main_grad.dtype, paddle.float32)
+            self.assertEqual(list(weight.main_grad.shape), list(weight.shape))
+            self.assertFalse(bool(weight.main_grad.any()))
 
     def test_default_leaves_the_buffers_to_mixprecision(self):
         expert = self._expert(False)

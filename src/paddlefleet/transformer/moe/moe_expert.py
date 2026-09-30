@@ -351,9 +351,7 @@ class GroupedMLPExpert(FleetLayer):
         self.weight2.is_distributed = self.expert_parallel
         # Claim main_grad so MixPrecision skips these Parameters. The
         # identity output capture writes fp32 X.T@dY into this buffer.
-        if self.config.use_accuracy_compatible and getattr(
-            self.config, "use_accuracy_compatible", False
-        ):
+        if self.config.use_accuracy_compatible:
             self.weight1.main_grad = paddle.zeros_like(
                 self.weight1, dtype="float32"
             )
@@ -488,11 +486,13 @@ class GroupedMLPExpert(FleetLayer):
                 out_parts = []
                 x_start = 0
                 shard_split = row_owner is not None
-                row_owner_values = (
-                    row_owner.cpu().tolist()
-                    if isinstance(row_owner, paddle.Tensor)
-                    else list(row_owner)
-                )
+                row_owner_values = None
+                if shard_split:
+                    row_owner_values = (
+                        row_owner.cpu().tolist()
+                        if isinstance(row_owner, paddle.Tensor)
+                        else list(row_owner)
+                    )
                 for expert_idx, n_tokens in enumerate(tokens_per_expert):
                     if n_tokens == 0:
                         continue
