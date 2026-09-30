@@ -302,6 +302,18 @@ DIST_CKPT_PATH = "dist_ckpt"
 DIST_MODEL_PATH = "dist_model"
 
 
+def _deferred_token_replica_sizes(trainer):
+    """Return the (sharding, data parallel) degrees gradients are reduced over."""
+    hcg = getattr(trainer, "hcg", None)
+    if hcg is None:
+        dp_group = getattr(trainer, "dp_group", None)
+        return 1, int(getattr(dp_group, "nranks", 1) or 1)
+    return (
+        int(hcg.get_sharding_parallel_world_size()),
+        int(hcg.get_data_parallel_world_size()),
+    )
+
+
 def _sharded_parameter(model, named_params, key):
     """Find the live parameter behind a sharded-state key.
 
@@ -3330,6 +3342,33 @@ class Trainer:
             )
         inner = candidates[0] if candidates else None
         native_v2 = inner is not None
+        # The divisor is the MAIN token count summed over one replica group
+        # (_deferred_token_replica_group), while the framework reductions above
+        # average gradients over the replicas they span. Only topologies whose
+        # averaging factor is undone here are exact; fail closed otherwise.
+        sharding_size, dp_size = _deferred_token_replica_sizes(self)
+        if max(sharding_size, dp_size) > 1:
+            if sharding_size > 1 and dp_size > 1:
+                raise RuntimeError(
+                    "defer_token_normalization supports one data-replica "
+                    f"axis, got sharding={sharding_size} and "
+                    f"data parallel={dp_size}"
+                )
+            if native_v2:
+                if dp_size > 1:
+                    raise RuntimeError(
+                        "defer_token_normalization with "
+                        "DygraphShardingOptimizerV2 requires data parallel "
+                        f"size 1, got {dp_size}"
+                    )
+            elif not in_auto_parallel_align_mode():
+                raise RuntimeError(
+                    "defer_token_normalization over "
+                    f"{max(sharding_size, dp_size)} data replicas requires "
+                    "DygraphShardingOptimizerV2 (sharding with split_param): "
+                    "other gradient reductions average over the replicas, so "
+                    "a 1/N scale would be too small by the replica count"
+                )
         # Native fused buffers average through AVG or SUM followed by 1/R.
         # Restore the per-parameter sum before the deferred token division.
         # Validate every mapping before changing any gradient.

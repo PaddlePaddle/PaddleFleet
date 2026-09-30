@@ -374,20 +374,18 @@ class DeferredTokenReplicaGroupTests(unittest.TestCase):
         ):
             self.assertIs(Trainer._deferred_token_replica_group(stub), replicas)
 
-    def test_failing_lookups_fall_back_to_the_configured_dp_group(self):
+    def test_failing_lookups_propagate(self):
+        # A broken parallel state must not silently pick another replica group.
         def explode(*args, **kwargs):
             raise RuntimeError("parallel state is not initialized")
 
-        dp_group = _Group(3)
         stub = SimpleNamespace(
             hcg=SimpleNamespace(get_sharding_parallel_group=explode),
-            dp_group=dp_group,
+            dp_group=_Group(3),
         )
 
-        with mock.patch.object(
-            parallel_state, "get_data_parallel_group", explode
-        ):
-            self.assertIs(Trainer._deferred_token_replica_group(stub), dp_group)
+        with self.assertRaisesRegex(RuntimeError, "not initialized"):
+            Trainer._deferred_token_replica_group(stub)
 
 
 class RequiresNativeTokenWeightedLoggingTests(unittest.TestCase):
@@ -878,6 +876,61 @@ class ApplyDeferredTokenNormalizationTests(unittest.TestCase):
             )
 
         self.assertIn("invalid comm group nranks", str(caught.exception))
+
+    def _hcg(self, sharding, dp):
+        return SimpleNamespace(
+            get_sharding_parallel_world_size=lambda: sharding,
+            get_data_parallel_world_size=lambda: dp,
+        )
+
+    def _apply_with_replicas(self, optimizer, sharding, dp):
+        grad = _fp32([8.0])
+        params = [_Param("w", main_grad=grad)]
+        model = SimpleNamespace(parameters=lambda: params)
+        stub = self._stub(model, optimizer)
+        stub.hcg = self._hcg(sharding, dp)
+        loss_mod.set_pending_gradient_divisor(8.0)
+        Trainer._apply_deferred_token_normalization(stub, model)
+        return grad
+
+    def test_averaged_data_parallel_reduction_is_rejected(self):
+        # fused_allreduce_gradients averages over DP, so 1/N would be R times
+        # too small; refuse instead of silently shrinking the gradients.
+        with mock.patch.object(
+            trainer_mod, "in_auto_parallel_align_mode", lambda: False
+        ):
+            for sharding, dp in ((1, 2), (2, 1)):
+                with (
+                    self.subTest(sharding=sharding, dp=dp),
+                    self.assertRaisesRegex(
+                        RuntimeError, "requires DygraphShardingOptimizerV2"
+                    ),
+                ):
+                    self._apply_with_replicas(SimpleNamespace(), sharding, dp)
+
+    def test_align_mode_sums_so_one_over_n_is_exact(self):
+        with mock.patch.object(
+            trainer_mod, "in_auto_parallel_align_mode", lambda: True
+        ):
+            grad = self._apply_with_replicas(SimpleNamespace(), 1, 2)
+
+        self.assertEqual(grad.tolist(), [1.0])
+
+    def test_sharding_and_data_parallel_together_are_rejected(self):
+        optimizer = SimpleNamespace(
+            _inner_opt=_native_sharding_optimizer({"w": [_bucket(2)]})
+        )
+        with self.assertRaisesRegex(RuntimeError, "one data-replica axis"):
+            self._apply_with_replicas(optimizer, 2, 2)
+
+    def test_native_sharding_undoes_its_own_average(self):
+        optimizer = SimpleNamespace(
+            _inner_opt=_native_sharding_optimizer({"w": [_bucket(2)]})
+        )
+
+        grad = self._apply_with_replicas(optimizer, 2, 1)
+
+        self.assertEqual(grad.tolist(), [2.0])
 
 
 class MaybeLogSaveEvaluateTests(unittest.TestCase):
