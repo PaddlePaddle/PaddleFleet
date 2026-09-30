@@ -424,7 +424,12 @@ class HyperEncoderProvider(GPTConfig, ModelProviderMixin["HyperEncoderModel"]):
         self.moe_expert_capacity_factor = None
         self.moe_subbatch_token_num_before_dispatch = None
         self.train_mtp_only = False
-        self.pad_token_id = 0
+        # ``pad_token_id`` is configurable: ``register_attributes`` already copied
+        # any value from ``HyperEncoderConfig`` (which ``_build_encoder_view`` feeds
+        # from the top-level config, same source as the decoder). Only fall back to
+        # 0 when nothing was provided, instead of unconditionally overriding it.
+        if getattr(self, "pad_token_id", None) is None:
+            self.pad_token_id = 0
 
         # Detach recompute first, so the parent's post_init sees "recompute off".
         for name, pinned, where in (

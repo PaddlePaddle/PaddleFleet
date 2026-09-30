@@ -224,6 +224,12 @@ class LanguageLoss(FleetLayer):
     # Class-level tracker for MTP loss, read by trainer for logging.
     mtp_loss_tracker: dict[str, float] = {}
 
+    # Class-level accumulator. When HB_LOSS_GLOBAL_TOKEN_AVG=1, _reduce_loss_by_tokens
+    # accumulates this rank's (loss_sum, valid_tokens) per micro-batch here; the trainer
+    # reads it to produce the global token-weighted loss for logging. Logging only, not
+    # used in backprop.
+    token_avg_tracker: dict = {}
+
     # Class-level stash for cu_seqlens_q under use_erndata=True.
     # Populated on every rank by the dataloader (ernie5
     # dist_data_loader.py — right after the three broadcast_data_obj calls),
@@ -274,6 +280,45 @@ class LanguageLoss(FleetLayer):
             config.loss_subbatch_sequence_length
         )
         self.use_subbatch = self.loss_subbatch_sequence_length > 0
+
+    def _reduce_loss_by_tokens(self, loss_sum, local_valid):
+        """Normalize this rank's (loss_sum, valid_tokens) into a scalar loss.
+
+        HB_LOSS_GLOBAL_TOKEN_AVG off: return ``loss_sum / local_valid``.
+
+        HB_LOSS_GLOBAL_TOKEN_AVG=1: backprop still returns ``loss_sum / local_valid``
+        (unchanged); additionally accumulate this rank's ``(loss_sum, valid_tokens)``
+        into the class-level ``token_avg_tracker`` so the trainer can produce the global
+        token-weighted loss for logging. This function performs no collective communication.
+        """
+        if os.environ.get("HB_LOSS_GLOBAL_TOKEN_AVG", "0") != "1":
+            return loss_sum / local_valid
+
+        # Accumulate this rank's device scalars into the class-level tracker; the
+        # trainer produces the logging value.
+        _tr = LanguageLoss.token_avg_tracker
+        _tr["S"] = _tr.get("S", 0.0) + loss_sum.detach()
+        _tr["n"] = _tr.get("n", 0.0) + local_valid.detach()
+        # Backprop: each rank normalizes by its local valid tokens.
+        return loss_sum / paddle.clip(local_valid, min=1.0)
+
+    @classmethod
+    def consume_token_avg_loss(cls):
+        """Reduce the accumulated (loss_sum, valid_tokens) into a global scalar.
+
+        all_reduce(SUM) this rank's accumulated (ΣS, Σn) across all ranks, then
+        return ΣΣS / ΣΣn as the global token-weighted loss. Clears the tracker.
+        Returns None when no tokens were accumulated.
+        """
+        _tr = cls.token_avg_tracker
+        _S = paddle.to_tensor([float(_tr.get("S", 0.0))], dtype="float64")
+        _n = paddle.to_tensor([float(_tr.get("n", 0.0))], dtype="float64")
+        if dist.is_initialized() and dist.get_world_size() > 1:
+            dist.all_reduce(_S, dist.ReduceOp.SUM)
+            dist.all_reduce(_n, dist.ReduceOp.SUM)
+        cls.token_avg_tracker.clear()
+        nv = float(_n.item())
+        return round(float(_S.item()) / nv, 8) if nv > 0 else None
 
     def forward_impl(self, logits: Tensor | tuple, labels: Tensor) -> Tensor:
         # Fused linear + cross-entropy path: `logits` is actually a
@@ -339,7 +384,7 @@ class LanguageLoss(FleetLayer):
             loss = paddle.sum(
                 loss.cast(paddle.float32).reshape([-1]) * lossmask
             )
-            loss = loss / lossmask.sum()
+            loss = self._reduce_loss_by_tokens(loss, lossmask.sum())
             return loss
 
         seq_len = logits.shape[1]
@@ -517,7 +562,7 @@ class LanguageLoss(FleetLayer):
                     loss = paddle.sum(
                         loss.cast(paddle.float32).reshape([-1]) * lossmask
                     )
-                    loss = loss / lossmask.sum()
+                    loss = self._reduce_loss_by_tokens(loss, lossmask.sum())
 
         if _use_accuracy_compatible_kernel():
             # 定位锚点 2：mask + 归一化后的标量 loss，与锚点 1 配合可切开
