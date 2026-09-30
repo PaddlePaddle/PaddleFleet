@@ -14,18 +14,18 @@
 
 """CP-aware ``use_erndata=True`` end-to-end test (CP=1 vs CP=2).
 
-The megatron MTP branch in ``GPTEmbedding`` slices the sequence itself with
-``extract_local_cp_chunks`` instead of going through
-``ContextParallelScatterOp`` (which is gated on ``experimental_dataflow``, a
-flag this style forbids). The RoPE tables are built by
-``RotaryEmbedding.get_rotary_seq_len``, which scales the rank-local length back
-up by ``cp_group.world_size`` and therefore always yields the FULL length L --
-so they must be sliced with the same layout as the embeddings, otherwise every
-rank applies the positions ``0..L/cp-1`` to chunks that actually live
-elsewhere in the sequence.
+The erndata non-dataflow path moves the sequence to local CP coordinates with
+``cp_shard.to_cp_local``'s local slice instead of ``ContextParallelScatterOp``
+(the ``experimental_dataflow`` implementation, a flag the MTP spelling
+forbids). The RoPE tables are built by ``RotaryEmbedding.get_rotary_seq_len``,
+which scales the rank-local length back up by ``cp_group.world_size`` and
+therefore always yields the FULL length L -- so they must be sliced with the
+same layout as the embeddings, otherwise every rank applies the positions
+``0..L/cp-1`` to chunks that actually live elsewhere in the sequence.
 
 Which layout that is comes from ``config.cp_balance_mode``, and both supported
-values are exercised here:
+values are exercised here, parameterized over MTP (K>0) and the K==0 plain
+path (both go through ``to_cp_local``):
 
   ``dualchunk_allgather``  -> two zigzag chunks,
     ``[interval*r, interval*(r+1)) u [L-interval*(r+1), L-interval*r)``
@@ -39,9 +39,12 @@ The primary check in both is a LAYOUT one: the ``rotary_pos_emb`` the real
 full-length table this rank's ``RotaryEmbedding`` produces, and must NOT equal
 the other mode's slice.
 
+The flashmask is part of the adapter contract (always present, full-length L);
+this file does not re-derive it from ``cu_seqlens_q``.
+
 ``test_cp_invariant_loss`` is a coarse companion: same weights (CPU init, so
 rank-independent) and same data must give the same loss at any ``cp_degree``.
-``REF_LOSS`` is the single-card value; run
+``REF_LOSS`` is the single-card MTP value; run
 
     python -m paddle.distributed.launch --gpus=0 \
         tests/multi_card_tests/test_gpt_mtp_megatron_cp.py
@@ -54,7 +57,8 @@ to regenerate it and
 for the CP=2 comparison. Note the loss alone is a weak signal on a randomly
 initialised 2-layer model: measured against a deliberately broken
 contiguous-prefix RoPE it only moves 9.246039 -> 9.247475 (1.6e-4 relative),
-inside the bf16 tolerance below. Hence the layout assertion.
+inside the bf16 tolerance below. Hence the layout assertion. The K==0 e2e
+only asserts finite loss and grads (no shared reference: MTP vs mtp0 differ).
 """
 
 import functools
@@ -86,7 +90,7 @@ SEED = 46
 # Packed multi-document layout: 3 docs inside the length-32 sequence.
 CU_SEQLENS = [0, 12, 20, SEQ]
 
-# Single-card (cp_degree=1) reference loss, see module docstring.
+# Single-card (cp_degree=1) reference loss for the MTP path, see module docstring.
 REF_LOSS = 9.246039390563965
 
 CP_SIZE = None
@@ -125,7 +129,9 @@ def setUpModule():
     model_parallel_cuda_manual_seed(SEED)
 
 
-def _make_config(cp_balance_mode="dualchunk_allgather"):
+def _make_config(
+    cp_balance_mode="dualchunk_allgather", num_nextn_predict_layers=NUM_MTP
+):
     return GPTConfig(
         vocab_size=VOCAB,
         max_sequence_length=SEQ,
@@ -148,11 +154,9 @@ def _make_config(cp_balance_mode="dualchunk_allgather"):
         rope_scaling=1.0,
         apply_rope_fusion=False,
         gated_linear_unit=True,
-        # MTP, megatron data style
-        num_nextn_predict_layers=NUM_MTP,
+        num_nextn_predict_layers=num_nextn_predict_layers,
         mtp_loss_scaling_factor=0.3,
         use_erndata=True,
-        # CP
         context_parallel_size=CP_SIZE,
         cp_balance_mode=cp_balance_mode,
         experimental_dataflow=False,
@@ -174,16 +178,12 @@ def _make_config(cp_balance_mode="dualchunk_allgather"):
     )
 
 
-def _make_inputs(with_mask=True):
-    """Megatron contract: length-L tensors (no L+K padding) + cu_seqlens_q.
+def _make_inputs():
+    """Megatron / adapter contract: length-L tensors + cu_seqlens_q + flashmask.
 
-    ``with_mask=False`` reproduces the minimal erndata contract, where only
-    ``cu_seqlens_q`` carries the doc boundaries and no materialized flashmask is
-    supplied (erndata emits ``attn_mask_startend_row_indices`` only when
-    ``pack_by_cu_seqlen=True``). ``GPTEmbedding`` must then derive the main mask
-    itself, otherwise the CP branch of ``DotProductAttention`` synthesizes an
-    all-visible mask and runs flashmask with ``causal=False``, silently dropping
-    causality and doc boundaries from the backbone.
+    The erndata adapter always ships ``attn_mask_startend_row_indices`` with
+    the batch. The mask stays full-length L: CP attention allgathers KV and
+    remaps these global row values itself.
     """
     paddle.seed(SEED)
     data = paddle.randint(low=1, high=VOCAB, shape=(BATCH, SEQ + 1)).cuda()
@@ -202,27 +202,21 @@ def _make_inputs(with_mask=True):
     )
     cu_seqlens_q = paddle.to_tensor(CU_SEQLENS, dtype="int32").cuda()
 
-    out = {
+    end = np.zeros(SEQ, dtype=np.int32)
+    for j in range(len(CU_SEQLENS) - 1):
+        s, e = CU_SEQLENS[j], CU_SEQLENS[j + 1]
+        end[s:e] = e
+    return {
         "input_ids": input_ids,
         "labels": labels,
         "position_ids": position_ids,
         "cu_seqlens_q": cu_seqlens_q,
-    }
-    if with_mask:
-        # Full-length per-doc flashmask boundaries. CP attention allgathers KV
-        # and remaps these global row values itself
-        # (preprocess_index_dual_chunks), so they are intentionally NOT sliced.
-        # 1 column because gpt_model_use_experimental_version=False.
-        end = np.zeros(SEQ, dtype=np.int32)
-        for j in range(len(CU_SEQLENS) - 1):
-            s, e = CU_SEQLENS[j], CU_SEQLENS[j + 1]
-            end[s:e] = e
-        out["attn_mask_startend_row_indices"] = (
+        "attn_mask_startend_row_indices": (
             paddle.to_tensor(end[None, None, :, None])
             .tile([BATCH, 1, 1, 1])
             .cuda()
-        )
-    return out
+        ),
+    }
 
 
 def _forward_backward(model, raw):
@@ -233,11 +227,10 @@ def _forward_backward(model, raw):
         "position_ids": [raw["position_ids"].clone()],
         "cu_seqlens_q": [raw["cu_seqlens_q"].clone()],
         "labels": [labels],
-    }
-    if "attn_mask_startend_row_indices" in raw:
-        micro["attn_mask_startend_row_indices"] = [
+        "attn_mask_startend_row_indices": [
             raw["attn_mask_startend_row_indices"].clone()
-        ]
+        ],
+    }
     return pipe_model.forward_backward_pipeline((micro, labels))
 
 
@@ -251,64 +244,81 @@ def _find_embedding(model):
     raise AssertionError("no GPTEmbedding found in the built model")
 
 
-class TestMTPMegatronCPRope(unittest.TestCase):
+class _RopeLayoutChecks:
+    def _assert_rope_layout(
+        self, mode, extract, num_nextn_predict_layers=NUM_MTP
+    ):
+        from paddlefleet.parallel_state import get_context_parallel_rank
+
+        paddle.seed(SEED)
+        model = gpt_builder(
+            _make_config(
+                cp_balance_mode=mode,
+                num_nextn_predict_layers=num_nextn_predict_layers,
+            ),
+            num_stages=1,
+        )
+        emb = _find_embedding(model)
+        raw = _make_inputs()
+        out = emb.forward(
+            {
+                "input_ids": raw["input_ids"],
+                "position_ids": raw["position_ids"],
+                "cu_seqlens_q": raw["cu_seqlens_q"],
+                "attn_mask_startend_row_indices": raw[
+                    "attn_mask_startend_row_indices"
+                ],
+            }
+        )
+        rope_local = out["rotary_pos_emb"]
+        # MTP concat lives on axis 0; the seq axis is always the rank-local L/cp.
+        self.assertEqual(out["hidden_states"].shape[1], SEQ // CP_SIZE)
+        self.assertEqual(rope_local.shape[1], SEQ // CP_SIZE)
+        full = emb.rotary_pos_emb(SEQ)
+        cp_rank = get_context_parallel_rank() if CP_SIZE > 1 else 0
+        expected = extract(full, cp_rank, CP_SIZE, axis=1)
+        np.testing.assert_array_equal(
+            rope_local.astype("float32").numpy(),
+            expected.astype("float32").numpy(),
+        )
+        return full, rope_local, cp_rank
+
+
+class TestMTPMegatronCPRope(_RopeLayoutChecks, unittest.TestCase):
     def test_rope_matches_zigzag_layout(self):
         """The decoder's RoPE table must be this rank's zigzag chunk.
 
         Runs the real ``GPTEmbedding.forward`` (real ``RotaryEmbedding``, real
         CP group) and compares its ``rotary_pos_emb`` against the zigzag slice
         of the full-length table. A contiguous prefix -- what the code produced
-        before the fix -- fails this at any CP degree > 1.
+        before the fix -- fails this at any CP degree > 1. Parameterized over
+        MTP and the K==0 plain path: both go through to_cp_local.
         """
         from paddlefleet.cp_shard import (
             extract_local_zigzag_chunks,
         )
-        from paddlefleet.parallel_state import get_context_parallel_rank
 
-        paddle.seed(SEED)
-        model = gpt_builder(_make_config(), num_stages=1)
-        emb = _find_embedding(model)
-        raw = _make_inputs()
-
-        out = emb.forward(
-            {
-                "input_ids": raw["input_ids"],
-                "position_ids": raw["position_ids"],
-                "cu_seqlens_q": raw["cu_seqlens_q"],
-            }
-        )
-        rope_local = out["rotary_pos_emb"]
-
-        # Rank-local sequence length: the megatron branch keeps the full L and
-        # zigzag-slices it, so both hidden states and RoPE must be L / cp.
-        self.assertEqual(out["hidden_states"].shape[1], SEQ // CP_SIZE)
-        self.assertEqual(rope_local.shape[1], SEQ // CP_SIZE)
-
-        # Full-length table straight from this rank's RotaryEmbedding, sliced
-        # with the layout the embeddings used.
-        full = emb.rotary_pos_emb(SEQ)
-        cp_rank = get_context_parallel_rank() if CP_SIZE > 1 else 0
-        expected = extract_local_zigzag_chunks(full, cp_rank, CP_SIZE, axis=1)
-        np.testing.assert_array_equal(
-            rope_local.astype("float32").numpy(),
-            expected.astype("float32").numpy(),
-        )
-
-        if CP_SIZE > 1:
-            # And it must NOT be the contiguous prefix (the pre-fix layout).
-            contiguous = full[:, : SEQ // CP_SIZE]
-            self.assertFalse(
-                bool(
-                    paddle.all(
-                        rope_local.astype("float32")
-                        == contiguous.astype("float32")
+        for k in (0, NUM_MTP):
+            with self.subTest(num_nextn_predict_layers=k):
+                full, rope_local, _ = self._assert_rope_layout(
+                    "dualchunk_allgather",
+                    extract_local_zigzag_chunks,
+                    num_nextn_predict_layers=k,
+                )
+                if CP_SIZE > 1:
+                    contiguous = full[:, : SEQ // CP_SIZE]
+                    self.assertFalse(
+                        bool(
+                            paddle.all(
+                                rope_local.astype("float32")
+                                == contiguous.astype("float32")
+                            )
+                        ),
+                        "rank>0 must not receive the contiguous RoPE prefix",
                     )
-                ),
-                "rank>0 must not receive the contiguous RoPE prefix",
-            )
 
 
-class TestMTPMegatronCPContiguousRope(unittest.TestCase):
+class TestMTPMegatronCPContiguousRope(_RopeLayoutChecks, unittest.TestCase):
     """Same layout check for ``cp_balance_mode="contiguous_allgather"``.
 
     Not a duplicate of the zigzag class: ``contiguous_allgather`` is a distinct
@@ -324,94 +334,38 @@ class TestMTPMegatronCPContiguousRope(unittest.TestCase):
             extract_local_contiguous_chunk,
             extract_local_zigzag_chunks,
         )
-        from paddlefleet.parallel_state import get_context_parallel_rank
 
-        paddle.seed(SEED)
-        model = gpt_builder(
-            _make_config(cp_balance_mode="contiguous_allgather"), num_stages=1
-        )
-        emb = _find_embedding(model)
-        raw = _make_inputs()
-
-        out = emb.forward(
-            {
-                "input_ids": raw["input_ids"],
-                "position_ids": raw["position_ids"],
-                "cu_seqlens_q": raw["cu_seqlens_q"],
-            }
-        )
-        rope_local = out["rotary_pos_emb"]
-
-        self.assertEqual(out["hidden_states"].shape[1], SEQ // CP_SIZE)
-        self.assertEqual(rope_local.shape[1], SEQ // CP_SIZE)
-
-        full = emb.rotary_pos_emb(SEQ)
-        cp_rank = get_context_parallel_rank() if CP_SIZE > 1 else 0
-        expected = extract_local_contiguous_chunk(
-            full, cp_rank, CP_SIZE, axis=1
-        )
-        np.testing.assert_array_equal(
-            rope_local.astype("float32").numpy(),
-            expected.astype("float32").numpy(),
-        )
-
-        if CP_SIZE > 1:
-            # And it must NOT be the zigzag slice: at CP=2 the two layouts
-            # differ on both ranks (rank0 [0:8)u[24:32) vs [0:16), rank1
-            # [8:24) vs [16:32) for L=32), so this is what would catch a call
-            # site that ignored cp_balance_mode.
-            zigzag = extract_local_zigzag_chunks(full, cp_rank, CP_SIZE, axis=1)
-            self.assertFalse(
-                bool(
-                    paddle.all(
-                        rope_local.astype("float32") == zigzag.astype("float32")
+        for k in (0, NUM_MTP):
+            with self.subTest(num_nextn_predict_layers=k):
+                full, rope_local, cp_rank = self._assert_rope_layout(
+                    "contiguous_allgather",
+                    extract_local_contiguous_chunk,
+                    num_nextn_predict_layers=k,
+                )
+                if CP_SIZE > 1:
+                    zigzag = extract_local_zigzag_chunks(
+                        full, cp_rank, CP_SIZE, axis=1
                     )
-                ),
-                "contiguous_allgather must not receive the zigzag RoPE slice",
-            )
-
-    def test_derived_mask_stays_global_under_contiguous(self):
-        """The derived flashmask is full-length in BOTH layouts.
-
-        ``build_startend_row_indices_from_cu_seqlens`` is deliberately not
-        sliced: CP attention allgathers KV and remaps the global row values
-        itself. Pinning it per-layout keeps a future "slice the mask too as
-        well" change from passing silently under one mode.
-        """
-        masks = {}
-        for mode in ("dualchunk_allgather", "contiguous_allgather"):
-            paddle.seed(SEED)
-            model = gpt_builder(
-                _make_config(cp_balance_mode=mode), num_stages=1
-            )
-            emb = _find_embedding(model)
-            raw = _make_inputs(with_mask=False)
-            out = emb.forward(
-                {
-                    "input_ids": raw["input_ids"],
-                    "position_ids": raw["position_ids"],
-                    "cu_seqlens_q": raw["cu_seqlens_q"],
-                }
-            )
-            mask = out.get("attn_mask_startend_row_indices")
-            self.assertIsNotNone(mask, f"no derived mask under {mode}")
-            self.assertEqual(list(mask.shape), [BATCH, 1, SEQ, 1])
-            masks[mode] = mask.numpy()
-
-        np.testing.assert_array_equal(
-            masks["dualchunk_allgather"], masks["contiguous_allgather"]
-        )
+                    self.assertFalse(
+                        bool(
+                            paddle.all(
+                                rope_local.astype("float32")
+                                == zigzag.astype("float32")
+                            )
+                        ),
+                        "contiguous_allgather must not receive the zigzag "
+                        "RoPE slice",
+                    )
 
     def test_cp_invariant_loss_contiguous(self):
         """End-to-end loss under ``contiguous_allgather``, not just the layout.
 
         The layout checks above stop at ``GPTEmbedding``; everything after it --
-        ``roll_tensor`` + ``extract_local_cp_chunks`` per MTP depth, the CP
-        flashmask attention (``FlashMaskContextParallel`` with
-        ``mode="contiguous_allgather"``), and LanguageLoss's per-depth label
-        scatter -- is only exercised by a real forward/backward. Same ``REF_LOSS``
-        as the zigzag test: ``cp_balance_mode`` is a no-op at ``cp_size == 1``, so
-        the single-card reference is shared, and a correct implementation is
+        packed roll + ``to_cp_local`` per MTP depth, the CP flashmask
+        attention, and LanguageLoss's per-depth label slice -- is only
+        exercised by a real forward/backward. Same ``REF_LOSS`` as the zigzag
+        test: ``cp_balance_mode`` is a no-op at ``cp_size == 1``, so the
+        single-card reference is shared, and a correct implementation is
         CP-invariant in either layout.
         """
         if (
@@ -484,104 +438,39 @@ class TestMTPMegatronCP(unittest.TestCase):
             )
 
 
-class TestMTPMegatronMainMaskFromCuSeqlens(unittest.TestCase):
-    """The main flashmask must be derived when the contract omits it.
+class TestMtp0MegatronCP(unittest.TestCase):
+    """Plain erndata + CP path with MTP inactive (K==0).
 
-    erndata only guarantees length-L tensors + cu_seqlens_q. When
-    ``attn_mask_startend_row_indices`` is absent, ``GPTEmbedding`` must build it
-    from ``cu_seqlens_q``; otherwise the CP branch of ``DotProductAttention``
-    fills in an all-visible mask and calls flashmask with ``causal=False``,
-    which drops both causality and document boundaries from the backbone.
+    RoPE layout for K==0 is covered by the parameterized checks above. This
+    class only keeps a smoke e2e: embedding slice, RoPE slice, CP flashmask
+    attention, and LanguageLoss._forward's label slice. It does not compare
+    against a CP=1 reference.
     """
 
-    def test_embedding_derives_main_mask(self):
-        paddle.seed(SEED)
-        model = gpt_builder(_make_config(), num_stages=1)
-        emb = _find_embedding(model)
-        raw = _make_inputs(with_mask=False)
-        self.assertNotIn("attn_mask_startend_row_indices", raw)
-
-        out = emb.forward(
-            {
-                "input_ids": raw["input_ids"],
-                "position_ids": raw["position_ids"],
-                "cu_seqlens_q": raw["cu_seqlens_q"],
-            }
-        )
-
-        mask = out.get("attn_mask_startend_row_indices")
-        self.assertIsNotNone(
-            mask,
-            "GPTEmbedding must derive the main mask from cu_seqlens_q",
-        )
-        # Full length L (not the rank-local L/cp): CP attention allgathers KV
-        # and remaps these global row values itself.
-        self.assertEqual(list(mask.shape), [BATCH, 1, SEQ, 1])
-        self.assertEqual(mask.dtype, paddle.int32)
-
-        # Values must be the per-doc end rows implied by CU_SEQLENS.
-        expected = np.zeros(SEQ, dtype=np.int32)
-        for j in range(len(CU_SEQLENS) - 1):
-            s, e = CU_SEQLENS[j], CU_SEQLENS[j + 1]
-            expected[s:e] = e
-        np.testing.assert_array_equal(
-            mask.numpy()[0, 0, :, 0],
-            expected,
-        )
-
-    def test_derived_mask_matches_explicit_mask(self):
-        """Deriving must be equivalent to passing the mask in explicitly."""
-        paddle.seed(SEED)
-        model = gpt_builder(_make_config(), num_stages=1)
-        emb = _find_embedding(model)
-
-        raw_with = _make_inputs(with_mask=True)
-        raw_without = _make_inputs(with_mask=False)
-
-        out_with = emb.forward(
-            {
-                "input_ids": raw_with["input_ids"],
-                "position_ids": raw_with["position_ids"],
-                "cu_seqlens_q": raw_with["cu_seqlens_q"],
-                "attn_mask_startend_row_indices": raw_with[
-                    "attn_mask_startend_row_indices"
-                ],
-            }
-        )
-        out_without = emb.forward(
-            {
-                "input_ids": raw_without["input_ids"],
-                "position_ids": raw_without["position_ids"],
-                "cu_seqlens_q": raw_without["cu_seqlens_q"],
-            }
-        )
-        np.testing.assert_array_equal(
-            out_with["attn_mask_startend_row_indices"].numpy(),
-            out_without["attn_mask_startend_row_indices"].numpy(),
-        )
-
-    def test_cp_loss_without_explicit_mask(self):
-        """End-to-end on the minimal contract: same loss as with the mask."""
+    def test_mtp0_loss_and_grads_finite(self):
         if (
             not paddle.device.current_device_is_cpu
             and paddle.device.get_device_capability()[0] < 9
         ):
             self.skipTest("requires SM90+ for the CP flashmask kernels")
-
         paddle.seed(SEED)
-        model = gpt_builder(_make_config(), num_stages=1)
+        model = gpt_builder(
+            _make_config(num_nextn_predict_layers=0), num_stages=1
+        )
         model = paddle.amp.decorate(
             models=model, optimizers=None, level="O2", dtype="bfloat16"
         )
-        loss = _forward_backward(model, _make_inputs(with_mask=False))
+        loss = _forward_backward(model, _make_inputs())
         val = float(loss.astype("float32"))
-        print(
-            f"[MTP-MEGATRON-CP] cp={CP_SIZE} loss(no explicit mask)={val}",
-            flush=True,
-        )
+        print(f"[MTP0-MEGATRON-CP] cp={CP_SIZE} loss={val}", flush=True)
         self.assertTrue(np.isfinite(val), f"loss must be finite, got {val}")
-        if REF_LOSS is not None:
-            np.testing.assert_allclose(val, REF_LOSS, rtol=5e-3, atol=0)
+        grads = [p.grad for p in model.parameters() if p.grad is not None]
+        self.assertGreater(len(grads), 0, "no gradients were produced")
+        for g in grads:
+            self.assertTrue(
+                bool(paddle.isfinite(g.astype("float32")).all()),
+                "gradients must be finite",
+            )
 
 
 if __name__ == "__main__":

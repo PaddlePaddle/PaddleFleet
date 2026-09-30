@@ -243,6 +243,42 @@ class TestGptEmbeddingMegatron(unittest.TestCase):
                 ):
                     emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu})
 
+    def test_erndata_plain_k0_cp_slices_locally(self) -> None:
+        # K == 0 erndata plain path: with no MTP layer and experimental_dataflow
+        # off, forward must slice decoder_input to this rank's local CP chunk
+        # via to_cp_local -- the same transform (and cp_balance_mode layout)
+        # the MTP branch uses -- and emit no MTP concat/tail.
+        B, L, H = 1, 8, 4  # L divisible by 2*cp_size
+        for mode in ("dualchunk_allgather", "contiguous_allgather"):
+            for cp_rank in (0, 1):
+                with self.subTest(cp_balance_mode=mode, cp_rank=cp_rank):
+                    emb = _make_embedding(0, B, L, H, cp_balance_mode=mode)
+                    # Skip fill_feature (which zeros pad_token positions) and the
+                    # experimental-version rope-nulling so hidden_states is the
+                    # bare sliced stub embedding, comparable element-for-element.
+                    emb.config.gpt_model_use_experimental_version = False
+                    input_ids = (
+                        paddle.arange(B * L, dtype="int64")
+                        .reshape([B, L])
+                        .cuda()
+                    )
+                    cu = paddle.to_tensor([0, L], dtype="int32")
+                    full = paddle.arange(B * L * H, dtype="float32").reshape(
+                        [B, L, H]
+                    )
+                    with _fake_cp(cp_size=2, cp_rank=cp_rank):
+                        out = emb.forward(_erndata_args(input_ids, cu))
+                    self.assertEqual(
+                        list(out["hidden_states"].shape), [B, L // 2, H]
+                    )
+                    expected = extract_local_cp_chunks(
+                        full, cp_rank, 2, axis=1, mode=mode
+                    )
+                    np.testing.assert_array_equal(
+                        out["hidden_states"].numpy(), expected.numpy()
+                    )
+                    self.assertNotIn("mtp_decoder_inputs", out)
+
 
 class TestGptEmbeddingErnie5(unittest.TestCase):
     """ernie5 (non-megatron) MTP embedding path, single-card (no SP/CP).
@@ -334,6 +370,42 @@ class TestGptEmbeddingMegatronCPSP(unittest.TestCase):
             ),
             "the two CP layouts must differ here or this test proves nothing",
         )
+
+    def test_plain_cp_rejects_sequence_parallel(self) -> None:
+        # Config already rejects this combo; the runtime check is the
+        # -O-safe belt. It must name the CP transform implementation, and
+        # weight-only counts as inactive MTP (not "no MTP").
+        B, L, H = 1, 8, 4
+        cases = (
+            (0, False, False, "local"),
+            (0, False, True, "scatter"),
+            (1, True, False, "local"),
+        )
+        for k, weight_only, dataflow, how in cases:
+            with self.subTest(
+                num_nextn_predict_layers=k,
+                mtp_load_weight_only=weight_only,
+                experimental_dataflow=dataflow,
+            ):
+                emb = _make_embedding(
+                    k, B, L, H, mtp_load_weight_only=weight_only
+                )
+                emb.config.experimental_dataflow = dataflow
+                emb.sequence_parallel = True
+                emb.config.sequence_parallel = True
+                input_ids = (
+                    paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
+                )
+                cu = paddle.to_tensor([0, L], dtype="int32")
+                with (
+                    _fake_cp(cp_size=2),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        rf"sequence_parallel=True.*cp_shard_source='{how}'"
+                        r".*Set sequence_parallel=False",
+                    ),
+                ):
+                    emb.forward(_erndata_args(input_ids, cu))
 
     def test_megatron_sequence_parallel(self) -> None:
         # Identity ScatterOp still validates the sequence-first layout for B > 1.
