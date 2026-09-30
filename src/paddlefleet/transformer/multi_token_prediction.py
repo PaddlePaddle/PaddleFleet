@@ -36,12 +36,12 @@ from paddle.distributed.flex_checkpoint.aoa.generation import (
 )
 
 from paddlefleet import tensor_parallel
-from paddlefleet.context_parallel_utils import ContextParallelScatterOp
-from paddlefleet.cp_shard import extract_local_cp_chunks
-from paddlefleet.parallel_state import (
-    get_context_parallel_rank,
-    get_context_parallel_world_size,
+from paddlefleet.cp_shard import (
+    cp_shard_source,
+    embedding_grad_is_cp_gathered,
+    to_cp_local,
 )
+from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.layers import (
     gen_linear_aoa_statements,
@@ -82,8 +82,8 @@ SUPPORTED_ATTN_MASK = [
 #   * cp_group is None or size==1 → non-CP path.
 #   * cp_group.nranks > 1 with cu_seqlens_q → NotImplementedError; the
 #     mirror-chunk (DualChunkSwap) CP variant is not implemented on this path
-#     (CP is instead handled by extract_local_cp_chunks at the call site,
-#     which follows config.cp_balance_mode).
+#     (the caller rolls in global coordinates and then calls
+#     cp_shard.to_cp_local).
 #
 # Note: we consciously do NOT wrap cu_seqlens_q in an MCore-style
 # PackedSeqParams dataclass. ernie5's model backend consumes doc boundaries
@@ -240,8 +240,8 @@ def roll_tensor(
     already holds a full-length ``[B, L]`` copy — no zigzag scatter happens
     before the model. Consequently rolling reduces to standard CP=1
     semantics on the full-length tensor, and callers should invoke
-    ``extract_local_cp_chunks`` (which follows ``config.cp_balance_mode``)
-    after ``roll_tensor`` to obtain their local slice before embedding / loss.
+    ``cp_shard.to_cp_local`` after ``roll_tensor`` to obtain their local
+    slice before embedding / loss.
 
     Args:
         tensor: input tensor.
@@ -855,8 +855,15 @@ class MultiTokenPredictionLayer(FleetLayer):
                 reduce_scatter_embeddings=False,
                 config=no_init_cfg,
             )
-            if self.config.context_parallel_size > 1 and not getattr(
-                config, "use_erndata", False
+            # Same rule as GPTEmbedding's table: skip the default CP grad
+            # scaling where the CP transform all-gathers the gradient. The
+            # loader-sharded source keeps its historical marking as well.
+            # Erndata keeps default CP scaling on both the stage-0 embedding and
+            # this physical copy. Disabling it only here would make their shared
+            # gradient contributions use different scales before PP all-reduce.
+            if embedding_grad_is_cp_gathered(config) or (
+                cp_shard_source(config, config.context_parallel_size)
+                == "loader"
             ):
                 from paddlefleet.context_parallel_utils import (
                     mark_context_parallel_parameter_disable_scale_grad,
@@ -865,9 +872,6 @@ class MultiTokenPredictionLayer(FleetLayer):
                 mark_context_parallel_parameter_disable_scale_grad(
                     self.mtp_embed
                 )
-            # Erndata keeps default CP scaling on both the stage-0 embedding and
-            # this physical copy. Disabling it only here would make their shared
-            # gradient contributions use different scales before PP all-reduce.
 
             if not getattr(config, "use_erndata", False):
                 from paddlefleet.models.gpt.mtp_embedding_layer import (
@@ -1046,15 +1050,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                 mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.transpose(
                     [0, 2, 1]
                 ).astype(hs_streams.dtype)
-                if (
-                    get_context_parallel_world_size() > 1
-                    and self.config.experimental_dataflow
-                ):
-                    mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
-                        mtp_hidden_inputs_mask,
-                        axis=1,
-                        mode=self.config.cp_balance_mode,
-                    )
+                mtp_hidden_inputs_mask = to_cp_local(
+                    mtp_hidden_inputs_mask, self.config
+                )
                 # when sp enable: hs_streams is seq-first, so bring the mask to
                 # [S/CP, B, 1] before scattering the seq axis.
                 if self.sequence_parallel:
@@ -1124,17 +1122,10 @@ class MultiTokenPredictionLayer(FleetLayer):
                     hidden_states.dtype
                 )
 
-                if (
-                    get_context_parallel_world_size() > 1
-                    and self.config.experimental_dataflow
-                ):
-                    # In EB dataflow and CP size > 1, mtp_hidden_inputs_mask is [b, s, 1];
-                    # we need to scatter it to [b, s/cp, 1] here.
-                    mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
-                        mtp_hidden_inputs_mask,
-                        axis=1,
-                        mode=self.config.cp_balance_mode,
-                    )
+                # [b, s, 1] global -> [b, s/cp, 1] local.
+                mtp_hidden_inputs_mask = to_cp_local(
+                    mtp_hidden_inputs_mask, self.config
+                )
 
                 # when sp enable
                 if self.sequence_parallel:
@@ -1490,10 +1481,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 ]
 
                 # CP/SP scatter, mirroring what GPTEmbedding does per chunk
-                if cp_world_size > 1 and self.config.experimental_dataflow:
-                    decoder_input = ContextParallelScatterOp.apply(
-                        decoder_input, axis=1, mode=self.config.cp_balance_mode
-                    )
+                decoder_input = to_cp_local(decoder_input, self.config)
                 if self.config.sequence_parallel:
                     batch_size, local_seq_len, hidden_size = decoder_input.shape
                     decoder_input = decoder_input.reshape(
@@ -1940,7 +1928,7 @@ class MultiTokenPredictionLayer(FleetLayer):
     # only while another MTP depth needs it and never reaches the LMHead.
     #
     # Constraints: experimental_dataflow=False. Context parallelism is handled
-    # via extract_local_cp_chunks (layout picked by config.cp_balance_mode)
+    # via cp_shard.to_cp_local (layout picked by config.cp_balance_mode)
     # after the full-sequence packed roll rather than inside roll_tensor.
     # ------------------------------------------------------------------ #
 
@@ -1982,16 +1970,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 cu_seqlens_q=cu_seqlens_q,
             )
 
-        cp_size = get_context_parallel_world_size()
-        if cp_size > 1:
-            cp_rank = get_context_parallel_rank()
-            decoder_input = extract_local_cp_chunks(
-                decoder_input,
-                cp_rank,
-                cp_size,
-                axis=1,
-                mode=self.config.cp_balance_mode,
-            )
+        decoder_input = to_cp_local(decoder_input, self.config)
 
         if self.sequence_parallel:
             # ScatterOp partitions axis 0; transpose to canonical [S, B, H]

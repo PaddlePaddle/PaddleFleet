@@ -30,7 +30,11 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
 from paddlefleet.context_parallel_utils import (
     mark_context_parallel_parameter_disable_scale_grad,
 )
-from paddlefleet.cp_shard import cp_shard_source, to_cp_local
+from paddlefleet.cp_shard import (
+    cp_shard_source,
+    embedding_grad_is_cp_gathered,
+    to_cp_local,
+)
 from paddlefleet.models.gpt.utils import fill_feature
 from paddlefleet.parallel_state import (
     get_context_parallel_world_size,
@@ -105,9 +109,9 @@ class GPTEmbedding(FleetLayer):
             self.embedding.reduce_scatter_embeddings = False
             self.embedding.sequence_parallel = False
 
-        if self.config.experimental_dataflow:
-            # In EB data flow, since CP scatter is apply after embedding,
-            # we need to disable scale grad for the parameters that need to be scattered to each cp local.
+        if embedding_grad_is_cp_gathered(config):
+            # The scatter implementation of to_cp_local all-gathers the
+            # gradient, so every rank already holds the full-length gradient.
             mark_context_parallel_parameter_disable_scale_grad(
                 self.embedding.embed_tokens
             )

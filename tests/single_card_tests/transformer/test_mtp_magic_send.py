@@ -215,6 +215,12 @@ def _fwd_ctx(
                 return_value=cp_world_size,
             )
         )
+        s.enter_context(
+            patch(
+                "paddlefleet.parallel_state.get_context_parallel_world_size",
+                return_value=cp_world_size,
+            )
+        )
         tp = s.enter_context(
             patch(
                 "paddlefleet.transformer.multi_token_prediction.tensor_parallel"
@@ -230,9 +236,7 @@ def _fwd_ctx(
             so.apply = scatter_fn
         if cp_scatter_fn is not None:
             co = s.enter_context(
-                patch(
-                    "paddlefleet.transformer.multi_token_prediction.ContextParallelScatterOp"
-                )
+                patch("paddlefleet.cp_shard.ContextParallelScatterOp")
             )
             co.apply = cp_scatter_fn
         if proj_override is not None and layer is not None:

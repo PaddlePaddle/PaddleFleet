@@ -400,6 +400,9 @@ class TestErndataMagicSend(unittest.TestCase):
         layer = MultiTokenPredictionLayer.__new__(MultiTokenPredictionLayer)
         cfg = MagicMock()
         cfg.use_erndata = True
+        # MagicMock attributes are truthy; pin the flag that picks the CP
+        # transform implementation.
+        cfg.experimental_dataflow = False
         cfg.enable_mtp_magic_send = magic_send
         cfg.num_nextn_predict_layers = K
         cfg.gpt_model_use_experimental_version = False
@@ -531,13 +534,12 @@ class TestErndataMagicSend(unittest.TestCase):
                 layer, _ = self._make_layer(1, 0)
                 with (
                     patch(
-                        "paddlefleet.transformer.multi_token_prediction."
+                        "paddlefleet.parallel_state."
                         "get_context_parallel_world_size",
                         return_value=2,
                     ),
                     patch(
-                        "paddlefleet.transformer.multi_token_prediction."
-                        "get_context_parallel_rank",
+                        "paddlefleet.parallel_state.get_context_parallel_rank",
                         return_value=cp_rank,
                     ),
                 ):
