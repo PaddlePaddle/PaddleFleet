@@ -47,10 +47,9 @@ from paddlefleet.accuracy_target import targets_hf
 from paddlefleet.context_parallel_utils import (
     ContextParallelAllGatherOp,
     ContextParallelGatherOp,
-    ContextParallelScatterOp,
 )
+from paddlefleet.cp_shard import cp_shard_source, to_cp_local
 from paddlefleet.parallel_state import (
-    get_context_parallel_rank,
     get_context_parallel_world_size,
     get_tensor_model_parallel_group,
 )
@@ -1723,41 +1722,16 @@ class TopKRouter(StandardMoERouter):
             else:
                 seq_len, batch_size, d_model = input.shape
             input = input.reshape([-1, d_model])
-            if (
-                get_context_parallel_world_size() > 1
-                and self.config.experimental_dataflow
-            ):
-                # In EB dataflow, shape of input_ids [b, s],
-                # but shape of input is [b, s/cp, h] ([s/cp, b, h] in sp),
-                # so we need to scatter input_ids here to avid the assertion below
-                input_ids = ContextParallelScatterOp.apply(
-                    input_ids, axis=1, mode=self.config.cp_balance_mode
-                )
-            elif (
-                get_context_parallel_world_size() > 1
-                and getattr(self.config, "use_erndata", False)
+            # GPTEmbedding publishes input_ids in global coordinates while
+            # the hidden states here are local, so the router still moves them
+            # to local coordinates itself. The erndata branch keys on the
+            # length because PP stages beyond the first may receive either.
+            if cp_shard_source(self.config) == "scatter" or (
+                cp_shard_source(self.config) == "local"
                 and input_ids is not None
                 and input_ids.shape[1] != seq_len
             ):
-                # erndata MTP path: PaddleFleet dataloader broadcasts
-                # input_ids full-length [B, L] to every CP rank (unlike
-                # experimental_dataflow which pre-scatters). Embedding was
-                # already sliced to [B, L/cp, H] with the model's
-                # cp_balance_mode layout via extract_local_cp_chunks (see
-                # gpt_embedding.py). Slice input_ids with the same layout here
-                # — no comm needed since every rank holds the same [B, L]
-                # tensor.
-                from paddlefleet.cp_shard import extract_local_cp_chunks
-
-                _cp_size = get_context_parallel_world_size()
-                _cp_rank = get_context_parallel_rank()
-                input_ids = extract_local_cp_chunks(
-                    input_ids,
-                    _cp_rank,
-                    _cp_size,
-                    axis=1,
-                    mode=self.config.cp_balance_mode,
-                )
+                input_ids = to_cp_local(input_ids, self.config)
             if input_ids is not None:
                 pad_token_id = getattr(self.config, "pad_token_id", 0)
                 if pad_token_id is None:
@@ -1798,17 +1772,9 @@ class TopKRouter(StandardMoERouter):
             )
             seq_len = self.config.max_sequence_length // (cp_size * tp_size)
             batch_size = input.shape[0] // seq_len
-            if (
-                max(get_context_parallel_world_size(), 1) > 1
-                and self.config.experimental_dataflow
-                and input_ids is not None
-            ):
-                # In EB dataflow, shape of input_ids [b, s],
-                # but shape of input is [b, s/cp, h] ([s/cp, b, h] in sp),
-                # so we need to scatter input_ids here to avid the assertion below
-                input_ids = ContextParallelScatterOp.apply(
-                    input_ids, axis=1, mode=self.config.cp_balance_mode
-                )
+            if cp_shard_source(self.config) == "scatter":
+                # Same as the 3D branch: input_ids arrive global.
+                input_ids = to_cp_local(input_ids, self.config)
             if (
                 input_ids is not None
                 and self.sequence_parallel
