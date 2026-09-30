@@ -1732,6 +1732,7 @@ jobs:
           dpkg -i *.deb
           cd /workspace/PaddleFleet
           python -m pip install --upgrade pip
+          python -m pip cache purge
           python -m pip install dist/${{ needs.build_whl.outputs.root_whl_name }} \
             --extra-index-url=https://www.paddlepaddle.org.cn/packages/nightly/cu129/ \
             --extra-index-url=https://www.paddlepaddle.org.cn/packages/stable/cu129/
