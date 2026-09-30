@@ -133,10 +133,11 @@ def load_tokenizer_and_processor(model_args, data_args):
         processor = AutoProcessor.from_pretrained(
             model_args.model_name_or_path, use_fast=data_args.processor_use_fast
         )
-    except OSError:
+    except (OSError, ValueError):
         # Extracted GLM-5.2 weights keep an independent tokenizer path and
-        # have no processor files. Any other load failure must surface:
-        # published GLM-4 SFT depends on the real AutoProcessor.
+        # have no processor files; AutoProcessor then raises
+        # "Unrecognized processing class" (ValueError). Any other load failure
+        # must surface: published GLM-4 SFT depends on the real AutoProcessor.
         independent_tokenizer = (
             model_args.tokenizer_name_or_path
             and model_args.tokenizer_name_or_path
