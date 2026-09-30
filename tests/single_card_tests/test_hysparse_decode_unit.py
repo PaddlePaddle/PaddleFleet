@@ -376,6 +376,7 @@ class TestMLAHySparseForwardRouting(unittest.TestCase):
         core_attention.config = types.SimpleNamespace()
         stub = types.SimpleNamespace(
             config=types.SimpleNamespace(
+                use_accuracy_compatible=False,
                 sequence_parallel=False,
                 enable_hy_sparse_attention=True,
             ),
