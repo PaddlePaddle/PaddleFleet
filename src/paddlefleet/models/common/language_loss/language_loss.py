@@ -224,6 +224,14 @@ class LanguageLoss(FleetLayer):
     # Class-level tracker for MTP loss, read by trainer for logging.
     mtp_loss_tracker: dict[str, float] = {}
 
+    # Class-level accumulator for cross-microbatch token-weighted loss display.
+    # When HB_LOSS_GLOBAL_TOKEN_AVG=1, _reduce_loss_by_tokens accumulates this
+    # rank's raw (ΣS, Σn) here per micro-batch (detached device scalars). The
+    # trainer reads it once per logging interval, all_reduce(SUM)s it, prints the
+    # global token-weighted loss ΣΣS/ΣΣn, and resets. Accumulated values are
+    # detached and never participate in backprop.
+    token_avg_tracker: dict = {}
+
     # Class-level stash for cu_seqlens_q under use_erndata=True.
     # Populated on every rank by the dataloader (ernie5
     # dist_data_loader.py — right after the three broadcast_data_obj calls),
@@ -274,6 +282,33 @@ class LanguageLoss(FleetLayer):
             config.loss_subbatch_sequence_length
         )
         self.use_subbatch = self.loss_subbatch_sequence_length > 0
+
+    def _reduce_loss_by_tokens(self, loss_sum, local_valid):
+        """Normalize per-rank (loss_sum, valid_tokens) into a scalar loss.
+
+        Default (``HB_LOSS_GLOBAL_TOKEN_AVG`` off): normalize by this rank's
+        valid tokens ``loss_sum / local_valid`` -- each rank's per-token mean,
+        which the trainer aggregates with an unweighted average.
+
+        With ``HB_LOSS_GLOBAL_TOKEN_AVG=1``: only the logged loss changes, the
+        backprop term stays ``loss_sum / local_valid``. This rank's raw
+        ``(ΣS, Σn)`` is accumulated per micro-batch into the class-level
+        ``token_avg_tracker`` as detached device scalars (no gradient, no host
+        sync, no communication). The trainer then produces the global
+        token-weighted display ``ΣΣS/ΣΣn`` with a single ``all_reduce(SUM)`` per
+        logging interval, matching Megatron lm_loss.
+        """
+        if os.environ.get("HB_LOSS_GLOBAL_TOKEN_AVG", "0") != "1":
+            return loss_sum / local_valid
+
+        # Only accumulate device scalars into the class-level tracker; the
+        # display convention is produced by a single trainer-side all_reduce.
+        _tr = LanguageLoss.token_avg_tracker
+        _tr["S"] = _tr.get("S", 0.0) + loss_sum.detach()
+        _tr["n"] = _tr.get("n", 0.0) + local_valid.detach()
+        # Backprop convention: each rank normalized by its local valid tokens
+        # (identical to when disabled).
+        return loss_sum / paddle.clip(local_valid, min=1.0)
 
     def forward_impl(self, logits: Tensor | tuple, labels: Tensor) -> Tensor:
         # Fused linear + cross-entropy path: `logits` is actually a
@@ -339,7 +374,7 @@ class LanguageLoss(FleetLayer):
             loss = paddle.sum(
                 loss.cast(paddle.float32).reshape([-1]) * lossmask
             )
-            loss = loss / lossmask.sum()
+            loss = self._reduce_loss_by_tokens(loss, lossmask.sum())
             return loss
 
         seq_len = logits.shape[1]
@@ -517,7 +552,7 @@ class LanguageLoss(FleetLayer):
                     loss = paddle.sum(
                         loss.cast(paddle.float32).reshape([-1]) * lossmask
                     )
-                    loss = loss / lossmask.sum()
+                    loss = self._reduce_loss_by_tokens(loss, lossmask.sum())
 
         if _use_accuracy_compatible_kernel():
             # 定位锚点 2：mask + 归一化后的标量 loss，与锚点 1 配合可切开
