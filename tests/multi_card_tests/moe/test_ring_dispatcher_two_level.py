@@ -13,20 +13,15 @@
 # limitations under the License.
 """Two-level (G>1 AND N>1) coverage for RingMoETokenDispatcher.
 
-``test_ring_dispatcher_ep.py`` runs on two cards, so it can only reach the
-intra-only or the inter-only topology -- never both levels at once. That leaves
-the interesting interactions uncovered: the per-round intra AllGather/
-ReduceScatter running *inside* an inter-node rotation, and the deferred wait on
-the in-flight output reduce (``_RingReduceScatterAsync``), which degenerates to
-a no-op whenever ``intra_group`` is None.
-
 Patching ``_RING_GPUS_PER_NODE`` below the world size forces the EP group to
-split into both an intra and an inter level, so a large enough even world size
-exercises both at once.
+split into both an intra-node and an inter-node level, so an even world size
+large enough exercises the per-round intra AllGather/ReduceScatter running
+inside an inter-node rotation -- the interaction a single-level run never hits.
 
-With an expert fn that is linear in the tokens, the ring's output is analytic:
-every rank's own rows come back scaled by EP, because the intra ReduceScatter
-sums the intra partials and the inter ReduceScatter sums the inter ones.
+With an expert fn linear in the tokens the ring's output is analytic: every
+rank's own rows come back scaled by EP (the intra ReduceScatter sums the intra
+partials, the inter ReduceScatter sums the inter ones), which lets the backward
+be checked element-wise against a closed-form gradient.
 
 Run with:
   python -m paddle.distributed.launch \
@@ -181,6 +176,19 @@ class _TwoLevelBase(unittest.TestCase):
         w.stop_gradient = False
         return idx, w
 
+    def _distinct_upstream(self, shape):
+        # Upstream cotangent distinct per (rank, element): makes any cross-round
+        # or cross-rank mis-routing of the backward observable, unlike a uniform
+        # ``out.sum()`` whose all-ones cotangent hides it.
+        n = 1
+        for d in shape:
+            n *= int(d)
+        g = paddle.arange(n, dtype="float32").reshape(shape) + float(
+            self.rank * n + 1
+        )
+        g.stop_gradient = True
+        return g
+
 
 class TestTwoLevelRing(_TwoLevelBase):
     def test_topology_is_two_level(self):
@@ -221,6 +229,63 @@ class TestTwoLevelRing(_TwoLevelBase):
                 2.0 * self.ep_size,
                 dtype="float32",
             ),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+    def test_rejects_inter_only_topology(self):
+        # One GPU per node group (G==1) is the inter-only degenerate ring the
+        # removed ep test used to reach; construction must reject it with a real
+        # RuntimeError (survives ``python -O``) rather than run a single-level
+        # ring. Replaces the EP=2 coverage the deleted file provided.
+        with self.assertRaisesRegex(RuntimeError, "two-level ring"):
+            _dispatcher(self.ep_group, self.num_experts, gpus_per_node=1)
+
+    def test_token_grad_is_routed_elementwise(self):
+        # Stronger than the symmetric 2*EP constant: with expert_fn(t)=t*scale
+        # the ring output is out[i]=scale*EP*x[i] elementwise, so a distinct
+        # per-(rank,element) cotangent pins x.grad=scale*EP*g_out and exposes a
+        # grad routed to the wrong round/rank/row.
+        scale = 2.0
+        disp = _dispatcher(self.ep_group, self.num_experts)
+        x = self._tokens()
+        idx, w = self._routing()
+        disp.pre_gate_token_ag(x)
+        out = disp.ring_forward(x, w, idx, _scale_expert_fn(scale), w.dtype)
+        g_out = self._distinct_upstream(out.shape)
+        paddle.autograd.backward([out], [g_out])
+        self.assertIsNotNone(x.grad)
+        np.testing.assert_allclose(
+            x.grad.numpy(),
+            (scale * self.ep_size) * g_out.numpy(),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+
+    def test_token_and_router_grad_match_analytic(self):
+        # Weighted expert out[i]=EP*x[i]*sum_k w[i,k] with a distinct cotangent
+        # pins BOTH input grads elementwise, numerically checking the routing
+        # pair's reverse path (not just its magnitude):
+        #   x.grad[i,j] = EP*s[i]*g_out[i,j]        (s[i]=sum_k w[i,k])
+        #   w.grad[i,k] = EP*sum_j(g_out[i,j]*x[i,j])
+        disp = _dispatcher(self.ep_group, self.num_experts)
+        x = self._tokens()
+        idx, w = self._routing()
+        disp.pre_gate_token_ag(x)
+        out = disp.ring_forward(x, w, idx, _weighted_expert_fn(), w.dtype)
+        g_out = self._distinct_upstream(out.shape)
+        paddle.autograd.backward([out], [g_out])
+        s = w.sum(axis=-1, keepdim=True)
+        np.testing.assert_allclose(
+            x.grad.numpy(),
+            (self.ep_size * s * g_out).numpy(),
+            rtol=1e-5,
+            atol=1e-5,
+        )
+        exp_w = self.ep_size * (g_out * x.detach()).sum(axis=-1, keepdim=True)
+        np.testing.assert_allclose(
+            w.grad.numpy(),
+            np.broadcast_to(exp_w.numpy(), [self.T_local, self.K]),
             rtol=1e-5,
             atol=1e-5,
         )
@@ -267,9 +332,10 @@ class TestTwoLevelRing(_TwoLevelBase):
     def test_repeated_forwards_are_stable(self):
         """A deferred reduce must not leak state across calls.
 
-        ``_RingReduceScatterAsync`` hands its task to the caller; if a handle
-        were ever left undrained the next call would read a half-written buffer,
-        which shows up as a second iteration disagreeing with the first.
+        The explicit driver hands each round's async ReduceScatter task to the
+        caller; if a handle were ever left undrained the next call would read a
+        half-written buffer, surfacing as a second iteration disagreeing with
+        the first.
         """
         disp = _dispatcher(self.ep_group, self.num_experts)
         idx, w = self._routing()
@@ -284,21 +350,6 @@ class TestTwoLevelRing(_TwoLevelBase):
                 np.testing.assert_allclose(
                     out.numpy(), first, rtol=1e-6, atol=1e-6
                 )
-
-    def test_async_reduce_handle_is_drained(self):
-        """_rs_async must leave a task behind, and _drain must consume it."""
-        from paddlefleet.transformer.moe import token_dispatcher as td
-
-        disp = _dispatcher(self.ep_group, self.num_experts)
-        part = paddle.randn([self.T_local * disp.G, self.d_latent])
-        handle = {}
-        out = disp._rs_async(part, disp.intra_group, handle)
-        self.assertIn("task", handle)
-        td.RingMoETokenDispatcher._drain([handle])
-        self.assertEqual(out.shape, [self.T_local, self.d_latent])
-        # Draining a taskless handle (degenerate group) must be a no-op.
-        self.assertIs(disp._rs_async(part, None, {}), part)
-        td.RingMoETokenDispatcher._drain([{}])
 
 
 class _Fp8StraightThrough(paddle.autograd.PyLayer):
@@ -429,6 +480,30 @@ class TestTwoLevelFp8Ring(_TwoLevelBase):
         out.sum().backward()
         self.assertIsNotNone(x.grad)
         self.assertEqual(x.grad.shape, [self.T_local, self.H])
+
+    def test_fp8_grad_matches_straight_through(self):
+        # fp8 straight-through expert: forward casts e4m3->bf16, backward passes
+        # the cotangent through unchanged, so the token-grad path is identity
+        # and x.grad=EP*g_out. A per-(rank,row) integer cotangent (exact in
+        # bf16) gives a real numerical reference instead of a not-None check.
+        disp = self._fp8_dispatcher()
+        idx, w = self._routing()
+        x = self._tokens128()
+        disp.pre_gate_token_ag(x)
+        out = disp.ring_forward(x, w, idx, _fp8_expert_fn(), w.dtype)
+        row_id = paddle.arange(self.T_local, dtype="float32").reshape(
+            [-1, 1]
+        ) + float(self.rank * self.T_local + 1)
+        g_out = paddle.tile(row_id, [1, self.H]).astype("bfloat16")
+        g_out.stop_gradient = True
+        paddle.autograd.backward([out], [g_out])
+        self.assertIsNotNone(x.grad)
+        np.testing.assert_allclose(
+            x.grad.astype("float32").numpy(),
+            (self.ep_size * g_out.astype("float32")).numpy(),
+            rtol=2e-2,
+            atol=2e-2,
+        )
 
 
 if __name__ == "__main__":
