@@ -226,7 +226,10 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           set -x
-          branch_version="${BRANCH//\//.}"
+          # Nightly ops wheels exist only for develop/release branches. In a stacked PR,
+          # BRANCH (base.ref) is the PR below; github.base_ref is the stack trunk.
+          ops_branch="${{ github.base_ref || github.ref_name }}"
+          branch_version="${ops_branch//\//.}"
           OPS_DST=paddlefleet_ops-0.0.0+${branch_version}-cp312-cp312-linux_x86_64.whl
           wget -q --no-proxy "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlefleet-ops/${OPS_DST}" -O dist/${OPS_DST}
           echo "OPS_WHL=${OPS_DST}" >> dist/whl_names.txt
