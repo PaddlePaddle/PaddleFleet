@@ -147,47 +147,30 @@ class RestoreFusedExpert3dLayoutTests(unittest.TestCase):
         )
 
     def test_shards_outside_the_fused_expert_layout_are_left_alone(self):
-        param3d = paddle.zeros([2, 3, 4], dtype="float32")
-        param2d = paddle.zeros([6, 4], dtype="float32")
         plain = _fp32([1.0, 2.0])
         wrong_key = "layers.0.mlp.up_proj.weight"
-        missing_key = "layers.9.mlp.grouped_gemm_experts.weight"
-        numel_key = "layers.1.mlp.grouped_gemm_experts.weight"
+        three_d_key = "layers.1.mlp.grouped_gemm_experts.weight"
         shards = {
             "plain": plain,
             wrong_key: ShardedWeight(
                 wrong_key, paddle.zeros([6, 4]), (6, 4), (6, 4), (0, 0)
             ),
-            missing_key: ShardedWeight(
-                missing_key, paddle.zeros([6, 4]), (6, 4), (6, 4), (0, 0)
-            ),
-            EXPERT_KEY: ShardedWeight(
-                EXPERT_KEY, param2d, (6, 4), (6, 4), (0, 0)
-            ),
-            numel_key: ShardedWeight(
-                numel_key,
+            # Already in the 3-D parameter layout (Qwen3-VL): nothing to do.
+            three_d_key: ShardedWeight(
+                three_d_key,
                 paddle.zeros([2, 3, 4]),
                 (2, 3, 4),
                 (2, 3, 4),
                 (0, 0, 0),
             ),
         }
-        second_key = "layers.2.mlp.grouped_gemm_experts.weight"
-        shards[second_key] = ShardedWeight(
-            second_key, paddle.zeros([5, 4]), (5, 4), (5, 4), (0, 0)
-        )
-        named = [
-            (wrong_key, param2d),
-            (EXPERT_KEY, param2d),
-            (numel_key, param3d),
-            (second_key, param3d),
-        ]
         before = {
             key: (shard, getattr(shard, "local_shape", None))
             for key, shard in shards.items()
         }
 
-        restore_fused_expert_3d_layout(_model(named), shards)
+        # No flat grouped-GEMM shard, so the parameters are never read.
+        restore_fused_expert_3d_layout(SimpleNamespace(), shards)
 
         for key, shard in shards.items():
             self.assertIs(shards[key], before[key][0])
@@ -195,6 +178,30 @@ class RestoreFusedExpert3dLayoutTests(unittest.TestCase):
                 getattr(shard, "local_shape", None), before[key][1]
             )
         self.assertIs(shards["plain"], plain)
+
+    def test_malformed_flat_expert_shards_are_rejected(self):
+        param3d = paddle.zeros([2, 3, 4], dtype="float32")
+        param2d = paddle.zeros([6, 4], dtype="float32")
+        cases = [
+            ("no matching model parameter", paddle.zeros([6, 4]), []),
+            ("expected a 3-D model parameter", param2d, [param2d]),
+            ("local tensor has 20 elements", paddle.zeros([5, 4]), [param3d]),
+        ]
+        for message, local, params in cases:
+            with self.subTest(message=message):
+                shard = ShardedWeight(
+                    EXPERT_KEY,
+                    local,
+                    tuple(local.shape),
+                    tuple(local.shape),
+                    (0, 0),
+                )
+                named = [(EXPERT_KEY, param) for param in params]
+                with self.assertRaisesRegex(ValueError, message):
+                    restore_fused_expert_3d_layout(
+                        _model(named), {EXPERT_KEY: shard}
+                    )
+                self.assertIs(shard.local_tensor, local)
 
 
 class FusedExpertOptimizerSaveViewsTests(unittest.TestCase):
@@ -585,7 +592,10 @@ class ResolveDeferredTokenNormalizationTests(unittest.TestCase):
     def _stub(self, compatible=True, group=None):
         return SimpleNamespace(
             model=SimpleNamespace(
-                config=SimpleNamespace(use_accuracy_compatible=compatible)
+                config=SimpleNamespace(
+                    use_accuracy_compatible=compatible,
+                    defer_token_normalization=True,
+                )
             ),
             _deferred_token_replica_group=lambda: group,
         )
@@ -710,6 +720,10 @@ class ApplyDeferredTokenNormalizationTests(unittest.TestCase):
         loss_mod.clear_pending_gradient_divisor()
 
     def _stub(self, model, optimizer):
+        # Deferred normalization only runs when the model opts in.
+        model.config = SimpleNamespace(
+            use_accuracy_compatible=True, defer_token_normalization=True
+        )
         return SimpleNamespace(model=model, optimizer=optimizer)
 
     def test_without_the_language_loss_module_the_helper_is_a_noop(self):

@@ -71,6 +71,12 @@ class TestDeferredTokenReduction(unittest.TestCase):
     def apply(self, optimizer, parameters):
         trainer = object.__new__(Trainer)
         trainer.optimizer = optimizer
+        # Deferred normalization only runs when the model opts in.
+        trainer.model = SimpleNamespace(
+            config=SimpleNamespace(
+                use_accuracy_compatible=True, defer_token_normalization=True
+            )
+        )
         self.language_loss.set_pending_gradient_divisor(4.0)
         trainer._apply_deferred_token_normalization(
             SimpleNamespace(parameters=lambda: iter(parameters))
