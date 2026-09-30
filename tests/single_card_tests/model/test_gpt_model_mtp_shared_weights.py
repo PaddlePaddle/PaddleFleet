@@ -486,7 +486,7 @@ class TestMTPDepthSampling(unittest.TestCase):
         self.assertEqual(len(ks), 1, f"K must be fixed within a step, got {ks}")
 
     def test_sampler_without_a_train_step_stays_constant(self):
-        """No TRAINER_GLOBAL_STEP -> step 0 for everyone, so K never moves.
+        """Neither step variable set -> step 0 for everyone, so K never moves.
 
         Correct but degenerate, and the sampler warns rather than failing: a
         training loop that does not export the step still trains, it just trains
@@ -495,11 +495,49 @@ class TestMTPDepthSampling(unittest.TestCase):
         """
         cfg = self._cfg([0.2, 0.3, 0.5])
         with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("TRAINER_GLOBAL_STEP", None)
+            for name in ("TRAINER_GLOBAL_STEP", "PDC_INIT_STEP"):
+                os.environ.pop(name, None)
             ks = {draw_mtp_sampled_depth(cfg) for _ in range(20)}
         with _at_train_step(0):
             self.assertEqual(ks, {draw_mtp_sampled_depth(cfg)})
         self.assertEqual(len(ks), 1)
+
+    def test_sampler_step_sources_match_has_recovered(self):
+        """The step is read from the same pair, in the same order, as
+        recompute_utils.has_recovered(): TRAINER_GLOBAL_STEP first, then
+        PDC_INIT_STEP.
+
+        Reusing that reader's contract is the point -- these variables already
+        exist in the repo and the pretraining trainers already write the first
+        one, so sampling adds no new launcher requirement. The order matters:
+        PDC_INIT_STEP is fixed for a job, so preferring it would pin K.
+        """
+        cfg = self._cfg([0.2, 0.3, 0.5])
+        # Steps chosen so the two sources give DIFFERENT K, otherwise the
+        # precedence assertion below would hold whichever one was read.
+        with _at_train_step(3):
+            k_trainer = draw_mtp_sampled_depth(cfg)
+        with mock.patch.dict(os.environ, {"PDC_INIT_STEP": "2"}):
+            os.environ.pop("TRAINER_GLOBAL_STEP", None)
+            k_pdc = draw_mtp_sampled_depth(cfg)
+        self.assertNotEqual(
+            k_trainer,
+            k_pdc,
+            "pick steps whose K differ or this test is vacuous",
+        )
+
+        # both set -> TRAINER_GLOBAL_STEP wins
+        with mock.patch.dict(
+            os.environ, {"TRAINER_GLOBAL_STEP": "3", "PDC_INIT_STEP": "2"}
+        ):
+            self.assertEqual(draw_mtp_sampled_depth(cfg), k_trainer)
+
+        # a malformed value must not be trusted; fall through to the next name
+        with mock.patch.dict(
+            os.environ,
+            {"TRAINER_GLOBAL_STEP": "not-an-int", "PDC_INIT_STEP": "2"},
+        ):
+            self.assertEqual(draw_mtp_sampled_depth(cfg), k_pdc)
 
     def test_sampler_fixed_k1(self):
         """P(K=1)=1 -> always sample K=1."""

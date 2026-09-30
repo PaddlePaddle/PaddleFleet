@@ -264,13 +264,15 @@ class TransformerConfig(ModelParallelConfig):
       sum_j w_j == 1. K is a pure function of (config.seed, train step): the RNG is
       seeded per call from those two values, with the step read from the
       TRAINER_GLOBAL_STEP environment variable the trainer exports before every
-      forward, and config.seed defaulting to 0 since TransformerConfig has no seed
-      field of its own. No state is kept anywhere, so every rank and every call
-      site derives the same K with no collective -- MoE expert-parallel all-to-all
-      stays consistent, and resuming from a checkpoint continues the same K
-      sequence for free because global_step is restored before the first forward.
-      All micro-batches of one optimizer step share a K, which also keeps the
-      per-rank compute of a pipeline step balanced.
+      forward (falling back to PDC_INIT_STEP, the same pair and order
+      recompute_utils.has_recovered already reads), and config.seed defaulting to
+      0 since TransformerConfig has no seed field of its own. No state is kept
+      anywhere, so every rank and every call site derives the same K with no
+      collective -- MoE expert-parallel all-to-all stays consistent, and resuming
+      from a checkpoint continues the same K sequence for free because global_step
+      is restored before the first forward. All micro-batches of one optimizer
+      step share a K, which also keeps the per-rank compute of a pipeline step
+      balanced.
     Works under pipeline_model_parallel_size > 1 with no layout restriction: the MTP
     depths and the MTP LM head may land on different pipeline chunks, since each
     re-derives K from (seed, step) rather than reading it off dict_args. dict_args

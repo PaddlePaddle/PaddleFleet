@@ -775,7 +775,7 @@ class MTPLossAutoScaler(paddle.autograd.PyLayer):
         MTPLossAutoScaler.main_loss_backward_scale = scale
 
 
-_MTP_SAMPLING_STEP_ENV = "TRAINER_GLOBAL_STEP"
+_MTP_SAMPLING_STEP_ENV = ("TRAINER_GLOBAL_STEP", "PDC_INIT_STEP")
 _warned_missing_train_step = False
 
 
@@ -788,26 +788,37 @@ def _current_train_step():
     resume bookkeeping, and every rank and pipeline stage derives the same K for
     the same step without communicating.
 
-    A training loop that does not export it leaves the step at 0, which makes K
-    constant for the whole run -- correct but not sampling anything. That is worth
-    a warning rather than a silent degradation, so warn once.
+    These are not new variables invented for sampling: ``recompute_utils``'s
+    ``has_recovered()`` already reads exactly this pair, in this order, and the
+    pretraining trainers already write ``TRAINER_GLOBAL_STEP``. Mirroring that
+    reader keeps one contract in the repo rather than two.
+
+    A training loop that exports neither leaves the step at 0, which makes K
+    constant for the whole run -- correct (``w_j = E[1{K>=j}/K]`` depends only on
+    the configured distribution) but not sampling anything. That is worth a
+    warning rather than a silent degradation, so warn once.
     """
     global _warned_missing_train_step
-    raw = os.environ.get(_MTP_SAMPLING_STEP_ENV)
-    if raw is None:
-        if not _warned_missing_train_step:
-            _warned_missing_train_step = True
-            logger.warning(
-                f"mtp_depth_sampling is on but {_MTP_SAMPLING_STEP_ENV} is not "
-                "set, so the sampled depth cannot advance and K stays constant "
-                "for the whole run. The trainer is expected to export it once "
-                "per micro-batch."
-            )
-        return 0
-    try:
-        return int(raw)
-    except ValueError:
-        return 0
+    for name in _MTP_SAMPLING_STEP_ENV:
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        try:
+            return int(raw)
+        except ValueError:
+            # A malformed value is a broken launcher, not a missing one; fall
+            # through to the next name rather than trusting it.
+            continue
+    if not _warned_missing_train_step:
+        _warned_missing_train_step = True
+        logger.warning(
+            "mtp_depth_sampling is on but none of "
+            f"{'/'.join(_MTP_SAMPLING_STEP_ENV)} holds a usable step, so the "
+            "sampled depth cannot advance and K stays constant for the whole "
+            "run. The trainer is expected to export TRAINER_GLOBAL_STEP once "
+            "per micro-batch."
+        )
+    return 0
 
 
 def draw_mtp_sampled_depth(config):
