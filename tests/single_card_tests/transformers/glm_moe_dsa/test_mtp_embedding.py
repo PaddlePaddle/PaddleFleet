@@ -26,6 +26,7 @@ the main path independent of legacy environment settings.
 
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import paddle
@@ -69,11 +70,20 @@ def _make_embedding(*, use_accuracy_compatible, num_nextn_predict_layers):
 
     seen = {}
 
-    def _embed(input_ids=None, position_ids=None):
-        seen["input_ids"] = input_ids.clone()
-        return paddle.zeros([input_ids.shape[0], input_ids.shape[1], 4])
+    class _Lookup:
+        """Embedding double; ``seen`` keeps the carrier (first) lookup.
 
-    emb.embedding = _embed
+        Under accuracy compatibility every MTP depth looks the embedding up
+        again, so later calls must not overwrite the carrier ids.
+        """
+
+        tp_group = SimpleNamespace(nranks=2)
+
+        def __call__(self, input_ids=None, position_ids=None):
+            seen.setdefault("input_ids", input_ids.clone())
+            return paddle.zeros([input_ids.shape[0], input_ids.shape[1], 4])
+
+    emb.embedding = _Lookup()
     return emb, seen
 
 
@@ -85,6 +95,18 @@ def _carrier(seq_len, tail):
 
 class TestGPTEmbeddingMTPCarrierTail(unittest.TestCase):
     """The tail zeroing must be exact, gated, and confined to the tail."""
+
+    def setUp(self):
+        # The embedding reads the live TP group size; on one card it is always
+        # 1. Report the double's group so the carrier is looked up in one piece,
+        # as with the config's tensor_model_parallel_size=2. The TP1 split
+        # lookup is covered in test_coverage_gpt_embedding_paths.py.
+        patcher = patch(
+            "paddlefleet.models.gpt.gpt_embedding.get_pg_size",
+            side_effect=lambda group: 1 if group is None else group.nranks,
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
     def test_tail_is_zeroed_under_accuracy_compatible(self):
