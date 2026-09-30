@@ -293,6 +293,30 @@ def _align_dsa_indexer_mask(
     )
 
 
+def _sparse_index_mask(topk_indices: Tensor, sq: int, sk: int) -> Tensor:
+    """Return a ``[b, sq, sk]`` mask that is 0 at top-k keys and -inf elsewhere.
+
+    Invalid (``-1``) top-k entries are routed to an extra column that is then
+    dropped. Clipping them to 0 would scatter ``-inf`` and a valid key 0 into
+    the same slot of one ``put_along_axis`` call, so key 0 could be masked.
+    """
+    index_mask = paddle.full(
+        [topk_indices.shape[0], sq, sk + 1],
+        fill_value=float("-inf"),
+        dtype="float32",
+    )
+    safe_topk = paddle.where(
+        topk_indices >= 0, topk_indices, paddle.full_like(topk_indices, sk)
+    )
+    index_mask = paddle.put_along_axis(
+        index_mask,
+        safe_topk,
+        paddle.zeros(topk_indices.shape, dtype="float32"),
+        axis=-1,
+    )
+    return index_mask[:, :, :sk]
+
+
 # ---------------------------------------------------------------------------
 # DSA Indexer Sublayers Spec
 # ---------------------------------------------------------------------------
@@ -2026,29 +2050,7 @@ class DSAttention(FleetLayer):
 
         # Build sparse mask. Use the indexer-gathered sequence so top-k
         # indices (full seq under SP) and the causal mask share a layout.
-        index_mask = paddle.full(
-            [b, indexer_sq, indexer_sk],
-            fill_value=float("-inf"),
-            dtype="float32",
-        )
-        zeros = paddle.zeros(
-            [
-                topk_indices.shape[0],
-                topk_indices.shape[1],
-                topk_indices.shape[2],
-            ],
-            dtype="float32",
-        )
-        valid_topk = topk_indices >= 0
-        safe_topk = paddle.clip(topk_indices, min=0, max=indexer_sk - 1)
-        index_mask = paddle.put_along_axis(
-            index_mask,
-            safe_topk,
-            paddle.where(
-                valid_topk, zeros, paddle.full_like(zeros, float("-inf"))
-            ),
-            axis=-1,
-        )
+        index_mask = _sparse_index_mask(topk_indices, indexer_sq, indexer_sk)
         # Merge causal + index
         index_mask = index_mask + causal_mask.unsqueeze(0)
         if sp_enabled:
@@ -2070,8 +2072,9 @@ class DSAttention(FleetLayer):
                 if aligned_attn.ndim == 3:
                     aligned_attn = aligned_attn.unsqueeze(1)
                 if sp_enabled:
+                    # Slice query rows (axis -2); axis 1 is the head axis here.
                     aligned_attn = aligned_attn[
-                        :, row_start : row_start + sq, :
+                        ..., row_start : row_start + sq, :
                     ]
                 combined_mask = aligned_attn.cast("float32") + combined_mask
 

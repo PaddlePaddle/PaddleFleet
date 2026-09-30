@@ -18,6 +18,7 @@ Single card only: ``gather_from_sequence_parallel_region`` is patched.
 
 Surface under test:
   * ``_normalize_dsa_mask`` / ``_align_dsa_indexer_mask`` layout alignment
+  * ``_sparse_index_mask`` top-k scatter with invalid (-1) entries
 """
 
 import unittest
@@ -29,6 +30,7 @@ import paddle
 from paddlefleet.transformer.dsa_attention import (
     _align_dsa_indexer_mask,
     _normalize_dsa_mask,
+    _sparse_index_mask,
 )
 
 MODULE = "paddlefleet.transformer.dsa_attention"
@@ -124,6 +126,38 @@ class TestNormalizeAndAlignIndexerMask(unittest.TestCase):
         self.assertEqual(list(aligned.shape), [1, 6, 4])
         expected = paddle.concat([mask, mask], axis=-1)
         self.assertTrue(_true(_equal_all(aligned, expected)))
+
+
+class TestSparseIndexMask(unittest.TestCase):
+    """Top-k scatter into the sparse attention mask."""
+
+    def _expected(self, rows, sk):
+        expected = paddle.full([1, len(rows), sk], float("-inf"))
+        for row, indices in enumerate(rows):
+            for index in indices:
+                if index >= 0:
+                    expected[0, row, index] = 0.0
+        return expected
+
+    def test_invalid_entries_do_not_mask_a_valid_key_zero(self):
+        # Causal rows with fewer visible keys than top-k pad with -1, and the
+        # valid key 0 shares a row with those -1 entries.
+        rows = [[0, -1, -1], [1, 0, -1], [2, 1, 0], [3, 2, 1]]
+        topk = paddle.to_tensor([rows], dtype="int64")
+
+        mask = _sparse_index_mask(topk, 4, 4)
+
+        self.assertEqual(list(mask.shape), [1, 4, 4])
+        self.assertTrue(_true(_equal_all(mask, self._expected(rows, 4))))
+
+    def test_all_invalid_row_stays_fully_masked(self):
+        topk = paddle.to_tensor([[[-1, -1], [0, 1]]], dtype="int64")
+
+        mask = _sparse_index_mask(topk, 2, 3)
+
+        self.assertTrue(
+            _true(_equal_all(mask, self._expected([[-1, -1], [0, 1]], 3)))
+        )
 
 
 if __name__ == "__main__":
