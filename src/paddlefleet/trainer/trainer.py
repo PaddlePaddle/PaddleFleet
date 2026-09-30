@@ -347,12 +347,19 @@ def _expert_3d_coordinates(sharded_weight, param_shape):
 
 def restore_fused_expert_3d_layout(model, model_sharded_state_dict):
     """Restore 3-D grouped-GEMM expert weights for FlexCheckpoint at sharding=1."""
-    named_params = dict(model.named_parameters())
+    named_params = None
     for key, sharded_weight in model_sharded_state_dict.items():
         if not isinstance(sharded_weight, ShardedWeight):
             continue
         if "grouped_gemm_experts.weight" not in key:
             continue
+        local = sharded_weight.local_tensor
+        # Only the row-flattened 2-D export needs restoring; models such as
+        # Qwen3-VL already shard their experts in the 3-D parameter layout.
+        if len(local.shape) != 2:
+            continue
+        if named_params is None:
+            named_params = dict(model.named_parameters())
         param = _sharded_parameter(model, named_params, key)
         if param is None:
             raise ValueError(
@@ -363,10 +370,7 @@ def restore_fused_expert_3d_layout(model, model_sharded_state_dict):
                 f"Cannot restore fused expert shard {key}: expected a 3-D model parameter, "
                 f"got shape {tuple(param.shape)}."
             )
-        local = sharded_weight.local_tensor
         param_shape = tuple(param.shape)
-        if tuple(local.shape) == param_shape:
-            continue
         if int(local.numel()) != int(param.numel()):
             raise ValueError(
                 f"Cannot restore fused expert shard {key}: local tensor has "

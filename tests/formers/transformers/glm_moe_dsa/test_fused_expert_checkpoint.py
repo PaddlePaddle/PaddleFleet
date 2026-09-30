@@ -122,6 +122,30 @@ class TestRestoreFusedExpert3DLayout(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "3-D model parameter"):
             restore_fused_expert_3d_layout(model, {key: shard})
 
+    def test_skips_shards_already_in_3d_layout(self):
+        import paddle
+        from paddle.distributed import ShardedWeight
+        from paddlefleet.trainer.trainer import restore_fused_expert_3d_layout
+
+        # Qwen3-VL keeps grouped-GEMM experts 3-D and names them under
+        # ``model.language_model``; nothing needs restoring, so the model's
+        # parameters must not even be looked up.
+        key = "model.language_model.layers.0.mlp.grouped_gemm_experts.weight1"
+        local = paddle.zeros([2, 4, 6], dtype="float32")
+        shard = ShardedWeight(
+            key=key,
+            local_tensor=local,
+            local_shape=(2, 4, 6),
+            global_shape=(2, 4, 6),
+            global_offset=(0, 0, 0),
+        )
+
+        restore_fused_expert_3d_layout(SimpleNamespace(), {key: shard})
+
+        self.assertIs(shard.local_tensor, local)
+        self.assertEqual(shard.local_shape, (2, 4, 6))
+        self.assertEqual(shard.global_offset, (0, 0, 0))
+
 
 class TestFusedExpertOptimizerSave(unittest.TestCase):
     def make_trainer(self, dtype="bfloat16"):
