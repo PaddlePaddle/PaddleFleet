@@ -1717,8 +1717,10 @@ class DSAttention(FleetLayer):
                     parameter.stop_gradient = True
 
         # These fields are part of TransformerConfig. Read them directly so a
-        # malformed DSA configuration cannot silently disable the loss path.
-        self.dsa_indexer_loss_coeff = float(config.dsa_indexer_loss_coeff)
+        # missing field fails loudly; ``None`` keeps meaning "no indexer loss".
+        self.dsa_indexer_loss_coeff = float(
+            config.dsa_indexer_loss_coeff or 0.0
+        )
         self.dsa_indexer_use_sparse_loss = config.dsa_indexer_use_sparse_loss
 
     def _get_index_share_topk_holder(

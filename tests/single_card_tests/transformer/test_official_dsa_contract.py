@@ -326,7 +326,9 @@ class TestGlm52OfficialDsaHfFields(TestCase):
             num_hidden_layers=2,
             dsa_indexer_types=["full", "shared"],
         )
-        with self.assertRaisesRegex(ValueError, "outside dsa_indexer_types"):
+        # Layer 2 is past num_hidden_layers: the lookup fails instead of
+        # falling back to the periodic rule.
+        with self.assertRaisesRegex(IndexError, r"outside \[0, 2\)"):
             resolve_dsa_indexer_layout(config, 2)
 
     def test_producer_and_consumer_holder_keys_match_for_legal_share_layouts(
