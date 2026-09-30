@@ -42,8 +42,8 @@ from paddlefleet.tensor_parallel.mappings import (
 from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.kimi_delta_attention import build_cu_seqlens
 from paddlefleet.transformer.layer import FleetLayer
-from paddlefleet.utils.accuracy_target import targets_hf
 from paddlefleet.utils import get_pg_size, use_dsv4_accuracy_compatible
+from paddlefleet.utils.accuracy_target import targets_hf
 
 if TYPE_CHECKING:
     from paddle import Tensor
