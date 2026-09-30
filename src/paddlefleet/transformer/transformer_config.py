@@ -255,8 +255,8 @@ class TransformerConfig(ModelParallelConfig):
       only MTP depths 1..K; depths >K are skipped (no transformer_layer forward, no
       vocab projection, no loss). The loss averages over the K computed depths, so
       depth j's effective weight is w_j = E[1{K>=j}/K] and sum_j w_j == 1. K is
-      sampled once per micro-batch from a private RNG seeded by config.seed,
-      mtp_depth_sampling_seed_offset and a per-call counter, so every rank running
+      sampled once per micro-batch from a private RNG seeded by config.seed and a
+      per-call counter, so every rank running
       the MTP layers derives the same K with no collective; MoE expert-parallel
       all-to-all therefore stays consistent.
     Works under pipeline_model_parallel_size > 1, but requires the whole MTP block
@@ -273,24 +273,6 @@ class TransformerConfig(ModelParallelConfig):
     Works under expert_model_parallel_size > 1: every EP rank derives the same K,
     so the MoE all-to-all of each computed depth stays matched; covered by
     tests/multi_card_tests/moe/test_gpt_mtp_depth_sampling_ep.py."""
-
-    mtp_depth_sampling_seed_offset: int = 0
-    """Offset added to the mtp_depth_sampling draw sequence, measured in draws.
-
-    The per-call counter behind the draw is runtime state and resets to 0 when a
-    job restarts, so a resumed run would replay the K sequence from its start.
-    P(K) -- and therefore w_j = E[1{K>=j}/K] -- depends only on the configured
-    distribution, not on where the sequence starts, so the loss stays correctly
-    normalised either way; what would reset is continuity and reproducibility of
-    the stream.
-
-    Trainer.train() sets this automatically when resuming from a checkpoint, to
-    global_step * gradient_accumulation_steps, i.e. the number of draws already
-    consumed; global_step is all_gather-checked there, so every rank gets the
-    same offset. Set it by hand only when driving the training loop yourself.
-    A warm start (ignore_load_lr_and_optim=True) is a fresh run rather than a
-    resumed one, so it deliberately keeps the offset at 0. Ignored when
-    mtp_depth_sampling is None."""
 
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
@@ -2454,18 +2436,6 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError(
                     "mtp_depth_sampling must sum to 1.0 (it is the distribution "
                     f"P(K=k)), got sum={_s} for {self.mtp_depth_sampling}"
-                )
-            # Raise, not assert: a bogus offset would silently shift the draw
-            # sequence rather than fail, and the effect is invisible in the loss.
-            if (
-                isinstance(self.mtp_depth_sampling_seed_offset, bool)
-                or not isinstance(self.mtp_depth_sampling_seed_offset, int)
-                or self.mtp_depth_sampling_seed_offset < 0
-            ):
-                raise ValueError(
-                    "mtp_depth_sampling_seed_offset must be a non-negative int "
-                    "(it counts draws already consumed), got "
-                    f"{self.mtp_depth_sampling_seed_offset!r}"
                 )
 
         if self.enable_mtp_magic_send:

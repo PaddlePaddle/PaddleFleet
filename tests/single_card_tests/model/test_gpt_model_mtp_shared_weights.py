@@ -35,7 +35,7 @@ from paddlefleet.models.gpt.gpt_model import GPTModel
 from paddlefleet.transformer.multi_token_prediction import (
     MultiTokenPredictionLayer,
     resolve_mtp_sampled_depth,
-    resume_mtp_sampling_offset,
+    resume_mtp_sampling_counters,
 )
 from paddlefleet.transformer.transformer_layer import TransformerLayer
 
@@ -418,12 +418,13 @@ class TestMTPDepthSampling(unittest.TestCase):
         # a constant K would make the equality above vacuous
         self.assertGreater(len(set(drawn_a)), 1)
 
-    def test_seed_offset_continues_the_draw_sequence(self):
-        """mtp_depth_sampling_seed_offset=n must resume the stream after n draws.
+    def test_resumed_counters_continue_the_draw_sequence(self):
+        """Fast-forwarding the counter must resume the stream, not replay it.
 
-        This is the answer to a restart zeroing the per-call counter: the offset is
-        measured in draws, so setting it to the consumed micro-batch count makes
-        the resumed job continue instead of replaying from the start.
+        This is the answer to a restart zeroing the per-call counter. The counter
+        IS the draw index, so setting it to the number of draws already consumed
+        makes the resumed job carry on from there. Nothing about the config takes
+        part -- config stays static across the restart.
         """
         config = self._cfg([0.2, 0.3, 0.5])
         layer = self._mtp0(gpt_builder(config, num_stages=1))
@@ -433,8 +434,9 @@ class TestMTPDepthSampling(unittest.TestCase):
         ]
 
         resumed_config = self._cfg([0.2, 0.3, 0.5])
-        resumed_config.mtp_depth_sampling_seed_offset = 3
-        resumed = self._mtp0(gpt_builder(resumed_config, num_stages=1))
+        resumed_model = gpt_builder(resumed_config, num_stages=1)
+        resume_mtp_sampling_counters(resumed_model, 3, 1)
+        resumed = self._mtp0(resumed_model)
         resumed.train()
         resumed_run = [
             resolve_mtp_sampled_depth(resumed, resumed_config, {})
@@ -581,44 +583,51 @@ class TestMTPDepthSampling(unittest.TestCase):
         ):
             head.forward({"hidden_states": hidden})
 
-    def test_resume_offset_helper_sets_or_stays_out_of_the_way(self):
-        """The trainer-side hook: set the offset when sampling is on, no-op else.
+    def test_resume_counter_hook_sets_or_stays_out_of_the_way(self):
+        """The trainer-side hook: fast-forward the counters, or do nothing.
 
-        One optimizer step consumes gradient_accumulation_steps draws, so the
-        offset is global_step times that. Returning None rather than raising is
-        deliberate -- the trainer calls this on the resume path and a resume must
-        never fail over a sampling detail.
+        One optimizer step consumes gradient_accumulation_steps draws, so the draw
+        count is global_step times that. It must write runtime state on the layers
+        and leave the config alone -- config is static, it must not vary with
+        resume state. Returning None rather than raising is deliberate: the trainer
+        calls this on the resume path and a resume must never fail over a sampling
+        detail.
         """
-
-        class _Wrapper:
-            def __init__(self, config=None, layers=None):
-                if config is not None:
-                    self.config = config
-                if layers is not None:
-                    self._layers = layers
-
         cfg = self._cfg([0.34, 0.33, 0.33])
-        self.assertEqual(
-            resume_mtp_sampling_offset(_Wrapper(config=cfg), 7, 4), 28
+        model = gpt_builder(cfg, num_stages=1)
+
+        self.assertEqual(resume_mtp_sampling_counters(model, 7, 4), 28)
+        for layer in _mtp_layers(model):
+            self.assertEqual(layer._mtp_sampling_counter, 28)
+        assert not hasattr(cfg, "mtp_depth_sampling_seed_offset"), (
+            "the resume path must not push state into the config"
         )
-        self.assertEqual(cfg.mtp_depth_sampling_seed_offset, 28)
 
         # a distributed wrapper keeps the model under _layers
+        class _Wrapped:
+            def __init__(self, inner):
+                self._layers = inner
+
         wrapped_cfg = self._cfg([0.34, 0.33, 0.33])
-        inner = _Wrapper(config=wrapped_cfg)
+        wrapped = gpt_builder(wrapped_cfg, num_stages=1)
         self.assertEqual(
-            resume_mtp_sampling_offset(_Wrapper(layers=inner), 3, 2), 6
+            resume_mtp_sampling_counters(_Wrapped(wrapped), 2, 5), 10
         )
-        self.assertEqual(wrapped_cfg.mtp_depth_sampling_seed_offset, 6)
+        for layer in _mtp_layers(wrapped):
+            self.assertEqual(layer._mtp_sampling_counter, 10)
 
+        # sampling off -> nothing to continue
         disabled = self._cfg(None)
-        self.assertIsNone(
-            resume_mtp_sampling_offset(_Wrapper(config=disabled), 7, 4)
-        )
-        self.assertEqual(disabled.mtp_depth_sampling_seed_offset, 0)
+        off_model = gpt_builder(disabled, num_stages=1)
+        self.assertIsNone(resume_mtp_sampling_counters(off_model, 7, 4))
+        for layer in _mtp_layers(off_model):
+            assert not hasattr(layer, "_mtp_sampling_counter")
 
-        # nothing that carries a config at all
-        self.assertIsNone(resume_mtp_sampling_offset(_Wrapper(), 7, 4))
+        # nothing that carries a config or MTP layers at all
+        class _Bare:
+            pass
+
+        self.assertIsNone(resume_mtp_sampling_counters(_Bare(), 7, 4))
 
     def test_local_chunks_walks_virtual_pipeline_chunks(self):
         """Under VPP one rank holds several chunks, each its own p2p island.

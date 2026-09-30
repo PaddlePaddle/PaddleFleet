@@ -3084,13 +3084,14 @@ class Trainer:
             # sequence from its beginning. global_step was just restored -- and
             # all_gather'd above to prove every rank agrees on it -- so hand it
             # to the sampler as the number of draws already consumed. The helper
-            # owns the config lookup, the no-op cases and the logging so this
-            # file only carries the call.
+            # owns the lookup, the no-op cases and the logging, and it writes
+            # runtime state on the MTP layers rather than touching the config,
+            # which stays static.
             from paddlefleet.transformer.multi_token_prediction import (
-                resume_mtp_sampling_offset,
+                resume_mtp_sampling_counters,
             )
 
-            resume_mtp_sampling_offset(
+            resume_mtp_sampling_counters(
                 self.model,
                 self.state.global_step,
                 args.gradient_accumulation_steps,

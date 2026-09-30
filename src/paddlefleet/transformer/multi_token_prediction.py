@@ -781,8 +781,7 @@ def draw_mtp_sampled_depth(owner, config):
     D=num_nextn_predict_layers. Returns D when sampling is disabled.
 
     The draw is DETERMINISTIC and collective-free: a private RNG is seeded by
-    ``config.seed``, ``config.mtp_depth_sampling_seed_offset`` and ``owner``'s own
-    per-call counter. A world-group ``broadcast(src=0)`` -- the original
+    ``config.seed`` and ``owner``'s own per-call counter. A world-group ``broadcast(src=0)`` -- the original
     mechanism -- deadlocks at pp>1, because only the last pipeline stage runs the
     MTP layers while src=0 sits on the first stage and never joins.
 
@@ -803,14 +802,14 @@ def draw_mtp_sampled_depth(owner, config):
     used elsewhere is untouched.
 
     Restart behaviour: the counter is runtime state and resets to 0, so a resumed
-    job would replay the draw sequence from its start. ``Trainer.train()`` sets
-    ``config.mtp_depth_sampling_seed_offset`` to the number of draws already
-    consumed when it restores a checkpoint, which makes the sequence continue
-    instead. Even without that, ``P(K)`` and therefore the effective per-depth
-    weight ``w_j = E[1{K>=j}/K]`` depend only on the configured distribution, not
-    on where the sequence starts, so the loss stays correctly normalised
-    (``sum_j w_j == 1``); what the offset buys is continuity and reproducibility
-    of the stream.
+    job would replay the draw sequence from its start. ``Trainer.train()`` calls
+    :func:`resume_mtp_sampling_counters` when it restores a checkpoint, which
+    fast-forwards the counters to the number of draws already consumed. Even
+    without that, ``P(K)`` and therefore the effective per-depth weight
+    ``w_j = E[1{K>=j}/K]`` depend only on the configured distribution, not on where
+    the sequence starts, so the loss stays correctly normalised
+    (``sum_j w_j == 1``); what the fast-forward buys is continuity and
+    reproducibility of the stream.
 
     The counter only advances outside a recompute replay, mirroring the
     magic-count handling further down this file. The caller's primary guard is
@@ -829,10 +828,7 @@ def draw_mtp_sampled_depth(owner, config):
     counter = getattr(owner, "_mtp_sampling_counter", 0)
     owner._mtp_sampling_counter = counter
     base = int(getattr(config, "seed", 0) or 0)
-    # Measured in draws, so bumping it by the consumed micro-batch count resumes
-    # the sequence where the previous run left off.
-    offset = int(getattr(config, "mtp_depth_sampling_seed_offset", 0) or 0)
-    seed = base * 1_000_003 + offset + counter
+    seed = base * 1_000_003 + counter
     if paddle.is_grad_enabled() or not owner.training:
         owner._mtp_sampling_counter = counter + 1
     rng = np.random.default_rng(seed)
@@ -840,34 +836,58 @@ def draw_mtp_sampled_depth(owner, config):
     return max(1, min(k, d))
 
 
-def resume_mtp_sampling_offset(model, global_step, gradient_accumulation_steps):
-    """Point the depth sampler at the draw a resumed run should continue from.
+def resume_mtp_sampling_counters(
+    model, global_step, gradient_accumulation_steps
+):
+    """Fast-forward every MTP depth's draw counter to where a resume left off.
 
-    The per-call counter behind :func:`draw_mtp_sampled_depth` starts at 0 in a
-    fresh process, so without this a resumed job replays the K sequence from its
-    beginning. One optimizer step consumes ``gradient_accumulation_steps``
-    micro-batches and therefore that many draws, so ``global_step`` times that is
-    the number already spent. The offset only has to be rank-identical and
-    monotonic across restarts -- being a few draws off changes nothing -- and the
-    trainer reads ``global_step`` from the checkpoint after all_gather-checking it
-    across ranks, which supplies both properties.
+    The counter behind :func:`draw_mtp_sampled_depth` is the draw index, and it
+    starts at 0 in a fresh process, so without this a resumed job replays the K
+    sequence from its beginning. One optimizer step consumes
+    ``gradient_accumulation_steps`` micro-batches and therefore that many draws,
+    so ``global_step`` times that is the number already spent. Setting the counter
+    keeps this out of ``TransformerConfig``: the config stays static, and the only
+    thing that varies with resume state is runtime state on the layers, which is
+    where it belongs.
 
-    ``model`` may already be a distributed wrapper, so the config is looked up on
-    it and then on the layers it wraps. Returns the offset it set, or None when
-    there is nothing to do: sampling off, or no config reachable at all. The whole
-    thing lives here rather than in the trainer so it stays unit-testable, and it
-    returns instead of raising because it runs on the resume path -- a resume must
-    never fail over a sampling detail.
+    The counter only has to be rank-identical and monotonic across restarts --
+    being a few draws off changes nothing -- and the trainer reads ``global_step``
+    from the checkpoint after all_gather-checking it across ranks, which supplies
+    both. Only the first MTP depth on a stage actually draws, but every depth is
+    set so the invariant holds whichever one gets there first.
+
+    ``model`` may already be a distributed wrapper, so both it and the layers it
+    wraps are checked. Returns the draw count it applied, or None when there is
+    nothing to do: sampling off, or no MTP layers reachable. It returns instead of
+    raising because it runs on the resume path -- a resume must never fail over a
+    sampling detail.
     """
+    inner = getattr(model, "_layers", None)
     config = getattr(model, "config", None)
     if config is None:
-        config = getattr(getattr(model, "_layers", None), "config", None)
+        config = getattr(inner, "config", None)
     if config is None or not getattr(config, "mtp_depth_sampling", None):
         return None
-    offset = int(global_step) * int(gradient_accumulation_steps)
-    config.mtp_depth_sampling_seed_offset = offset
-    logger.info(f"Continuing MTP depth sampling from draw {offset}")
-    return offset
+    collect = getattr(model, "_get_all_mtp_layers", None) or getattr(
+        inner, "_get_all_mtp_layers", None
+    )
+    if collect is None:
+        return None
+    drawn = int(global_step) * int(gradient_accumulation_steps)
+    sites = [
+        layer
+        for layer in collect()
+        if isinstance(layer, MultiTokenPredictionLayer)
+    ]
+    if not sites:
+        return None
+    for site in sites:
+        site._mtp_sampling_counter = drawn
+    logger.info(
+        f"Continuing MTP depth sampling from draw {drawn} "
+        f"on {len(sites)} MTP depth(s)"
+    )
+    return drawn
 
 
 def resolve_mtp_sampled_depth(owner, config, dict_args):

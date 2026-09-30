@@ -673,44 +673,6 @@ class TestMTPDepthSamplingValidation(unittest.TestCase):
         self.assertEqual(config.mtp_depth_sampling, [0.6, 0.3, 0.1])
         self.assertTrue(config.mtp_shared_weights)
 
-    def test_seed_offset_defaults_to_zero_and_accepts_a_count(self):
-        """The offset resumes the draw sequence; it is measured in draws."""
-        config = TransformerConfig(
-            num_nextn_predict_layers=3,
-            mtp_depth_sampling=[0.6, 0.3, 0.1],
-        )
-        self.assertEqual(config.mtp_depth_sampling_seed_offset, 0)
-        config = TransformerConfig(
-            num_nextn_predict_layers=3,
-            mtp_depth_sampling=[0.6, 0.3, 0.1],
-            mtp_depth_sampling_seed_offset=1024,
-        )
-        self.assertEqual(config.mtp_depth_sampling_seed_offset, 1024)
-
-    def test_seed_offset_rejects_negative_and_non_int(self):
-        """A bogus offset would silently shift the sequence, so raise instead."""
-        for bad in (-1, 1.5, True, "8"):
-            with (
-                self.subTest(offset=bad),
-                self.assertRaisesRegex(
-                    ValueError,
-                    r"mtp_depth_sampling_seed_offset must be a non-negative int",
-                ),
-            ):
-                TransformerConfig(
-                    num_nextn_predict_layers=3,
-                    mtp_depth_sampling=[0.6, 0.3, 0.1],
-                    mtp_depth_sampling_seed_offset=bad,
-                )
-
-    def test_seed_offset_unvalidated_when_sampling_is_off(self):
-        """Nothing reads it when the feature is off, so nothing rejects it."""
-        config = TransformerConfig(
-            num_nextn_predict_layers=3,
-            mtp_depth_sampling_seed_offset=-5,
-        )
-        self.assertEqual(config.mtp_depth_sampling_seed_offset, -5)
-
     def test_sampling_rejects_mtp_load_weight_only(self):
         """WeightOnlyMTPLayer.forward returns before the sampling hook and the LM
         head's MTP branch is skipped, so sampling would be accepted and never
