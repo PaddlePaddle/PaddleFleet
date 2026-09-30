@@ -128,11 +128,6 @@ from .moe_utils import (
 )
 
 
-def use_accuracy_compatible_kernel() -> bool:
-    """Compatibility hook retained for callers that patch the legacy flag."""
-    return os.environ.get("FLAGS_use_accuracy_compatible_kernel", "0") == "1"
-
-
 class _AccuracyCompatibleMoEInputBranches(PyLayer):
     """Fan out MoE input branches and combine their dgrads in Megatron order."""
 
@@ -1095,7 +1090,7 @@ class MoELayer(nn.Layer):
             # them exactly once during the aligned unpermute/combine path.
             if per_token_scale is None and not use_dsv4_accuracy_compatible():
                 raise RuntimeError(
-                    "FLAGS_use_accuracy_compatible_kernel requires dispatched "
+                    "use_accuracy_compatible requires dispatched "
                     "router probabilities from the token dispatcher."
                 )
             if per_token_scale is not None:
