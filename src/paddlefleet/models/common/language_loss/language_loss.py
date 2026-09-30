@@ -433,12 +433,6 @@ class LanguageLoss(FleetLayer):
             if self.use_accuracy_compatible:
                 # Match the reference vocabulary-parallel CE reduction.
                 self.loss_func = _uac_vocab_parallel_ce
-                print(
-                    "[UAC-CE] LanguageLoss.loss_func="
-                    "vocab_parallel_cross_entropy "
-                    f"live_tp={get_tensor_model_parallel_world_size()}",
-                    flush=True,
-                )
             else:
                 self.loss_func = paddle.distributed.fleet.meta_parallel.ParallelCrossEntropy()
         elif self.use_accuracy_compatible:
