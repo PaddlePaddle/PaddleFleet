@@ -233,9 +233,9 @@ class TransformerConfig(ModelParallelConfig):
     _mtp_embed_global_group broadcast (see all_weights).
 
     The cross-stage path means this flag tolerates MTP depths split across
-    stages. Note that mtp_depth_sampling does NOT: it needs every depth and the
-    MTP LM head in one pipeline chunk (see mtp_depth_sampling), so the two can be
-    combined only with the MTP block kept together.
+    stages, and so does mtp_depth_sampling -- it derives K from (seed, train step)
+    at each site rather than shipping it between them -- so the two combine with
+    no extra placement constraint.
 
     Can be combined with mtp_shared_last_layer. In that mode,
     mtp_shared_last_layer shares each MTP transformer's body with the last
@@ -257,23 +257,24 @@ class TransformerConfig(ModelParallelConfig):
     occasionally.
     - None: disabled — always run all num_nextn_predict_layers depths (default).
     - list[float] of length D=num_nextn_predict_layers: a probability distribution
-      P(K=k), k=1..D (must sum to 1). Each step samples a prefix length K and runs
-      only MTP depths 1..K; depths >K are skipped (no transformer_layer forward, no
-      vocab projection, no loss). The loss averages over the K computed depths, so
-      depth j's effective weight is w_j = E[1{K>=j}/K] and sum_j w_j == 1. K is
-      sampled once per micro-batch from a private RNG seeded by config.seed and a
-      per-call counter, so every rank running
-      the MTP layers derives the same K with no collective; MoE expert-parallel
-      all-to-all therefore stays consistent.
-    Works under pipeline_model_parallel_size > 1, but requires the whole MTP block
-    -- every depth AND the MTP LM head -- to sit in one pipeline chunk. K is
-    published as an int in dict_args, which never crosses a chunk boundary (p2p
-    ships tensors only), so a split layout would force separate sites to derive K
-    independently; that assumes two different code paths are entered the same
-    number of times, which nothing guarantees under virtual pipeline parallelism
-    or p2p overlap, and a disagreement deadlocks instead of failing. GPTModel's
-    _assert_mtp_sampling_sites_colocated rejects such layouts at build time. Pin
-    the block with seg_method="layer:..." if the default segmentation splits it.
+      P(K=k), k=1..D (must sum to 1). Each optimizer step samples a prefix length K
+      and runs only MTP depths 1..K; depths >K are skipped (no transformer_layer
+      forward, no vocab projection, no loss). The loss averages over the K computed
+      depths, so depth j's effective weight is w_j = E[1{K>=j}/K] and
+      sum_j w_j == 1. K is a pure function of (config.seed, train step): the RNG is
+      seeded per call from those two values, with the step read from the
+      TRAINER_GLOBAL_STEP environment variable the trainer exports before every
+      forward, and config.seed defaulting to 0 since TransformerConfig has no seed
+      field of its own. No state is kept anywhere, so every rank and every call
+      site derives the same K with no collective -- MoE expert-parallel all-to-all
+      stays consistent, and resuming from a checkpoint continues the same K
+      sequence for free because global_step is restored before the first forward.
+      All micro-batches of one optimizer step share a K, which also keeps the
+      per-rank compute of a pipeline step balanced.
+    Works under pipeline_model_parallel_size > 1 with no layout restriction: the MTP
+    depths and the MTP LM head may land on different pipeline chunks, since each
+    re-derives K from (seed, step) rather than reading it off dict_args. dict_args
+    still caches the value within a chunk to avoid re-drawing.
     Covered by
     tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_depth_sampling.py.
     Works under expert_model_parallel_size > 1: every EP rank derives the same K,

@@ -18,7 +18,8 @@ Every MoE layer of an MTP depth issues an EP all-to-all, so all EP ranks must ru
 exactly the same depths on every micro-batch, although each rank feeds different
 tokens. On a GPT model with EP=2 this checks that:
 
-  * the sampled K sequence is identical on every rank and actually varies;
+  * the sampled K is identical on every rank, constant within an optimizer step
+    (it is a function of the train step) and varies from step to step;
   * with K fixed, the loss is the LM loss plus the scaled average of the first K
     per-depth losses of the unsampled model (same weights, same data);
   * optimizer steps through the hybrid-parallel optimizer keep the replicated
@@ -27,11 +28,15 @@ tokens. On a GPT model with EP=2 this checks that:
   * the same holds with mtp_shared_weights + mtp_shared_last_layer, where the
     shared parameters keep their ties and are trained by every sampled K.
 
+The train step reaches the sampler through TRAINER_GLOBAL_STEP, which the trainer
+exports and these tests set by hand since they drive the pipeline directly.
+
 Runs at any world size (EP = world size); CI runs it on 2 GPUs.
 """
 
 import functools
 import hashlib
+import os
 import unittest
 
 import numpy as np
@@ -161,6 +166,16 @@ def _batch(same_micro_batches):
     )
 
 
+def _set_train_step(step):
+    """Stand in for the trainer's per-forward TRAINER_GLOBAL_STEP export.
+
+    K is a pure function of (config.seed, train step), so this is the only thing
+    that moves the draw. Advancing it between forward_backward_pipeline calls is
+    what makes these tests see several K values instead of one.
+    """
+    os.environ["TRAINER_GLOBAL_STEP"] = str(step)
+
+
 def _mtp_layers(model):
     return [
         la
@@ -221,7 +236,9 @@ class TestMTPDepthSamplingEP(unittest.TestCase):
         ks, ran = _record_sampled_depth(model)
         pipe = fleet.distributed_model(model)
         losses = []
-        for _ in range(3):
+        steps = 6
+        for step in range(steps):
+            _set_train_step(step)
             losses.append(
                 float(pipe.forward_backward_pipeline(_batch(False), None))
             )
@@ -229,7 +246,7 @@ class TestMTPDepthSamplingEP(unittest.TestCase):
         errors = []
         if not all(np.isfinite(losses)):
             errors.append(f"rank {dist.get_rank()}: non-finite loss {losses}")
-        if len(ks) != 3 * ACC_STEPS:
+        if len(ks) != steps * ACC_STEPS:
             errors.append(f"rank {dist.get_rank()}: {len(ks)} K draws")
         for k, depths in zip(ks, ran):
             if depths != set(range(k)):
@@ -239,12 +256,21 @@ class TestMTPDepthSamplingEP(unittest.TestCase):
         gathered = _all_gather(ks)
         if any(g != gathered[0] for g in gathered):
             errors.append(f"K differs across EP ranks: {gathered}")
-        if len(set(ks)) < 2:
-            errors.append(f"K never varied: {ks}")
+        # Per optimizer step, not per micro-batch: every micro-batch of a step
+        # must run the same depths, or the pipeline stages go out of balance.
+        per_step = [
+            ks[i * ACC_STEPS : (i + 1) * ACC_STEPS] for i in range(steps)
+        ]
+        uneven = [chunk for chunk in per_step if len(set(chunk)) != 1]
+        if uneven:
+            errors.append(f"K varied inside an optimizer step: {uneven}")
+        if len({chunk[0] for chunk in per_step}) < 2:
+            errors.append(f"K never varied across steps: {ks}")
         _assert_on_all_ranks(self, errors)
         print(f"[MTP-SAMPLING-EP] ep={EP_SIZE} K={ks}", flush=True)
 
     def test_fixed_k_loss_is_prefix_average(self):
+        _set_train_step(0)
         ref = _build(None)
         state = {k: v.clone() for k, v in ref.state_dict().items()}
         loss_full = float(
@@ -293,7 +319,10 @@ class TestMTPDepthSamplingEP(unittest.TestCase):
                 learning_rate=0.1, parameters=model.parameters()
             )
         )
-        losses = [float(pipe.train_batch(_batch(False), opt)) for _ in range(3)]
+        losses = []
+        for step in range(3):
+            _set_train_step(step)
+            losses.append(float(pipe.train_batch(_batch(False), opt)))
 
         errors = []
         if not all(np.isfinite(losses)):
@@ -346,7 +375,10 @@ class TestMTPDepthSamplingEP(unittest.TestCase):
                 learning_rate=0.1, parameters=model.parameters()
             )
         )
-        losses = [float(pipe.train_batch(_batch(False), opt)) for _ in range(3)]
+        losses = []
+        for step in range(3):
+            _set_train_step(step)
+            losses.append(float(pipe.train_batch(_batch(False), opt)))
 
         errors = []
         if not all(np.isfinite(losses)):

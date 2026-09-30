@@ -3079,24 +3079,6 @@ class Trainer:
                     f"Error, get different global step, please check! step list: {[x.item() for x in global_step_list]}"
                 )
 
-            # MTP depth sampling draws K from a per-call counter that starts at
-            # 0 in a fresh process, so a resumed job would replay the draw
-            # sequence from its beginning. global_step was just restored -- and
-            # all_gather'd above to prove every rank agrees on it -- so hand it
-            # to the sampler as the number of draws already consumed. The helper
-            # owns the lookup, the no-op cases and the logging, and it writes
-            # runtime state on the MTP layers rather than touching the config,
-            # which stays static.
-            from paddlefleet.transformer.multi_token_prediction import (
-                resume_mtp_sampling_counters,
-            )
-
-            resume_mtp_sampling_counters(
-                self.model,
-                self.state.global_step,
-                args.gradient_accumulation_steps,
-            )
-
             epochs_trained = (
                 self.state.global_step // num_update_steps_per_epoch
             )

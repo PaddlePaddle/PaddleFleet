@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -774,50 +775,72 @@ class MTPLossAutoScaler(paddle.autograd.PyLayer):
         MTPLossAutoScaler.main_loss_backward_scale = scale
 
 
-def draw_mtp_sampled_depth(owner, config):
-    """Draw K -- how many MTP depths (prefix 1..K) to run this micro-batch.
+_MTP_SAMPLING_STEP_ENV = "TRAINER_GLOBAL_STEP"
+_warned_missing_train_step = False
+
+
+def _current_train_step():
+    """The optimizer step this micro-batch belongs to, or 0 if unknown.
+
+    ``Trainer.train()`` exports ``TRAINER_GLOBAL_STEP`` once per micro-batch,
+    unconditionally, right after loading the batch. Reading it here is what lets
+    the depth draw be a pure function of the step: no per-layer counters, no
+    resume bookkeeping, and every rank and pipeline stage derives the same K for
+    the same step without communicating.
+
+    A training loop that does not export it leaves the step at 0, which makes K
+    constant for the whole run -- correct but not sampling anything. That is worth
+    a warning rather than a silent degradation, so warn once.
+    """
+    global _warned_missing_train_step
+    raw = os.environ.get(_MTP_SAMPLING_STEP_ENV)
+    if raw is None:
+        if not _warned_missing_train_step:
+            _warned_missing_train_step = True
+            logger.warning(
+                f"mtp_depth_sampling is on but {_MTP_SAMPLING_STEP_ENV} is not "
+                "set, so the sampled depth cannot advance and K stays constant "
+                "for the whole run. The trainer is expected to export it once "
+                "per micro-batch."
+            )
+        return 0
+    try:
+        return int(raw)
+    except ValueError:
+        return 0
+
+
+def draw_mtp_sampled_depth(config):
+    """Draw K -- how many MTP depths (prefix 1..K) to run this optimizer step.
 
     Driven by ``config.mtp_depth_sampling``, a list P(K=k) of length
     D=num_nextn_predict_layers. Returns D when sampling is disabled.
 
-    The draw is DETERMINISTIC and collective-free: a private RNG is seeded by
-    ``config.seed`` and ``owner``'s own per-call counter. A world-group ``broadcast(src=0)`` -- the original
-    mechanism -- deadlocks at pp>1, because only the last pipeline stage runs the
+    K is a PURE FUNCTION of ``config.seed`` and the current train step, so it is
+    deterministic, collective-free and identical on every rank, every pipeline
+    stage and every virtual chunk that asks -- no counters to keep in lockstep and
+    nothing to align. A world-group ``broadcast(src=0)`` -- the original mechanism
+    -- deadlocks at pp>1 instead, because only the last pipeline stage runs the
     MTP layers while src=0 sits on the first stage and never joins.
 
-    Who draws: exactly one site per rank per micro-batch. Within a pipeline chunk
-    the first MTP depth draws and publishes K in ``dict_args``; every later
-    consumer reads it back (``resolve_mtp_sampled_depth``). ``dict_args`` does not
-    cross a chunk boundary, so a split layout would force a second site to derive
-    K on its own -- ``GPTModel._assert_mtp_sampling_sites_colocated`` rejects
-    those layouts at build time precisely so that never happens.
-
-    Across ranks: every rank holding the MTP block runs the same schedule and
-    enters this function once per micro-batch, so the counters agree and so does
-    K. That is what keeps the MoE expert-parallel all-to-all of each computed
-    depth matched, and the per-depth loss reduction consistent, without any
-    communication.
+    Granularity is one draw per OPTIMIZER step, not per micro-batch: the step only
+    advances once per optimizer update, so all micro-batches of a step run the same
+    depths. That keeps every micro-batch's cost identical, which matters for
+    pipeline balance, and it makes a recompute replay trivially idempotent. The
+    effective per-depth weight is unchanged -- ``w_j = E[1{K>=j}/K]`` depends only
+    on the configured distribution, not on how finely K is redrawn -- and a resumed
+    job continues the sequence for free, because the step comes from the restored
+    checkpoint state.
 
     A private Generator is used (not ``np.random.*``) so the global RNG stream
     used elsewhere is untouched.
 
-    Restart behaviour: the counter is runtime state and resets to 0, so a resumed
-    job would replay the draw sequence from its start. ``Trainer.train()`` calls
-    :func:`resume_mtp_sampling_counters` when it restores a checkpoint, which
-    fast-forwards the counters to the number of draws already consumed. Even
-    without that, ``P(K)`` and therefore the effective per-depth weight
-    ``w_j = E[1{K>=j}/K]`` depend only on the configured distribution, not on where
-    the sequence starts, so the loss stays correctly normalised
-    (``sum_j w_j == 1``); what the fast-forward buys is continuity and
-    reproducibility of the stream.
-
-    The counter only advances outside a recompute replay, mirroring the
-    magic-count handling further down this file. The caller's primary guard is
-    ``resolve_mtp_sampled_depth``'s ``"mtp_sampled_depth" in dict_args`` check,
-    which relies on the replay seeing the dict this site already wrote into; if a
-    replay ever arrives with a fresh dict instead, not advancing the counter makes
-    the re-draw return the SAME K rather than a new one, so the backward still
-    matches the depths the forward actually ran.
+    ``config.seed`` is read with a default of 0 on purpose: TransformerConfig
+    carries no seed field of its own today, so in-tree the draw is a function of
+    the step alone -- which is what makes two runs of the same config reproduce
+    each other. A downstream config that does carry a seed decorrelates otherwise
+    identical runs for free, with ``base * 1_000_003`` keeping the per-seed
+    streams disjoint for any realistic step count.
     """
     d = config.num_nextn_predict_layers
     ratio = getattr(config, "mtp_depth_sampling", None)
@@ -825,94 +848,29 @@ def draw_mtp_sampled_depth(owner, config):
         return d
     probs = np.asarray(ratio, dtype="float64")
     probs = probs / probs.sum()
-    counter = getattr(owner, "_mtp_sampling_counter", 0)
-    owner._mtp_sampling_counter = counter
     base = int(getattr(config, "seed", 0) or 0)
-    seed = base * 1_000_003 + counter
-    if paddle.is_grad_enabled() or not owner.training:
-        owner._mtp_sampling_counter = counter + 1
+    seed = base * 1_000_003 + _current_train_step()
     rng = np.random.default_rng(seed)
     k = int(rng.choice(len(probs), p=probs)) + 1
     return max(1, min(k, d))
 
 
-def resume_mtp_sampling_counters(
-    model, global_step, gradient_accumulation_steps
-):
-    """Fast-forward every MTP depth's draw counter to where a resume left off.
+def resolve_mtp_sampled_depth(config, dict_args):
+    """Return this micro-batch's K, deriving it if nobody published one yet.
 
-    The counter behind :func:`draw_mtp_sampled_depth` is the draw index, and it
-    starts at 0 in a fresh process, so without this a resumed job replays the K
-    sequence from its beginning. One optimizer step consumes
-    ``gradient_accumulation_steps`` micro-batches and therefore that many draws,
-    so ``global_step`` times that is the number already spent. Setting the counter
-    keeps this out of ``TransformerConfig``: the config stays static, and the only
-    thing that varies with resume state is runtime state on the layers, which is
-    where it belongs.
-
-    The counter only has to be rank-identical and monotonic across restarts --
-    being a few draws off changes nothing -- and the trainer reads ``global_step``
-    from the checkpoint after all_gather-checking it across ranks, which supplies
-    both. Only the first MTP depth on a stage actually draws, but every depth is
-    set so the invariant holds whichever one gets there first.
-
-    ``model`` may already be a distributed wrapper, so both it and the layers it
-    wraps are checked. Returns the draw count it applied, or None when there is
-    nothing to do: sampling off, or no MTP layers reachable. It returns instead of
-    raising because it runs on the resume path -- a resume must never fail over a
-    sampling detail.
-    """
-    inner = getattr(model, "_layers", None)
-    config = getattr(model, "config", None)
-    if config is None:
-        config = getattr(inner, "config", None)
-    if config is None or not getattr(config, "mtp_depth_sampling", None):
-        return None
-    collect = getattr(model, "_get_all_mtp_layers", None) or getattr(
-        inner, "_get_all_mtp_layers", None
-    )
-    if collect is None:
-        return None
-    drawn = int(global_step) * int(gradient_accumulation_steps)
-    sites = [
-        layer
-        for layer in collect()
-        if isinstance(layer, MultiTokenPredictionLayer)
-    ]
-    if not sites:
-        return None
-    for site in sites:
-        site._mtp_sampling_counter = drawn
-    logger.info(
-        f"Continuing MTP depth sampling from draw {drawn} "
-        f"on {len(sites)} MTP depth(s)"
-    )
-    return drawn
-
-
-def resolve_mtp_sampled_depth(owner, config, dict_args):
-    """Return this micro-batch's K, drawing it if nobody upstream published one.
-
-    ``dict_args`` is the within-chunk carrier: the first MTP depth in the chunk
-    draws and publishes K, and every later consumer in that chunk -- the deeper
-    MTP layers and the MTP LM head -- reads it back. Reusing the published value
-    rather than drawing again is also what makes a recompute replay idempotent,
-    since the replay re-enters with the dict the forward wrote into.
+    Every site would derive the same value anyway -- K is a pure function of
+    (seed, step) -- so the ``dict_args`` entry is a cache, not a synchronisation
+    mechanism: it saves the later MTP depths and the LM head on a stage from
+    recomputing the draw, and it makes the value visibly identical for anyone
+    reading the dict.
     """
     if "mtp_sampled_depth" in dict_args:
         return dict_args["mtp_sampled_depth"]
-    k = draw_mtp_sampled_depth(owner, config)
+    k = draw_mtp_sampled_depth(config)
     dict_args["mtp_sampled_depth"] = k
     return k
 
 
-# The checkpoint holds an MTP block's transformer tensors directly under the
-# layer, one module shallower than the live tree, which nests them under
-# ``transformer_layer``. Dropping that segment before every checkpoint-name
-# lookup in this subtree is what lets one ``checkpoint_name_mapping`` layer
-# entry cover an ordinary layer and an MTP block's inner transformer alike; the
-# model-side names keep the segment. Children that do not carry it (``enorm``,
-# ``hnorm``, ``eh_proj``, ...) are unaffected.
 _AOA_DROP_SEGMENT = "transformer_layer"
 
 
@@ -1665,12 +1623,12 @@ class MultiTokenPredictionLayer(FleetLayer):
         return outputs
 
     def _sample_mtp_depth(self):
-        """Draw K for this micro-batch from this layer's own counter.
+        """Draw K for this optimizer step.
 
-        Thin wrapper over :func:`draw_mtp_sampled_depth`; see that function for the
-        determinism / lockstep argument and the recompute handling.
+        Thin wrapper over :func:`draw_mtp_sampled_depth`, which is a pure function
+        of (config.seed, train step) -- see it for why no site needs to coordinate.
         """
-        return draw_mtp_sampled_depth(self, self.config)
+        return draw_mtp_sampled_depth(self.config)
 
     def forward(self, dict_args: dict):
         # Dispatch by config.use_erndata. Under erndata the data pipeline
@@ -1694,22 +1652,17 @@ class MultiTokenPredictionLayer(FleetLayer):
             )
 
         # === MTP depth sampling (prefix-length sampling) ===
-        # Resolve K once per micro-batch and carry it in dict_args so it flows WITH
-        # the data. This is robust to gradient_accumulation_steps>1 and recompute:
-        # there is no shared/config state an interleaved micro-batch could
-        # overwrite, and the recompute of a layer replays the same saved dict_args.
-        # dict_args does not cross a pipeline chunk boundary, which is why
-        # GPTModel._assert_mtp_sampling_sites_colocated pins every depth and the
-        # MTP LM head to one chunk: the first depth here draws, everyone else --
-        # including the head -- reads the published value back, so no second site
-        # ever derives K on its own (see draw_mtp_sampled_depth). Depths >= K return
-        # early, skipping their transformer_layer forward; the LM head then emits
-        # None logits for them and the loss drops those entries.
+        # K is a pure function of (config.seed, train step), so every depth, the
+        # LM head, every rank and every pipeline chunk derive the same value with
+        # no coordination -- and a recompute replay derives it again identically.
+        # dict_args caches it so the later consumers on a stage skip the draw.
+        # Depths >= K return early, skipping their transformer_layer forward; the
+        # LM head then emits None logits for them and the loss drops those entries.
         if (
             getattr(self.config, "mtp_depth_sampling", None)
             and not self.config.enable_mtp_magic_send
         ):
-            k = resolve_mtp_sampled_depth(self, self.config, dict_args)
+            k = resolve_mtp_sampled_depth(self.config, dict_args)
             if self.layer_number >= k:
                 # Skip this depth entirely: leave hidden_states_concat unchanged
                 # (K stays in dict_args for downstream MTP layers + the LM head).

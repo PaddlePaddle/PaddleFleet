@@ -16,6 +16,7 @@
 
 import functools
 import inspect
+import os
 import random
 import unittest
 from unittest import mock
@@ -31,13 +32,24 @@ from paddle.distributed.fleet.meta_parallel import (
 import paddlefleet.parallel_state as ps
 from paddlefleet.gpt_builders import gpt_builder
 from paddlefleet.models.gpt import GPTConfig
-from paddlefleet.models.gpt.gpt_model import GPTModel
 from paddlefleet.transformer.multi_token_prediction import (
     MultiTokenPredictionLayer,
+    draw_mtp_sampled_depth,
     resolve_mtp_sampled_depth,
-    resume_mtp_sampling_counters,
 )
 from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+
+def _at_train_step(step):
+    """Pretend the trainer is on optimizer step ``step``.
+
+    K is a pure function of (config.seed, train step), and the step reaches the
+    sampler through the TRAINER_GLOBAL_STEP environment variable the trainer
+    exports before every forward. Tests that want a different draw move the step,
+    which is the only knob there is now.
+    """
+    return mock.patch.dict(os.environ, {"TRAINER_GLOBAL_STEP": str(step)})
+
 
 # mtp_shared_last_layer needs a paddle whose SharedLayerDesc understands
 # shared_submodule_weight_only (the flag paddlefleet passes for the MTP body).
@@ -389,99 +401,134 @@ class TestMTPDepthSampling(unittest.TestCase):
         return layers[0] if layers else None
 
     def test_peer_ranks_derive_matching_k(self):
-        """Two independent MTP layer instances must agree on K without talking.
+        """Independent sites must agree on K without talking to each other.
 
-        The MTP block is pinned to one pipeline chunk, so within a rank K is drawn
-        once and read back from dict_args. What is still derived independently is
-        the draw on each DP / EP peer rank holding that block: they run the same
-        schedule, so the same counter index must give the same K, or the MoE
-        all-to-all of a computed depth and the per-depth loss reduction stop
-        matching. Two layer objects with separate counters stand in for two peer
-        ranks here. A drift silently trains a different depth set than the loss
-        normalises over, so the whole sequence must match, not just the first draw.
+        Nothing synchronises the draw: each DP / EP peer rank, each pipeline
+        stage and each virtual chunk derives K on its own from (seed, step). If
+        two of them disagreed, the MoE all-to-all of a computed depth and the
+        per-depth loss reduction would stop matching -- a drift silently trains a
+        different depth set than the loss normalises over. Separate dicts stand in
+        for separate sites here, and the whole step sequence must match, not just
+        one draw.
         """
         config = self._cfg([0.2, 0.3, 0.5])
-        depths = _mtp_layers(gpt_builder(config, num_stages=1))
-        rank_a, rank_b = depths[0], depths[1]
-        for layer in (rank_a, rank_b):
-            layer.train()
+        peer_config = self._cfg([0.2, 0.3, 0.5])
 
         drawn_a, drawn_b = [], []
-        for _ in range(8):
-            # separate dicts == separate ranks: neither sees the other's K
-            drawn_a.append(resolve_mtp_sampled_depth(rank_a, config, {}))
-            drawn_b.append(resolve_mtp_sampled_depth(rank_b, config, {}))
+        for step in range(8):
+            with _at_train_step(step):
+                # separate dicts == separate sites: neither sees the other's K
+                drawn_a.append(resolve_mtp_sampled_depth(config, {}))
+                drawn_b.append(resolve_mtp_sampled_depth(peer_config, {}))
 
         self.assertEqual(drawn_a, drawn_b)
-        self.assertEqual(rank_a._mtp_sampling_counter, 8)
-        self.assertEqual(rank_b._mtp_sampling_counter, 8)
         # a constant K would make the equality above vacuous
         self.assertGreater(len(set(drawn_a)), 1)
 
-    def test_resumed_counters_continue_the_draw_sequence(self):
-        """Fast-forwarding the counter must resume the stream, not replay it.
+    def test_resume_continues_the_draw_sequence(self):
+        """A restart must carry on the stream, not replay it.
 
-        This is the answer to a restart zeroing the per-call counter. The counter
-        IS the draw index, so setting it to the number of draws already consumed
-        makes the resumed job carry on from there. Nothing about the config takes
-        part -- config stays static across the restart.
+        There is no sampling state to save or restore: the trainer already
+        restores global_step before the first forward, and K is a function of it,
+        so a job that died after 3 steps and resumes at step 3 draws exactly what
+        the uninterrupted run would have drawn. Modelled here by re-deriving the
+        tail of a sequence from a fresh config object.
         """
         config = self._cfg([0.2, 0.3, 0.5])
-        layer = self._mtp0(gpt_builder(config, num_stages=1))
-        layer.train()
-        first_run = [
-            resolve_mtp_sampled_depth(layer, config, {}) for _ in range(6)
-        ]
+        first_run = []
+        for step in range(6):
+            with _at_train_step(step):
+                first_run.append(resolve_mtp_sampled_depth(config, {}))
 
         resumed_config = self._cfg([0.2, 0.3, 0.5])
-        resumed_model = gpt_builder(resumed_config, num_stages=1)
-        resume_mtp_sampling_counters(resumed_model, 3, 1)
-        resumed = self._mtp0(resumed_model)
-        resumed.train()
-        resumed_run = [
-            resolve_mtp_sampled_depth(resumed, resumed_config, {})
-            for _ in range(3)
-        ]
+        resumed_run = []
+        for step in range(3, 6):
+            with _at_train_step(step):
+                resumed_run.append(
+                    resolve_mtp_sampled_depth(resumed_config, {})
+                )
 
         self.assertEqual(resumed_run, first_run[3:])
 
     def test_published_k_is_reused_not_redrawn(self):
-        """Within a stage the first depth publishes K in dict_args; later consumers
-        must read it back instead of drawing, which is also what makes a recompute
-        replay idempotent."""
-        config = self._cfg([0.2, 0.3, 0.5])
-        depths = _mtp_layers(gpt_builder(config, num_stages=1))
-        depths[0].train()
-        depths[1].train()
+        """dict_args is a cache: a consumer that finds K there must not re-draw.
 
+        Re-deriving would give the same answer within a step, so the observable
+        has to be a step that moves underneath the cached value -- after which
+        reading the dict must still return the originally published K. That is
+        what keeps every depth and the LM head of one forward on one K even if
+        the trainer bumps the step mid-flight.
+        """
+        config = self._cfg([1.0, 0.0, 0.0])
         dict_args = {}
-        first = resolve_mtp_sampled_depth(depths[0], config, dict_args)
-        second = resolve_mtp_sampled_depth(depths[1], config, dict_args)
+        with _at_train_step(0):
+            first = resolve_mtp_sampled_depth(config, dict_args)
+        self.assertEqual(dict_args["mtp_sampled_depth"], first)
 
-        self.assertEqual(first, second)
-        self.assertEqual(depths[0]._mtp_sampling_counter, 1)
-        # the reusing consumer must not touch its own counter
-        self.assertEqual(getattr(depths[1], "_mtp_sampling_counter", 0), 0)
+        dict_args["mtp_sampled_depth"] = 99
+        with _at_train_step(7):
+            self.assertEqual(resolve_mtp_sampled_depth(config, dict_args), 99)
+
+    def test_sampler_is_stateless_within_a_step(self):
+        """Repeated draws inside one optimizer step must all give the same K.
+
+        This is what makes a recompute replay and every micro-batch of the step
+        agree for free, and it is the property that replaced the old per-call
+        counter -- there is no state left to get out of sync.
+        """
+        cfg = self._cfg([0.2, 0.3, 0.5])
+        mtp0 = self._mtp0(gpt_builder(cfg, num_stages=1))
+        mtp0.train()
+        with _at_train_step(11):
+            ks = {mtp0._sample_mtp_depth() for _ in range(5)}
+            with paddle.no_grad():
+                ks.add(mtp0._sample_mtp_depth())
+        self.assertEqual(len(ks), 1, f"K must be fixed within a step, got {ks}")
+
+    def test_sampler_without_a_train_step_stays_constant(self):
+        """No TRAINER_GLOBAL_STEP -> step 0 for everyone, so K never moves.
+
+        Correct but degenerate, and the sampler warns rather than failing: a
+        training loop that does not export the step still trains, it just trains
+        one fixed depth prefix. Pinning it here documents that the fallback is
+        deliberate and, more importantly, that it is not random per call.
+        """
+        cfg = self._cfg([0.2, 0.3, 0.5])
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("TRAINER_GLOBAL_STEP", None)
+            ks = {draw_mtp_sampled_depth(cfg) for _ in range(20)}
+        with _at_train_step(0):
+            self.assertEqual(ks, {draw_mtp_sampled_depth(cfg)})
+        self.assertEqual(len(ks), 1)
 
     def test_sampler_fixed_k1(self):
         """P(K=1)=1 -> always sample K=1."""
         cfg = self._cfg([1.0, 0.0, 0.0])
         mtp0 = self._mtp0(gpt_builder(cfg, num_stages=1))
-        ks = [mtp0._sample_mtp_depth() for _ in range(50)]
+        ks = []
+        for step in range(50):
+            with _at_train_step(step):
+                ks.append(mtp0._sample_mtp_depth())
         assert set(ks) == {1}, f"expected all K==1, got {sorted(set(ks))}"
 
     def test_sampler_fixed_kd(self):
         """P(K=D)=1 -> always sample K=D (runs every depth)."""
         cfg = self._cfg([0.0, 0.0, 1.0])
         mtp0 = self._mtp0(gpt_builder(cfg, num_stages=1))
-        ks = [mtp0._sample_mtp_depth() for _ in range(50)]
+        ks = []
+        for step in range(50):
+            with _at_train_step(step):
+                ks.append(mtp0._sample_mtp_depth())
         assert set(ks) == {3}, f"expected all K==3, got {sorted(set(ks))}"
 
     def test_sampler_distribution(self):
         """Mixed distribution -> K stays in support and E[K] < D."""
         cfg = self._cfg([0.5, 0.5, 0.0])
         mtp0 = self._mtp0(gpt_builder(cfg, num_stages=1))
-        ks = [mtp0._sample_mtp_depth() for _ in range(400)]
+        ks = []
+        for step in range(400):
+            with _at_train_step(step):
+                ks.append(mtp0._sample_mtp_depth())
         assert set(ks) <= {1, 2}, f"K out of support: {sorted(set(ks))}"
         assert 1 in ks and 2 in ks, f"both should appear: {sorted(set(ks))}"
         assert sum(ks) / len(ks) < 3, "E[K] must be < D=3"
@@ -533,12 +580,8 @@ class TestMTPDepthSampling(unittest.TestCase):
         """mtp_depth_sampling=None (default) trains with no skip path at all."""
         cfg = self._cfg(None)
         model = gpt_builder(cfg, num_stages=1)
-        mtp0 = self._mtp0(model)
         loss = _run_step(model, cfg, self.strategy)
         assert loss is not None and not paddle.isnan(loss).any(), "loss NaN"
-        assert not hasattr(mtp0, "_mtp_sampling_counter"), (
-            "sampling state must not be set when the feature is disabled"
-        )
         assert not hasattr(cfg, "_mtp_sampled_depth"), (
             "no config-level sampling state should exist"
         )
@@ -550,141 +593,45 @@ class TestMTPDepthSampling(unittest.TestCase):
             if type(layer).__name__ == "GPTLMHead"
         )
 
-    def test_lm_head_reads_k_back_instead_of_drawing(self):
-        """The head must not own a draw counter any more.
+    def test_lm_head_derives_the_same_k_as_the_depths(self):
+        """The head must land on the depths' K even with nothing published.
 
-        It used to re-derive K whenever its stage held no MTP depth, which is the
-        construct that deadlocks under VPP / p2p overlap. Now the MTP block is
-        pinned to one chunk and the head reads the published value, so a counter
-        appearing on the head is a regression back to the independent draw.
+        This is the property that removed the co-location requirement: the head
+        may sit on a different pipeline chunk from the MTP depths, where dict_args
+        never reaches it, so it re-derives K from (seed, step) instead. Driven
+        with an empty dict to model exactly that split, and compared against what
+        the depths would compute for the same step. Falling back to D here would
+        project the slices the depths skipped and average the loss over D -- a
+        silently wrong run, not a crash.
+        """
+        cfg = self._cfg([0.0, 1.0, 0.0])
+        head = self._lm_head(gpt_builder(cfg, num_stages=1))
+        hidden = paddle.zeros([cfg.num_nextn_predict_layers + 1, 8])
+        with (
+            mock.patch.object(head, "_forward", side_effect=lambda t: t),
+            _at_train_step(5),
+        ):
+            logits = head.forward({"hidden_states": hidden})
+            expected_k = draw_mtp_sampled_depth(cfg)
+
+        self.assertEqual(expected_k, 2)
+        self.assertEqual(len(logits), cfg.num_nextn_predict_layers + 1)
+        computed = [i for i in range(1, len(logits)) if logits[i] is not None]
+        self.assertEqual(computed, list(range(1, expected_k + 1)))
+
+    def test_lm_head_keeps_no_sampling_state(self):
+        """No counters anywhere: the head derives or reads, never accumulates.
+
+        A counter reappearing on the head is a regression to the old per-call
+        stream, whose index had to stay aligned with the MTP depths' -- the
+        construct that could drift under VPP / p2p overlap and deadlock.
         """
         cfg = self._cfg([0.34, 0.33, 0.33])
         model = gpt_builder(cfg, num_stages=1)
         head = self._lm_head(model)
         _run_step(model, cfg, self.strategy)
         assert not hasattr(head, "_mtp_sampling_counter"), (
-            "the LM head must read K from dict_args, never draw it"
-        )
-
-    def test_lm_head_raises_when_k_was_never_published(self):
-        """Sampling on but no K in dict_args must fail loudly, not fall back to D.
-
-        Falling back would project the depths the MTP layers skipped and average
-        the loss over D, i.e. train on garbage slices without any symptom.
-        """
-        cfg = self._cfg([1.0, 0.0, 0.0])
-        head = self._lm_head(gpt_builder(cfg, num_stages=1))
-        hidden = paddle.zeros([cfg.num_nextn_predict_layers + 1, 8])
-        with (
-            mock.patch.object(head, "_forward", side_effect=lambda t: t),
-            self.assertRaisesRegex(
-                RuntimeError, r"no MTP depth published mtp_sampled_depth"
-            ),
-        ):
-            head.forward({"hidden_states": hidden})
-
-    def test_resume_counter_hook_sets_or_stays_out_of_the_way(self):
-        """The trainer-side hook: fast-forward the counters, or do nothing.
-
-        One optimizer step consumes gradient_accumulation_steps draws, so the draw
-        count is global_step times that. It must write runtime state on the layers
-        and leave the config alone -- config is static, it must not vary with
-        resume state. Returning None rather than raising is deliberate: the trainer
-        calls this on the resume path and a resume must never fail over a sampling
-        detail.
-        """
-        cfg = self._cfg([0.34, 0.33, 0.33])
-        model = gpt_builder(cfg, num_stages=1)
-
-        self.assertEqual(resume_mtp_sampling_counters(model, 7, 4), 28)
-        for layer in _mtp_layers(model):
-            self.assertEqual(layer._mtp_sampling_counter, 28)
-        assert not hasattr(cfg, "mtp_depth_sampling_seed_offset"), (
-            "the resume path must not push state into the config"
-        )
-
-        # a distributed wrapper keeps the model under _layers
-        class _Wrapped:
-            def __init__(self, inner):
-                self._layers = inner
-
-        wrapped_cfg = self._cfg([0.34, 0.33, 0.33])
-        wrapped = gpt_builder(wrapped_cfg, num_stages=1)
-        self.assertEqual(
-            resume_mtp_sampling_counters(_Wrapped(wrapped), 2, 5), 10
-        )
-        for layer in _mtp_layers(wrapped):
-            self.assertEqual(layer._mtp_sampling_counter, 10)
-
-        # sampling off -> nothing to continue
-        disabled = self._cfg(None)
-        off_model = gpt_builder(disabled, num_stages=1)
-        self.assertIsNone(resume_mtp_sampling_counters(off_model, 7, 4))
-        for layer in _mtp_layers(off_model):
-            assert not hasattr(layer, "_mtp_sampling_counter")
-
-        # nothing that carries a config or MTP layers at all
-        class _Bare:
-            pass
-
-        self.assertIsNone(resume_mtp_sampling_counters(_Bare(), 7, 4))
-
-    def test_local_chunks_walks_virtual_pipeline_chunks(self):
-        """Under VPP one rank holds several chunks, each its own p2p island.
-
-        _assert_mtp_sampling_sites_colocated has to look per chunk rather than per
-        rank because of this: dict_args does not survive a chunk boundary either.
-
-        Driven on a stub rather than a built model: patching _model_chunks onto a
-        paddle Layer and letting mock delete it again pokes at Layer.__delattr__
-        for no benefit, and _local_chunks only ever reads these two attributes.
-        """
-
-        class _Chunk:
-            def __init__(self, run_function):
-                self.run_function = run_function
-
-        class _Stub:
-            _num_virtual_pipeline_stages = 2
-
-            def __init__(self, chunks):
-                self._model_chunks = chunks
-
-        first, second = ["depth-0"], ["depth-1", "lm-head"]
-        stub = _Stub([_Chunk(first), _Chunk(second)])
-
-        self.assertEqual(
-            GPTModel._local_chunks(stub),
-            [first, second],
-        )
-
-        # no chunks registered yet -> fall back to the flat run_function
-        class _Flat:
-            _num_virtual_pipeline_stages = 2
-            _model_chunks = None
-            run_function = ["only-chunk"]
-
-        self.assertEqual(GPTModel._local_chunks(_Flat()), [["only-chunk"]])
-
-    def test_local_chunks_keeps_the_mtp_block_together(self):
-        """At one stage the whole MTP block must land in a single chunk.
-
-        _assert_mtp_sampling_sites_colocated is built on this: a chunk is the unit
-        dict_args flows through, so the depths and the head being in one chunk is
-        exactly what lets K be published once and read back.
-        """
-        cfg = self._cfg([0.34, 0.33, 0.33])
-        model = gpt_builder(cfg, num_stages=1)
-        chunks = model._local_chunks()
-
-        self.assertEqual(len(chunks), 1)
-        depths = [
-            la for la in chunks[0] if isinstance(la, MultiTokenPredictionLayer)
-        ]
-        self.assertEqual(len(depths), cfg.num_nextn_predict_layers)
-        self.assertTrue(
-            any(type(la).__name__ == "GPTLMHead" for la in chunks[0]),
-            "the LM head must share the chunk that publishes K",
+            "the LM head must derive K from (seed, step), never accumulate state"
         )
 
     def test_lm_head_emits_none_for_skipped_depths(self):
@@ -789,23 +736,6 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
         model, mtp = self._independent_model(num_nextn=3)
         self.assertIsNone(model.config.mtp_depth_sampling)
         self.assertEqual(mtp[0]._sample_mtp_depth(), 3)
-
-    def test_sampler_counter_frozen_without_grad_in_training(self):
-        """A no-grad forward in training mode is a recompute pre-pass: it must not
-        advance the counter, or the replay would draw a different K."""
-        config = GPTConfig(
-            **_base_kwargs(num_nextn=3),
-            use_dense_mtp=False,
-            mtp_depth_sampling=[0.2, 0.3, 0.5],
-        )
-        depth0 = _mtp_layers(gpt_builder(config, num_stages=1))[0]
-        depth0.train()
-        with paddle.no_grad():
-            k_first = depth0._sample_mtp_depth()
-            self.assertEqual(depth0._sample_mtp_depth(), k_first)
-        self.assertEqual(depth0._mtp_sampling_counter, 0)
-        self.assertEqual(depth0._sample_mtp_depth(), k_first)
-        self.assertEqual(depth0._mtp_sampling_counter, 1)
 
     def test_all_weights_skips_mtp_embed_sublayer(self):
         """all_weights must drop mtp_embed even when it exists. Attached by hand
@@ -939,70 +869,16 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
         )
         self.assertEqual(len(two_groups), 2 * n_params)
 
-    def _sampling_colocation_check(self, layout):
-        """Run the sampling placement check with a faked PP / chunk layout.
-
-        Each gathered element is one rank's list of (mtp_depths, mtp_lm_heads),
-        one entry per chunk that rank runs.
-        """
-        model, _ = self._independent_model(num_nextn=3)
-
-        def _fake_all_gather_object(object_list, obj, group=None):
-            object_list.extend(layout)
-
-        with mock.patch.object(
-            paddle.distributed,
-            "all_gather_object",
-            side_effect=_fake_all_gather_object,
-        ):
-            model._assert_mtp_sampling_sites_colocated()
-
-    def test_sampling_accepts_whole_mtp_block_in_one_chunk(self):
-        """K rides in dict_args, so every consumer must be in the drawing chunk."""
-        self._sampling_colocation_check([[([0, 1, 2], 1)], [([], 0)]])
-        self._sampling_colocation_check([[([], 0)], [([0, 1, 2], 1)]])
-
-    def test_sampling_rejects_split_depths(self):
-        """Split depths would make two chunks derive K independently -- the case
-        that deadlocks once their entry counts drift under VPP / p2p overlap."""
-        with self.assertRaisesRegex(
-            RuntimeError, r"mtp_depth_sampling requires every MTP depth"
-        ):
-            self._sampling_colocation_check([[([0], 1)], [([1, 2], 0)]])
-
-    def test_sampling_rejects_missing_depth(self):
-        """The holder chunk must carry the whole 0..D-1 range, not a subset."""
-        with self.assertRaisesRegex(
-            RuntimeError, r"mtp_depth_sampling requires every MTP depth"
-        ):
-            self._sampling_colocation_check([[([0, 2], 1)], [([], 0)]])
-
-    def test_sampling_rejects_lm_head_in_another_chunk(self):
-        """The head reads K back rather than deriving it, so it must be able to."""
-        with self.assertRaisesRegex(
-            RuntimeError, r"mtp_depth_sampling requires every MTP depth"
-        ):
-            self._sampling_colocation_check([[([0, 1, 2], 0)], [([], 1)]])
-
-    def test_sampling_ignores_an_undetectable_lm_head(self):
-        """No K-consuming head visible anywhere -> do not fail the build.
-
-        GPTMainLMHead / GPTMTPLMHead override forward and never read K, so a model
-        wired that way legitimately reports zero heads. GPTLMHead.forward still
-        raises at the first step if K really is missing, so skipping the head half
-        of the check here cannot hide a silent divergence.
-        """
-        self._sampling_colocation_check([[([0, 1, 2], 0)], [([], 0)]])
-
     def test_sampling_is_idempotent_under_recompute(self):
         """A recompute replay must reuse the forward's K, not draw a new one.
 
         Otherwise the backward would be computed for a different set of depths
-        than the forward ran -- silently wrong gradients rather than a crash. Two
-        things protect this: the caller's `"mtp_sampled_depth" not in dict_args`
-        guard, and _sample_mtp_depth only advancing its counter outside a replay.
-        The counter is the observable: one step over one micro-batch must advance
-        it exactly once no matter how many times forward is entered.
+        than the forward ran -- silently wrong gradients rather than a crash. With
+        K a pure function of (seed, train step) this holds by construction: the
+        replay happens inside the same step, so it re-derives the same value even
+        when it gets a fresh dict_args. The depth counts are the observable -- the
+        step must skip exactly the depths P(K=2)=1 excludes, however many times
+        forward is entered.
         """
         config = GPTConfig(
             **_base_kwargs(num_nextn=3),
@@ -1013,16 +889,11 @@ class TestMTPSharedWeightsGuards(unittest.TestCase):
             recompute_num_layers=1,
         )
         model = gpt_builder(config, num_stages=1)
-        depth0 = next(la for la in _mtp_layers(model) if la.layer_number == 0)
         body_calls = _count_mtp_body_calls(model)
 
         loss = _run_step(model, config, self.strategy)
         assert loss is not None and not paddle.isnan(loss).any(), (
             "recompute + sampling step did not produce a usable loss"
-        )
-        assert depth0._mtp_sampling_counter == 1, (
-            "one micro-batch must draw K exactly once; counter="
-            f"{depth0._mtp_sampling_counter} means a recompute replay re-drew it"
         )
         assert body_calls.get(0, 0) > 0 and body_calls.get(1, 0) > 0, (
             f"P(K=2)=1 must run depths 0 and 1, body_calls={body_calls}"

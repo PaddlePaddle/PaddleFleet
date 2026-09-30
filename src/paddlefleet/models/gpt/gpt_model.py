@@ -255,11 +255,6 @@ class GPTModel(PipelineLayer):
         # Tie GPTMTPLMHead weight to GPTMainLMHead weight on the same stage.
         self._tie_mtp_lm_head_weight()
         if (
-            getattr(self.config, "mtp_depth_sampling", None)
-            and self.config.pipeline_model_parallel_size > 1
-        ):
-            self._assert_mtp_sampling_sites_colocated()
-        if (
             getattr(self.config, "mtp_shared_weights", False)
             and getattr(self.config, "mtp_shared_last_layer", False)
             and self.config.pipeline_model_parallel_size > 1
@@ -269,83 +264,6 @@ class GPTModel(PipelineLayer):
             self.config, "mtp_shared_last_layer", False
         ):
             self._alias_mtp_fusion_weights()
-
-    def _local_chunks(self):
-        """The layer lists this rank runs, one per virtual pipeline chunk.
-
-        Data flows through a chunk's list in order, so a dict published by one
-        layer is visible to later layers of the SAME chunk only -- chunk
-        boundaries are p2p boundaries just like plain stage boundaries.
-        """
-        if self._num_virtual_pipeline_stages > 1 and getattr(
-            self, "_model_chunks", None
-        ):
-            return [list(chunk.run_function) for chunk in self._model_chunks]
-        return [list(self.run_function)]
-
-    def _assert_mtp_sampling_sites_colocated(self):
-        """Require every site that consumes the sampled K to share one chunk.
-
-        K is drawn once per micro-batch and published in ``dict_args``, which
-        never crosses a stage (or virtual-chunk) boundary. If the MTP depths were
-        split, or the LM head sat where no depth does, those sites would each
-        have to derive K on their own -- different code paths whose entry counts
-        nothing keeps aligned under virtual pipeline parallelism or p2p overlap.
-        A drift there makes the head's None placeholders disagree with the depths
-        that actually ran, so the per-depth loss set differs across stages and
-        the collectives mismatch, which shows up as a hang rather than an error.
-        Rejecting the layout is the only guarantee that costs no communication.
-
-        The head is identified by the forward that implements the placeholder
-        logic, i.e. an unoverridden ``GPTLMHead.forward``; ``GPTMainLMHead`` and
-        ``GPTMTPLMHead`` replace it and never read K, so matching on the class
-        alone would be wrong. If no such head is visible on any rank the head
-        half of the check is skipped rather than failing the build -- an
-        unexpected head layout must not break an otherwise valid model, and
-        ``GPTLMHead.forward`` still raises at the first step if K never arrives.
-        """
-        import paddle.distributed
-
-        local = [
-            (
-                sorted(
-                    layer.layer_number
-                    for layer in chunk
-                    if isinstance(layer, MultiTokenPredictionLayer)
-                ),
-                sum(
-                    1
-                    for layer in chunk
-                    if isinstance(layer, GPTLMHead)
-                    and type(layer).forward is GPTLMHead.forward
-                ),
-            )
-            for chunk in self._local_chunks()
-        ]
-        hcg = fleet.get_hybrid_communicate_group()
-        gathered = []
-        paddle.distributed.all_gather_object(
-            gathered, local, group=hcg.get_pipe_parallel_group()
-        )
-        chunks = [entry for per_rank in gathered for entry in per_rank]
-        holders = [entry for entry in chunks if entry[0]]
-        heads_anywhere = sum(entry[1] for entry in chunks)
-        expected = list(range(self.config.num_nextn_predict_layers))
-        split_depths = len(holders) != 1 or holders[0][0] != expected
-        head_elsewhere = (
-            heads_anywhere > 0 and bool(holders) and not holders[0][1]
-        )
-        if split_depths or head_elsewhere:
-            raise RuntimeError(
-                "mtp_depth_sampling requires every MTP depth AND the MTP LM "
-                "head to sit in one pipeline chunk, but the layout is "
-                f"{gathered} (per rank, one (mtp_depths, mtp_lm_heads) entry "
-                "per chunk). K is published in dict_args, which does not cross "
-                "a chunk boundary; a split layout would make separate sites "
-                "derive K independently and deadlock as soon as they disagree. "
-                'Pin the MTP block to one stage with seg_method="layer:...", '
-                "or disable mtp_depth_sampling."
-            )
 
     def _assert_mtp_depths_colocated_for_combined_sharing(self):
         """Require combined MTP sharing to keep all depths on one PP stage.

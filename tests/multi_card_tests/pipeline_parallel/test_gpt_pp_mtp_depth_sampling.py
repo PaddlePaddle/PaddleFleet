@@ -22,9 +22,10 @@ complete. This test builds a small MoE+MTP model under pp=2 and asserts the
 step finishes with a finite loss for:
   * sampling disabled (None)            -> baseline
   * fixed K=1                           -> exercises the skip path (depths>=1)
-  * mixed distribution (varying K)      -> K changes per micro-batch, must stay
-                                           rank-consistent (else MoE all-to-all
-                                           on the last stage would deadlock)
+  * mixed distribution (varying K)      -> K changes from step to step, must stay
+                                           rank-consistent within a step (else the
+                                           MoE all-to-all on the last stage would
+                                           deadlock)
   * mtp_shared_weights + sampling       -> the combination the config layer allows
 
 Each case also counts transformer_layer invocations per MTP depth, so a
@@ -54,7 +55,10 @@ REPO_FLAG = os.getenv("repo_flag")
 SKIP_TESTS = REPO_FLAG != "paddlefleet"
 
 
-def _run_pp(mtp_depth_sampling, seed=46, **extra_config):
+def _run_pp(mtp_depth_sampling, seed=46, train_step=0, **extra_config):
+    # K is a pure function of (seed, train step); the trainer normally exports
+    # this, so set it explicitly rather than relying on the unset-env fallback.
+    os.environ["TRAINER_GLOBAL_STEP"] = str(train_step)
     config = GPTConfig(
         moe_expert_fusion=False,
         vocab_size=128,
@@ -208,7 +212,7 @@ class TestMTPDepthSamplingPP(unittest.TestCase):
         )
 
     def test_pp_sampling_mixed(self):
-        # K varies per micro-batch; every rank running the MTP layer must draw
+        # K varies from step to step; every rank running the MTP layer must draw
         # the same K deterministically or the MoE all-to-all deadlocks.
         loss, mtp_layers, body_calls = _run_pp([0.34, 0.33, 0.33])
         self._assert_finite(loss)
@@ -220,24 +224,15 @@ class TestMTPDepthSamplingPP(unittest.TestCase):
     def test_pp_sampling_with_shared_weights(self):
         """Cross-depth full sharing plus sampling.
 
-        mtp_shared_weights on its own tolerates depths on different stages, but
-        sampling does not: K is published in dict_args, which never crosses a
-        chunk boundary, so GPTModel._assert_mtp_sampling_sites_colocated requires
-        the whole MTP block in one chunk. Whichever way this run's segmentation
-        falls, the contract is the same -- either the block stayed together and the
-        step behaves like the non-shared case, or the layout is rejected loudly at
-        build time. What must never happen is a run that proceeds with two chunks
-        deriving K on their own.
+        Both features tolerate MTP depths on different pipeline stages: K is
+        derived from (seed, train step) at each site rather than shipped in
+        dict_args, so a split layout derives the same K on both sides instead of
+        needing the block pinned to one chunk. Whatever this run's segmentation
+        does, the step must complete and the skip must still happen.
         """
-        try:
-            loss, mtp_layers, body_calls = _run_pp(
-                [1.0, 0.0, 0.0], mtp_shared_weights=True
-            )
-        except RuntimeError as exc:
-            assert "mtp_depth_sampling requires every MTP depth" in str(exc), (
-                f"unexpected RuntimeError from a split MTP layout: {exc}"
-            )
-            return
+        loss, mtp_layers, body_calls = _run_pp(
+            [1.0, 0.0, 0.0], mtp_shared_weights=True
+        )
         self._assert_finite(loss)
         if not mtp_layers:
             return
@@ -254,6 +249,25 @@ class TestMTPDepthSamplingPP(unittest.TestCase):
             assert not not_shared, (
                 f"depths must share all_weights, not_shared={not_shared[:5]}"
             )
+
+    def test_pp_sampling_follows_the_train_step(self):
+        """K must advance with the optimizer step, not stay frozen.
+
+        The train step is now the only thing that moves the draw, so a regression
+        that stopped reading TRAINER_GLOBAL_STEP would pin K for a whole run --
+        finite loss, correct-looking skips, and a distribution of exactly one
+        point. Sweep a few steps and require the per-depth counts to differ.
+        """
+        seen = set()
+        for step in range(6):
+            loss, mtp_layers, body_calls = _run_pp(
+                [0.34, 0.33, 0.33], train_step=step
+            )
+            self._assert_finite(loss)
+            if not mtp_layers:
+                return
+            seen.add(tuple(sorted(body_calls.items())))
+        assert len(seen) > 1, f"K never varied across train steps: {seen}"
 
 
 if __name__ == "__main__":
