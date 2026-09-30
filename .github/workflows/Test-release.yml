@@ -17,7 +17,9 @@ env:
   work_dir: /paddle
   PADDLE_ROOT: /paddle
   ci_scripts: /paddle/ci
-  BRANCH: ${{ github.event.pull_request.base.ref || github.ref_name }}
+  # For a stacked PR, pull_request.base.ref is the PR below it; the stack trunk
+  # (develop/release) is what we build on and what artifacts are published for.
+  BRANCH: ${{ github.event.pull_request.stack.base.ref || github.event.pull_request.base.ref || github.ref_name }}
   CI_name: test
   no_proxy: "bcebos.com,.bcebos.com,apiin.im.baidu.com,gitee.com,aliyun.com,.baidu.com,.tuna.tsinghua.edu.cn,paddlepaddle.org.cn,.paddlepaddle.org.cn,www.paddlepaddle.org.cn"
   docker_image: "ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlepaddle/paddle:ubuntu24-cuda129-py312-dev"
@@ -63,7 +65,9 @@ jobs:
         if: |
           github.event_name != 'pull_request' || !contains(github.event.pull_request.labels.*.name, 'fleet-models-ci')
         run: |
-          changed_files=$(git diff origin/${{ github.event.pull_request.base.ref }}...HEAD --name-only)
+          # HEAD is refs/pull/N/merge; its first parent is the base the PR lands on
+          # (the merge ref of the PR below, for a stacked PR), so this is the PR's own diff.
+          changed_files=$(git diff HEAD^1 HEAD --name-only)
           echo "Changed files: $changed_files"
           all_count=0
           md_count=0
@@ -106,7 +110,13 @@ jobs:
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             echo "packages_changed=true" >> $GITHUB_OUTPUT
           else
-            if git diff --name-only HEAD~1 HEAD -- packages/ | grep -q .; then
+            # HEAD~1 of a stacked PR's merge ref is the PR below, so a packages/
+            # change in a lower layer would be missed. Diff from the trunk commit
+            # the merge ref is built on instead; for a normal PR that is HEAD~1.
+            git fetch --depth=100 origin "${BRANCH}"
+            if ! trunk_base=$(git merge-base FETCH_HEAD HEAD); then
+              echo "packages_changed=true" >> $GITHUB_OUTPUT
+            elif git diff --name-only "${trunk_base}" HEAD -- packages/ | grep -q .; then
               echo "packages_changed=true" >> $GITHUB_OUTPUT
             else
               echo "packages_changed=false" >> $GITHUB_OUTPUT
@@ -226,10 +236,7 @@ jobs:
         run: |
           docker exec -t ${{ env.container_name }} /bin/bash -ce '
           set -x
-          # Nightly ops wheels exist only for develop/release branches. In a stacked PR,
-          # BRANCH (base.ref) is the PR below; github.base_ref is the stack trunk.
-          ops_branch="${{ github.base_ref || github.ref_name }}"
-          branch_version="${ops_branch//\//.}"
+          branch_version="${BRANCH//\//.}"
           OPS_DST=paddlefleet_ops-0.0.0+${branch_version}-cp312-cp312-linux_x86_64.whl
           wget -q --no-proxy "https://paddle-whl.bj.bcebos.com/nightly/cu129/paddlefleet-ops/${OPS_DST}" -O dist/${OPS_DST}
           echo "OPS_WHL=${OPS_DST}" >> dist/whl_names.txt
@@ -1563,7 +1570,9 @@ jobs:
             EXCLUDE_ARGS+=(":(exclude)${EXCLUDE_PATH}**")
           done
 
-          git diff origin/${{ github.event.pull_request.base.ref }}...HEAD --unified=0 \
+          # Only this PR's lines: for a stacked PR, HEAD^1 of the merge ref already
+          # contains the trunk and every lower layer.
+          git diff HEAD^1 HEAD --unified=0 \
             -- . "${EXCLUDE_ARGS[@]}" > diff.txt
           echo "Diff size: $(wc -l < diff.txt) lines ($(wc -c < diff.txt) bytes)"
           python -m pip install diff-cover -q
