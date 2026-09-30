@@ -55,6 +55,9 @@ def _make_embedding(*, use_accuracy_compatible, num_nextn_predict_layers):
     emb.config.experimental_dataflow = False
     emb.config.gpt_model_use_experimental_version = False
     emb.config.enable_mtp_magic_send = False
+    # ErnData carriers have no appended MTP tail, so the gate skips them;
+    # a bare MagicMock attribute would be truthy.
+    emb.config.use_erndata = False
     emb.config.use_accuracy_compatible = use_accuracy_compatible
     emb.config.pad_token_id = PAD_TOKEN_ID
     emb.multimodal_embedding = False
@@ -143,6 +146,21 @@ class TestGPTEmbeddingMTPCarrierTail(unittest.TestCase):
             seen["input_ids"].numpy().tolist(),
             input_ids.numpy().tolist(),
             "with MTP off there is no shifted slice to align",
+        )
+
+    @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
+    def test_disabled_under_erndata(self):
+        emb, seen = _make_embedding(
+            use_accuracy_compatible=True, num_nextn_predict_layers=1
+        )
+        emb.config.use_erndata = True
+        input_ids = _carrier(seq_len=8, tail=3)
+        emb.forward(dict_args={"input_ids": input_ids})
+
+        self.assertEqual(
+            seen["input_ids"].numpy().tolist(),
+            input_ids.numpy().tolist(),
+            "ErnData carriers have no MTP tail to zero",
         )
 
     @patch.dict(os.environ, {"MODEL_REPRO_IEEE_KERNEL": "1"})
