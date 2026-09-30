@@ -15,7 +15,7 @@
 """Single-card coverage for the separate_mtp_headloss megatron label path.
 
 Drives the REAL ``MainLanguageLoss`` / ``MTPLanguageLoss`` / base
-``LanguageLoss._megatron_label_for_depth`` via ``__new__`` + MagicMock config
+``LanguageLoss._labels_for_depth`` via ``__new__`` + MagicMock config
 and a stubbed ``_forward`` that records the labels handed to it. Under
 use_erndata=True:
 
@@ -73,7 +73,7 @@ def _ref_per_doc_roll(labels_np, cu_list, depth, ignored=IGNORED):
 
 
 def _base_loss(K):
-    """Bare ``LanguageLoss`` for testing ``_megatron_label_for_depth``."""
+    """Bare ``LanguageLoss`` for testing ``_labels_for_depth``."""
     loss = LanguageLoss.__new__(LanguageLoss)
     loss.config = MagicMock()
     loss.config.num_nextn_predict_layers = K
@@ -94,7 +94,7 @@ def _record_forward():
 
 
 class TestMegatronLabelForDepth(unittest.TestCase):
-    """Base ``LanguageLoss._megatron_label_for_depth`` (CP=1, TP=1)."""
+    """Base ``LanguageLoss._labels_for_depth`` (CP=1, TP=1)."""
 
     def setUp(self) -> None:
         LanguageLoss._cu_seqlens_q_stash = None
@@ -110,7 +110,7 @@ class TestMegatronLabelForDepth(unittest.TestCase):
         LanguageLoss._cu_seqlens_q_stash = _cu(cu_list)
         labels_np = np.arange(L, dtype="int64").reshape([1, L])
         labels = paddle.to_tensor(labels_np)
-        out = loss._megatron_label_for_depth(labels, -1)
+        out = loss._labels_for_depth(labels, -1)
         self.assertEqual(list(out.shape), [1, L])
         np.testing.assert_array_equal(out.numpy(), labels_np)
 
@@ -122,7 +122,7 @@ class TestMegatronLabelForDepth(unittest.TestCase):
         labels_np = np.arange(L, dtype="int64").reshape([1, L])
         labels = paddle.to_tensor(labels_np)
         for depth in range(2):
-            out = loss._megatron_label_for_depth(labels, depth)
+            out = loss._labels_for_depth(labels, depth)
             self.assertEqual(list(out.shape), [1, L])
             ref = _ref_per_doc_roll(labels_np, cu_list, depth)
             np.testing.assert_array_equal(out.numpy(), ref)
@@ -134,11 +134,11 @@ class TestMegatronLabelForDepth(unittest.TestCase):
         LanguageLoss._cu_seqlens_q_stash = _cu(cu_list)
         labels = paddle.arange(L, dtype="int64").reshape([1, L])
         # depth 0: last position of each doc (index 3, 9, 15).
-        d0 = loss._megatron_label_for_depth(labels, 0).numpy()[0]
+        d0 = loss._labels_for_depth(labels, 0).numpy()[0]
         for idx in (3, 9, 15):
             self.assertEqual(d0[idx], IGNORED)
         # depth 1: last two positions of each doc (2,3 / 8,9 / 14,15).
-        d1 = loss._megatron_label_for_depth(labels, 1).numpy()[0]
+        d1 = loss._labels_for_depth(labels, 1).numpy()[0]
         for idx in (2, 3, 8, 9, 14, 15):
             self.assertEqual(d1[idx], IGNORED)
 
@@ -147,9 +147,9 @@ class TestMegatronLabelForDepth(unittest.TestCase):
         LanguageLoss._cu_seqlens_q_stash = None
         labels = paddle.arange(16, dtype="int64").reshape([1, 16])
         with self.assertRaises(RuntimeError):
-            loss._megatron_label_for_depth(labels, 0)
+            loss._labels_for_depth(labels, 0)
         # depth < 0 never needs the stash.
-        out = loss._megatron_label_for_depth(labels, -1)
+        out = loss._labels_for_depth(labels, -1)
         self.assertEqual(list(out.shape), [1, 16])
 
 
