@@ -12,17 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""erndata MTP contracts: cu_seqlens granularity + mHC multi-depth chain.
+"""Packed-doc helper contracts: cu_seqlens granularity + mHC multi-depth chain.
 
 Two contracts that end-to-end smoke can only surface as opaque shape errors
 (or, worse, as a silently wrong attention mask):
 
-1. ``build_startend_row_indices_from_cu_seqlens`` must decide the cu_seqlens
-   granularity from the caller-supplied per-sample ``seq_len``, never from the
-   boundary values. ``batch_size=2`` with per-sample ``cu=[0, 4, 8]`` has the
-   same boundary set as a batch-flat cu over two length-4 samples, so a
-   structural test necessarily mis-classifies one of them and emits a mask of
-   the wrong length.
+1. ``build_startend_row_indices_from_cu_seqlens`` (HyperBody packed decoder;
+   the erndata GPT path does not call this -- the adapter ships the mask)
+   must decide the cu_seqlens granularity from the caller-supplied per-sample
+   ``seq_len``, never from the boundary values. ``batch_size=2`` with
+   per-sample ``cu=[0, 4, 8]`` has the same boundary set as a batch-flat cu
+   over two length-4 samples, so a structural test necessarily mis-classifies
+   one of them and emits a mask of the wrong length.
 
 2. Under ``use_erndata=True`` with mHC, ``_forward_megatron_style`` must
    publish each depth's multi-stream output into the ``mhc_multistream``
@@ -47,6 +48,11 @@ from paddlefleet.transformer.multi_token_prediction import (
 def _ends(mask: paddle.Tensor, sample: int) -> list[int]:
     """Extract the per-position end-row column for one sample."""
     return [row[0] for row in mask.numpy().tolist()[sample][0]]
+
+
+def _dummy_mask(batch: int, seq: int) -> paddle.Tensor:
+    """Adapter-owned flashmask placeholder; the stubbed block ignores values."""
+    return paddle.full([batch, 1, seq, 1], seq, dtype="int32")
 
 
 class TestCuSeqlensGranularity(unittest.TestCase):
@@ -175,6 +181,7 @@ def _make_mhc_layer(
     cfg.fp32_residual_connection = False
     cfg.pad_token_id = 0
     cfg.cp_balance_mode = "dualchunk_allgather"
+    cfg.experimental_dataflow = False
     cfg.num_residual_streams = n
     cfg.hidden_size = h
     layer.config = cfg
@@ -231,6 +238,7 @@ class TestErndataMhcMultiDepthChain(unittest.TestCase):
             "hidden_states": carrier,
             "mhc_multistream": mhc,
             "context": None,
+            "attn_mask_startend_row_indices": _dummy_mask(B, S),
         }
 
     def test_depth1_receives_depth0_multistream_output(self) -> None:
@@ -341,6 +349,7 @@ class TestErndataMhcMultiDepthChain(unittest.TestCase):
                 "hidden_states": carrier,
                 "mhc_multistream": mhc,
                 "context": None,
+                "attn_mask_startend_row_indices": _dummy_mask(B, S),
             }
         )
         self.assertEqual(float(rec["hidden_in"].numpy()[0, 0, 0]), _CHUNK_MARK)
@@ -360,39 +369,13 @@ class TestErndataMhcMultiDepthChain(unittest.TestCase):
             [paddle.full([B, S, h], -(i + 1.0)) for i in range(2)]
         )
         with self.assertRaises(RuntimeError):
-            layer.forward({"hidden_states": carrier, "context": None})
-
-
-def _make_mask_layer(
-    K: int,
-    *,
-    layer_number: int = 0,
-    sequence_parallel: bool = False,
-    tp_size: int = 1,
-):
-    """Non-mHC layer used to exercise the mask-derivation fallback only."""
-    layer = MultiTokenPredictionLayer.__new__(MultiTokenPredictionLayer)
-    cfg = MagicMock()
-    cfg.use_erndata = True
-    cfg.enable_mtp_magic_send = False
-    cfg.num_nextn_predict_layers = K
-    cfg.gpt_model_use_experimental_version = False
-    cfg.sequence_parallel = sequence_parallel
-    cfg.tensor_model_parallel_size = tp_size
-    layer.config = cfg
-    layer.layer_number = layer_number
-    layer.mhc_enabled = False
-
-    recorded = {}
-
-    def _stub_proj(hidden_states, decoder_input, **kwargs):
-        am = kwargs.get("attn_mask_startend_row_indices")
-        recorded["attn_mask"] = am
-        recorded["attn_mask_shape"] = None if am is None else list(am.shape)
-        return decoder_input
-
-    layer._proj_and_transformer_layer = _stub_proj
-    return layer, recorded
+            layer.forward(
+                {
+                    "hidden_states": carrier,
+                    "context": None,
+                    "attn_mask_startend_row_indices": _dummy_mask(B, S),
+                }
+            )
 
 
 class TestErndataMagicSend(unittest.TestCase):
@@ -400,9 +383,6 @@ class TestErndataMagicSend(unittest.TestCase):
         layer = MultiTokenPredictionLayer.__new__(MultiTokenPredictionLayer)
         cfg = MagicMock()
         cfg.use_erndata = True
-        # MagicMock attributes are truthy; pin the flag that picks the CP
-        # transform implementation.
-        cfg.experimental_dataflow = False
         cfg.enable_mtp_magic_send = magic_send
         cfg.num_nextn_predict_layers = K
         cfg.gpt_model_use_experimental_version = False
@@ -411,6 +391,7 @@ class TestErndataMagicSend(unittest.TestCase):
         cfg.expert_model_parallel_size = 1
         cfg.pad_token_id = 0
         cfg.cp_balance_mode = "dualchunk_allgather"
+        cfg.experimental_dataflow = False
         layer.config = cfg
         layer.layer_number = depth
         layer.sequence_parallel = False
@@ -439,6 +420,7 @@ class TestErndataMagicSend(unittest.TestCase):
             "mtp_full_input_ids": ids,
             "cu_seqlens_q": cu,
             "context": None,
+            "attn_mask_startend_row_indices": _dummy_mask(B, S),
         }
         l0, rec0 = self._make_layer(K, 0)
         l1, rec1 = self._make_layer(K, 1)
@@ -612,12 +594,14 @@ class TestErndataMagicSend(unittest.TestCase):
                 "hidden_states": paddle.concat(ordinary_chunks),
                 "cu_seqlens_q": cu,
                 "context": None,
+                "attn_mask_startend_row_indices": _dummy_mask(B, S),
             }
             magic_args = {
                 "hidden_states": base,
                 "mtp_full_input_ids": ids,
                 "cu_seqlens_q": cu,
                 "context": None,
+                "attn_mask_startend_row_indices": _dummy_mask(B, S),
             }
             for depth in range(K):
                 ordinary, ordinary_rec = self._make_layer(
@@ -641,70 +625,6 @@ class TestErndataMagicSend(unittest.TestCase):
 
             self.assertIs(magic_args["cu_seqlens_q"], cu)
             self.assertNotIn("mtp_full_input_ids", magic_args)
-
-
-class TestMaskFallbackWithoutInputIds(unittest.TestCase):
-    """The fallback must not depend on the optional ``input_ids`` key.
-
-    ``GPTEmbedding`` publishes ``input_ids`` as ``input_ids_for_moe_mask``,
-    which stays None under plain ``use_erndata`` with
-    ``expert_model_parallel_size == 1`` and
-    ``gpt_model_use_experimental_version == False`` -- the key is then absent
-    from ``dict_args``. The per-sample length must instead be recovered from
-    the rank-local hidden_states shape and the parallel degrees.
-    """
-
-    def test_batch_flat_cu_without_input_ids(self) -> None:
-        """B=2, L=4, batch-flat cu, no input_ids -> [2, 1, 4, 1] mask.
-
-        Deriving L from a missing ``input_ids`` would fall back to per-sample
-        semantics and emit a length-8 mask, which mismatches the length-4
-        sequence attention actually sees.
-        """
-        K, B, L, h = 1, 2, 4, 2
-        layer, rec = _make_mask_layer(K)
-        # Carrier: K+1 slots concatenated along the batch axis, [ (K+1)*B, L, h ]
-        carrier = paddle.zeros([(K + 1) * B, L, h], dtype="float32")
-        cu = paddle.to_tensor([0, 2, 4, 7, 8], dtype="int32")
-        layer._forward_megatron_style(
-            {"hidden_states": carrier, "cu_seqlens_q": cu, "context": None}
-        )
-        self.assertEqual(rec["attn_mask_shape"], [B, 1, L, 1])
-        self.assertEqual(_ends(rec["attn_mask"], 0), [2, 2, 4, 4])
-        self.assertEqual(_ends(rec["attn_mask"], 1), [3, 3, 3, 4])
-
-    def test_per_sample_cu_without_input_ids(self) -> None:
-        """A per-sample cu keeps the shared length-L layout for both samples."""
-        K, B, L, h = 1, 2, 4, 2
-        layer, rec = _make_mask_layer(K)
-        carrier = paddle.zeros([(K + 1) * B, L, h], dtype="float32")
-        cu = paddle.to_tensor([0, 3, 4], dtype="int32")
-        layer._forward_megatron_style(
-            {"hidden_states": carrier, "cu_seqlens_q": cu, "context": None}
-        )
-        self.assertEqual(rec["attn_mask_shape"], [B, 1, L, 1])
-        self.assertEqual(_ends(rec["attn_mask"], 0), [3, 3, 3, 4])
-        self.assertEqual(_ends(rec["attn_mask"], 1), [3, 3, 3, 4])
-
-    def test_sequence_parallel_scales_local_seq_back_up(self) -> None:
-        """Under SP the seq axis holds L/TP; the mask must still cover L.
-
-        Layout is seq-first, so the carrier concat is along the seq axis:
-        [ (K+1)*L/TP, B, h ]. With TP=2 and local 4 the global L is 8, so a
-        batch-flat cu spanning B*L=16 must be recognized. Forgetting the TP
-        factor would make the span match neither reading and raise.
-        """
-        K, B, L, h, tp = 1, 2, 8, 2, 2
-        local = L // tp
-        layer, rec = _make_mask_layer(K, sequence_parallel=True, tp_size=tp)
-        carrier = paddle.zeros([(K + 1) * local, B, h], dtype="float32")
-        cu = paddle.to_tensor([0, 5, 8, 12, 16], dtype="int32")
-        layer._forward_megatron_style(
-            {"hidden_states": carrier, "cu_seqlens_q": cu, "context": None}
-        )
-        self.assertEqual(rec["attn_mask_shape"], [B, 1, L, 1])
-        self.assertEqual(_ends(rec["attn_mask"], 0), [5, 5, 5, 5, 5, 8, 8, 8])
-        self.assertEqual(_ends(rec["attn_mask"], 1), [4, 4, 4, 4, 8, 8, 8, 8])
 
 
 if __name__ == "__main__":

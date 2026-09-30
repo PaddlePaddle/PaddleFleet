@@ -62,6 +62,7 @@ def _make_embedding(
     use_erndata=True,
     magic_send=False,
     cp_balance_mode="dualchunk_allgather",
+    mtp_load_weight_only=False,
 ):
     emb = GPTEmbedding.__new__(GPTEmbedding)
     cfg = MagicMock()
@@ -73,7 +74,7 @@ def _make_embedding(
     cfg.expert_model_parallel_size = 1
     cfg.tensor_model_parallel_size = 1
     cfg.num_nextn_predict_layers = K
-    cfg.mtp_load_weight_only = False
+    cfg.mtp_load_weight_only = mtp_load_weight_only
     cfg.use_erndata = use_erndata
     cfg.enable_mtp_magic_send = magic_send
     # MagicMock attributes are truthy by default; pin the real default so the
@@ -106,6 +107,21 @@ def _make_embedding(
     )
     emb.embedding = _stub_embedding
     return emb
+
+
+def _erndata_args(input_ids, cu_seqlens_q=None, **extra):
+    """Batch dict for use_erndata=True: adapter-owned flashmask is required."""
+    batch, seq = input_ids.shape
+    args = {
+        "input_ids": input_ids,
+        "attn_mask_startend_row_indices": paddle.full(
+            [batch, 1, seq, 1], seq, dtype="int32"
+        ),
+    }
+    if cu_seqlens_q is not None:
+        args["cu_seqlens_q"] = cu_seqlens_q
+    args.update(extra)
+    return args
 
 
 @contextlib.contextmanager
@@ -164,7 +180,7 @@ class TestGptEmbeddingMegatron(unittest.TestCase):
             [0, 3, 8], dtype="int32", place=paddle.CPUPlace()
         )
 
-        out = emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu_cpu})
+        out = emb.forward(_erndata_args(input_ids, cu_cpu))
 
         # hidden_states is the concat of (K+1) [B, L, H] embeddings along axis 0.
         self.assertEqual(list(out["hidden_states"].shape), [(K + 1) * B, L, H])
@@ -180,7 +196,7 @@ class TestGptEmbeddingMegatron(unittest.TestCase):
         input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
         cu = paddle.to_tensor([0, 3, 8], dtype="int32")
 
-        out = emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu})
+        out = emb.forward(_erndata_args(input_ids, cu))
 
         self.assertEqual(list(out["hidden_states"].shape), [B, L, H])
         self.assertIn("mtp_full_input_ids", out)
@@ -198,16 +214,41 @@ class TestGptEmbeddingMegatron(unittest.TestCase):
         cu_cpu = paddle.to_tensor(
             [0, 6], dtype="int32", place=paddle.CPUPlace()
         )
-        emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu_cpu})
+        emb.forward(_erndata_args(input_ids, cu_cpu))
         self.assertTrue(LanguageLoss._cu_seqlens_q_stash.place.is_gpu_place())
+
+    def test_erndata_missing_mask_raises(self) -> None:
+        # GPTEmbedding fail-closes for every use_erndata spelling, including
+        # the plain path where MTP is inactive (K==0 / weight-only). MTP-layer
+        # reuse of a missing mask is covered in test_mtp_forward_dispatch.
+        B, L, H = 1, 8, 4
+        cases = (
+            (0, False),
+            (1, False),
+            (1, True),
+        )
+        for k, weight_only in cases:
+            with self.subTest(
+                num_nextn_predict_layers=k, mtp_load_weight_only=weight_only
+            ):
+                emb = _make_embedding(
+                    k, B, L, H, mtp_load_weight_only=weight_only
+                )
+                input_ids = (
+                    paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
+                )
+                cu = paddle.to_tensor([0, L], dtype="int32")
+                with self.assertRaisesRegex(
+                    RuntimeError, r"attn_mask_startend_row_indices"
+                ):
+                    emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu})
 
 
 class TestGptEmbeddingErnie5(unittest.TestCase):
     """ernie5 (non-megatron) MTP embedding path, single-card (no SP/CP).
 
-    Covers the L+K concat-shift branch (gpt_embedding.py:516-540, 586-660
-    minus SP/CP-only sublines) and the magic-send truncation branch
-    (542-545, 551/560/567 guard evaluations).
+    Covers the L+K concat-shift branch (minus SP/CP-only sublines) and the
+    magic-send truncation branch.
     """
 
     def test_ernie5_concat_shift_path(self) -> None:
@@ -231,8 +272,8 @@ class TestGptEmbeddingErnie5(unittest.TestCase):
 
 
 class TestGptEmbeddingMegatronCPSP(unittest.TestCase):
-    """CP>1 (457, 494) and sequence_parallel (464, 467, 501-502, 505, 508)
-    sublines of the megatron branch, covered single-card via monkeypatch.
+    """CP>1 and sequence_parallel sublines of the megatron branch,
+    covered single-card via monkeypatch.
     """
 
     def setUp(self) -> None:
@@ -242,14 +283,14 @@ class TestGptEmbeddingMegatronCPSP(unittest.TestCase):
         LanguageLoss._cu_seqlens_q_stash = None
 
     def test_megatron_cp_extract(self) -> None:
-        # cp_size=2 -> real extract_local_cp_chunks halves the seq len
-        # (lines 457 and 494). L must be divisible by 2*cp_size.
+        # cp_size=2 -> real to_cp_local halves the seq len.
+        # L must be divisible by 2*cp_size.
         K, B, L, H = 2, 1, 8, 4
         emb = _make_embedding(K, B, L, H)
         input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
         cu = paddle.to_tensor([0, 3, 8], dtype="int32")
         with _fake_cp(cp_size=2):
-            out = emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu})
+            out = emb.forward(_erndata_args(input_ids, cu))
         # Each of the K+1 chunks is zigzag-halved to L/2 on axis 1.
         self.assertEqual(
             list(out["hidden_states"].shape), [(K + 1) * B, L // 2, H]
@@ -275,7 +316,7 @@ class TestGptEmbeddingMegatronCPSP(unittest.TestCase):
             )
             cu = paddle.to_tensor([0, 3, 8], dtype="int32")
             with _fake_cp(cp_size=cp_size, cp_rank=cp_rank):
-                out = emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu})
+                out = emb.forward(_erndata_args(input_ids, cu))
             # hidden_states is the (K+1) chunks concatenated on axis 0; the
             # first B rows are the main (unrolled) embedding.
             main = out["hidden_states"][:B]
@@ -303,7 +344,7 @@ class TestGptEmbeddingMegatronCPSP(unittest.TestCase):
         input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
         cu = paddle.to_tensor([0, 3, 8, 11, 16], dtype="int32")
         with _identity_scatter():
-            out = emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu})
+            out = emb.forward(_erndata_args(input_ids, cu))
         # SP layout is [S, B, H]; concat of K+1 chunks -> [(K+1)*L, B, H].
         self.assertEqual(list(out["hidden_states"].shape), [(K + 1) * L, B, H])
         expected_main = emb.embedding(input_ids=input_ids, position_ids=None)
@@ -315,13 +356,13 @@ class TestGptEmbeddingMegatronCPSP(unittest.TestCase):
 
 
 class TestGptEmbeddingErnie5CPSP(unittest.TestCase):
-    """CP scatter (603, 638) and sequence_parallel (610, 613-614, 647, 650,
-    653) sublines of the ernie5 (non-megatron) MTP embedding branch.
+    """CP scatter and sequence_parallel sublines of the ernie5
+    (non-megatron) MTP embedding branch.
     """
 
     def test_ernie5_cp_scatter(self) -> None:
         # experimental_dataflow + cp_size>1 -> ContextParallelScatterOp
-        # (identity) at lines 603 and 638.
+        # (identity).
         K, B, L, H = 2, 1, 10, 4
         emb = _make_embedding(K, B, L, H, use_erndata=False)
         emb.config.experimental_dataflow = True
@@ -333,8 +374,7 @@ class TestGptEmbeddingErnie5CPSP(unittest.TestCase):
         )
 
     def test_ernie5_sequence_parallel(self) -> None:
-        # sequence_parallel path with identity ScatterOp
-        # (lines 610, 613-614, 647, 650, 653).
+        # sequence_parallel path with identity ScatterOp.
         K, B, L, H = 2, 1, 10, 4
         emb = _make_embedding(K, B, L, H, use_erndata=False)
         emb.sequence_parallel = True
@@ -408,7 +448,7 @@ class TestGptEmbeddingMegatronCPRope(unittest.TestCase):
         input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
         cu = paddle.to_tensor([0, 3, 8], dtype="int32")
         with _fake_cp(cp_size=2):
-            out = emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu})
+            out = emb.forward(_erndata_args(input_ids, cu))
 
         full = (
             paddle.arange(L, dtype="float32")
@@ -431,7 +471,8 @@ class TestGptEmbeddingMegatronCPRope(unittest.TestCase):
 
     def test_rope_slice_follows_cp_balance_mode(self) -> None:
         # The RoPE table enters local coordinates through its own to_cp_local
-        # call, after the hidden states did. Every channel of the stub table holds the
+        # call, after the hidden states did.
+        # Every channel of the stub table holds the
         # global position index, so the sliced table reads out directly as the
         # position set this rank owns -- and the two layouts disagree at rank 1
         # of 2 with L=8 (zigzag [2,3,4,5] vs contiguous [4,5,6,7]).
@@ -451,7 +492,7 @@ class TestGptEmbeddingMegatronCPRope(unittest.TestCase):
             )
             cu = paddle.to_tensor([0, 3, 8], dtype="int32")
             with _fake_cp(cp_size=2, cp_rank=1):
-                out = emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu})
+                out = emb.forward(_erndata_args(input_ids, cu))
             np.testing.assert_array_equal(
                 out["rotary_pos_emb"][0, :, 0, 0].numpy(),
                 np.array(positions, dtype="float32"),
@@ -463,7 +504,7 @@ class TestGptEmbeddingMegatronCPRope(unittest.TestCase):
         emb = _enable_rope(_make_embedding(K, B, L, H), cp_size=1, dim=D)
         input_ids = paddle.arange(B * L, dtype="int64").reshape([B, L]).cuda()
         cu = paddle.to_tensor([0, 3, 8], dtype="int32")
-        out = emb.forward({"input_ids": input_ids, "cu_seqlens_q": cu})
+        out = emb.forward(_erndata_args(input_ids, cu))
         np.testing.assert_array_equal(
             out["rotary_pos_emb"][0, :, 0, 0].numpy(),
             np.arange(L, dtype="float32"),
@@ -491,15 +532,12 @@ class TestGptEmbeddingMegatronCPRope(unittest.TestCase):
 
 
 class TestGptEmbeddingMagicSendCPSP(unittest.TestCase):
-    """magic-send truncation branch CP/SP sublines (gpt_embedding.py:555,
-    564, 568, 571, 574-575, 579). magic-send lives in the ernie5
-    (non-megatron) path, so use_erndata stays "ernie5".
+    """magic-send truncation branch CP/SP sublines. magic-send lives in the
+    ernie5 (non-megatron) path, so use_erndata stays False.
     """
 
     def test_magic_experimental_sp_cp(self) -> None:
-        # experimental_version=True + SP=True + CP>1 + experimental_dataflow:
-        # covers 555 (CP scatter), 564 (astype), 568/571/574 (SP reshape),
-        # 575 (guard eval). 579 is skipped here (experimental&SP True).
+        # experimental_version=True + SP=True + CP>1 + experimental_dataflow.
         K, B, L, H = 2, 1, 8, 4
         emb = _make_embedding(K, B, L, H, use_erndata=False, magic_send=True)
         emb.sequence_parallel = True
@@ -512,7 +550,7 @@ class TestGptEmbeddingMagicSendCPSP(unittest.TestCase):
 
     def test_magic_non_experimental_sp(self) -> None:
         # experimental_version=False + SP=True: the ``if not (experimental
-        # and SP)`` guard is True, so line 579 (reshape/permute) runs.
+        # and SP)`` guard is True, so the reshape/permute runs.
         K, B, L, H = 2, 1, 8, 4
         emb = _make_embedding(K, B, L, H, use_erndata=False, magic_send=True)
         emb.config.gpt_model_use_experimental_version = False

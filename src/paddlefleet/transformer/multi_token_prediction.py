@@ -310,12 +310,9 @@ def build_startend_row_indices_from_cu_seqlens(
 ):
     """Derive flashmask ``attn_mask_startend_row_indices`` from ``cu_seqlens_q``.
 
-    The erndata MTP contract carries packed-document boundaries as a
-    cumulative-length int32 vector ``[num_docs + 1]`` rather than a materialized
-    attention mask. Every consumer of that contract (the main backbone via
-    ``GPTEmbedding``, and each MTP depth via
-    ``MultiTokenPredictionLayer._forward_megatron_style``) needs the equivalent
-    flashmask boundaries, so the derivation lives here once.
+    Packed-document boundaries as a cumulative-length int32 vector
+    ``[num_docs + 1]``. HyperBody's packed decoder derives its flashmask this
+    way; the erndata GPT path receives the mask from the adapter instead.
 
     For a token at position ``i`` inside document ``j``
     (``cu[j] <= i < cu[j+1]``), the end row is ``cu[j+1]`` — i.e. attention is
@@ -2063,54 +2060,14 @@ class MultiTokenPredictionLayer(FleetLayer):
                 f"Under use_erndata=True, input_ids must be [B, L], got shape {input_ids.shape}."
             )
 
-        # Derive per-depth attn_mask_startend_row_indices from cu_seqlens_q
-        # only when the dataloader did not already provide one. The erndata
-        # loader emits a per-sample mask [B, 1, S, 1] that already reflects
-        # packed-doc boundaries, and doc boundaries are the SAME at every MTP
-        # depth (per-doc roll does not wrap across doc boundaries), so reusing
-        # it avoids both redundant deviation and any semantic drift. The
-        # fallback derivation below handles the case where the loader omitted
-        # the mask.
-        cu_seqlens_q = dict_args.get("cu_seqlens_q", None)
-        if (
-            cu_seqlens_q is not None
-            and dict_args.get("attn_mask_startend_row_indices") is None
-        ):
-            # experimental_dataflow: 2-col [B, 1, S, 2]; fleet-mode: 1-col [B, 1, S, 1].
-            # ernie5 flashmask & SWA helpers require a 4D layout [B, heads, S, num_vec]
-            # (see startend_row_indices_add_sliding_window in utils.py).
-            include_pos = bool(
-                getattr(
-                    self.config, "gpt_model_use_experimental_version", False
-                )
-            )
-            # Recover the GLOBAL per-sample length L from this rank's shard.
-            # ``input_ids`` must not be used: GPTEmbedding publishes it as
-            # ``input_ids_for_moe_mask``, which stays None under plain
-            # use_erndata with expert_model_parallel_size == 1 and
-            # gpt_model_use_experimental_version == False, so the key is absent
-            # here. Scale the local seq axis back up by the parallel degrees,
-            # exactly the way the KDA branch of GPTEmbedding.forward does for
-            # its own cu_seqlens (gpt_embedding.py, build_cu_seqlens call site):
-            # the mask lives in global sequence coordinates while hidden_states
-            # is the rank-local shard. Layout is seq-first iff sequence_parallel.
-            cp_size = max(get_context_parallel_world_size(), 1)
-            if getattr(self.config, "sequence_parallel", False):
-                # [s/tp, b, h]
-                local_seq_len, batch_size = dict_args["hidden_states"].shape[:2]
-                sp_size = self.config.tensor_model_parallel_size
-            else:
-                # [b, s, h]
-                batch_size, local_seq_len = dict_args["hidden_states"].shape[:2]
-                sp_size = 1
-            seq_len = local_seq_len * sp_size * cp_size
-            dict_args["attn_mask_startend_row_indices"] = (
-                build_startend_row_indices_from_cu_seqlens(
-                    cu_seqlens_q,
-                    batch_size,
-                    include_position_axis=include_pos,
-                    seq_len=seq_len,
-                )
+        # GPTEmbedding rejects an erndata batch without a mask, and document
+        # boundaries are the same at every MTP depth (the per-document roll
+        # never crosses one), so every depth reuses the backbone mask.
+        if dict_args.get("attn_mask_startend_row_indices") is None:
+            raise RuntimeError(
+                "use_erndata=True requires attn_mask_startend_row_indices "
+                "on the MTP batch; the adapter ships the backbone mask and "
+                "every MTP depth reuses it."
             )
 
         # Run transformer layer.

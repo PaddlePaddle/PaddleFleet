@@ -366,6 +366,20 @@ class GPTEmbedding(FleetLayer):
             if attn_mask_startend_row_indices is not None
             else None
         )
+        if (
+            getattr(self.config, "use_erndata", False)
+            and attn_mask_startend_row_indices is None
+        ):
+            # Without a mask the CP branch of DotProductAttention synthesizes an
+            # all-visible one and calls flashmask with causal=False, silently
+            # dropping causality and document boundaries. The erndata adapter
+            # owns this field; do not reconstruct it here.
+            raise RuntimeError(
+                "use_erndata=True requires attn_mask_startend_row_indices "
+                "(or startend_row_indices) on the batch; the adapter owns "
+                "this field and GPTEmbedding does not derive it from "
+                "cu_seqlens_q."
+            )
         deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
         deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
         visual_pos_masks = None
@@ -378,9 +392,9 @@ class GPTEmbedding(FleetLayer):
         # dataloader put it there (use_erndata path). We keep
         # it as a raw tensor throughout — no PackedSeqParams wrapper — to
         # avoid triggering the attention-kernel THD path (qkv_format="thd")
-        # which the ernie5 flashmask stack does not use. Downstream
-        # consumers (MultiTokenPredictionLayer._forward_megatron_style)
-        # derive per-depth attn_mask_startend_row_indices from this tensor.
+        # which the ernie5 flashmask stack does not use. Packed rolls and the
+        # LanguageLoss stash consume it; the attention mask comes from the
+        # batch (checked above).
         cu_seqlens_q = dict_args.get("cu_seqlens_q", None)
         if cu_seqlens_q is not None and not cu_seqlens_q.place.is_gpu_place():
             cu_seqlens_q = cu_seqlens_q.cuda()
@@ -468,29 +482,8 @@ class GPTEmbedding(FleetLayer):
                         "erndata MTP path does not support multimodal for now."
                     )
                     from paddlefleet.transformer.multi_token_prediction import (
-                        build_startend_row_indices_from_cu_seqlens,
                         roll_tensor,
                     )
-
-                    # The erndata contract only guarantees length-L tensors plus
-                    # cu_seqlens_q; the main flashmask boundaries are optional
-                    # (erndata emits them only when pack_by_cu_seqlen=True and
-                    # the sample has documents). Without a mask the CP branch of
-                    # DotProductAttention synthesizes an all-visible one and
-                    # calls flashmask with causal=False, silently dropping both
-                    # causality and doc boundaries from the backbone. Derive the
-                    # mask from cu_seqlens_q here so the backbone sees the same
-                    # per-doc boundaries the MTP depths do.
-                    if (
-                        attn_mask_startend_row_indices is None
-                        and cu_seqlens_q is not None
-                    ):
-                        attn_mask_startend_row_indices = build_startend_row_indices_from_cu_seqlens(
-                            cu_seqlens_q,
-                            decoder_input.shape[0],
-                            include_position_axis=self.config.gpt_model_use_experimental_version,
-                            seq_len=decoder_input.shape[1],
-                        )
 
                     # decoder_input: [B, L, H] full-length embedding (already
                     # computed above from the length-L input_ids in this branch).
