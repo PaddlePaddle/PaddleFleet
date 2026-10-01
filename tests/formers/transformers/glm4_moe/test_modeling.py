@@ -20,11 +20,12 @@ import unittest
 import numpy as np
 import paddle
 
-from paddlefleet.transformers import Glm4MoeConfig
 from paddlefleet.transformers import (
+    Glm4MoeConfig,
     Glm4MoeForCausalLMDeprecated as Glm4MoeForCausalLM,
+    Glm4MoeModel,
 )
-from paddlefleet.transformers import Glm4MoeModel
+from paddlefleet.transformers.glm4_moe.modeling import GLMMoEModelProvider
 from tests.formers.testing_utils import gpu_device_initializer, require_package
 from tests.formers.transformers.test_configuration_common import ConfigTester
 from tests.formers.transformers.test_generation_utils import (
@@ -380,6 +381,17 @@ class Glm4MoeModelTester:
                 result[0].shape,
                 [self.batch_size, self.seq_length, self.vocab_size],
             )
+
+
+class Glm4MoeProviderTest(unittest.TestCase):
+    def test_fleet_provider_maps_expert_tensor_parallel_size(self):
+        config = Glm4MoeConfig()
+        config.expert_tensor_model_parallel_size = 2
+
+        provider = object.__new__(GLMMoEModelProvider)
+        provider.register_attributes(config)
+
+        self.assertEqual(provider.expert_tensor_parallel_size, 2)
 
 
 class Glm4MoeModelTest(
