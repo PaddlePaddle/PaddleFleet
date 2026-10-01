@@ -55,10 +55,10 @@ REPO_FLAG = os.getenv("repo_flag")
 SKIP_TESTS = REPO_FLAG != "paddlefleet"
 
 
-def _run_pp(mtp_depth_sampling, seed=46, train_step=0, **extra_config):
+def _run_pp(mtp_depth_sampling, seed=46, steps=(0,), **extra_config):
     # K is a pure function of (seed, train step); the trainer normally exports
     # this, so set it explicitly rather than relying on the unset-env fallback.
-    os.environ["TRAINER_GLOBAL_STEP"] = str(train_step)
+    os.environ["TRAINER_GLOBAL_STEP"] = str(steps[0])
     config = GPTConfig(
         moe_expert_fusion=False,
         vocab_size=128,
@@ -136,8 +136,21 @@ def _run_pp(mtp_depth_sampling, seed=46, train_step=0, **extra_config):
         },
         [labels] * num_acc,
     )
-    loss = pipe.forward_backward_pipeline(inputs, None)
-    return loss, mtp_layers, body_calls
+
+    # Several steps run on ONE model rather than one model per step: every extra
+    # gpt_builder + distributed_model in this process re-enters
+    # _synchronize_shared_weights and its broadcasts, and stacking those made a
+    # rank die with a TCP-store broken pipe mid-build. Reusing the model is also
+    # closer to real training, where the step advances under a fixed model.
+    per_step = []
+    loss = None
+    for step in steps:
+        os.environ["TRAINER_GLOBAL_STEP"] = str(step)
+        for depth in body_calls:
+            body_calls[depth] = 0
+        loss = pipe.forward_backward_pipeline(inputs, None)
+        per_step.append(dict(body_calls))
+    return loss, mtp_layers, body_calls, per_step
 
 
 @unittest.skipIf(SKIP_TESTS, "requires repo_flag=paddlefleet multi-card env")
@@ -186,7 +199,7 @@ class TestMTPDepthSamplingPP(unittest.TestCase):
         assert not paddle.isinf(loss).any(), "loss has Inf"
 
     def test_pp_sampling_disabled(self):
-        loss, mtp_layers, body_calls = _run_pp(None)
+        loss, mtp_layers, body_calls, _ = _run_pp(None)
         self._assert_finite(loss)
         # Baseline: with sampling off every depth this rank holds must run.
         if mtp_layers:
@@ -197,7 +210,7 @@ class TestMTPDepthSamplingPP(unittest.TestCase):
     def test_pp_sampling_fixed_k1(self):
         # Depths >= 1 skipped on the last stage every step; the collective-free
         # sampler must not hang (the old broadcast(src=0) deadlocked here).
-        loss, mtp_layers, body_calls = _run_pp([1.0, 0.0, 0.0])
+        loss, mtp_layers, body_calls, _ = _run_pp([1.0, 0.0, 0.0])
         self._assert_finite(loss)
         if not mtp_layers:
             return
@@ -214,7 +227,7 @@ class TestMTPDepthSamplingPP(unittest.TestCase):
     def test_pp_sampling_mixed(self):
         # K varies from step to step; every rank running the MTP layer must draw
         # the same K deterministically or the MoE all-to-all deadlocks.
-        loss, mtp_layers, body_calls = _run_pp([0.34, 0.33, 0.33])
+        loss, mtp_layers, body_calls, _ = _run_pp([0.34, 0.33, 0.33])
         self._assert_finite(loss)
         if mtp_layers:
             assert body_calls.get(0, 0) > 0, (
@@ -230,7 +243,7 @@ class TestMTPDepthSamplingPP(unittest.TestCase):
         needing the block pinned to one chunk. Whatever this run's segmentation
         does, the step must complete and the skip must still happen.
         """
-        loss, mtp_layers, body_calls = _run_pp(
+        loss, mtp_layers, body_calls, _ = _run_pp(
             [1.0, 0.0, 0.0], mtp_shared_weights=True
         )
         self._assert_finite(loss)
@@ -258,16 +271,14 @@ class TestMTPDepthSamplingPP(unittest.TestCase):
         finite loss, correct-looking skips, and a distribution of exactly one
         point. Sweep a few steps and require the per-depth counts to differ.
         """
-        seen = set()
-        for step in range(6):
-            loss, mtp_layers, body_calls = _run_pp(
-                [0.34, 0.33, 0.33], train_step=step
-            )
-            self._assert_finite(loss)
-            if not mtp_layers:
-                return
-            seen.add(tuple(sorted(body_calls.items())))
-        assert len(seen) > 1, f"K never varied across train steps: {seen}"
+        loss, mtp_layers, _, per_step = _run_pp(
+            [0.34, 0.33, 0.33], steps=tuple(range(6))
+        )
+        self._assert_finite(loss)
+        if not mtp_layers:
+            return
+        seen = {tuple(sorted(counts.items())) for counts in per_step}
+        assert len(seen) > 1, f"K never varied across train steps: {per_step}"
 
 
 if __name__ == "__main__":
