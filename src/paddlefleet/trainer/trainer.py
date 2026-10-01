@@ -302,6 +302,180 @@ DIST_CKPT_PATH = "dist_ckpt"
 DIST_MODEL_PATH = "dist_model"
 
 
+def _sharded_parameter(model, named_params, key):
+    """Find the live parameter behind a sharded-state key.
+
+    ``GPTModel.sharded_state_dict`` renames pipeline keys to single-card
+    names while ``named_parameters()`` keeps the pipeline names.
+    """
+    param = named_params.get(key)
+    if param is None:
+        single_to_pp = getattr(model, "_pipeline_name_mapping", None)
+        if isinstance(single_to_pp, dict) and key in single_to_pp:
+            param = named_params.get(single_to_pp[key])
+    return param
+
+
+def _expert_3d_coordinates(sharded_weight, param_shape):
+    """Map a row-flattened expert shard's global layout onto 3-D experts.
+
+    Expert parallel ranks share the grouped-GEMM key and differ only in the
+    expert offset, so the global expert count and this rank's first expert
+    must survive the reshape.
+    """
+    _, rows, cols = param_shape
+    global_shape = tuple(sharded_weight.global_shape)
+    global_offset = tuple(sharded_weight.global_offset)
+    if (
+        len(global_shape) != 2
+        or len(global_offset) != 2
+        or global_shape[1] != cols
+        or global_offset[1] != 0
+        or global_shape[0] % rows
+        or global_offset[0] % rows
+    ):
+        raise ValueError(
+            f"Cannot restore fused expert shard {sharded_weight.key}: global "
+            f"shape {global_shape} at offset {global_offset} does not split "
+            f"into whole [{rows}, {cols}] experts."
+        )
+    return (
+        (global_shape[0] // rows, rows, cols),
+        (global_offset[0] // rows, 0, 0),
+    )
+
+
+def restore_fused_expert_3d_layout(model, model_sharded_state_dict):
+    """Restore 3-D grouped-GEMM expert weights for FlexCheckpoint at sharding=1."""
+    named_params = None
+    for key, sharded_weight in model_sharded_state_dict.items():
+        if not isinstance(sharded_weight, ShardedWeight):
+            continue
+        if "grouped_gemm_experts.weight" not in key:
+            continue
+        local = sharded_weight.local_tensor
+        # Only the row-flattened 2-D export needs restoring; models such as
+        # Qwen3-VL already shard their experts in the 3-D parameter layout.
+        if len(local.shape) != 2:
+            continue
+        if named_params is None:
+            named_params = dict(model.named_parameters())
+        param = _sharded_parameter(model, named_params, key)
+        if param is None:
+            raise ValueError(
+                f"Cannot restore fused expert shard {key}: no matching model parameter."
+            )
+        if param.ndim != 3:
+            raise ValueError(
+                f"Cannot restore fused expert shard {key}: expected a 3-D model parameter, "
+                f"got shape {tuple(param.shape)}."
+            )
+        param_shape = tuple(param.shape)
+        if int(local.numel()) != int(param.numel()):
+            raise ValueError(
+                f"Cannot restore fused expert shard {key}: local tensor has "
+                f"{int(local.numel())} elements, expected {int(param.numel())}."
+            )
+        if tuple(local.shape) != (
+            param_shape[0] * param_shape[1],
+            param_shape[2],
+        ):
+            raise ValueError(
+                f"Cannot restore fused expert shard {key}: local shape "
+                f"{tuple(local.shape)} is not a row-flattened {param_shape}."
+            )
+        global_shape, global_offset = _expert_3d_coordinates(
+            sharded_weight, param_shape
+        )
+        restored = local.reshape(list(param_shape))
+        restored.name = getattr(local, "name", "") or getattr(param, "name", "")
+        sharded_weight.local_tensor = restored
+        sharded_weight.local_shape = param_shape
+        sharded_weight.global_shape = global_shape
+        sharded_weight.global_offset = global_offset
+
+    return model_sharded_state_dict
+
+
+@contextlib.contextmanager
+def _fused_expert_optimizer_save_views(
+    model, model_sharded_state_dict, optimizer
+):
+    """Expose flat saving views without reshaping live optimizer tensors.
+
+    Only grouped-expert states need the 2-D layout advertised by their model
+    shards. Keep the original accumulator/master-weight objects and restore
+    their dictionary entries even when sharded-state construction fails.
+    Returned ShardedWeights retain the views through synchronous serialization.
+    """
+    named_params = dict(model.named_parameters())
+    parameter_shapes = {}
+    for key, shard in model_sharded_state_dict.items():
+        if not isinstance(shard, ShardedWeight):
+            continue
+        if "grouped_gemm_experts.weight" not in key:
+            continue
+        param = _sharded_parameter(model, named_params, key)
+        if (
+            param is not None
+            and param.ndim == 3
+            and len(shard.local_shape) == 2
+        ):
+            parameter_shapes[param.name] = tuple(shard.local_shape)
+    if not parameter_shapes:
+        yield
+        return
+
+    inner = optimizer
+    seen = {id(inner)}
+    while True:
+        wrapped = next(
+            (
+                getattr(inner, attr)
+                for attr in ("_inner_opt", "inner_opt", "_optimizer")
+                if getattr(inner, attr, None) is not None
+            ),
+            None,
+        )
+        if wrapped is None:
+            break
+        if id(wrapped) in seen:
+            raise ValueError(
+                "Cyclic optimizer wrapper while preparing fused-expert checkpoint views."
+            )
+        seen.add(id(wrapped))
+        inner = wrapped
+
+    masters = getattr(inner, "_master_weights", {})
+    accumulator_shapes = dict(parameter_shapes)
+    for name, shape in parameter_shapes.items():
+        master = masters.get(name)
+        if master is not None:
+            accumulator_shapes[master.name] = shape
+    mappings = [
+        (mapping, accumulator_shapes)
+        for mapping in getattr(inner, "_accumulators", {}).values()
+    ]
+    mappings.append((masters, parameter_shapes))
+    replacements = []
+    try:
+        for mapping, shapes in mappings:
+            if not isinstance(mapping, dict):
+                continue
+            for name, shape in shapes.items():
+                tensor = mapping.get(name)
+                if not isinstance(tensor, paddle.Tensor) or tensor.ndim != 3:
+                    continue
+                view = tensor.reshape(shape)
+                view.name = tensor.name
+                replacements.append((mapping, name, tensor))
+                mapping[name] = view
+        yield
+    finally:
+        for mapping, name, tensor in reversed(replacements):
+            mapping[name] = tensor
+
+
 class Trainer:
     """
     Trainer is a simple but feature-complete training and eval loop for PaddlePaddle, optimized for PaddleFleet.
@@ -1437,6 +1611,27 @@ class Trainer:
         if getattr(self.args, "copy_custom_file_list", None):
             self.copy_custom_files(output_dir)
 
+    def _validate_hf_export(self, output_dir):
+        """Validate tensor names of the safetensors an HF export just wrote.
+
+        Called only after flex_checkpoint HF exports, where every rank takes
+        part in the save. Only files directly in ``output_dir`` are checked:
+        HF exporters write their shards flat, while ``output_dir`` may also
+        hold earlier ``hf_checkpoint-*`` snapshots with the same names.
+        """
+        from .checkpoint_export import (
+            assert_unique_safetensors_names,
+            iter_safetensors_files,
+        )
+
+        # Each rank renames its own shards after the saver's barrier.
+        if paddle.distributed.get_world_size() > 1:
+            paddle.distributed.barrier()
+        if not self.is_local_process_zero():
+            return
+        if any(iter_safetensors_files(output_dir, recursive=False)):
+            assert_unique_safetensors_names(output_dir, recursive=False)
+
     def create_ema_state_assembler(self):
         global_steps = self.state.global_step
         memory_growth_threshold_bytes = (
@@ -1471,6 +1666,7 @@ class Trainer:
 
     def _save_flex_model_state(self, output_dir):
         model_sharded_state_dict = self.model.sharded_state_dict()
+        restore_fused_expert_3d_layout(self.model, model_sharded_state_dict)
         for key, sharded_weight in model_sharded_state_dict.items():
             # NOTE(Waynezee): Only Tensor in Parameter will be used in FlexCheckpoint Save Scenario.
             if isinstance(sharded_weight, ShardedWeight):
@@ -1492,9 +1688,12 @@ class Trainer:
         optimizer_states = {}
         master_weights = {}
         model_sharded_state_dict = self.model.sharded_state_dict()
-        optimizer_sharded_state_dict = self.optimizer.sharded_state_dict(
-            model_sharded_state_dict
-        )
+        with _fused_expert_optimizer_save_views(
+            self.model, model_sharded_state_dict, self.optimizer
+        ):
+            optimizer_sharded_state_dict = self.optimizer.sharded_state_dict(
+                model_sharded_state_dict
+            )
         for k, v in optimizer_sharded_state_dict.items():
             if k.endswith(".w_0"):
                 master_weights[k] = v
@@ -1532,6 +1731,7 @@ class Trainer:
 
         with _sprof_span("sharded_state_dict"):
             model_sharded_state_dict = self.model.sharded_state_dict()
+        restore_fused_expert_3d_layout(self.model, model_sharded_state_dict)
         master_weights_path = os.path.join(
             resume_from_checkpoint, MASTER_WEIGHT_DIC
         )
@@ -1611,8 +1811,6 @@ class Trainer:
                 os.remove(metadata_path)
             except FileNotFoundError:
                 pass
-            except Exception as e:
-                logger.error(f"Failed to delete {metadata_path}: {e}")
 
             load_transform = build_hf_dequant_load_transform(
                 checkpoint_path=resume_from_checkpoint,
@@ -4243,11 +4441,7 @@ class Trainer:
         if self.control.should_save_hf:
             if self.args.save_checkpoint_format == "flex_checkpoint":
                 is_main_process = paddle.distributed.get_rank() == 0
-                run_dir = self.args.output_dir
-                checkpoint_folder = (
-                    f"{PREFIX_HF_CHECKPOINT_DIR}-{self.state.global_step}"
-                )
-                ckpt_path = os.path.join(run_dir, checkpoint_folder)
+                run_dir, ckpt_path = self._hf_cadence_paths()
                 # Convert user-configured GB value to bytes for HFFormatFullParamSaver
                 memory_growth_threshold_bytes = (
                     self.args.save_hf_memory_growth_threshold * (2**30)
@@ -4267,6 +4461,7 @@ class Trainer:
                         save_checkpoint_format=self.args.save_checkpoint_format,
                         memory_growth_threshold=memory_growth_threshold_bytes,
                     )
+                self._validate_hf_export(ckpt_path)
                 if self.tokenizer is not None and self.args.save_tokenizer:
                     self.tokenizer.save_pretrained(ckpt_path)
                 if self.processing_class is not None:
@@ -6645,6 +6840,27 @@ class Trainer:
             # ignore_errors for shared disks between train nodes.
             shutil.rmtree(checkpoint, ignore_errors=True)
 
+    def _hf_cadence_paths(self, step=None):
+        """Resolve mid-training HF cadence root and snapshot dir.
+
+        Default layout is ``{output_dir}/hf_checkpoint-{step}`` so
+        ``_rotate_hf_checkpoints``, resume, and latest-discovery keep working.
+        ``save_hf_output_dir`` is opt-in for an oracle that rglob's output_dir.
+        """
+        from .checkpoint_export import resolve_hf_checkpoint_dir
+
+        step = self.state.global_step if step is None else step
+        run_dir = (
+            getattr(self.args, "save_hf_output_dir", None)
+            or self.args.output_dir
+        )
+        ckpt_path = resolve_hf_checkpoint_dir(
+            self.args.output_dir,
+            step,
+            getattr(self.args, "save_hf_output_dir", None),
+        )
+        return run_dir, ckpt_path
+
     def _rotate_hf_checkpoints(self, use_mtime=False, output_dir=None) -> None:
         if (
             self.args.save_hf_total_limit is None
@@ -6822,7 +7038,9 @@ class Trainer:
                             is_main_process,
                             save_checkpoint_format=self.args.save_checkpoint_format,
                             memory_growth_threshold=memory_growth_threshold_bytes,
+                            export_global_step=self.state.global_step,
                         )
+                    self._validate_hf_export(output_dir)
                 else:
                     self._save_flex_model_state(output_dir)
 
