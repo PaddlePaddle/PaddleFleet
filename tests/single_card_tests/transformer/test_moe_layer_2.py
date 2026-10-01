@@ -40,6 +40,8 @@ class _StubMoE:
     """
 
     _use_grouped_mlp_expert = False
+    # Keeps fusion_moe_forward off the GLM52 IEEE DeepEP fused-expert path.
+    moe_expert_fusion = False
 
 
 class _AddExpert:
@@ -129,13 +131,9 @@ class TestMoELayerExpertForward(unittest.TestCase):
         base = np.arange(8, dtype="float32").reshape([4, 2])
         dispatched = paddle.to_tensor(base)
 
-        with patch(
-            f"{MOE_LAYER_MODULE}.use_accuracy_compatible_kernel",
-            return_value=False,
-        ):
-            out = MoELayer.expert_forward(
-                model, dispatched, paddle.to_tensor([1, 0, 3], dtype="int64")
-            )
+        out = MoELayer.expert_forward(
+            model, dispatched, paddle.to_tensor([1, 0, 3], dtype="int64")
+        )
 
         expected = np.concatenate([base[0:1] + 1.0, base[1:4] + 100.0], axis=0)
         np.testing.assert_array_equal(out.numpy(), expected)
@@ -162,13 +160,9 @@ class TestMoELayerExpertForward(unittest.TestCase):
         base = np.arange(9, dtype="float32").reshape([3, 3])
         dispatched = paddle.to_tensor(base)
 
-        with patch(
-            f"{MOE_LAYER_MODULE}.use_accuracy_compatible_kernel",
-            return_value=False,
-        ):
-            out = MoELayer.expert_forward(
-                model, dispatched, paddle.to_tensor([2, 1], dtype="int64")
-            )
+        out = MoELayer.expert_forward(
+            model, dispatched, paddle.to_tensor([2, 1], dtype="int64")
+        )
 
         expected = np.concatenate(
             [base[0:2] + 100.0, base[2:3] + 1000.0], axis=0
@@ -187,11 +181,7 @@ class TestMoELayerExpertForward(unittest.TestCase):
         model.experts = [expert]
         dispatched = paddle.empty([0, 2], dtype="float32")
 
-        with patch(
-            f"{MOE_LAYER_MODULE}.use_accuracy_compatible_kernel",
-            return_value=False,
-        ):
-            out = MoELayer.expert_forward(model, dispatched, [0])
+        out = MoELayer.expert_forward(model, dispatched, [0])
 
         self.assertIs(out, dispatched)
         self.assertEqual(expert.inputs, [])
@@ -205,13 +195,7 @@ class TestMoELayerExpertForward(unittest.TestCase):
         model.experts = [_AddExpert(1.0)]
         dispatched = paddle.ones([1, 2], dtype="float32")
 
-        with (
-            patch(
-                f"{MOE_LAYER_MODULE}.use_accuracy_compatible_kernel",
-                return_value=True,
-            ),
-            self.assertRaisesRegex(RuntimeError, "requires dispatched"),
-        ):
+        with self.assertRaisesRegex(RuntimeError, "requires dispatched"):
             MoELayer.expert_forward(model, dispatched, [1])
 
     def test_tiny_m_padding_preserves_value_and_backward(self):
@@ -236,9 +220,11 @@ class TestMoELayerExpertForward(unittest.TestCase):
         dispatched = paddle.to_tensor(base)
         dispatched.stop_gradient = False
 
+        # Without dispatched probs, accuracy-compatible expert_forward is only
+        # allowed on the DSV4 path, which applies the router scale elsewhere.
         with patch(
-            f"{MOE_LAYER_MODULE}.use_accuracy_compatible_kernel",
-            return_value=False,
+            f"{MOE_LAYER_MODULE}.use_dsv4_accuracy_compatible",
+            return_value=True,
         ):
             out = MoELayer.expert_forward(
                 model, dispatched, paddle.to_tensor([1, 1], dtype="int64")
@@ -276,11 +262,7 @@ class TestMoELayerExpertForward(unittest.TestCase):
         model.experts = [expert]
         dispatched = paddle.ones([2, 3], dtype="float32")
 
-        with patch(
-            f"{MOE_LAYER_MODULE}.use_accuracy_compatible_kernel",
-            return_value=True,
-        ):
-            out = MoELayer.expert_forward(model, dispatched, [2])
+        out = MoELayer.expert_forward(model, dispatched, [2])
 
         scale = expert.scales[0]
         self.assertEqual(scale.shape[0], 32)
