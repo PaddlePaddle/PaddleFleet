@@ -601,6 +601,19 @@ class TestMTPLayerForward(unittest.TestCase):
                 }
             )
 
+    def test_conflicting_layer_masks_raise_value_error(self):
+        from paddlefleet.transformer.multi_token_prediction import (
+            _apply_mtp_layer_masks,
+        )
+
+        ones = paddle.ones([2, 1, 8, 8])
+        with self.assertRaisesRegex(ValueError, "mutually exclusive"):
+            _apply_mtp_layer_masks(
+                {"mtp_startend_row_indices_all": ones, "mtp_attn_mask": ones},
+                0,
+                SimpleNamespace(gpt_model_use_experimental_version=False),
+            )
+
     def test_recompute(self):
         layer = _build_mtp_layer(
             _cfg(

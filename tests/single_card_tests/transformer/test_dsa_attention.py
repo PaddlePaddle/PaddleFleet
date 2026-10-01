@@ -2150,8 +2150,8 @@ class TestNormalizeDSAMask(unittest.TestCase):
     _normalize_dsa_mask must:
       - return None unchanged for a None mask,
       - drop a singleton head dim from a 4D [b, 1, s, s] mask,
-      - additionally drop a leading singleton batch dim (3D [1, s, s] -> [s, s]),
-      - keep a genuine batch dim (b > 1) intact,
+      - keep the batch dim, including b == 1 (a sequence-parallel local
+        mask [1, s, s/TP] must not be flattened before it is gathered),
       - reject a 4D mask whose head dim is not 1.
     Content must be preserved bit-for-bit through the squeezes; expected values
     are built independently with numpy from the same source array.
@@ -2160,13 +2160,13 @@ class TestNormalizeDSAMask(unittest.TestCase):
     def test_none_returns_none(self):
         self.assertIsNone(_normalize_dsa_mask(None))
 
-    def test_4d_singleton_batch_squeezes_to_2d(self):
+    def test_4d_singleton_batch_keeps_batch(self):
         src = np.arange(3 * 4, dtype="float32").reshape(1, 1, 3, 4)
         mask = paddle.to_tensor(src)
         out = _normalize_dsa_mask(mask)
-        # [1, 1, 3, 4] -> squeeze head -> [1, 3, 4] -> squeeze batch -> [3, 4]
-        self.assertEqual(list(out.shape), [3, 4])
-        np.testing.assert_array_equal(out.numpy(), src.reshape(3, 4))
+        # [1, 1, 3, 4] -> squeeze head only -> [1, 3, 4]
+        self.assertEqual(list(out.shape), [1, 3, 4])
+        np.testing.assert_array_equal(out.numpy(), src.reshape(1, 3, 4))
 
     def test_4d_multi_batch_keeps_batch(self):
         src = np.arange(2 * 3 * 4, dtype="float32").reshape(2, 1, 3, 4)
@@ -2176,12 +2176,12 @@ class TestNormalizeDSAMask(unittest.TestCase):
         self.assertEqual(list(out.shape), [2, 3, 4])
         np.testing.assert_array_equal(out.numpy(), src.reshape(2, 3, 4))
 
-    def test_3d_singleton_batch_squeezes_to_2d(self):
+    def test_3d_singleton_batch_is_kept(self):
         src = np.arange(5 * 6, dtype="float32").reshape(1, 5, 6)
         mask = paddle.to_tensor(src)
         out = _normalize_dsa_mask(mask)
-        self.assertEqual(list(out.shape), [5, 6])
-        np.testing.assert_array_equal(out.numpy(), src.reshape(5, 6))
+        self.assertEqual(list(out.shape), [1, 5, 6])
+        np.testing.assert_array_equal(out.numpy(), src)
 
     def test_3d_multi_batch_kept(self):
         src = np.arange(2 * 5 * 6, dtype="float32").reshape(2, 5, 6)
