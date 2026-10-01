@@ -395,7 +395,11 @@ class TestGetTemplateAndFixTokenizer(unittest.TestCase):
             "default_system": "Indep system",
         }
         result = get_template_and_fix_tokenizer(config)
-        self.assertIs(result, tpl)
+        # A per-call copy: the registered template is never mutated.
+        self.assertIsNot(result, tpl)
+        self.assertIs(type(result), type(tpl))
+        self.assertEqual(tpl.default_system, "")
+        self.assertEqual(tpl.suffix, [])
         # default_system from config is consumed onto the template.
         self.assertEqual(result.default_system, "Indep system")
         # Empty suffix is backfilled from the tokenizer eos token.
@@ -418,10 +422,7 @@ class TestGetTemplateAndFixTokenizer(unittest.TestCase):
 
     def test_none_template_without_chat_template_falls_back_to_empty(self):
         empty_tpl = TEMPLATES["empty"]
-        # get_template_and_fix_tokenizer mutates suffix on the shared object;
-        # snapshot and restore so the fallback template is not polluted.
         orig_suffix = list(empty_tpl.suffix)
-        self.addCleanup(lambda: setattr(empty_tpl, "suffix", orig_suffix))
         tok = CharTokenizer(
             eos_token_id=2, eos_token="<eos>", chat_template=None
         )
@@ -432,7 +433,12 @@ class TestGetTemplateAndFixTokenizer(unittest.TestCase):
             "default_system": None,
         }
         result = get_template_and_fix_tokenizer(config)
-        self.assertIs(result, empty_tpl)
+        # A per-call copy of the registered "empty" template; the shared
+        # object keeps its suffix.
+        self.assertIsNot(result, empty_tpl)
+        self.assertIs(type(result), type(empty_tpl))
+        self.assertEqual(result.format_user, empty_tpl.format_user)
+        self.assertEqual(empty_tpl.suffix, orig_suffix)
 
 
 if __name__ == "__main__":
