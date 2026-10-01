@@ -778,6 +778,31 @@ class TrainingArguments:
         },
     )
 
+    dsa_indexer_topk_freq: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Frequency of DSA indexer top-k computation across layers."
+        },
+    )
+    dsa_indexer_skip_topk_offset: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "One-indexed offset for periodic DSA top-k computation."
+        },
+    )
+    dsa_indexer_types: Optional[List[str]] = field(
+        default=None,
+        metadata={
+            "help": "Per-layer DSA indexer layout using full/shared entries."
+        },
+    )
+    dsa_index_share_for_mtp_iteration: Optional[bool] = field(
+        default=None,
+        metadata={
+            "help": "Whether MTP iterations reuse the decoder indexer's top-k."
+        },
+    )
+
     sharding_comm_group_call_opt: bool = field(
         default=False,
         metadata={

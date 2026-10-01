@@ -1,0 +1,1087 @@
+# Copyright (c) 2026 PaddlePaddle Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Official GLM-5.2 HF config.json DSA fields map onto TransformerConfig."""
+
+from __future__ import annotations
+
+from dataclasses import fields
+from types import MethodType, SimpleNamespace
+from unittest import TestCase
+
+import paddle
+from paddle.distributed.fleet.utils import recompute
+
+from paddlefleet.transformer.transformer_config import TransformerConfig
+
+
+class TestGlm52OfficialDsaHfFields(TestCase):
+    _OFFICIAL_TO_INTERNAL = {
+        "index_topk_freq": "dsa_indexer_topk_freq",
+        "index_skip_topk_offset": "dsa_indexer_skip_topk_offset",
+        "indexer_types": "dsa_indexer_types",
+        "index_share_for_mtp_iteration": "dsa_index_share_for_mtp_iteration",
+    }
+
+    def test_transform_rules_map_official_glm52_dsa_keys(self):
+        names = {item.name for item in fields(TransformerConfig)}
+        for official, internal in self._OFFICIAL_TO_INTERNAL.items():
+            self.assertIn(internal, names)
+            self.assertEqual(
+                TransformerConfig.transform_rules[official], internal
+            )
+
+    def test_cli_overrides_reach_the_runtime_config(
+        self,
+    ):
+        from paddlefleet.transformers.configuration_utils import LlmMetaConfig
+        from paddlefleet.transformers.glm_moe_dsa.configuration import (
+            GlmMoeDsaConfig,
+        )
+
+        src = GlmMoeDsaConfig(
+            num_hidden_layers=4,
+            hidden_size=64,
+            num_attention_heads=4,
+            index_topk_freq=1,
+            indexer_types=["full"] * 4,
+        )
+        LlmMetaConfig.set_llm_config(
+            src,
+            SimpleNamespace(
+                num_nextn_predict_layers=1,
+                dsa_indexer_topk_freq=4,
+                dsa_indexer_skip_topk_offset=3,
+                dsa_indexer_types=["full", "full", "full", "shared"],
+                dsa_index_share_for_mtp_iteration=True,
+            ),
+        )
+        cfg = TransformerConfig.from_config(src)
+        self.assertEqual(cfg.dsa_indexer_topk_freq, 4)
+        self.assertEqual(cfg.dsa_indexer_skip_topk_offset, 3)
+        self.assertEqual(
+            cfg.dsa_indexer_types, ["full", "full", "full", "shared"]
+        )
+        self.assertIs(cfg.dsa_index_share_for_mtp_iteration, True)
+
+    def test_defaults_keep_always_on_indexer(self):
+        config = TransformerConfig(num_hidden_layers=4)
+        self.assertEqual(config.dsa_indexer_topk_freq, 1)
+        self.assertEqual(config.dsa_indexer_skip_topk_offset, 0)
+        self.assertIsNone(config.dsa_indexer_types)
+        self.assertIs(config.dsa_index_share_for_mtp_iteration, False)
+
+    def test_from_config_without_dsa_keys_keeps_defaults(self):
+        config = TransformerConfig.from_config(
+            SimpleNamespace(
+                num_hidden_layers=4, hidden_size=64, num_attention_heads=4
+            )
+        )
+        self.assertEqual(config.dsa_indexer_topk_freq, 1)
+        self.assertEqual(config.dsa_indexer_skip_topk_offset, 0)
+        self.assertIsNone(config.dsa_indexer_types)
+        self.assertIs(config.dsa_index_share_for_mtp_iteration, False)
+
+    def test_official_nondefault_values_are_accepted(self):
+        config = TransformerConfig(
+            num_hidden_layers=4,
+            num_nextn_predict_layers=1,
+            dsa_indexer_topk_freq=4,
+            dsa_indexer_skip_topk_offset=3,
+            dsa_indexer_types=["full", "full", "full", "shared"],
+            dsa_index_share_for_mtp_iteration=True,
+        )
+        self.assertEqual(config.dsa_indexer_topk_freq, 4)
+        self.assertEqual(config.dsa_indexer_skip_topk_offset, 3)
+        self.assertEqual(
+            config.dsa_indexer_types, ["full", "full", "full", "shared"]
+        )
+        self.assertIs(config.dsa_index_share_for_mtp_iteration, True)
+
+    def test_invalid_dsa_indexer_fields_raise(self):
+        with self.assertRaisesRegex(
+            ValueError, "dsa_indexer_topk_freq must be >= 1"
+        ):
+            TransformerConfig(dsa_indexer_topk_freq=0)
+        with self.assertRaisesRegex(
+            ValueError, "dsa_indexer_skip_topk_offset must be >= 0"
+        ):
+            TransformerConfig(dsa_indexer_skip_topk_offset=-1)
+        with self.assertRaisesRegex(ValueError, "dsa_indexer_types length"):
+            TransformerConfig(num_hidden_layers=2, dsa_indexer_types=["full"])
+        with self.assertRaisesRegex(ValueError, "must be 'full' or 'shared'"):
+            TransformerConfig(
+                num_hidden_layers=1, dsa_indexer_types=["unknown"]
+            )
+        with self.assertRaisesRegex(
+            ValueError, "dsa_index_share_for_mtp_iteration=True requires"
+        ):
+            TransformerConfig(
+                num_hidden_layers=2,
+                num_nextn_predict_layers=0,
+                dsa_index_share_for_mtp_iteration=True,
+            )
+        with self.assertRaisesRegex(
+            ValueError, "num_hidden_layers >= 1 so MTP can reuse"
+        ):
+            TransformerConfig(
+                num_hidden_layers=0,
+                num_nextn_predict_layers=1,
+                dsa_index_share_for_mtp_iteration=True,
+            )
+        with self.assertRaisesRegex(ValueError, r"dsa_indexer_types\[0\]"):
+            TransformerConfig(
+                num_hidden_layers=2, dsa_indexer_types=["shared", "full"]
+            )
+        with self.assertRaisesRegex(
+            ValueError, "dsa_indexer_topk_freq must be a positive int"
+        ):
+            TransformerConfig(dsa_indexer_topk_freq=True)
+        with self.assertRaisesRegex(
+            ValueError,
+            "dsa_indexer_skip_topk_offset must be a non-negative int",
+        ):
+            TransformerConfig(dsa_indexer_skip_topk_offset=1.5)
+        with self.assertRaisesRegex(
+            ValueError, "dsa_indexer_types must be None or a list of strings"
+        ):
+            TransformerConfig(num_hidden_layers=1, dsa_indexer_types="full")
+
+    def test_shared_layer_skips_indexer_construction(self):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            dsa_indexer_types=["full", "full", "full", "shared"],
+        )
+        _, skip_topk, index_share, source_layer = resolve_dsa_indexer_layout(
+            config, 3
+        )
+        self.assertTrue(skip_topk)
+        self.assertTrue(index_share)
+        self.assertEqual(source_layer, 2)
+
+    def test_first_decoder_from_official_types_owns_indexer(self):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            dsa_indexer_types=["full", "full", "full", "shared"],
+        )
+        indexer_type, skip_topk, index_share, source_layer = (
+            resolve_dsa_indexer_layout(config, 0)
+        )
+        self.assertEqual(indexer_type, "full")
+        self.assertFalse(skip_topk)
+        # Later shared layers reuse the last preceding full layer (2), not
+        # layer 0, so this producer does not publish a holder key.
+        self.assertFalse(index_share)
+        self.assertEqual(source_layer, 0)
+
+    def test_defaults_do_not_skip_indexer(self):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64, num_attention_heads=2, num_hidden_layers=4
+        )
+        indexer_type, skip_topk, index_share, source_layer = (
+            resolve_dsa_indexer_layout(config, 3)
+        )
+        self.assertEqual(indexer_type, "full")
+        self.assertFalse(skip_topk)
+        self.assertFalse(index_share)
+        self.assertEqual(source_layer, 3)
+
+    def test_mtp_layer_reuses_last_decoder_when_share_flag_is_set(self):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_nextn_predict_layers=1,
+            dsa_indexer_types=["full", "full", "full", "shared"],
+            dsa_index_share_for_mtp_iteration=True,
+        )
+        indexer_type, skip_topk, index_share, source_layer = (
+            resolve_dsa_indexer_layout(config, 0, is_mtp_layer=True)
+        )
+        self.assertEqual(indexer_type, "shared")
+        self.assertTrue(skip_topk)
+        self.assertTrue(index_share)
+        # Last decoder is shared, so MTP must read that layer's producer (2),
+        # not the last decoder's own index (3).
+        self.assertEqual(source_layer, 2)
+
+    def test_last_decoder_publishes_topk_when_mtp_share_is_set(self):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_nextn_predict_layers=1,
+            dsa_indexer_types=["full", "full", "full", "shared"],
+            dsa_index_share_for_mtp_iteration=True,
+        )
+        indexer_type, skip_topk, index_share, source_layer = (
+            resolve_dsa_indexer_layout(config, 2)
+        )
+        self.assertEqual(indexer_type, "full")
+        self.assertFalse(skip_topk)
+        self.assertTrue(index_share)
+        self.assertEqual(source_layer, 2)
+
+    def test_periodic_skip_helpers_and_freq_layout(self):
+        from paddlefleet.transformer.dsa_attention import (
+            is_dsa_skip_topk_layer,
+            resolve_dsa_indexer_layout,
+            source_dsa_compute_layer,
+        )
+
+        self.assertFalse(
+            is_dsa_skip_topk_layer(1, skip_topk_offset=0, topk_freq=4)
+        )
+        self.assertTrue(
+            is_dsa_skip_topk_layer(2, skip_topk_offset=0, topk_freq=4)
+        )
+        self.assertEqual(
+            source_dsa_compute_layer(2, skip_topk_offset=0, topk_freq=4), 1
+        )
+        with self.assertRaisesRegex(ValueError, "1-indexed"):
+            is_dsa_skip_topk_layer(0, 0, 4)
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            is_dsa_skip_topk_layer(1, -1, 4)
+        with self.assertRaisesRegex(ValueError, "positive"):
+            is_dsa_skip_topk_layer(1, 0, 0)
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            dsa_indexer_topk_freq=4,
+            dsa_indexer_skip_topk_offset=0,
+        )
+        layouts = [
+            resolve_dsa_indexer_layout(config, layer) for layer in range(4)
+        ]
+        self.assertEqual(
+            [(item[1], item[2], item[3]) for item in layouts],
+            [
+                (False, True, 0),
+                (True, True, 0),
+                (True, True, 0),
+                (True, True, 0),
+            ],
+        )
+
+    def test_unsupported_indexer_type_and_missing_full_source_raise(self):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64, num_attention_heads=2, num_hidden_layers=2
+        )
+        config.dsa_indexer_types = ["full", "sparse"]
+        with self.assertRaisesRegex(ValueError, "Unsupported DSA indexer type"):
+            resolve_dsa_indexer_layout(config, 1)
+
+        config.dsa_indexer_types = ["shared", "shared"]
+        with self.assertRaisesRegex(ValueError, "no preceding full indexer"):
+            resolve_dsa_indexer_layout(config, 1)
+
+    def test_configured_indexer_types_do_not_fall_back_on_layer_overflow(self):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=2,
+            dsa_indexer_types=["full", "shared"],
+        )
+        # Layer 2 is past num_hidden_layers: the lookup fails instead of
+        # falling back to the periodic rule.
+        with self.assertRaisesRegex(IndexError, r"outside \[0, 2\)"):
+            resolve_dsa_indexer_layout(config, 2)
+
+    def test_producer_and_consumer_holder_keys_match_for_legal_share_layouts(
+        self,
+    ):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        periodic = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_nextn_predict_layers=1,
+            dsa_indexer_topk_freq=4,
+            dsa_index_share_for_mtp_iteration=True,
+        )
+        published = {
+            layer: resolve_dsa_indexer_layout(periodic, layer)
+            for layer in range(4)
+        }
+        mtp = resolve_dsa_indexer_layout(periodic, 0, is_mtp_layer=True)
+        self.assertFalse(published[0][1])
+        self.assertTrue(published[0][2])
+        self.assertEqual(published[0][3], 0)
+        self.assertEqual(published[1][3], 0)
+        self.assertTrue(mtp[1])
+        self.assertEqual(mtp[3], 0)
+
+        official = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_nextn_predict_layers=1,
+            dsa_indexer_types=["full", "full", "full", "shared"],
+            dsa_index_share_for_mtp_iteration=True,
+        )
+        last_full = resolve_dsa_indexer_layout(official, 2)
+        last_decoder = resolve_dsa_indexer_layout(official, 3)
+        official_mtp = resolve_dsa_indexer_layout(
+            official, 0, is_mtp_layer=True
+        )
+        self.assertFalse(last_full[1])
+        self.assertTrue(last_full[2])
+        self.assertEqual(last_full[3], 2)
+        self.assertTrue(last_decoder[1])
+        self.assertEqual(last_decoder[3], 2)
+        self.assertTrue(official_mtp[1])
+        self.assertEqual(official_mtp[3], 2)
+
+    def test_head_empty_offset_uses_logical_decoder_index(self):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_empty_layers_add_in_head=2,
+            dsa_indexer_types=["full", "shared", "full", "shared"],
+        )
+        first = resolve_dsa_indexer_layout(config, 2)
+        second = resolve_dsa_indexer_layout(config, 3)
+        self.assertEqual(first[0], "full")
+        self.assertFalse(first[1])
+        self.assertTrue(first[2])
+        self.assertEqual(first[3], 0)
+        self.assertEqual(second[0], "shared")
+        self.assertTrue(second[1])
+        self.assertEqual(second[3], 0)
+        with self.assertRaises(IndexError):
+            resolve_dsa_indexer_layout(config, 0)
+
+    def test_index_share_holder_is_owned_by_the_forward_scope(self):
+        from paddlefleet.transformer.dsa_attention import DSAttention
+
+        attn = DSAttention.__new__(DSAttention)
+        attn.config = TransformerConfig(
+            hidden_size=64, num_attention_heads=2, num_hidden_layers=4
+        )
+        holder = {}
+        self.assertIs(attn._get_index_share_topk_holder(holder), holder)
+        self.assertFalse(hasattr(attn.config, "_dsa_index_share_topk_holder"))
+        holder[2] = "indices"
+        next_holder = {}
+        self.assertEqual(
+            attn._get_index_share_topk_holder(holder)[2], "indices"
+        )
+        self.assertEqual(attn._get_index_share_topk_holder(next_holder), {})
+
+    def _bare_dsa_attention(
+        self,
+        config,
+        *,
+        layer_number,
+        skip_topk,
+        index_share,
+        source_layer,
+    ):
+        from paddlefleet.transformer.dsa_attention import DSAttention
+
+        attn = DSAttention.__new__(DSAttention)
+        attn.config = config
+        attn.layer_number = layer_number
+        attn.skip_topk = skip_topk
+        attn.index_share = index_share
+        attn.source_layer = source_layer
+        return attn
+
+    def test_shared_consumer_reads_producer_holder_key(self):
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            dsa_indexer_topk_freq=4,
+        )
+        producer = self._bare_dsa_attention(
+            config,
+            layer_number=0,
+            skip_topk=False,
+            index_share=True,
+            source_layer=0,
+        )
+        consumer = self._bare_dsa_attention(
+            config,
+            layer_number=1,
+            skip_topk=True,
+            index_share=True,
+            source_layer=0,
+        )
+        holder = {}
+        producer._publish_index_share_topk(holder, "topk")
+        self.assertEqual(
+            consumer._lookup_index_share_topk(holder),
+            "topk",
+        )
+
+    def test_head_empty_producer_publishes_logical_source_layer_key(self):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_empty_layers_add_in_head=2,
+            dsa_indexer_types=["full", "shared", "full", "shared"],
+        )
+        producer_layout = resolve_dsa_indexer_layout(config, 2)
+        consumer_layout = resolve_dsa_indexer_layout(config, 3)
+        self.assertEqual(producer_layout[3], 0)
+        self.assertEqual(consumer_layout[3], 0)
+        producer = self._bare_dsa_attention(
+            config,
+            layer_number=2,
+            skip_topk=producer_layout[1],
+            index_share=producer_layout[2],
+            source_layer=producer_layout[3],
+        )
+        consumer = self._bare_dsa_attention(
+            config,
+            layer_number=3,
+            skip_topk=consumer_layout[1],
+            index_share=consumer_layout[2],
+            source_layer=consumer_layout[3],
+        )
+        holder = {}
+        producer._publish_index_share_topk(holder, "logical-topk")
+        self.assertIn(consumer.source_layer, holder)
+        self.assertNotIn(producer.layer_number, holder)
+        self.assertEqual(
+            consumer._lookup_index_share_topk(holder), "logical-topk"
+        )
+
+    def test_official_last_full_producer_key_matches_decoder_and_mtp(
+        self,
+    ):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_nextn_predict_layers=1,
+            dsa_indexer_types=["full", "full", "full", "shared"],
+            dsa_index_share_for_mtp_iteration=True,
+        )
+        producer_layout = resolve_dsa_indexer_layout(config, 2)
+        decoder_layout = resolve_dsa_indexer_layout(config, 3)
+        mtp_layout = resolve_dsa_indexer_layout(config, 0, is_mtp_layer=True)
+        self.assertEqual(producer_layout[3], 2)
+        self.assertEqual(decoder_layout[3], 2)
+        self.assertEqual(mtp_layout[3], 2)
+        producer = self._bare_dsa_attention(
+            config,
+            layer_number=2,
+            skip_topk=producer_layout[1],
+            index_share=producer_layout[2],
+            source_layer=producer_layout[3],
+        )
+        last_decoder = self._bare_dsa_attention(
+            config,
+            layer_number=3,
+            skip_topk=decoder_layout[1],
+            index_share=decoder_layout[2],
+            source_layer=decoder_layout[3],
+        )
+        mtp = self._bare_dsa_attention(
+            config,
+            layer_number=0,
+            skip_topk=mtp_layout[1],
+            index_share=mtp_layout[2],
+            source_layer=mtp_layout[3],
+        )
+        holder = {}
+        producer._publish_index_share_topk(holder, "official-topk")
+        self.assertEqual(
+            last_decoder._lookup_index_share_topk(holder), "official-topk"
+        )
+        self.assertEqual(mtp._lookup_index_share_topk(holder), "official-topk")
+
+    def test_skip_consumer_raises_when_source_key_is_missing(self):
+        config = TransformerConfig(
+            hidden_size=64, num_attention_heads=2, num_hidden_layers=4
+        )
+        consumer = self._bare_dsa_attention(
+            config,
+            layer_number=3,
+            skip_topk=True,
+            index_share=True,
+            source_layer=2,
+        )
+        holder = {}
+        with self.assertRaisesRegex(RuntimeError, "source layer 2"):
+            consumer._lookup_index_share_topk(holder)
+        with self.assertRaisesRegex(RuntimeError, "source layer 2"):
+            consumer._lookup_index_share_topk(None)
+
+    def test_source_layer_at_or_before_skip_offset_is_itself(self):
+        from paddlefleet.transformer.dsa_attention import (
+            source_dsa_compute_layer,
+        )
+
+        self.assertEqual(
+            source_dsa_compute_layer(3, skip_topk_offset=3, topk_freq=4), 3
+        )
+        self.assertEqual(
+            source_dsa_compute_layer(2, skip_topk_offset=3, topk_freq=4), 2
+        )
+
+    def test_logical_mtp_layer_keeps_physical_index(self):
+        from paddlefleet.transformer.dsa_attention import (
+            decoder_dsa_logical_layer,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_empty_layers_add_in_head=2,
+        )
+        self.assertEqual(
+            decoder_dsa_logical_layer(config, 7, is_mtp_layer=True), 7
+        )
+
+    def test_producer_rejects_layer_outside_indexer_types(self):
+        from paddlefleet.transformer.dsa_attention import (
+            decoder_dsa_topk_producer_layer,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            dsa_indexer_types=["full", "full", "full", "shared"],
+        )
+        with self.assertRaisesRegex(ValueError, "outside dsa_indexer_types"):
+            decoder_dsa_topk_producer_layer(config, 4)
+
+    def test_periodic_producer_without_indexer_types(self):
+        from paddlefleet.transformer.dsa_attention import (
+            decoder_dsa_topk_producer_layer,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            dsa_indexer_topk_freq=4,
+            dsa_indexer_skip_topk_offset=0,
+        )
+        self.assertEqual(decoder_dsa_topk_producer_layer(config, 0), 0)
+        self.assertEqual(decoder_dsa_topk_producer_layer(config, 3), 0)
+
+    def test_typed_full_indexer_is_its_own_producer(self):
+        from paddlefleet.transformer.dsa_attention import (
+            decoder_dsa_topk_producer_layer,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            dsa_indexer_types=["full", "shared", "full", "shared"],
+        )
+        self.assertEqual(decoder_dsa_topk_producer_layer(config, 0), 0)
+        self.assertEqual(decoder_dsa_topk_producer_layer(config, 2), 2)
+        self.assertEqual(decoder_dsa_topk_producer_layer(config, 1), 0)
+        self.assertEqual(decoder_dsa_topk_producer_layer(config, 3), 2)
+
+    def test_mtp_share_publishes_last_decoder_producer(self):
+        from paddlefleet.transformer.dsa_attention import (
+            _decoder_layer_publishes_shared_topk,
+            resolve_dsa_indexer_layout,
+        )
+
+        periodic = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_nextn_predict_layers=1,
+            dsa_indexer_topk_freq=4,
+            dsa_index_share_for_mtp_iteration=True,
+        )
+        self.assertTrue(_decoder_layer_publishes_shared_topk(periodic, 0))
+        self.assertFalse(_decoder_layer_publishes_shared_topk(periodic, 1))
+        mtp_full = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_nextn_predict_layers=1,
+            dsa_index_share_for_mtp_iteration=False,
+        )
+        indexer_type, skip_topk, index_share, source_layer = (
+            resolve_dsa_indexer_layout(mtp_full, 7, is_mtp_layer=True)
+        )
+        self.assertEqual(indexer_type, "full")
+        self.assertFalse(skip_topk)
+        self.assertFalse(index_share)
+        self.assertEqual(source_layer, 7)
+
+    def test_negative_layer_does_not_publish_shared_topk(self):
+        from paddlefleet.transformer.dsa_attention import (
+            _decoder_layer_publishes_shared_topk,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64, num_attention_heads=2, num_hidden_layers=4
+        )
+        self.assertFalse(_decoder_layer_publishes_shared_topk(config, -1))
+
+    def test_mtp_shared_indexer_requires_a_decoder(self):
+        from paddlefleet.transformer.dsa_attention import (
+            resolve_dsa_indexer_layout,
+        )
+
+        config = TransformerConfig(
+            hidden_size=64, num_attention_heads=2, num_hidden_layers=4
+        )
+        config.num_hidden_layers = 0
+        config.dsa_index_share_for_mtp_iteration = True
+        with self.assertRaisesRegex(ValueError, "preceding decoder layer"):
+            resolve_dsa_indexer_layout(config, 0, is_mtp_layer=True)
+
+    def test_skip_consumer_holder_does_not_contain_source_until_producer_runs(
+        self,
+    ):
+        from paddlefleet.transformer.dsa_attention import DSAttention
+
+        attn = DSAttention.__new__(DSAttention)
+        attn.config = TransformerConfig(
+            hidden_size=64, num_attention_heads=2, num_hidden_layers=4
+        )
+        attn.source_layer = 0
+        holder = {}
+        self.assertEqual(holder, {})
+        self.assertNotIn(attn.source_layer, holder)
+
+
+class TestDsaPipelineSharing(TestCase):
+    def model(
+        self,
+        *,
+        parts,
+        offset=0,
+        mtp=True,
+        weight_only=False,
+        full=False,
+        **config_kwargs,
+    ):
+        from paddle.distributed.fleet.meta_parallel import LayerDesc
+
+        from paddlefleet.models.gpt.gpt_layer_specs import (
+            get_gpt_decoder_layers_spec,
+            get_gpt_mtp_layers_spec,
+        )
+        from paddlefleet.models.gpt.gpt_model import GPTModel
+
+        config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            num_empty_layers_add_in_head=offset,
+            num_nextn_predict_layers=int(mtp),
+            multi_latent_attention=True,
+            dsa_index_n_heads=2,
+            dsa_indexer_types=["full"] * 4
+            if full
+            else ["full", "full", "full", "shared"],
+            dsa_index_share_for_mtp_iteration=mtp and not full,
+            mtp_load_weight_only=weight_only,
+            **config_kwargs,
+        )
+        decoder = get_gpt_decoder_layers_spec(config)
+        specs = decoder + (
+            get_gpt_mtp_layers_spec(config, decoder) if mtp else []
+        )
+        model = object.__new__(GPTModel)
+        object.__setattr__(model, "config", config)
+        object.__setattr__(model, "_use_dualpipev", False)
+        object.__setattr__(
+            model, "_layers_desc", [LayerDesc(spec) for spec in specs]
+        )
+        object.__setattr__(model, "segment_parts", parts)
+        return model
+
+    def test_producer_decoder_and_mtp_can_share_one_segment(self):
+        for offset in (0, 2):
+            self.model(
+                parts=[0, 2, 5], offset=offset
+            )._validate_dsa_pipeline_sharing()
+
+    def test_pipeline_validation_accepts_layer_func_spec(self):
+        model = self.model(parts=[0, 2, 5])
+        for descriptor in model._layers_desc:
+            spec = getattr(descriptor, "layer_spec", None)
+            if spec is not None:
+                descriptor.layer_func = spec
+        model._validate_dsa_pipeline_sharing()
+
+    def test_dsa_descriptor_without_layer_number_is_rejected(self):
+        model = self.model(parts=[0, 2, 5])
+        for descriptor in model._layers_desc:
+            spec = getattr(descriptor, "layer_spec", None)
+            core = getattr(
+                getattr(
+                    getattr(spec, "sublayers_spec", None),
+                    "self_attn",
+                    None,
+                ),
+                "sublayers_spec",
+                None,
+            )
+            core = getattr(core, "core_attention", None)
+            if (
+                getattr(getattr(core, "layer", None), "__name__", None)
+                == "DSAttention"
+            ):
+                spec.extra_kwargs = {}
+                break
+        else:
+            self.fail("test model did not contain a DSA descriptor")
+
+        with self.assertRaisesRegex(ValueError, "no layer_number"):
+            model._validate_dsa_pipeline_sharing()
+
+    def test_dsa_holder_is_removed_before_pipeline_transport(self):
+        from paddle.distributed.fleet.meta_parallel import dict_to_tuple_helper
+
+        from paddlefleet.models.gpt.gpt_model import GPTModel
+        from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+        layer = TransformerLayer.__new__(TransformerLayer)
+        layer.config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            dsa_indexer_types=["full", "full", "full", "shared"],
+        )
+        holders = []
+
+        def stage(marker):
+            def forward(local_input):
+                holder = layer._dsa_topk_holder_kwargs(local_input)[
+                    "dsa_topk_holder"
+                ]
+                holder[2] = paddle.to_tensor([marker], dtype="int64")
+                holders.append(holder)
+                return {
+                    **local_input,
+                    "hidden_states": local_input["hidden_states"] * marker,
+                }
+
+            return forward
+
+        model = self.model(parts=[0, 2, 5])
+        object.__setattr__(model, "_recompute_interval", 0)
+        object.__setattr__(model, "_num_virtual_pipeline_stages", 2)
+        object.__setattr__(model, "run_function", [stage(3)])
+        object.__setattr__(
+            model,
+            "_model_chunks",
+            [
+                SimpleNamespace(get_run_function=lambda: [stage(1)]),
+                SimpleNamespace(get_run_function=lambda: [stage(2)]),
+            ],
+        )
+        for chunk_id, marker in ((None, 3), (0, 1), (1, 2)):
+            with self.subTest(chunk_id=chunk_id):
+                args = {"hidden_states": paddle.to_tensor([1.0])}
+                output = GPTModel.forward(model, args, chunk_id=chunk_id)
+                self.assertNotIn("_block_cache_meta", args)
+                self.assertNotIn("_block_cache_meta", output)
+                transported = dict_to_tuple_helper(output)
+                self.assertEqual(len(transported), 1)
+                self.assertEqual(transported[0].tolist(), [float(marker)])
+                self.assertEqual(holders[-1][2].tolist(), [marker])
+        self.assertEqual(len({id(holder) for holder in holders}), 3)
+
+    def test_overlap_schedulers_reject_sharing_before_build(self):
+        from paddlefleet.transformer.transformer_layer import (
+            TransformerLayerWithOverlap,
+        )
+
+        for dualpipe in (False, True):
+            model = self.model(parts=[0, 2, 4], mtp=False)
+            if dualpipe:
+                object.__setattr__(model, "_use_dualpipev", True)
+            else:
+                for descriptor in model._layers_desc:
+                    descriptor.layer_spec.layer = TransformerLayerWithOverlap
+            with self.assertRaisesRegex(ValueError, "overlap pipeline"):
+                model._validate_dsa_pipeline_sharing()
+
+    def test_overlap_schedulers_keep_full_indexers_supported(self):
+        model = self.model(parts=[0, 2, 4], mtp=False, full=True)
+        object.__setattr__(model, "_use_dualpipev", True)
+        model._validate_dsa_pipeline_sharing()
+
+    def test_invalid_dsa_holder_metadata_is_rejected(self):
+        from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+        layer = TransformerLayer.__new__(TransformerLayer)
+        layer.config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            dsa_indexer_types=["full", "full", "full", "shared"],
+        )
+        with self.assertRaisesRegex(TypeError, "dsa_topk_holder.*dict"):
+            layer._dsa_topk_holder_kwargs(
+                {"_block_cache_meta": {"dsa_topk_holder": []}}
+            )
+
+    def test_decoder_cross_segment_is_rejected_before_build(self):
+        from unittest.mock import patch
+
+        from paddlefleet.models.gpt.gpt_model import PipelineLayer
+
+        model = self.model(parts=[0, 3, 5])
+        with patch.object(PipelineLayer, "_build_layer") as build:
+            with self.assertRaisesRegex(ValueError, "Cross-segment DSA"):
+                model._build_layer()
+            build.assert_not_called()
+
+    def test_mtp_cross_segment_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "shared MTP"):
+            self.model(parts=[0, 4, 5])._validate_dsa_pipeline_sharing()
+
+    def test_interleaved_segments_are_rejected_before_chunk_build(self):
+        from unittest.mock import patch
+
+        from paddlefleet.models.gpt.gpt_model import PipelineLayer
+
+        model = self.model(parts=[0, 1, 3, 4, 5])
+        with patch.object(PipelineLayer, "_build_chunked_layer") as build:
+            with self.assertRaisesRegex(ValueError, "Cross-segment DSA"):
+                model._build_chunked_layer()
+            build.assert_not_called()
+
+    def test_full_indexers_allow_arbitrary_segments(self):
+        self.model(parts=[0, 3, 5], full=True)._validate_dsa_pipeline_sharing()
+
+    def test_weight_only_mtp_does_not_require_a_topk_transport(self):
+        self.model(
+            parts=[0, 4, 5], weight_only=True
+        )._validate_dsa_pipeline_sharing()
+
+    FULL_RECOMPUTE = {
+        "recompute_granularity": "full",
+        "recompute_method": "uniform",
+        "recompute_num_layers": 1,
+    }
+
+    def test_pipelined_full_recompute_of_consumer_is_rejected(self):
+        model = self.model(parts=[0, 2, 5], **self.FULL_RECOMPUTE)
+        with self.assertRaisesRegex(
+            ValueError, "shared decoder layer 3 is recomputed"
+        ):
+            model._validate_dsa_pipeline_sharing()
+
+    def test_pipelined_core_attn_recompute_of_mtp_is_rejected(self):
+        model = self.model(
+            parts=[0, 2, 5],
+            recompute_granularity="selective",
+            recompute_modules={"core_attn": [4]},
+        )
+        with self.assertRaisesRegex(
+            ValueError, "shared MTP layer .* recomputed"
+        ):
+            model._validate_dsa_pipeline_sharing()
+
+    def test_recover_window_counts_as_recompute(self):
+        from unittest.mock import patch
+
+        model = self.model(parts=[0, 2, 5])
+        env = {"RECOVER_STEP": "10", "TRAINER_GLOBAL_STEP": "3"}
+        with (
+            patch.dict("os.environ", env),
+            self.assertRaisesRegex(ValueError, "is recomputed"),
+        ):
+            model._validate_dsa_pipeline_sharing()
+
+    def test_recompute_without_pipelining_is_allowed(self):
+        self.model(
+            parts=[0, 5], **self.FULL_RECOMPUTE
+        )._validate_dsa_pipeline_sharing()
+
+    def test_recomputed_producer_only_is_allowed(self):
+        self.model(
+            parts=[0, 2, 5],
+            recompute_granularity="selective",
+            recompute_modules={"core_attn": [2]},
+        )._validate_dsa_pipeline_sharing()
+
+    def test_pipelined_recompute_with_full_indexers_is_allowed(self):
+        self.model(
+            parts=[0, 3, 5], full=True, **self.FULL_RECOMPUTE
+        )._validate_dsa_pipeline_sharing()
+
+
+class TestMtpDsaHolderTransport(TestCase):
+    """The MTP inner layer must reuse the decoder's micro-batch top-k holder."""
+
+    def holder_layer(self):
+        from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+        layer = TransformerLayer.__new__(TransformerLayer)
+        layer.config = TransformerConfig(
+            hidden_size=64,
+            num_attention_heads=2,
+            num_hidden_layers=4,
+            dsa_indexer_types=["full", "full", "full", "shared"],
+        )
+        return layer
+
+    def fake_mtp(self, transformer_layer=None):
+        return SimpleNamespace(
+            config=SimpleNamespace(
+                sequence_parallel=False,
+                gpt_model_use_experimental_version=False,
+                recompute_method="uniform",
+                recompute_num_layers=1,
+            ),
+            mhc_enabled=True,
+            _concat_embeddings=lambda hidden, decoder_input, mask: hidden,
+            transformer_layer=transformer_layer,
+        )
+
+    def test_inner_layer_resolves_the_decoder_holder(self):
+        from paddlefleet.transformer.multi_token_prediction import (
+            MultiTokenPredictionLayer,
+        )
+
+        holder_layer = self.holder_layer()
+        decoder_args = {}
+        producer = holder_layer._dsa_topk_holder_kwargs(decoder_args)
+        resolved = {}
+
+        def inner(input_dict):
+            resolved.update(holder_layer._dsa_topk_holder_kwargs(input_dict))
+            return {"hidden_states": input_dict["hidden_states"]}
+
+        MultiTokenPredictionLayer._proj_and_transformer_layer(
+            self.fake_mtp(inner),
+            hidden_states="hidden",
+            decoder_input="decoder_input",
+            _block_cache_meta=decoder_args["_block_cache_meta"],
+        )
+        self.assertIs(resolved["dsa_topk_holder"], producer["dsa_topk_holder"])
+
+    def test_recompute_replays_with_the_same_metadata(self):
+        from paddlefleet.transformer import multi_token_prediction as mtp
+
+        for meta in (None, {"dsa_topk_holder": {}}):
+            with self.subTest(has_metadata=meta is not None):
+                seen = []
+
+                def inner(inputs):
+                    seen.append(inputs.get("_block_cache_meta"))
+                    return {"hidden_states": inputs["hidden_states"].square()}
+
+                layer = self.fake_mtp(inner)
+                forward = MethodType(
+                    mtp.MultiTokenPredictionLayer._proj_and_transformer_layer,
+                    layer,
+                )
+                hidden = paddle.to_tensor([2.0, 3.0], stop_gradient=False)
+                output = mtp.MultiTokenPredictionLayer._checkpointed_forward(
+                    layer,
+                    forward,
+                    hidden_states=hidden,
+                    decoder_input=hidden,
+                    _block_cache_meta=meta,
+                )
+                output.sum().backward()
+                self.assertEqual(output.tolist(), [4.0, 9.0])
+                self.assertEqual(hidden.grad.tolist(), [4.0, 6.0])
+                self.assertEqual(len(seen), 2)
+                self.assertTrue(all(item is meta for item in seen))
+
+    def test_decoder_full_recompute_forwards_the_same_holder(self):
+        from paddlefleet.transformer.transformer_layer import TransformerLayer
+
+        holder = {}
+        seen = []
+
+        def attention(hidden_states, **kwargs):
+            seen.append(kwargs["dsa_topk_holder"])
+            return hidden_states.square(), None
+
+        layer = SimpleNamespace(
+            config=SimpleNamespace(block_attention_residuals=False),
+            training=True,
+            mlp=None,
+            layer_number=0,
+            full_recompute=True,
+            _log_md5=lambda *args: None,
+            _forward_attention=attention,
+            _forward_mlp=lambda hidden_states, **kwargs: hidden_states,
+        )
+        forward = MethodType(TransformerLayer._forward_impl, layer)
+        hidden = paddle.to_tensor([2.0, 3.0], stop_gradient=False)
+        output = recompute(
+            forward, hidden_states=hidden, dsa_topk_holder=holder
+        )
+        output.sum().backward()
+
+        self.assertEqual(output.tolist(), [4.0, 9.0])
+        self.assertEqual(hidden.grad.tolist(), [4.0, 6.0])
+        self.assertEqual(len(seen), 2)
+        self.assertTrue(all(item is holder for item in seen))

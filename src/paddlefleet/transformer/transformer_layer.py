@@ -535,6 +535,7 @@ class TransformerLayer(nn.Layer):
         origin_input_ids: Tensor | None = None,
         blocks: list | None = None,
         cu_seqlens: Tensor | None = None,
+        dsa_topk_holder: dict | None = None,
     ):
         """Forward with block_attention_residuals + full_recompute.
 
@@ -611,6 +612,7 @@ class TransformerLayer(nn.Layer):
                 in_recompute=True,
                 input_ids=input_ids,
                 cu_seqlens=cu_seqlens,
+                dsa_topk_holder=dsa_topk_holder,
             )
             if ctx is None:
                 return hs
@@ -678,6 +680,40 @@ class TransformerLayer(nn.Layer):
         other layer class keeps building its own ``CSADocMaskMetadata``.
         """
         return {}
+
+    def _dsa_topk_holder_kwargs(self, dict_args: dict) -> dict:
+        """Create or retrieve the current micro-batch's DSA top-k holder.
+
+        ``GPTModel.forward`` removes the stage-local metadata before pipeline
+        transport. Recompute receives the holder explicitly and keeps it alive
+        independently of later micro-batches and virtual pipeline chunks.
+        """
+        indexer_types = getattr(self.config, "dsa_indexer_types", None)
+        share_enabled = bool(
+            getattr(self.config, "dsa_index_share_for_mtp_iteration", False)
+            or (getattr(self.config, "dsa_indexer_topk_freq", 1) or 1) > 1
+            or (indexer_types is not None and "shared" in indexer_types)
+        )
+        if not share_enabled:
+            return {}
+        metadata = dict_args.get("_block_cache_meta")
+        if metadata is None:
+            metadata = {}
+            dict_args["_block_cache_meta"] = metadata
+        if not isinstance(metadata, dict):
+            raise TypeError(
+                "_block_cache_meta must be a dict when DSA top-k sharing is enabled"
+            )
+        holder = metadata.get("dsa_topk_holder")
+        if holder is None:
+            holder = {}
+            metadata["dsa_topk_holder"] = holder
+        elif not isinstance(holder, dict):
+            raise TypeError(
+                "_block_cache_meta['dsa_topk_holder'] must be a dict when "
+                "DSA top-k sharing is enabled"
+            )
+        return {"dsa_topk_holder": holder}
 
     def forward(
         self,
@@ -867,6 +903,7 @@ class TransformerLayer(nn.Layer):
         # every layer class that does not opt in, and for MTP layers, whose
         # `forward` is itself inside the MTP module's recompute segment.
         docmask_meta_kwargs = self._docmask_meta_kwargs()
+        dsa_topk_holder_kwargs = self._dsa_topk_holder_kwargs(dict_args)
 
         if self.full_recompute or (not has_recovered()):
             hidden_states = dict_args["hidden_states"]
@@ -925,6 +962,7 @@ class TransformerLayer(nn.Layer):
                     input_ids=input_ids,
                     origin_input_ids=origin_input_ids,
                     blocks=dict_args.get("blocks", []),
+                    **dsa_topk_holder_kwargs,
                     **cu_seqlens_kwargs,
                 )
             else:
@@ -964,10 +1002,15 @@ class TransformerLayer(nn.Layer):
                     origin_input_ids=origin_input_ids,
                     **cu_seqlens_kwargs,
                     **docmask_meta_kwargs,
+                    **dsa_topk_holder_kwargs,
                     **offload_kwargs,
                 )
         else:
-            outputs = self._forward_impl(**dict_args, **docmask_meta_kwargs)
+            outputs = self._forward_impl(
+                **dict_args,
+                **docmask_meta_kwargs,
+                **dsa_topk_holder_kwargs,
+            )
 
         if isinstance(outputs, tuple):
             output, context = outputs[0], outputs[1]
@@ -1063,6 +1106,7 @@ class TransformerLayer(nn.Layer):
         blocks: list | tuple | None = None,
         cu_seqlens: Tensor | None = None,
         docmask_mb_idx: int = -1,
+        dsa_topk_holder: dict | None = None,
         **kwargs,
     ):
         def need_do_attention():
@@ -1135,6 +1179,7 @@ class TransformerLayer(nn.Layer):
                         input_ids=input_ids,
                         cu_seqlens=cu_seqlens,
                         docmask_mb_idx=docmask_mb_idx,
+                        dsa_topk_holder=dsa_topk_holder,
                         **kwargs,
                     )
 
@@ -1192,6 +1237,7 @@ class TransformerLayer(nn.Layer):
                         input_ids=input_ids,
                         cu_seqlens=cu_seqlens,
                         docmask_mb_idx=docmask_mb_idx,
+                        dsa_topk_holder=dsa_topk_holder,
                         **kwargs,
                     )
             self._log_md5(
@@ -1290,6 +1336,16 @@ class TransformerLayer(nn.Layer):
         if isinstance(self.self_attn, KimiDeltaAttention):
             # Built once per step by the embedding; None makes KDA build its own.
             extra_kwargs["cu_seqlens"] = cu_seqlens
+        if (
+            isinstance(self.self_attn, MultiLatentAttention)
+            and "dsa_topk_holder" in kwargs
+            and getattr(
+                getattr(self.self_attn, "core_attention", None),
+                "supports_index_share_topk",
+                False,
+            )
+        ):
+            extra_kwargs["dsa_topk_holder"] = kwargs["dsa_topk_holder"]
         if "shared_kv" in kwargs:
             extra_kwargs["shared_kv"] = kwargs["shared_kv"]
 
@@ -2030,6 +2086,16 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             self.self_attn, (DSv4HybridAttention, MultiLatentAttention)
         ):
             extra_kwargs["docmask_mb_idx"] = kwargs.get("docmask_mb_idx", -1)
+        if (
+            isinstance(self.self_attn, MultiLatentAttention)
+            and "dsa_topk_holder" in kwargs
+            and getattr(
+                getattr(self.self_attn, "core_attention", None),
+                "supports_index_share_topk",
+                False,
+            )
+        ):
+            extra_kwargs["dsa_topk_holder"] = kwargs["dsa_topk_holder"]
 
         if isinstance(self.self_attn, MultiLatentAttention):
             attention_output_with_bias = self.self_attn(
