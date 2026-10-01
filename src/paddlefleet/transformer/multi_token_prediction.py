@@ -15,11 +15,14 @@
 
 from __future__ import annotations
 
+import logging
+import os
 import warnings
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import numpy as np
 import paddle
 from paddle import Tensor, nn
 from paddle.distributed.fleet.meta_parallel import (
@@ -52,6 +55,8 @@ if TYPE_CHECKING:
     from paddlefleet.models.backends import BackendSpecProvider
     from paddlefleet.packed_seq_params import PackedSeqParams
     from paddlefleet.transformer.transformer_config import TransformerConfig
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_ATTN_MASK = [
     AttnMaskType.padding,
@@ -264,6 +269,113 @@ class MTPLossAutoScaler(paddle.autograd.PyLayer):
         MTPLossAutoScaler.main_loss_backward_scale = scale
 
 
+_MTP_SAMPLING_STEP_ENV = ("TRAINER_GLOBAL_STEP", "PDC_INIT_STEP")
+_warned_missing_train_step = False
+
+
+def _current_train_step():
+    """The optimizer step this micro-batch belongs to, or 0 if unknown.
+
+    ``Trainer.train()`` exports ``TRAINER_GLOBAL_STEP`` once per micro-batch,
+    unconditionally, right after loading the batch. Reading it here is what lets
+    the depth draw be a pure function of the step: no per-layer counters, no
+    resume bookkeeping, and every rank and pipeline stage derives the same K for
+    the same step without communicating.
+
+    These are not new variables invented for sampling: ``recompute_utils``'s
+    ``has_recovered()`` already reads exactly this pair, in this order, and the
+    pretraining trainers already write ``TRAINER_GLOBAL_STEP``. Mirroring that
+    reader keeps one contract in the repo rather than two.
+
+    A training loop that exports neither leaves the step at 0, which makes K
+    constant for the whole run -- correct (``w_j = E[1{K>=j}/K]`` depends only on
+    the configured distribution) but not sampling anything. That is worth a
+    warning rather than a silent degradation, so warn once.
+    """
+    global _warned_missing_train_step
+    for name in _MTP_SAMPLING_STEP_ENV:
+        raw = os.environ.get(name)
+        if raw is None:
+            continue
+        try:
+            return int(raw)
+        except ValueError:
+            # A malformed value is a broken launcher, not a missing one; fall
+            # through to the next name rather than trusting it.
+            continue
+    if not _warned_missing_train_step:
+        _warned_missing_train_step = True
+        logger.warning(
+            "mtp_depth_sampling is on but none of "
+            f"{'/'.join(_MTP_SAMPLING_STEP_ENV)} holds a usable step, so the "
+            "sampled depth cannot advance and K stays constant for the whole "
+            "run. The trainer is expected to export TRAINER_GLOBAL_STEP once "
+            "per micro-batch."
+        )
+    return 0
+
+
+def draw_mtp_sampled_depth(config):
+    """Draw K -- how many MTP depths (prefix 1..K) to run this optimizer step.
+
+    Driven by ``config.mtp_depth_sampling``, a list P(K=k) of length
+    D=num_nextn_predict_layers. Returns D when sampling is disabled.
+
+    K is a PURE FUNCTION of ``config.seed`` and the current train step, so it is
+    deterministic, collective-free and identical on every rank, every pipeline
+    stage and every virtual chunk that asks -- no counters to keep in lockstep and
+    nothing to align. A world-group ``broadcast(src=0)`` -- the original mechanism
+    -- deadlocks at pp>1 instead, because only the last pipeline stage runs the
+    MTP layers while src=0 sits on the first stage and never joins.
+
+    Granularity is one draw per OPTIMIZER step, not per micro-batch: the step only
+    advances once per optimizer update, so all micro-batches of a step run the same
+    depths. That keeps every micro-batch's cost identical, which matters for
+    pipeline balance, and it makes a recompute replay trivially idempotent. The
+    effective per-depth weight is unchanged -- ``w_j = E[1{K>=j}/K]`` depends only
+    on the configured distribution, not on how finely K is redrawn -- and a resumed
+    job continues the sequence for free, because the step comes from the restored
+    checkpoint state.
+
+    A private Generator is used (not ``np.random.*``) so the global RNG stream
+    used elsewhere is untouched.
+
+    ``config.seed`` is read with a default of 0 on purpose: TransformerConfig
+    carries no seed field of its own today, so in-tree the draw is a function of
+    the step alone -- which is what makes two runs of the same config reproduce
+    each other. A downstream config that does carry a seed decorrelates otherwise
+    identical runs for free, with ``base * 1_000_003`` keeping the per-seed
+    streams disjoint for any realistic step count.
+    """
+    d = config.num_nextn_predict_layers
+    ratio = getattr(config, "mtp_depth_sampling", None)
+    if not ratio:
+        return d
+    probs = np.asarray(ratio, dtype="float64")
+    probs = probs / probs.sum()
+    base = int(getattr(config, "seed", 0) or 0)
+    seed = base * 1_000_003 + _current_train_step()
+    rng = np.random.default_rng(seed)
+    k = int(rng.choice(len(probs), p=probs)) + 1
+    return max(1, min(k, d))
+
+
+def resolve_mtp_sampled_depth(config, dict_args):
+    """Return this micro-batch's K, deriving it if nobody published one yet.
+
+    Every site would derive the same value anyway -- K is a pure function of
+    (seed, step) -- so the ``dict_args`` entry is a cache, not a synchronisation
+    mechanism: it saves the later MTP depths and the LM head on a stage from
+    recomputing the draw, and it makes the value visibly identical for anyone
+    reading the dict.
+    """
+    if "mtp_sampled_depth" in dict_args:
+        return dict_args["mtp_sampled_depth"]
+    k = draw_mtp_sampled_depth(config)
+    dict_args["mtp_sampled_depth"] = k
+    return k
+
+
 class MultiTokenPredictionLayer(FleetLayer):
     """The implementation for Multi-Token Prediction (MTP) which extends
     the prediction scope to multiple future tokens at each position.
@@ -440,6 +552,32 @@ class MultiTokenPredictionLayer(FleetLayer):
     @property
     def transformer_layer_weights(self):
         return self.transformer_layer.named_parameters()
+
+    @property
+    def all_weights(self):
+        """Every parameter of this MTP depth: the transformer_layer body plus the
+        per-depth fusion modules (enorm / hnorm / eh_proj or e_proj+h_proj / norm).
+
+        Used as ``shared_weight_attr`` for the ``mtp_shared_weights`` key so that
+        paddle registers all of them in ``PipelineLayer.shared_comm`` -- unlike
+        ``transformer_layer_weights``, which deliberately covers the body only.
+
+        ``mtp_embed`` is excluded. Under enable_mtp_magic_send it is a real
+        VocabParallelEmbedding sublayer, but GPTModel already owns it end to end:
+        _tie_mtp_embed_weights_intra_rank shares it within a rank,
+        _create_mtp_embed_global_group / _synchronize_mtp_embed_weight sync it across
+        stages, and _mark_mtp_embed_shared_flags sets its is_firstly_shared.
+        Registering it in shared_comm as well would give its initial broadcast two
+        competing sources (stage 0 over the pipe group vs the shared group's lowest
+        rank), tag it with a sharding-sync ``color`` it does not want, and leave
+        is_firstly_shared decided by whichever mechanism ran last. The gradient
+        itself is already safe -- GPTModel.allreduce_shared_weight_gradients skips
+        mtp_embed by Parameter identity -- but the remaining three are not.
+        """
+        for name, param in self.named_parameters():
+            if name.startswith("mtp_embed."):
+                continue
+            yield name, param
 
     def _concat_embeddings(
         self,
@@ -773,6 +911,14 @@ class MultiTokenPredictionLayer(FleetLayer):
 
         return outputs
 
+    def _sample_mtp_depth(self):
+        """Draw K for this optimizer step.
+
+        Thin wrapper over :func:`draw_mtp_sampled_depth`, which is a pure function
+        of (config.seed, train step) -- see it for why no site needs to coordinate.
+        """
+        return draw_mtp_sampled_depth(self.config)
+
     def forward(self, dict_args: dict):
         if "context" in dict_args:
             assert dict_args["context"] is None, (
@@ -783,6 +929,22 @@ class MultiTokenPredictionLayer(FleetLayer):
                 "multi token prediction + sequence packing is not yet supported."
             )
 
+        # === MTP depth sampling (prefix-length sampling) ===
+        # K is a pure function of (config.seed, train step), so every depth, the
+        # LM head, every rank and every pipeline chunk derive the same value with
+        # no coordination -- and a recompute replay derives it again identically.
+        # dict_args caches it so the later consumers on a stage skip the draw.
+        # Depths >= K return early, skipping their transformer_layer forward; the
+        # LM head then emits None logits for them and the loss drops those entries.
+        if (
+            getattr(self.config, "mtp_depth_sampling", None)
+            and not self.config.enable_mtp_magic_send
+        ):
+            k = resolve_mtp_sampled_depth(self.config, dict_args)
+            if self.layer_number >= k:
+                # Skip this depth entirely: leave hidden_states_concat unchanged
+                # (K stays in dict_args for downstream MTP layers + the LM head).
+                return dict_args
         # === MTP input arrives outside hidden_states (magic_send / separate_mtp_input) ===
         # hidden_states is pure backbone output (not concatenated). The shifted MTP
         # embeddings arrive either as mtp_input_embeds (magic_send, produced by
@@ -1045,7 +1207,13 @@ class MultiTokenPredictionLayer(FleetLayer):
             )
 
         if self.config.train_mtp_only:
-            for i in range(self.config.num_nextn_predict_layers):
+            sampled_depth = dict_args.get(
+                "mtp_sampled_depth", self.config.num_nextn_predict_layers
+            )
+            num_depths = min(
+                self.config.num_nextn_predict_layers, sampled_depth
+            )
+            for i in range(num_depths):
                 tensor_list = paddle.split(
                     hidden_states_concat,
                     self.config.num_nextn_predict_layers + 1,

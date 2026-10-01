@@ -331,8 +331,29 @@ class GPTLMHead(ColumnParallelLinear):
                 self.config.num_nextn_predict_layers + 1,
             )
             logits = [self._forward(tensor_list[0])]
+            # MTP depth sampling: depths >= K were skipped by the MTP layers
+            # this step, so their slice of hidden_states carries no MTP
+            # computation. Skip the vocab projection for them and keep a None
+            # placeholder so the list length stays num_nextn_predict_layers + 1
+            # and the loss can detect the skipped depths.
+            #
+            # K is a pure function of (config.seed, train step), so this head
+            # derives exactly what the MTP layers used even when it sits on a
+            # different stage; dict_args just caches the value when they share one.
+            from paddlefleet.transformer.multi_token_prediction import (
+                resolve_mtp_sampled_depth,
+            )
+
+            sampled_depth = (
+                resolve_mtp_sampled_depth(self.config, dict_args)
+                if getattr(self.config, "mtp_depth_sampling", None)
+                else self.config.num_nextn_predict_layers
+            )
             for i in range(self.config.num_nextn_predict_layers):
-                logits.append(self._forward(tensor_list[i + 1]))
+                if i >= sampled_depth:
+                    logits.append(None)
+                else:
+                    logits.append(self._forward(tensor_list[i + 1]))
             return logits
         else:
             return self._forward(hidden_states)
