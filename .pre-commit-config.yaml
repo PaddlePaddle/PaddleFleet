@@ -36,6 +36,13 @@ repos:
     hooks:
       - id: typos
         args: [--force-exclude]
+        # PaddleFormers-derived tests carry spellings this hook rejects.
+        # Checking them would force renames that make future PaddleFormers
+        # patches conflict, so exclude the migrated tree (matches develop).
+        exclude: |
+          (?x)^(
+            tests/formers/
+          )
   # For Python files
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.4

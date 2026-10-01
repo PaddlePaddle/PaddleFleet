@@ -26,6 +26,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import numpy as np
 import paddle
 from paddle.distributed.fleet.meta_parallel import LayerSpec
 
@@ -40,7 +41,9 @@ from paddlefleet.transformer.dsa_attention import (
     _bwd_fused_indexer_loss,
     _compute_dsa_indexer_loss,
     _compute_index_scores_fused,
+    _normalize_dsa_mask,
     _unfused_dsa_attention,
+    fused_qk_topk_naive,
     hadamard_transform,
     rotate_activation,
 )
@@ -2129,6 +2132,197 @@ class TestDSAttentionMaskBranches(unittest.TestCase):
         )
         self.assertEqual(
             list(output.shape), [self.b, self.s, self.np * self.v_hd]
+        )
+
+
+# ===========================================================================
+# Layer 7: Mask normalization, naive fused-topk sentinel, Muon slice specs
+#          and total-layer counting (production surface not covered above)
+# ===========================================================================
+class TestNormalizeDSAMask(unittest.TestCase):
+    """Behavior tests for _normalize_dsa_mask shape reduction + content.
+
+    _normalize_dsa_mask must:
+      - return None unchanged for a None mask,
+      - drop a singleton head dim from a 4D [b, 1, s, s] mask,
+      - additionally drop a leading singleton batch dim (3D [1, s, s] -> [s, s]),
+      - keep a genuine batch dim (b > 1) intact,
+      - reject a 4D mask whose head dim is not 1.
+    Content must be preserved bit-for-bit through the squeezes; expected values
+    are built independently with numpy from the same source array.
+    """
+
+    def test_none_returns_none(self):
+        self.assertIsNone(_normalize_dsa_mask(None))
+
+    def test_4d_singleton_batch_squeezes_to_2d(self):
+        src = np.arange(3 * 4, dtype="float32").reshape(1, 1, 3, 4)
+        mask = paddle.to_tensor(src)
+        out = _normalize_dsa_mask(mask)
+        # [1, 1, 3, 4] -> squeeze head -> [1, 3, 4] -> squeeze batch -> [3, 4]
+        self.assertEqual(list(out.shape), [3, 4])
+        np.testing.assert_array_equal(out.numpy(), src.reshape(3, 4))
+
+    def test_4d_multi_batch_keeps_batch(self):
+        src = np.arange(2 * 3 * 4, dtype="float32").reshape(2, 1, 3, 4)
+        mask = paddle.to_tensor(src)
+        out = _normalize_dsa_mask(mask)
+        # b=2 must survive: [2, 1, 3, 4] -> [2, 3, 4]
+        self.assertEqual(list(out.shape), [2, 3, 4])
+        np.testing.assert_array_equal(out.numpy(), src.reshape(2, 3, 4))
+
+    def test_3d_singleton_batch_squeezes_to_2d(self):
+        src = np.arange(5 * 6, dtype="float32").reshape(1, 5, 6)
+        mask = paddle.to_tensor(src)
+        out = _normalize_dsa_mask(mask)
+        self.assertEqual(list(out.shape), [5, 6])
+        np.testing.assert_array_equal(out.numpy(), src.reshape(5, 6))
+
+    def test_3d_multi_batch_kept(self):
+        src = np.arange(2 * 5 * 6, dtype="float32").reshape(2, 5, 6)
+        mask = paddle.to_tensor(src)
+        out = _normalize_dsa_mask(mask)
+        self.assertEqual(list(out.shape), [2, 5, 6])
+        np.testing.assert_array_equal(out.numpy(), src)
+
+    def test_4d_nonsingleton_head_raises(self):
+        mask = paddle.zeros([1, 2, 3, 4], dtype="float32")
+        with self.assertRaises(AssertionError):
+            _normalize_dsa_mask(mask)
+
+
+class TestFusedQkTopkNaiveSentinel(unittest.TestCase):
+    """Behavior tests for fused_qk_topk_naive score math + -1 invalid sentinel.
+
+    The naive path (a) computes index_scores = sum_h relu(q . k) * weights and
+    (b) marks any top-k slot whose masked score is -inf as -1 so downstream
+    sparse attention skips it. Both the exact scores and the sentinel are
+    verified against an independent numpy computation. Fixed, distinguishable
+    q/k/weights are used so a wrong reduction axis, a dropped relu, or a missing
+    invalidation would change the asserted values.
+    """
+
+    def setUp(self):
+        # b=1, sq=1, sk=4, h=1, d=2; single query vector [1, 0].
+        self.q = paddle.to_tensor([[[[1.0, 0.0]]]], dtype="float32")
+        self.k = paddle.to_tensor(
+            [[[3.0, 0.0], [-2.0, 5.0], [1.0, 1.0], [2.0, 0.0]]],
+            dtype="float32",
+        )
+        self.weights = paddle.to_tensor([[[2.0]]], dtype="float32")
+        # Independent scores: relu([3, -2, 1, 2]) * 2 = [6, 0, 2, 4]
+        self.expected_scores = np.array(
+            [[[6.0, 0.0, 2.0, 4.0]]], dtype="float32"
+        )
+
+    def test_scores_and_topk_order_no_mask(self):
+        index_scores, topk_indices = fused_qk_topk_naive(
+            self.q, self.k, self.weights, index_topk=3, mask=None
+        )
+        np.testing.assert_allclose(
+            index_scores.numpy(), self.expected_scores, atol=1e-6
+        )
+        # Descending by score [6, 4, 2] -> indices [0, 3, 2]; no -inf -> no -1.
+        np.testing.assert_array_equal(
+            topk_indices.numpy(),
+            np.array([[[0, 3, 2]]], dtype=topk_indices.numpy().dtype),
+        )
+
+    def test_masked_rows_yield_minus_one_sentinel(self):
+        # Only position 0 is unmasked; the other three become -inf, so a top-3
+        # request must return one real index and two -1 sentinels.
+        mask = paddle.to_tensor(
+            [[[0.0, float("-inf"), float("-inf"), float("-inf")]]],
+            dtype="float32",
+        )
+        index_scores, topk_indices = fused_qk_topk_naive(
+            self.q, self.k, self.weights, index_topk=3, mask=mask
+        )
+        expected_scores = self.expected_scores.copy()
+        expected_scores[0, 0, 1:] = float("-inf")
+        np.testing.assert_array_equal(index_scores.numpy(), expected_scores)
+        np.testing.assert_array_equal(
+            topk_indices.numpy(),
+            np.array([[[0, -1, -1]]], dtype=topk_indices.numpy().dtype),
+        )
+
+
+class TestIndexerMuonSliceSpecs(unittest.TestCase):
+    """Behavior tests for DSAIndexer.muon_slice_specs gating + head count.
+
+    Only ``wq_b.weight`` packs independent heads along the output axis, so the
+    spec must map exactly that parameter to (ortho_per_head, {"heads": n_heads})
+    when muon_qkv_update_mode is 'split_head' (the default), and must return an
+    empty dict for any other mode. The head count is read from the real config
+    consumed by the indexer, and the callable identity is checked against the
+    production ortho_per_head.
+    """
+
+    def setUp(self):
+        self.config = _create_dsa_config(index_n_heads=2)
+        indexer_sublayers = DSAIndexerSublayersSpec(
+            linear_wq_b=BiasedLinear,
+            linear_wk=BiasedLinear,
+            k_norm=LayerNormStub,
+            linear_weights_proj=BiasedLinear,
+        )
+        self.indexer = DSAIndexer(
+            config=self.config,
+            sublayers_spec=indexer_sublayers,
+            layer_number=1,
+            pg_collection=None,
+        )
+
+    def test_default_mode_returns_per_head_spec(self):
+        from paddlefleet.transformer.muon_utils import ortho_per_head
+
+        specs = self.indexer.muon_slice_specs({})
+        self.assertEqual(set(specs.keys()), {"wq_b.weight"})
+        fn, kwargs = specs["wq_b.weight"]
+        self.assertIs(fn, ortho_per_head)
+        self.assertEqual(kwargs, {"heads": 2})
+
+    def test_explicit_split_head_mode_returns_per_head_spec(self):
+        from paddlefleet.transformer.muon_utils import ortho_per_head
+
+        specs = self.indexer.muon_slice_specs(
+            {"muon_qkv_update_mode": "split_head"}
+        )
+        self.assertEqual(set(specs.keys()), {"wq_b.weight"})
+        fn, kwargs = specs["wq_b.weight"]
+        self.assertIs(fn, ortho_per_head)
+        self.assertEqual(kwargs, {"heads": 2})
+
+    def test_non_split_head_mode_returns_empty(self):
+        specs = self.indexer.muon_slice_specs(
+            {"muon_qkv_update_mode": "whole_matrix"}
+        )
+        self.assertEqual(specs, {})
+
+
+class TestGetTotalNumLayersNextn(unittest.TestCase):
+    """Behavior tests for get_total_num_layers with MTP (nextn) layers.
+
+    get_total_num_layers adds num_nextn_predict_layers to num_hidden_layers.
+    The existing suite only exercises the None-as-zero path; here a positive
+    nextn count must increase the total, and an explicit zero must leave it
+    unchanged.
+    """
+
+    def test_adds_nextn_layers(self):
+        config = SimpleNamespace(
+            num_hidden_layers=4, num_nextn_predict_layers=2
+        )
+        self.assertEqual(
+            DSAIndexerLossLoggingHelper.get_total_num_layers(config), 6
+        )
+
+    def test_zero_nextn_leaves_hidden_count(self):
+        config = SimpleNamespace(
+            num_hidden_layers=5, num_nextn_predict_layers=0
+        )
+        self.assertEqual(
+            DSAIndexerLossLoggingHelper.get_total_num_layers(config), 5
         )
 
 
