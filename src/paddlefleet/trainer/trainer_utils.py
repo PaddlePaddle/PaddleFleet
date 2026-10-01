@@ -27,6 +27,7 @@ import gc
 import inspect
 import json
 import math
+import mmap
 import os
 import random
 import re
@@ -79,10 +80,10 @@ else:
 
 from ..transformers.model_utils import (
     EMAStateHFFormatFullParamSaver,
-    _add_variant,
     replace_name_and_gen_index,
     save_full_param,
 )
+from ..transformers.utils import device_guard
 from ..utils.env import (  # noqa for compatibility
     PADDLE_OPTIMIZER_NAME,
     PREFIX_CHECKPOINT_DIR,
@@ -2265,35 +2266,97 @@ def recover_params_from_master_weight(ema_state_dict, model, optimizer, group):
     return ema_param_state_dict
 
 
+_SHM_DIR = "/dev/shm"
+
+
+@paddle.no_grad()
+def unpack_ema_data(package):
+    """Rebuild `ZeroCostCheckpointEMAProcessor.ema_state_dict()` from shared memory handles.
+
+    Runs in the main process. The returned tensors are zero-copy views into the worker's EMA
+    buffers, so the caller must finish consuming them before the worker is allowed to run the
+    next `ema_accumulate`.
+    """
+
+    def get_ema_data(handle):
+        path = os.path.join(_SHM_DIR, handle["name"].lstrip("/"))
+        fd = os.open(path, os.O_RDWR)
+        try:
+            mapping = mmap.mmap(fd, os.fstat(fd).st_size)
+        finally:
+            os.close(fd)
+        array = np.ndarray(
+            tuple(handle["shape"]), dtype=np.float32, buffer=mapping
+        )
+        tensor = paddle.base.core.eager.Tensor(
+            value=array, place=paddle.base.core.CPUPlace(), zero_copy=True
+        )
+        tensor._keep_alive = (mapping, array)
+        return tensor
+
+    metas = package["metas"]
+    with device_guard("cpu"):
+        master_buffer = get_ema_data(package["master_shm"])
+        param_buffers = {
+            index: get_ema_data(handle)
+            for index, handle in package["param_shm"].items()
+        }
+        ema_state_dict = {}
+        for k, meta in metas.items():
+            if k == "master_weights":
+                continue
+            buffer = param_buffers[meta["buffer_index"]]
+            if meta["whole_buffer"]:
+                # `unshard_` type tensors use the entire buffer directly
+                tensor = buffer
+            else:
+                tensor = buffer._slice(meta["start"], meta["end"])
+                # A slice of a `zero_copy` tensor does not inherit the Python-side reference
+                # that keeps the mapping alive, so pin the parent buffer here. Without it the
+                # buffers are collected when this function returns and reading the slices
+                # touches unmapped memory.
+                tensor._keep_alive = buffer
+            tensor.get_tensor()._set_dims(meta["shape"])
+            tensor.name = meta["name"]
+            ema_state_dict[k] = tensor
+        ema_state_dict_master_weights = {}
+        for k, meta in metas["master_weights"].items():
+            t = master_buffer._slice(meta["start"], meta["end"])
+            t._keep_alive = master_buffer
+            t.get_tensor()._set_dims(meta["shape"])
+            t.name = meta["name"]
+            ema_state_dict_master_weights[k] = t
+        ema_state_dict["master_weights"] = ema_state_dict_master_weights
+    return ema_state_dict
+
+
 class EMAStateAssembler:
     def __init__(
         self,
         output_dir,
-        save_checkpoint_format,
         save_hf_steps,
         save_steps,
-        optimizer_name_suffix,
         model,
         optimizer,
-        start_step,
         memory_growth_threshold=8 * (2**30),
         post_save_hook=None,
+        zcc_manager=None,
+        save_checkpoint_format=None,
+        optimizer_name_suffix=None,
+        start_step=None,
     ):
         self.output_dir = Path(output_dir)
-        self.save_checkpoint_format = save_checkpoint_format
         self.save_hf_steps = save_hf_steps
-        self.save_steps = save_steps
         self.memory_growth_threshold = memory_growth_threshold
         self.post_save_hook = post_save_hook
+        self.zcc_manager = zcc_manager
         if save_hf_steps > 0 and save_hf_steps % save_steps != 0:
             raise ValueError(
                 "[EMAStateAssembler] save_hf_steps must be a multiple of save_steps."
             )
 
         self.rank = dist.get_rank()
-        self.world_size = dist.get_world_size()
 
-        self.optimizer_name_suffix = optimizer_name_suffix
         self.model = model
         self.optimizer = optimizer
         self.is_gpt_model = GPTModel is not None and isinstance(
@@ -2339,288 +2402,92 @@ class EMAStateAssembler:
                 n_routed_experts // moe_group.nranks
             ) * moe_group.rank
 
-        self._set_latest_processed_checkpoint_step(start_step)
-        self.expected_next_save_ckpt_step = (
-            self.latest_processed_checkpoint_step + save_hf_steps
-        )
         self.pending_hf_step = None
 
     def run(self, global_step=None):
         if self.save_hf_steps <= 0:
-            logger.info(
-                "[EMAStateAssembler] save_hf_steps is not positive. Skipping."
-            )
             return
 
         # global_step is None means it's last step
-        if global_step is not None and not self._begin_EMAHFProcess(
-            global_step
-        ):
-            return
-
-        next_step, next_ckpt_dir = self._find_checkpoint(mode="next")
-        if next_step is None:
-            next_step = -1
-        local_handled = (
-            next_step != -1
-            and next_ckpt_dir is not None
-            and self._is_already_handled(next_ckpt_dir)
-        )
-        gathered = []
-        dist.all_gather_object(gathered, (next_step, local_handled))
-        next_steps = [step for step, _ in gathered]
-        if -1 in next_steps:
-            logger.info(
-                f"[EMAStateAssembler][Rank {self.rank}] No unprocessed checkpoint found in {self.output_dir} "
-                f"in current training step. Latest processed checkpoint step is {self.latest_processed_checkpoint_step}. Skipping."
-            )
-            return
-
-        # The two branches below only exist for recovery. Ranks normally reach this point in
-        # lockstep: same global_step, same checkpoint dir, hence the same next_step and the same
-        # signal state. A machine interruption can break that -- ranks end up on different steps,
-        # or a checkpoint is left with only part of the ranks' signals written. Such a checkpoint
-        # can never be merged again, since merging needs every rank to take part, so it is given
-        # up on and all ranks realign onto the newest checkpoint.
-
-        if len(set(next_steps)) != 1:
-            target_step = max(next_steps)
-            # Only the lagging ranks move: they signal the checkpoint they skip so it stays loadable,
-            # then line up with the leading ranks, which already sit right before target_step. Every
-            # rank finds target_step on the next call.
-            if next_step < target_step:
-                self._handle_naive_checkpoint(next_step, next_ckpt_dir)
-                self.latest_processed_checkpoint_step = next_step
-                self._update_expected_next_save_ckpt_step()
-            logger.warning(
-                f"[EMAStateAssembler][Rank {self.rank}] Inconsistent checkpoint steps {next_steps}. "
-                f"All ranks will process step {target_step} next."
-            )
-            return
-
-        if any(handled for _, handled in gathered):
-            # Ranks that already hold saved_signal have no TMP left; calling into
-            # _handle_naive_checkpoint there would only emit a misleading warning.
-            if not local_handled:
-                self._handle_naive_checkpoint(next_step, next_ckpt_dir)
-            self.latest_processed_checkpoint_step = next_step
-            self._update_expected_next_save_ckpt_step()
-            self._close_EMAHFProcess(next_step)
-            logger.warning(
-                f"[EMAStateAssembler][Rank {self.rank}] Checkpoint at step {next_step} was partially "
-                "handled before; completed its signal and skipped the EMA merge."
-            )
-            return
-
-        if self._handle_checkpoint_with_ema(next_step, next_ckpt_dir):
-            self._close_EMAHFProcess(next_step)
-
-    def _update_expected_next_save_ckpt_step(self):
-        self.expected_next_save_ckpt_step = (
-            self.latest_processed_checkpoint_step + self.save_hf_steps
-        )
-        logger.info(
-            f"[EMAStateAssembler] [Rank {self.rank}] Update the expected next save ckpt step to {self.expected_next_save_ckpt_step}!"
-        )
-
-    def _begin_EMAHFProcess(self, global_step):
-        if global_step % self.save_hf_steps == 0:
+        if global_step is not None and global_step % self.save_hf_steps == 0:
+            if self.pending_hf_step is not None:
+                logger.warning(
+                    f"[EMAStateAssembler] [Rank {self.rank}] Step "
+                    f"{self.pending_hf_step} was still pending when step {global_step} came "
+                    f"up; dropping the older one."
+                )
             self.pending_hf_step = global_step
-        return self.pending_hf_step is not None
 
-    def _close_EMAHFProcess(self, consumed_step):
-        if (
-            self.pending_hf_step is not None
-            and consumed_step >= self.pending_hf_step
-        ):
-            self.pending_hf_step = None
-
-    def _set_latest_processed_checkpoint_step(self, start_step):
-        self.latest_processed_checkpoint_step = start_step
-        logger.info(
-            f"[EMAStateAssembler] Start working from checkpoint step {self.latest_processed_checkpoint_step}!"
+        step = self.pending_hf_step
+        if step is None:
+            return
+        assert self.zcc_manager is not None, (
+            "[EMAStateAssembler] zcc_manager was never injected, so the EMA cannot be read "
+            "from the workers' shared memory."
         )
 
-    def _find_checkpoint(
-        self, mode: str = "next"
-    ) -> Tuple[Optional[int], Optional[Path]]:
-        pattern = re.compile(_re_checkpoint)
-        target_step = None
-        target_ckpt_path = None
-        if not self.output_dir.is_dir():
-            return None, None
-        for item in self.output_dir.iterdir():
-            if item.is_dir():
-                match = pattern.match(item.name)
-                if match:
-                    step = int(match.group(1))
-                    if mode == "max":
-                        if (target_step is None) or (step > target_step):
-                            target_step = step
-                            target_ckpt_path = item
-                    elif mode == "next":
-                        if (
-                            step > self.latest_processed_checkpoint_step
-                            and step % self.save_hf_steps == 0
-                        ):
-                            if (target_step is None) or (step < target_step):
-                                target_step = step
-                                target_ckpt_path = item
-                    else:
-                        raise ValueError("mode must be 'max' or 'next'")
-        if (target_step is not None) and (
-            target_step > self.expected_next_save_ckpt_step
-        ):
-            return None, None
-        return target_step, target_ckpt_path
-
-    def _is_already_handled(self, checkpoint_dir: Path) -> bool:
-        final_signal_file = checkpoint_dir / f"saved_signal_{self.rank}"
-        return final_signal_file.exists()
-
-    def _check_all_ranks_saved(self, checkpoint_dir: Path) -> bool:
-        temp_signal_file = checkpoint_dir / f"save_signal_TMP_{self.rank}"
-
-        local_rank_is_saved = temp_signal_file.exists()
-
-        flag_tensor = paddle.to_tensor(
-            [1 if local_rank_is_saved else 0], dtype="int32"
-        )
-        dist.all_reduce(flag_tensor, op=dist.ReduceOp.SUM)
-
-        all_ranks_saved = flag_tensor.item() == self.world_size
-        return all_ranks_saved
-
-    def _mark_as_handled(self, checkpoint_dir: Path, step: int):
-        final_signal_file = checkpoint_dir / f"saved_signal_{self.rank}"
-        with open(final_signal_file, "w") as f:
-            f.write("1")
-
-        temp_signal_file = checkpoint_dir / f"save_signal_TMP_{self.rank}"
-        if temp_signal_file.exists():
-            try:
-                temp_signal_file.unlink()
-            except OSError as e:
-                logger.warning(
-                    f"[EMAStateAssembler] Failed to remove temp signal file {temp_signal_file}: {e}"
-                )
-        self.latest_processed_checkpoint_step = step
-        self._update_expected_next_save_ckpt_step()
-
-    def _handle_checkpoint_with_ema(
-        self, step: int, checkpoint_dir: Path
-    ) -> bool:
-        """Return True when this checkpoint is done being processed, False when still waiting."""
-        if self._check_all_ranks_saved(checkpoint_dir):
+        ema_state = self._get_ema_state(step)
+        if ema_state == "wait":
             logger.info(
-                f"[EMAStateAssembler] [Rank {self.rank}] All ranks ready. Proceeding with EMA state assembly for step {step}."
-            )
-            ema_state_path = self._get_ema_state_path(checkpoint_dir)
-            if not ema_state_path.exists():
-                self._mark_as_handled(checkpoint_dir, step)
-                logger.warning(
-                    f"[EMAStateAssembler] [Rank {self.rank}] EMA state file not found at {ema_state_path}, skipping and updating signal. "
-                )
-                return True
-            ema_sharded_state_dict = self._build_ema_sharded_state_dict(
-                self._load_ema_state_dict(ema_state_path)
-            )
-            self._mark_as_handled(checkpoint_dir, step)
-            self._save_full_ema_states(step, ema_sharded_state_dict)
-            del ema_sharded_state_dict
-            logger.info(
-                f"[EMAStateAssembler] [Rank {self.rank}] Finished merging EMA states and updated signal."
-            )
-            return True
-        else:
-            logger.info(
-                f"[EMAStateAssembler] [Rank {self.rank}] Waiting for other ranks to finish saving checkpoint at step {step}."
-            )
-            return False
-
-    def _handle_naive_checkpoint(self, step: int, checkpoint_dir: Path):
-        logger.info(
-            f"[EMAStateAssembler] [Rank {self.rank}] Processing a no need merge EMA checkpoint."
-        )
-        temp_signal_file = checkpoint_dir / f"save_signal_TMP_{self.rank}"
-
-        if not temp_signal_file.exists():
-            logger.warning(
-                f"[EMAStateAssembler] [Rank {self.rank}] Temporary signal file not found at {temp_signal_file}. "
+                f"[EMAStateAssembler] [Rank {self.rank}] Waiting for every rank's EMA of "
+                f"step {step} to become readable."
             )
             return
-
-        self._mark_as_handled(checkpoint_dir, step)
-        logger.info(
-            f"[EMAStateAssembler] [Rank {self.rank}] Marked naive checkpoint as handled and updated signal."
-        )
-
-    def _get_ema_state_path(self, checkpoint_dir: Path) -> Path:
-        if self.save_checkpoint_format == "flex_checkpoint":
-            return checkpoint_dir / "ema_state" / f"{self.rank}_0.distcp"
-        else:
-            optimizer_name = _add_variant(
-                PADDLE_OPTIMIZER_NAME, self.optimizer_name_suffix
+        if ema_state == "gone":
+            logger.warning(
+                f"[EMAStateAssembler] [Rank {self.rank}] EMA of step {step} was already "
+                f"overwritten by a later accumulation; skipping its HF checkpoint."
             )
-            ema_file_name = optimizer_name.replace("optimizer", "ema")
-            return checkpoint_dir / ema_file_name
-
-    def _load_ema_state_dict(self, ema_state_path: Path):
-        if not ema_state_path.exists():
-            raise FileNotFoundError(
-                f"[EMAStateAssembler] EMA state file not found at {ema_state_path}."
-            )
+            self.pending_hf_step = None
+            return
 
         logger.info(
-            f"[EMAStateAssembler] [Rank {self.rank}] Loading EMA state from {ema_state_path}."
+            f"[EMAStateAssembler] [Rank {self.rank}] All ranks ready. Assembling the EMA HF "
+            f"checkpoint for step {step} from shared memory."
         )
-        ema_state_dict = paddle.load(str(ema_state_path))
-        if "master_weights" not in ema_state_dict:
-            # FC format: flat dict with .w_0 suffix keys → rename back + re-pad to old format
-            model_state_dict = self.model.state_dict()
-            struct_name_to_static_name = {
-                k: v.name for k, v in model_state_dict.items()
-            }
-            opt_master_weights = self.optimizer.state_dict().get(
-                "master_weights", {}
-            )
-            master_weights = {}
-            model_params = {}
-            for k, v in ema_state_dict.items():
-                if k.endswith(".w_0"):
-                    struct_name = k[:-4]
-                    tensor_name = struct_name_to_static_name[
-                        self._rename(struct_name, False)
-                    ]
-                    if tensor_name in opt_master_weights:
-                        opt_tensor = opt_master_weights[tensor_name]
-                        if opt_tensor.ndim == 1:
-                            # Flattened format (sharding_v2) → flatten + re-pad
-                            flat = v.flatten()
-                            expected_numel = opt_tensor._numel()
-                            if flat._numel() < expected_numel:
-                                padded = paddle.zeros(
-                                    [expected_numel], dtype=v.dtype
-                                )
-                                padded[: flat._numel()] = flat
-                                padded.name = tensor_name
-                                master_weights[tensor_name] = padded
-                                flat._clear()
-                            else:
-                                flat.name = tensor_name
-                                master_weights[tensor_name] = flat
-                        else:
-                            # Non-flattened (Muon etc.) → reshape to optimizer's shape
-                            reshaped = v.reshape(opt_tensor.shape)
-                            reshaped.name = tensor_name
-                            master_weights[tensor_name] = reshaped
-                    else:
-                        master_weights[tensor_name] = v
-                else:
-                    model_params[k] = v
-            ema_state_dict = {}
-            ema_state_dict["master_weights"] = master_weights
-            ema_state_dict.update(model_params)
+        ema_sharded_state_dict = self._build_ema_sharded_state_dict(
+            self._load_ema_state_dict_from_shared_memory()
+        )
+        self._save_full_ema_states(step, ema_sharded_state_dict)
+        del ema_sharded_state_dict
+        # Only now may the workers overwrite the shared EMA buffers again, so the pending step
+        # must not be cleared any earlier.
+        self.pending_hf_step = None
+        logger.info(
+            f"[EMAStateAssembler] [Rank {self.rank}] Finished the EMA HF checkpoint for step "
+            f"{step}."
+        )
+
+    def _get_ema_state(self, step: int) -> str:
+        """Whether `step`'s EMA can still be read from every rank's shared memory.
+
+        "wait"  -- some rank has not accumulated `step` yet and none has passed it.
+        "ready" -- every rank's buffers hold exactly `step`.
+        "gone"  -- some rank accumulated past `step`, so its buffer no longer holds it and no
+                   amount of waiting can line the ranks up again.
+        """
+        local = self.zcc_manager.ema_shared_memory_ready_step()
+        flags = paddle.to_tensor([local, -local], dtype="int32")
+        dist.all_reduce(flags, op=dist.ReduceOp.MAX)
+        newest, neg_oldest = flags.tolist()
+        if newest > step:
+            return "gone"
+        return "ready" if -neg_oldest == step else "wait"
+
+    def _load_ema_state_dict_from_shared_memory(self):
+        package = self.zcc_manager.get_ema_package()
+        assert package is not None, (
+            "[EMAStateAssembler] EMA shared memory is reported ready but no handles were "
+            "sent by the ZCC worker."
+        )
+        logger.info(
+            f"[EMAStateAssembler] [Rank {self.rank}] Loading EMA state from shared memory."
+        )
+        ema_state_dict = unpack_ema_data(package)
+
+        master_weights = ema_state_dict.pop("master_weights")
+        ema_state_dict = {k: v.cuda() for k, v in ema_state_dict.items()}
+        ema_state_dict["master_weights"] = master_weights
         return ema_state_dict
 
     def _rename(self, key, add_mode=True):

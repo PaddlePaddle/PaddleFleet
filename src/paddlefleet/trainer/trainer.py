@@ -1398,6 +1398,12 @@ class Trainer:
             unwrapped_model, zcc_worker_class
         )
 
+        # The assembler is deliberately created *before* this manager so that its callback runs
+        # first on `on_step_end`; hand the manager over now so it can read the EMA values
+        # straight from the worker's shared memory instead of the `ema_state` file.
+        if getattr(self, "ema_state_assembler", None) is not None:
+            self.ema_state_assembler.zcc_manager = self.zcc_manager
+
         # Register pipeline hooks if using pipeline parallelism
         if (
             isinstance(self.model, PipelineLayer)
@@ -1438,19 +1444,15 @@ class Trainer:
             self.copy_custom_files(output_dir)
 
     def create_ema_state_assembler(self):
-        global_steps = self.state.global_step
         memory_growth_threshold_bytes = (
             self.args.save_hf_memory_growth_threshold * (2**30)
         )
         self.ema_state_assembler = EMAStateAssembler(
             output_dir=self.args.output_dir,
-            save_checkpoint_format=self.args.save_checkpoint_format,
             save_hf_steps=self.args.save_hf_steps,
             save_steps=self.args.save_steps,
-            optimizer_name_suffix=self.args.optimizer_name_suffix,
             model=self.model,
             optimizer=self.optimizer,
-            start_step=global_steps,
             memory_growth_threshold=memory_growth_threshold_bytes,
             post_save_hook=self._save_hf_side_files,
         )
@@ -2598,13 +2600,10 @@ class Trainer:
                 )
                 ema_state_assembler = EMAStateAssembler(
                     output_dir=self.args.output_dir,
-                    save_checkpoint_format=self.args.save_checkpoint_format,
                     save_hf_steps=self.args.save_hf_steps,
                     save_steps=self.args.save_steps,
-                    optimizer_name_suffix=self.args.optimizer_name_suffix,
                     model=self.model,
                     optimizer=self.optimizer,
-                    start_step=self.state.global_step,
                     memory_growth_threshold=memory_growth_threshold_bytes,
                     post_save_hook=self._save_hf_side_files,
                 )
