@@ -49,6 +49,8 @@ import paddle
 import pytest
 
 import paddlefleet.models.common.language_loss.language_loss as ll
+import paddlefleet.parallel_state as ps
+from paddlefleet import cp_shard
 from paddlefleet.models.common.language_loss.language_loss import LanguageLoss
 
 IGNORED = -100
@@ -499,6 +501,8 @@ def test_observer_failure_does_not_poison_next_forward():
 def test_experimental_nonfused_mtp_observes_after_cp_gather():
     """Check gather placement only; communication itself is mocked here."""
     layer = _real_loss(experimental=True)
+    # The model-side scatter/gather pair belongs to experimental_dataflow.
+    layer.config.experimental_dataflow = True
     heads, labels, _, _ = _real_inputs()
     seen = []
     layer._eval_token_loss_hook = _save_observations(seen)
@@ -511,10 +515,15 @@ def test_experimental_nonfused_mtp_observes_after_cp_gather():
             ll, "get_context_parallel_world_size", return_value=2
         ),
         mock.patch.object(
-            ll.ContextParallelScatterOp, "apply", side_effect=lambda x, **kw: x
+            ps, "get_context_parallel_world_size", return_value=2
         ),
         mock.patch.object(
-            ll.ContextParallelGatherOp, "apply", side_effect=gather
+            cp_shard.ContextParallelScatterOp,
+            "apply",
+            side_effect=lambda x, **kw: x,
+        ),
+        mock.patch.object(
+            cp_shard.ContextParallelGatherOp, "apply", side_effect=gather
         ),
     ):
         layer.forward(heads, labels)

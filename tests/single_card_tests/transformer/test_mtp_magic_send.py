@@ -215,6 +215,12 @@ def _fwd_ctx(
                 return_value=cp_world_size,
             )
         )
+        s.enter_context(
+            patch(
+                "paddlefleet.parallel_state.get_context_parallel_world_size",
+                return_value=cp_world_size,
+            )
+        )
         tp = s.enter_context(
             patch(
                 "paddlefleet.transformer.multi_token_prediction.tensor_parallel"
@@ -230,9 +236,7 @@ def _fwd_ctx(
             so.apply = scatter_fn
         if cp_scatter_fn is not None:
             co = s.enter_context(
-                patch(
-                    "paddlefleet.transformer.multi_token_prediction.ContextParallelScatterOp"
-                )
+                patch("paddlefleet.cp_shard.ContextParallelScatterOp")
             )
             co.apply = cp_scatter_fn
         if proj_override is not None and layer is not None:
@@ -758,6 +762,12 @@ class TestGPTEmbeddingForward(unittest.TestCase):
                     return_value=cp_world_size,
                 )
             )
+            stack.enter_context(
+                patch(
+                    "paddlefleet.parallel_state.get_context_parallel_world_size",
+                    return_value=cp_world_size,
+                )
+            )
             if mock_scatter:
                 sc = stack.enter_context(
                     patch("paddlefleet.models.gpt.gpt_embedding.ScatterOp")
@@ -765,9 +775,7 @@ class TestGPTEmbeddingForward(unittest.TestCase):
                 sc.apply = lambda x: x
             if mock_cp:
                 cp = stack.enter_context(
-                    patch(
-                        "paddlefleet.models.gpt.gpt_embedding.ContextParallelScatterOp"
-                    )
+                    patch("paddlefleet.cp_shard.ContextParallelScatterOp")
                 )
                 cp.apply = lambda x, axis=0, **kwargs: x
             return emb.forward({"input_ids": paddle.randint(0, 512, [2, 10])})

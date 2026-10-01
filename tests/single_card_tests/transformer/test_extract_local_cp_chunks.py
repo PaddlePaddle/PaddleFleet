@@ -33,7 +33,7 @@ from paddlefleet.context_parallel_utils import (
     scatter_balance,
     scatter_contiguous,
 )
-from paddlefleet.transformer.multi_token_prediction import (
+from paddlefleet.cp_shard import (
     extract_local_contiguous_chunk,
     extract_local_cp_chunks,
     extract_local_zigzag_chunks,

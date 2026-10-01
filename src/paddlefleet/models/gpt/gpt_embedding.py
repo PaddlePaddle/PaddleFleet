@@ -28,12 +28,15 @@ from paddle.distributed.fleet.utils.sequence_parallel_utils import (
 )
 
 from paddlefleet.context_parallel_utils import (
-    ContextParallelScatterOp,
     mark_context_parallel_parameter_disable_scale_grad,
+)
+from paddlefleet.cp_shard import (
+    cp_shard_source,
+    embedding_grad_is_cp_gathered,
+    to_cp_local,
 )
 from paddlefleet.models.gpt.utils import fill_feature
 from paddlefleet.parallel_state import (
-    get_context_parallel_rank,
     get_context_parallel_world_size,
 )
 from paddlefleet.tensor_parallel.mappings import (
@@ -42,6 +45,7 @@ from paddlefleet.tensor_parallel.mappings import (
 from paddlefleet.train_infer_consistent_ops.inspect_util import inspect_tensor
 from paddlefleet.transformer.kimi_delta_attention import build_cu_seqlens
 from paddlefleet.transformer.layer import FleetLayer
+from paddlefleet.transformer.transformer_config import mtp_layers_active
 from paddlefleet.utils import use_dsv4_accuracy_compatible
 
 if TYPE_CHECKING:
@@ -98,21 +102,16 @@ class GPTEmbedding(FleetLayer):
 
         self.multimodal_embedding = config.multimodal_embedding
         if self.sequence_parallel and (
-            self.multimodal_embedding
-            or (
-                config.num_nextn_predict_layers is not None
-                and self.config.num_nextn_predict_layers > 0
-                and not config.mtp_load_weight_only
-            )
+            self.multimodal_embedding or mtp_layers_active(config)
         ):
             self.embedding.embed_tokens.reduce_scatter_embeddings = False
             self.embedding.scatter_to_sequence_parallel = False
             self.embedding.reduce_scatter_embeddings = False
             self.embedding.sequence_parallel = False
 
-        if self.config.experimental_dataflow:
-            # In EB data flow, since CP scatter is apply after embedding,
-            # we need to disable scale grad for the parameters that need to be scattered to each cp local.
+        if embedding_grad_is_cp_gathered(config):
+            # The scatter implementation of to_cp_local all-gathers the
+            # gradient, so every rank already holds the full-length gradient.
             mark_context_parallel_parameter_disable_scale_grad(
                 self.embedding.embed_tokens
             )
@@ -367,6 +366,20 @@ class GPTEmbedding(FleetLayer):
             if attn_mask_startend_row_indices is not None
             else None
         )
+        if (
+            getattr(self.config, "use_erndata", False)
+            and attn_mask_startend_row_indices is None
+        ):
+            # Without a mask the CP branch of DotProductAttention synthesizes an
+            # all-visible one and calls flashmask with causal=False, silently
+            # dropping causality and document boundaries. The erndata adapter
+            # owns this field; do not reconstruct it here.
+            raise RuntimeError(
+                "use_erndata=True requires attn_mask_startend_row_indices "
+                "(or startend_row_indices) on the batch; the adapter owns "
+                "this field and GPTEmbedding does not derive it from "
+                "cu_seqlens_q."
+            )
         deepstack_image_embeds = dict_args.get("deepstack_image_embeds", None)
         deepstack_video_embeds = dict_args.get("deepstack_video_embeds", None)
         visual_pos_masks = None
@@ -374,21 +387,14 @@ class GPTEmbedding(FleetLayer):
         deepstack_visual_embeds = None
         visual_pos_mask = None
         mtp_emb_res = None
-        # CP slicing context of the use_erndata MTP branch below.
-        # The branch slices the embeddings itself (no ContextParallelScatterOp,
-        # which is gated on experimental_dataflow and therefore never runs for
-        # this style), so the RoPE tables have to be sliced with the very same
-        # layout further down. cp_size == 1 means "nothing to slice".
-        mtp_megatron_cp_size = 1
-        mtp_megatron_cp_rank = 0
 
         # Ingest cu_seqlens_q (raw int32 tensor) from the batch dict if the
         # dataloader put it there (use_erndata path). We keep
         # it as a raw tensor throughout — no PackedSeqParams wrapper — to
         # avoid triggering the attention-kernel THD path (qkv_format="thd")
-        # which the ernie5 flashmask stack does not use. Downstream
-        # consumers (MultiTokenPredictionLayer._forward_megatron_style)
-        # derive per-depth attn_mask_startend_row_indices from this tensor.
+        # which the ernie5 flashmask stack does not use. Packed rolls and the
+        # LanguageLoss stash consume it; the attention mask comes from the
+        # batch (checked above).
         cu_seqlens_q = dict_args.get("cu_seqlens_q", None)
         if cu_seqlens_q is not None and not cu_seqlens_q.place.is_gpu_place():
             cu_seqlens_q = cu_seqlens_q.cuda()
@@ -461,19 +467,13 @@ class GPTEmbedding(FleetLayer):
                     deepstack_video_embeds,
                 )
 
-            if (
-                self.config.num_nextn_predict_layers is not None
-                and self.config.num_nextn_predict_layers > 0
-                and not self.config.mtp_load_weight_only
-            ):
+            if mtp_layers_active(self.config):
                 # ------------------------------------------------------------
                 # erndata branch: input_ids is [B, L] (no L+K append);
                 # produce K shifted embeddings by rolling decoder_input in
                 # place with per-doc boundary zero-fill via cu_seqlens_q.
-                # Under CP>1, each rank holds the full-length embedding (per
-                # PaddleFleet dataloader broadcast) and slices its own
-                # local slice via extract_local_cp_chunks (layout follows
-                # config.cp_balance_mode) — no ContextParallelScatterOp needed.
+                # Rolls run in global coordinates; each slot then enters local
+                # coordinates through to_cp_local.
                 # The ernie5 (default) path in the ``else`` below retains
                 # upstream develop's full logic, including multimodal + MTP.
                 # ------------------------------------------------------------
@@ -482,30 +482,8 @@ class GPTEmbedding(FleetLayer):
                         "erndata MTP path does not support multimodal for now."
                     )
                     from paddlefleet.transformer.multi_token_prediction import (
-                        build_startend_row_indices_from_cu_seqlens,
-                        extract_local_cp_chunks,
                         roll_tensor,
                     )
-
-                    # The erndata contract only guarantees length-L tensors plus
-                    # cu_seqlens_q; the main flashmask boundaries are optional
-                    # (erndata emits them only when pack_by_cu_seqlen=True and
-                    # the sample has documents). Without a mask the CP branch of
-                    # DotProductAttention synthesizes an all-visible one and
-                    # calls flashmask with causal=False, silently dropping both
-                    # causality and doc boundaries from the backbone. Derive the
-                    # mask from cu_seqlens_q here so the backbone sees the same
-                    # per-doc boundaries the MTP depths do.
-                    if (
-                        attn_mask_startend_row_indices is None
-                        and cu_seqlens_q is not None
-                    ):
-                        attn_mask_startend_row_indices = build_startend_row_indices_from_cu_seqlens(
-                            cu_seqlens_q,
-                            decoder_input.shape[0],
-                            include_position_axis=self.config.gpt_model_use_experimental_version,
-                            seq_len=decoder_input.shape[1],
-                        )
 
                     # decoder_input: [B, L, H] full-length embedding (already
                     # computed above from the length-L input_ids in this branch).
@@ -517,28 +495,7 @@ class GPTEmbedding(FleetLayer):
                     inputs_embeds_ori = decoder_input
                     batch_size, seq_length, hidden_size = decoder_input.shape
 
-                    # CP context (world size / rank). CP=1 turns extract into no-op.
-                    _cp_size = get_context_parallel_world_size()
-                    _cp_rank = (
-                        get_context_parallel_rank() if _cp_size > 1 else 0
-                    )
-                    # Publish it so the RoPE tables below get the same slicing.
-                    mtp_megatron_cp_size = _cp_size
-                    mtp_megatron_cp_rank = _cp_rank
-
-                    # Main embedding: [B, L, H] → [B, L/cp_size, H] with the
-                    # model's own CP layout (zigzag for dualchunk_allgather,
-                    # contiguous slice for contiguous_allgather).
-                    if _cp_size > 1:
-                        inputs_embeds = extract_local_cp_chunks(
-                            inputs_embeds_ori,
-                            _cp_rank,
-                            _cp_size,
-                            axis=1,
-                            mode=self.config.cp_balance_mode,
-                        )
-                    else:
-                        inputs_embeds = inputs_embeds_ori
+                    inputs_embeds = to_cp_local(inputs_embeds_ori, self.config)
 
                     if self.sequence_parallel:
                         # ScatterOp partitions axis 0, so establish the canonical
@@ -565,9 +522,7 @@ class GPTEmbedding(FleetLayer):
                         mtp_emb_res = [inputs_embeds]
 
                         # Cumulative rolls: depth k uses decoder_input rolled by
-                        # (k+1) positions. Roll on the full-length float embedding
-                        # (identical on every CP rank), then extract this rank's
-                        # local slice — avoids a ContextParallelScatterOp per depth.
+                        # (k+1) positions, in global coordinates.
                         rolled_embed = inputs_embeds_ori
                         for depth in range(
                             self.config.num_nextn_predict_layers
@@ -579,17 +534,9 @@ class GPTEmbedding(FleetLayer):
                                 cp_group=None,
                                 cu_seqlens_q=cu_seqlens_q,
                             )
-
-                            if _cp_size > 1:
-                                inputs_embeds_mtp = extract_local_cp_chunks(
-                                    rolled_embed,
-                                    _cp_rank,
-                                    _cp_size,
-                                    axis=1,
-                                    mode=self.config.cp_balance_mode,
-                                )
-                            else:
-                                inputs_embeds_mtp = rolled_embed
+                            inputs_embeds_mtp = to_cp_local(
+                                rolled_embed, self.config
+                            )
 
                             if self.sequence_parallel:
                                 # Match the main slot: scatter the canonical
@@ -658,15 +605,7 @@ class GPTEmbedding(FleetLayer):
 
                         # Apply the same SP scatter as the non-magic-send path to ensure
                         # bit-for-bit identical main embedding output.
-                        if (
-                            get_context_parallel_world_size() > 1
-                            and self.config.experimental_dataflow
-                        ):
-                            decoder_input = ContextParallelScatterOp.apply(
-                                decoder_input,
-                                axis=1,
-                                mode=self.config.cp_balance_mode,
-                            )
+                        decoder_input = to_cp_local(decoder_input, self.config)
                         if (
                             self.config.gpt_model_use_experimental_version
                             and self.config.sequence_parallel
@@ -705,16 +644,7 @@ class GPTEmbedding(FleetLayer):
                             inputs_embeds.shape
                         )
 
-                        if (
-                            get_context_parallel_world_size() > 1
-                            and self.config.experimental_dataflow
-                        ):
-                            # In EB data flow, main input embed apply CP scatter here
-                            inputs_embeds = ContextParallelScatterOp.apply(
-                                inputs_embeds,
-                                axis=1,
-                                mode=self.config.cp_balance_mode,
-                            )
+                        inputs_embeds = to_cp_local(inputs_embeds, self.config)
 
                         if self.sequence_parallel:
                             inputs_embeds = inputs_embeds.reshape(
@@ -750,18 +680,9 @@ class GPTEmbedding(FleetLayer):
                                     axis=1,
                                 )
 
-                            if (
-                                get_context_parallel_world_size() > 1
-                                and self.config.experimental_dataflow
-                            ):
-                                # In EB data flow, mtp input embed apply CP scatter here
-                                inputs_embeds_mtp = (
-                                    ContextParallelScatterOp.apply(
-                                        inputs_embeds_mtp,
-                                        axis=1,
-                                        mode=self.config.cp_balance_mode,
-                                    )
-                                )
+                            inputs_embeds_mtp = to_cp_local(
+                                inputs_embeds_mtp, self.config
+                            )
 
                             if self.sequence_parallel:
                                 inputs_embeds_mtp = inputs_embeds_mtp.reshape(
@@ -813,26 +734,26 @@ class GPTEmbedding(FleetLayer):
                         visual_pos_masks = visual_pos_masks[
                             ..., : -self.config.num_nextn_predict_layers
                         ]
-            # CP scatter for the plain (no-MTP, no-multimodal) path must happen
-            # before rope generation so that get_rotary_seq_len sees local seq len.
-            if (
-                not self.multimodal_embedding
-                and not (
-                    self.config.num_nextn_predict_layers
-                    and self.config.num_nextn_predict_layers > 0
-                    and not self.config.mtp_load_weight_only
-                )
-                and get_context_parallel_world_size() > 1
-                and self.config.experimental_dataflow
+            # Plain path (MTP inactive, no multimodal): the hidden states'
+            # global work ends with the lookup. The multimodal path does not
+            # transform here; see the config checks for use_erndata.
+            if not self.multimodal_embedding and not mtp_layers_active(
+                self.config
             ):
-                assert not self.sequence_parallel, (
-                    "sequence_parallel is not supported when context_parallel scatter "
-                    "is applied in the plain (no-MTP, no-multimodal) path before RoPE "
-                    "generation."
-                )
-                decoder_input = ContextParallelScatterOp.apply(
-                    decoder_input, axis=1, mode=self.config.cp_balance_mode
-                )
+                if self.sequence_parallel and cp_shard_source(self.config) in (
+                    "scatter",
+                    "local",
+                ):
+                    # LanguageModelEmbedding has already scattered the
+                    # sequence for SP, so the CP transform would run second.
+                    raise ValueError(
+                        "sequence_parallel=True is not supported when the "
+                        "plain embedding path shards the sequence for context "
+                        "parallelism (cp_shard_source="
+                        f"{cp_shard_source(self.config)!r}). Set "
+                        "sequence_parallel=False."
+                    )
+                decoder_input = to_cp_local(decoder_input, self.config)
 
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
         rotary_pos_emb = None
@@ -842,40 +763,12 @@ class GPTEmbedding(FleetLayer):
         swa_rotary_pos_cos = None
         swa_rotary_pos_sin = None
 
-        def _slice_rope_for_mtp_megatron_cp(rope_table):
-            """Slice a RoPE table for use_erndata + CP > 1.
-
-            ``RotaryEmbedding.get_rotary_seq_len`` scales the rank-local input
-            length back up by ``cp_group.world_size``, so the tables below are
-            always built for the FULL sequence length L while the hidden states
-            this rank carries are its local slice. The generic
-            ``ContextParallelScatterOp`` further down only runs for
-            ``experimental_dataflow``, which megatron style forbids, so the
-            slicing has to happen here -- with exactly the layout the megatron
-            MTP branch used for the embeddings (``config.cp_balance_mode``).
-            """
-            if mtp_megatron_cp_size == 1 or rope_table is None:
-                return rope_table
-            from paddlefleet.transformer.multi_token_prediction import (
-                extract_local_cp_chunks,
-            )
-
-            return extract_local_cp_chunks(
-                rope_table,
-                mtp_megatron_cp_rank,
-                mtp_megatron_cp_size,
-                axis=1,
-                mode=self.config.cp_balance_mode,
-            )
-
         # For MTP mode: truncate position_ids to match the actual sequence length
         # MTP reduces sequence length by num_nextn_predict_layers
         mtp_position_ids = position_ids
         if (
             mtp_emb_res is not None
             and position_ids is not None
-            and self.config.num_nextn_predict_layers is not None
-            and self.config.num_nextn_predict_layers > 0
             # erndata keeps the main decoder at the full length L (the
             # per-doc shift happens inside the MTP layer), so position_ids
             # already matches. Under CP mtp_emb_res[0] is the rank-local
@@ -921,7 +814,10 @@ class GPTEmbedding(FleetLayer):
             )
 
         if rotary_pos_emb is not None:
-            rotary_pos_emb = _slice_rope_for_mtp_megatron_cp(rotary_pos_emb)
+            # get_rotary_seq_len scales the local hidden length back up by
+            # cp_size, so the table is global. Enter local coordinates before
+            # deriving cos/sin; both are elementwise, so they stay local.
+            rotary_pos_emb = to_cp_local(rotary_pos_emb, self.config)
             if self.config.apply_rope_fusion:
                 rotary_pos_cos = paddle.cos(rotary_pos_emb)
                 rotary_pos_sin = paddle.sin(rotary_pos_emb)
@@ -961,9 +857,7 @@ class GPTEmbedding(FleetLayer):
             )
 
         if swa_rotary_pos_emb is not None:
-            swa_rotary_pos_emb = _slice_rope_for_mtp_megatron_cp(
-                swa_rotary_pos_emb
-            )
+            swa_rotary_pos_emb = to_cp_local(swa_rotary_pos_emb, self.config)
             if self.config.apply_rope_fusion:
                 swa_rotary_pos_cos = paddle.cos(swa_rotary_pos_emb)
                 swa_rotary_pos_sin = paddle.sin(swa_rotary_pos_emb)
@@ -991,42 +885,11 @@ class GPTEmbedding(FleetLayer):
             swa_rotary_pos_cos = None
             swa_rotary_pos_sin = None
 
-        if (
-            get_context_parallel_world_size() > 1
-            and self.config.experimental_dataflow
-        ):
-            if rotary_pos_emb is not None:
-                rotary_pos_emb = ContextParallelScatterOp.apply(
-                    rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
-                )
-            if swa_rotary_pos_emb is not None:
-                swa_rotary_pos_emb = ContextParallelScatterOp.apply(
-                    swa_rotary_pos_emb, axis=1, mode=self.config.cp_balance_mode
-                )
-            if rotary_pos_cos is not None:
-                rotary_pos_cos = ContextParallelScatterOp.apply(
-                    rotary_pos_cos, axis=1, mode=self.config.cp_balance_mode
-                )
-            if rotary_pos_sin is not None:
-                rotary_pos_sin = ContextParallelScatterOp.apply(
-                    rotary_pos_sin, axis=1, mode=self.config.cp_balance_mode
-                )
-            if swa_rotary_pos_cos is not None:
-                swa_rotary_pos_cos = ContextParallelScatterOp.apply(
-                    swa_rotary_pos_cos, axis=1, mode=self.config.cp_balance_mode
-                )
-            if swa_rotary_pos_sin is not None:
-                swa_rotary_pos_sin = ContextParallelScatterOp.apply(
-                    swa_rotary_pos_sin, axis=1, mode=self.config.cp_balance_mode
-                )
-
         mtp_full_input_ids = None
         if (
             getattr(self.config, "use_erndata", False)
             and self.config.enable_mtp_magic_send
-            and self.config.num_nextn_predict_layers is not None
-            and self.config.num_nextn_predict_layers > 0
-            and not self.config.mtp_load_weight_only
+            and mtp_layers_active(self.config)
         ):
             mtp_full_input_ids = input_ids.contiguous()
             mtp_full_input_ids.stop_gradient = True
@@ -1088,11 +951,7 @@ class GPTEmbedding(FleetLayer):
                 mtp_hidden_inputs_mask_all
             )
         if mtp_emb_res is not None:
-            assert (
-                self.config.num_nextn_predict_layers is not None
-                and self.config.num_nextn_predict_layers > 0
-                and not self.config.mtp_load_weight_only
-            )
+            assert mtp_layers_active(self.config)
             assert len(mtp_emb_res) == self.config.num_nextn_predict_layers + 1
             if self.config.separate_mtp_input:
                 # Keep hidden_states free of MTP chunks so the backbone layers do not

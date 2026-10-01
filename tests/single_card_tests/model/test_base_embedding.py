@@ -89,7 +89,17 @@ class TestGPTEmbeddingFillFeatureBranch(unittest.TestCase):
         cfg.mtp_load_weight_only = False
         cfg.sequence_parallel = False
         cfg.pad_token_id = pad_token_id
+        # MagicMock attributes are truthy by default. Pin the real defaults so
+        # GPTEmbedding.forward does not take the use_erndata fail-close (missing
+        # attn_mask_startend_row_indices) or experimental-dataflow CP scatter.
+        cfg.use_erndata = False
+        cfg.gpt_model_use_experimental_version = False
+        cfg.experimental_dataflow = False
+        cfg.enable_mtp_magic_send = False
+        cfg.apply_rope_fusion = False
+        cfg.separate_mtp_input = False
         emb.config = cfg
+        emb.swa_rotary_pos_emb = None
         return emb, B, S, H
 
     def test_forward_zeros_padding_and_sets_moe_mask(self):

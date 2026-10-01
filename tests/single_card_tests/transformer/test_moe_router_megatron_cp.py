@@ -43,7 +43,7 @@ from unittest.mock import MagicMock
 import paddle
 
 import paddlefleet.transformer.moe.moe_router as mr
-import paddlefleet.transformer.multi_token_prediction as mtp
+from paddlefleet import cp_shard, parallel_state as ps
 from paddlefleet.transformer.moe.moe_router import TopKRouter
 
 
@@ -67,16 +67,19 @@ def _fake_cp_and_extract(cp_size=2):
         raise _Sentinel
 
     with contextlib.ExitStack() as stack:
+        for mod in (mr, ps):
+            stack.enter_context(
+                mock.patch.object(
+                    mod, "get_context_parallel_world_size", lambda: cp_size
+                )
+            )
+        stack.enter_context(
+            mock.patch.object(ps, "get_context_parallel_rank", lambda: 0)
+        )
         stack.enter_context(
             mock.patch.object(
-                mr, "get_context_parallel_world_size", lambda: cp_size
+                cp_shard, "extract_local_cp_chunks", _record_and_raise
             )
-        )
-        stack.enter_context(
-            mock.patch.object(mr, "get_context_parallel_rank", lambda: 0)
-        )
-        stack.enter_context(
-            mock.patch.object(mtp, "extract_local_cp_chunks", _record_and_raise)
         )
         yield calls
 

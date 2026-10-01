@@ -39,11 +39,12 @@ from paddle.distributed.flex_checkpoint.aoa.generation import (
 )
 
 from paddlefleet import tensor_parallel
-from paddlefleet.context_parallel_utils import ContextParallelScatterOp
-from paddlefleet.parallel_state import (
-    get_context_parallel_rank,
-    get_context_parallel_world_size,
+from paddlefleet.cp_shard import (
+    cp_shard_source,
+    embedding_grad_is_cp_gathered,
+    to_cp_local,
 )
+from paddlefleet.parallel_state import get_context_parallel_world_size
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.tensor_parallel.layers import (
     gen_linear_aoa_statements,
@@ -86,8 +87,8 @@ SUPPORTED_ATTN_MASK = [
 #   * cp_group is None or size==1 → non-CP path.
 #   * cp_group.nranks > 1 with cu_seqlens_q → NotImplementedError; the
 #     mirror-chunk (DualChunkSwap) CP variant is not implemented on this path
-#     (CP is instead handled by extract_local_cp_chunks at the call site,
-#     which follows config.cp_balance_mode).
+#     (the caller rolls in global coordinates and then calls
+#     cp_shard.to_cp_local).
 #
 # Note: we consciously do NOT wrap cu_seqlens_q in an MCore-style
 # PackedSeqParams dataclass. ernie5's model backend consumes doc boundaries
@@ -244,8 +245,8 @@ def roll_tensor(
     already holds a full-length ``[B, L]`` copy — no zigzag scatter happens
     before the model. Consequently rolling reduces to standard CP=1
     semantics on the full-length tensor, and callers should invoke
-    ``extract_local_cp_chunks`` (which follows ``config.cp_balance_mode``)
-    after ``roll_tensor`` to obtain their local slice before embedding / loss.
+    ``cp_shard.to_cp_local`` after ``roll_tensor`` to obtain their local
+    slice before embedding / loss.
 
     Args:
         tensor: input tensor.
@@ -309,160 +310,14 @@ def roll_tensor(
     return rolled, rolled.sum()
 
 
-def extract_local_zigzag_chunks(tensor_full, cp_rank, cp_size, axis=1):
-    """Extract this CP rank's zigzag chunks from a full-length tensor.
-
-    Mirrors PaddleFleet's ``scatter_balance`` layout
-    (``context_parallel_utils.py:97-153``): each rank owns two chunks —
-
-    * ``chunk_start = tensor_full[..., interval*r : interval*(r+1), ...]``
-    * ``chunk_end   = tensor_full[..., L-interval*(r+1) : L-interval*r, ...]``
-
-    concatenated along the seq axis.
-
-    Extraction only — no CP communication. Use to obtain the local slice
-    without invoking ``ContextParallelScatterOp``, which avoids the
-    ``cp_size`` × embedding-lookup redundancy that would otherwise result
-    from doing embedding on the full-length ``input_ids``.
-
-    Callers under ``use_erndata=True`` typically:
-
-    1. Roll the full-length int tensor with ``roll_tensor(cu_seqlens_q=...)``.
-    2. Extract this rank's local slice via this helper.
-    3. Feed the local slice to embedding / loss.
-
-    Args:
-        tensor_full: ``[..., L, ...]`` full-length tensor available on every rank.
-        cp_rank: this rank's index within the CP group.
-        cp_size: CP world size. ``cp_size == 1`` returns ``tensor_full`` unchanged.
-        axis: sequence axis (default 1 for ``[B, L, ...]``).
-
-    Returns:
-        ``[..., L / cp_size, ...]`` tensor holding this rank's zigzag chunks.
-    """
-    if cp_size == 1:
-        return tensor_full
-    ndim = tensor_full.dim()
-    dim = axis if axis >= 0 else ndim + axis
-    seq_len = tensor_full.shape[dim]
-    if seq_len % (cp_size * 2) != 0:
-        raise ValueError(
-            f"extract_local_zigzag_chunks: seq_len={seq_len} on axis={axis} "
-            f"is not divisible by 2*cp_size={2 * cp_size}."
-        )
-    interval = seq_len // cp_size // 2
-    chunk_start = paddle.slice(
-        tensor_full,
-        axes=[dim],
-        starts=[interval * cp_rank],
-        ends=[interval * (cp_rank + 1)],
-    )
-    chunk_end = paddle.slice(
-        tensor_full,
-        axes=[dim],
-        starts=[seq_len - interval * (cp_rank + 1)],
-        ends=[seq_len - interval * cp_rank],
-    )
-    return paddle.concat([chunk_start, chunk_end], axis=dim)
-
-
-def extract_local_contiguous_chunk(tensor_full, cp_rank, cp_size, axis=1):
-    """Extract this CP rank's contiguous chunk from a full-length tensor.
-
-    Mirrors ``context_parallel_utils.scatter_contiguous``: rank ``r`` owns the
-    single slice ``tensor_full[..., chunk*r : chunk*(r+1), ...]`` with
-    ``chunk = L / cp_size``.
-
-    Extraction only — no CP communication, same contract as
-    ``extract_local_zigzag_chunks``.
-    """
-    if cp_size == 1:
-        return tensor_full
-    ndim = tensor_full.dim()
-    dim = axis if axis >= 0 else ndim + axis
-    seq_len = tensor_full.shape[dim]
-    if seq_len % cp_size != 0:
-        raise ValueError(
-            f"extract_local_contiguous_chunk: seq_len={seq_len} on axis={axis} "
-            f"is not divisible by cp_size={cp_size}."
-        )
-    chunk = seq_len // cp_size
-    # Deliberately a bare slice, unlike scatter_contiguous's paddle.assign: the
-    # per-depth caller keeps only this result, so a view holds F while a copy
-    # holds F + F/cp until the source is freed. Measured peaks over the roll
-    # loop are (2K+1)F for views vs 2F + K*F + (K+1)F/cp for assign -- worse at
-    # K=1 (every erndata model config here), even at K=3. The dominant term in
-    # both is roll_tensor's own grad-node retention, which neither changes.
-    return paddle.slice(
-        tensor_full,
-        axes=[dim],
-        starts=[chunk * cp_rank],
-        ends=[chunk * (cp_rank + 1)],
-    )
-
-
-def extract_local_cp_chunks(tensor_full, cp_rank, cp_size, axis=1, *, mode):
-    """Layout-aware local-slice extraction for the ``use_erndata`` MTP path.
-
-    That path keeps its tensors full-length on every CP rank and slices them
-    locally instead of calling ``ContextParallelScatterOp`` (which would redo the
-    embedding lookup ``cp_size`` times), so the slice must use the same layout
-    the rest of the model scatters with, i.e. ``config.cp_balance_mode``:
-
-    * ``dualchunk_allgather``  -> ``scatter_balance``    -> two zigzag chunks
-    * ``contiguous_allgather`` -> ``scatter_contiguous`` -> one contiguous chunk
-
-    ``contiguous_allgather`` is mandatory for the DSv4 hybrid stack, whose
-    attention layers assert on it under CP, so hard-coding zigzag here is wrong.
-
-    Args:
-        tensor_full: ``[..., L, ...]`` full-length tensor present on every rank.
-        cp_rank: this rank's index inside the CP group.
-        cp_size: CP world size; ``1`` returns ``tensor_full`` unchanged.
-        axis: sequence axis (default 1 for ``[B, L, ...]``).
-        mode: ``config.cp_balance_mode``. Keyword-only and required: the bug this
-            helper exists to fix was a call site that assumed a layout, and the
-            wrong layout is a silently wrong loss rather than a crash.
-
-    Returns:
-        ``[..., L / cp_size, ...]`` tensor holding this rank's slice.
-
-    Note:
-        ``cp_size == 1`` returns ``tensor_full`` itself, not a copy — do not
-        write into the result in place.
-    """
-    if cp_size == 1:
-        return tensor_full
-    if mode == "dualchunk_allgather":
-        return extract_local_zigzag_chunks(
-            tensor_full, cp_rank, cp_size, axis=axis
-        )
-    if mode == "contiguous_allgather":
-        return extract_local_contiguous_chunk(
-            tensor_full, cp_rank, cp_size, axis=axis
-        )
-    # contiguous_a2a shards the sequence contiguously too, so the slice would
-    # match, but its mask contract differs (DotProductAttention.forward skips
-    # expand_attn_mask_startend_row_indices_for_cp under a2a) and has never been
-    # run on this path. Refuse rather than guess.
-    raise ValueError(
-        f"extract_local_cp_chunks: unsupported cp_balance_mode={mode!r} for the "
-        "use_erndata MTP path; expected 'dualchunk_allgather' or "
-        "'contiguous_allgather'."
-    )
-
-
 def build_startend_row_indices_from_cu_seqlens(
     cu_seqlens_q, batch_size, include_position_axis=False, seq_len=None
 ):
     """Derive flashmask ``attn_mask_startend_row_indices`` from ``cu_seqlens_q``.
 
-    The erndata MTP contract carries packed-document boundaries as a
-    cumulative-length int32 vector ``[num_docs + 1]`` rather than a materialized
-    attention mask. Every consumer of that contract (the main backbone via
-    ``GPTEmbedding``, and each MTP depth via
-    ``MultiTokenPredictionLayer._forward_megatron_style``) needs the equivalent
-    flashmask boundaries, so the derivation lives here once.
+    Packed-document boundaries as a cumulative-length int32 vector
+    ``[num_docs + 1]``. HyperBody's packed decoder derives its flashmask this
+    way; the erndata GPT path receives the mask from the adapter instead.
 
     For a token at position ``i`` inside document ``j``
     (``cu[j] <= i < cu[j+1]``), the end row is ``cu[j+1]`` — i.e. attention is
@@ -1102,8 +957,15 @@ class MultiTokenPredictionLayer(FleetLayer):
                 reduce_scatter_embeddings=False,
                 config=no_init_cfg,
             )
-            if self.config.context_parallel_size > 1 and not getattr(
-                config, "use_erndata", False
+            # Same rule as GPTEmbedding's table: skip the default CP grad
+            # scaling where the CP transform all-gathers the gradient. The
+            # loader-sharded source keeps its historical marking as well.
+            # Erndata keeps default CP scaling on both the stage-0 embedding and
+            # this physical copy. Disabling it only here would make their shared
+            # gradient contributions use different scales before PP all-reduce.
+            if embedding_grad_is_cp_gathered(config) or (
+                cp_shard_source(config, config.context_parallel_size)
+                == "loader"
             ):
                 from paddlefleet.context_parallel_utils import (
                     mark_context_parallel_parameter_disable_scale_grad,
@@ -1112,9 +974,6 @@ class MultiTokenPredictionLayer(FleetLayer):
                 mark_context_parallel_parameter_disable_scale_grad(
                     self.mtp_embed
                 )
-            # Erndata keeps default CP scaling on both the stage-0 embedding and
-            # this physical copy. Disabling it only here would make their shared
-            # gradient contributions use different scales before PP all-reduce.
 
             if not getattr(config, "use_erndata", False):
                 from paddlefleet.models.gpt.mtp_embedding_layer import (
@@ -1319,15 +1178,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                 mtp_hidden_inputs_mask = mtp_hidden_inputs_mask.transpose(
                     [0, 2, 1]
                 ).astype(hs_streams.dtype)
-                if (
-                    get_context_parallel_world_size() > 1
-                    and self.config.experimental_dataflow
-                ):
-                    mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
-                        mtp_hidden_inputs_mask,
-                        axis=1,
-                        mode=self.config.cp_balance_mode,
-                    )
+                mtp_hidden_inputs_mask = to_cp_local(
+                    mtp_hidden_inputs_mask, self.config
+                )
                 # when sp enable: hs_streams is seq-first, so bring the mask to
                 # [S/CP, B, 1] before scattering the seq axis.
                 if self.sequence_parallel:
@@ -1397,17 +1250,10 @@ class MultiTokenPredictionLayer(FleetLayer):
                     hidden_states.dtype
                 )
 
-                if (
-                    get_context_parallel_world_size() > 1
-                    and self.config.experimental_dataflow
-                ):
-                    # In EB dataflow and CP size > 1, mtp_hidden_inputs_mask is [b, s, 1];
-                    # we need to scatter it to [b, s/cp, 1] here.
-                    mtp_hidden_inputs_mask = ContextParallelScatterOp.apply(
-                        mtp_hidden_inputs_mask,
-                        axis=1,
-                        mode=self.config.cp_balance_mode,
-                    )
+                # [b, s, 1] global -> [b, s/cp, 1] local.
+                mtp_hidden_inputs_mask = to_cp_local(
+                    mtp_hidden_inputs_mask, self.config
+                )
 
                 # when sp enable
                 if self.sequence_parallel:
@@ -1788,10 +1634,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 ]
 
                 # CP/SP scatter, mirroring what GPTEmbedding does per chunk
-                if cp_world_size > 1 and self.config.experimental_dataflow:
-                    decoder_input = ContextParallelScatterOp.apply(
-                        decoder_input, axis=1, mode=self.config.cp_balance_mode
-                    )
+                decoder_input = to_cp_local(decoder_input, self.config)
                 if self.config.sequence_parallel:
                     batch_size, local_seq_len, hidden_size = decoder_input.shape
                     decoder_input = decoder_input.reshape(
@@ -2244,7 +2087,7 @@ class MultiTokenPredictionLayer(FleetLayer):
     # only while another MTP depth needs it and never reaches the LMHead.
     #
     # Constraints: experimental_dataflow=False. Context parallelism is handled
-    # via extract_local_cp_chunks (layout picked by config.cp_balance_mode)
+    # via cp_shard.to_cp_local (layout picked by config.cp_balance_mode)
     # after the full-sequence packed roll rather than inside roll_tensor.
     # ------------------------------------------------------------------ #
 
@@ -2286,16 +2129,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 cu_seqlens_q=cu_seqlens_q,
             )
 
-        cp_size = get_context_parallel_world_size()
-        if cp_size > 1:
-            cp_rank = get_context_parallel_rank()
-            decoder_input = extract_local_cp_chunks(
-                decoder_input,
-                cp_rank,
-                cp_size,
-                axis=1,
-                mode=self.config.cp_balance_mode,
-            )
+        decoder_input = to_cp_local(decoder_input, self.config)
 
         if self.sequence_parallel:
             # ScatterOp partitions axis 0; transpose to canonical [S, B, H]
@@ -2388,54 +2222,14 @@ class MultiTokenPredictionLayer(FleetLayer):
                 f"Under use_erndata=True, input_ids must be [B, L], got shape {input_ids.shape}."
             )
 
-        # Derive per-depth attn_mask_startend_row_indices from cu_seqlens_q
-        # only when the dataloader did not already provide one. The erndata
-        # loader emits a per-sample mask [B, 1, S, 1] that already reflects
-        # packed-doc boundaries, and doc boundaries are the SAME at every MTP
-        # depth (per-doc roll does not wrap across doc boundaries), so reusing
-        # it avoids both redundant deviation and any semantic drift. The
-        # fallback derivation below handles the case where the loader omitted
-        # the mask.
-        cu_seqlens_q = dict_args.get("cu_seqlens_q", None)
-        if (
-            cu_seqlens_q is not None
-            and dict_args.get("attn_mask_startend_row_indices") is None
-        ):
-            # experimental_dataflow: 2-col [B, 1, S, 2]; fleet-mode: 1-col [B, 1, S, 1].
-            # ernie5 flashmask & SWA helpers require a 4D layout [B, heads, S, num_vec]
-            # (see startend_row_indices_add_sliding_window in utils.py).
-            include_pos = bool(
-                getattr(
-                    self.config, "gpt_model_use_experimental_version", False
-                )
-            )
-            # Recover the GLOBAL per-sample length L from this rank's shard.
-            # ``input_ids`` must not be used: GPTEmbedding publishes it as
-            # ``input_ids_for_moe_mask``, which stays None under plain
-            # use_erndata with expert_model_parallel_size == 1 and
-            # gpt_model_use_experimental_version == False, so the key is absent
-            # here. Scale the local seq axis back up by the parallel degrees,
-            # exactly the way the KDA branch of GPTEmbedding.forward does for
-            # its own cu_seqlens (gpt_embedding.py, build_cu_seqlens call site):
-            # the mask lives in global sequence coordinates while hidden_states
-            # is the rank-local shard. Layout is seq-first iff sequence_parallel.
-            cp_size = max(get_context_parallel_world_size(), 1)
-            if getattr(self.config, "sequence_parallel", False):
-                # [s/tp, b, h]
-                local_seq_len, batch_size = dict_args["hidden_states"].shape[:2]
-                sp_size = self.config.tensor_model_parallel_size
-            else:
-                # [b, s, h]
-                batch_size, local_seq_len = dict_args["hidden_states"].shape[:2]
-                sp_size = 1
-            seq_len = local_seq_len * sp_size * cp_size
-            dict_args["attn_mask_startend_row_indices"] = (
-                build_startend_row_indices_from_cu_seqlens(
-                    cu_seqlens_q,
-                    batch_size,
-                    include_position_axis=include_pos,
-                    seq_len=seq_len,
-                )
+        # GPTEmbedding rejects an erndata batch without a mask, and document
+        # boundaries are the same at every MTP depth (the per-document roll
+        # never crosses one), so every depth reuses the backbone mask.
+        if dict_args.get("attn_mask_startend_row_indices") is None:
+            raise RuntimeError(
+                "use_erndata=True requires attn_mask_startend_row_indices "
+                "on the MTP batch; the adapter ships the backbone mask and "
+                "every MTP depth reuses it."
             )
 
         # Run transformer layer.

@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING, Literal
 import paddle.nn.functional as F
 
 from ..accuracy_target import AccuracyTarget, normalize_accuracy_target
+from ..cp_shard import SUPPORTED_LOCAL_SLICE_MODES
 from ..model_parallel_config import ModelParallelConfig
 from ..recompute_utils import validate_recompute_modules
 from ..utils import (
@@ -150,6 +151,21 @@ def dw_overlap_enabled(config, point: str) -> bool:
         bool(selected)
         and point in selected
         and dw_overlap_scheduler_supported(config)
+    )
+
+
+def mtp_layers_active(config) -> bool:
+    """Whether MTP transformer layers run on the data path.
+
+    ``mtp_load_weight_only`` loads MTP weights but skips MTP compute and
+    embedding processing, so it counts as inactive (same as K==0). Accepts
+    a real ``TransformerConfig`` or a duck-typed test config.
+    """
+    n = getattr(config, "num_nextn_predict_layers", None)
+    return (
+        n is not None
+        and n > 0
+        and not getattr(config, "mtp_load_weight_only", False)
     )
 
 
@@ -2574,76 +2590,17 @@ class TransformerConfig(ModelParallelConfig):
                     "the shifted embeddings from hidden_states, not from "
                     "mtp_decoder_inputs)."
                 )
-            # The erndata MTP path slices its full-length tensors locally
-            # (extract_local_cp_chunks) instead of calling
-            # ContextParallelScatterOp, so cp_balance_mode has to name a layout
-            # the rest of the model also uses:
-            #   dualchunk_allgather  -> scatter_balance    (zigzag, MCore-like)
-            #   contiguous_allgather -> scatter_contiguous (rank-order slices)
-            #
-            # contiguous_a2a shards the sequence contiguously too, but its mask
-            # contract differs (DotProductAttention.forward skips
-            # expand_attn_mask_startend_row_indices_for_cp under a2a) and has
-            # never been run here, so it is refused rather than assumed to work.
-            #
-            # contiguous_allgather is necessary but not sufficient for the DSv4
-            # hybrid stack: DSv4HybridAttention/MQALatentAttention assert on it
-            # under CP, and the Indexer rejection in the dsv4_hybrid block below
-            # still rules the combination out.
-            if self.context_parallel_size > 1:
-                if self.cp_balance_mode not in (
-                    "dualchunk_allgather",
-                    "contiguous_allgather",
-                ):
-                    raise ValueError(
-                        f"use_erndata=True with MTP + context_parallel_size>1 "
-                        f"requires cp_balance_mode in "
-                        f"{{'dualchunk_allgather', 'contiguous_allgather'}}, got "
-                        f"{self.cp_balance_mode!r}."
-                    )
-                if self.gpt_model_use_experimental_version:
-                    # Not a mask-shape problem, despite what the CP mask
-                    # expansion in DotProductAttention.forward suggests: the
-                    # erndata loader co-emits attn_mask_startend_row_indices
-                    # [B, 1, L, 1] with cu_seqlens (both under pack_by_cu_seqlen,
-                    # which defaults True), so GPTEmbedding's
-                    # include_position_axis branch -- gated on the mask being
-                    # absent -- never fires and no 2-column mask is ever built.
-                    #
-                    # What the flag does change here is the attention entry
-                    # point: it routes query/key through _apply_ec_complex_3d_mrope,
-                    # which indexes position_ids on a 3-way last axis, while
-                    # erndata delivers position_ids as [B, L] and
-                    # transformer_layer leaves it untouched. It also nulls the
-                    # rotary tables, making the CP RoPE slicing this path relies
-                    # on inert. Neither has been run under CP, so refuse rather
-                    # than let it fail deep inside attention.
-                    raise ValueError(
-                        "use_erndata=True with MTP + context_parallel_size>1 is "
-                        "incompatible with "
-                        "gpt_model_use_experimental_version=True: that flag "
-                        "switches attention to the EC 3-axis MRoPE path, which "
-                        "expects position_ids with a mode axis, while erndata "
-                        "delivers [B, L]. Set "
-                        "gpt_model_use_experimental_version=False."
-                    )
-                if self.mtp_distillation_loss:
-                    # LanguageLoss's distillation branch builds lossmask from
-                    # labels_cur_depth, which the erndata path has already sliced
-                    # to L/cp, and then scatters it again -- the sibling
-                    # non-distillation branch skips that second scatter for
-                    # erndata, this one does not. The result is
-                    # [B, L/cp**2, 1] * [B, L/cp, V]. Its `xishu` normaliser is a
-                    # rank-local token count divided into a CP-all-reduced sum on
-                    # top of that. Both are pre-existing; reject the combination
-                    # here rather than ship a broadcast error.
-                    raise ValueError(
-                        "use_erndata=True with MTP + context_parallel_size>1 is "
-                        "incompatible with mtp_distillation_loss=True: the "
-                        "distillation branch double-scatters its loss mask and "
-                        "normalises a CP-reduced sum by a rank-local token "
-                        "count. Set mtp_distillation_loss=False."
-                    )
+            if self.context_parallel_size > 1 and self.mtp_distillation_loss:
+                # The distillation branch mixes the gathered main-head softmax,
+                # a CP all-reduced loss and a global token count. Only the
+                # experimental_dataflow layout of that arithmetic has been run;
+                # reject it under the erndata local slice until it is checked.
+                raise ValueError(
+                    "use_erndata=True with MTP + context_parallel_size>1 is "
+                    "incompatible with mtp_distillation_loss=True: the "
+                    "distillation loss has not been validated with the erndata "
+                    "local CP slice. Set mtp_distillation_loss=False."
+                )
             # PP>1 is supported without any external dataloader help:
             # cu_seqlens_q travels down the pipeline dict (like position_ids)
             # to the last stage, and GPTLMHead.forward — which runs on the loss
@@ -2658,36 +2615,52 @@ class TransformerConfig(ModelParallelConfig):
             and self.context_parallel_size > 1
             and not self.experimental_dataflow
         ):
-            # Under erndata nothing upstream shards by CP: the loader broadcasts
-            # every tensor full-length to the whole CP group
-            # (erndata_paddle_adapter._get_cp_group_and_src) and the model is
-            # expected to take its own slice. Exactly two paths do that:
-            #   * GPTEmbedding's MTP branch (extract_local_cp_chunks), gated on
-            #     num_nextn_predict_layers > 0 and not mtp_load_weight_only;
-            #   * the plain-path ContextParallelScatterOp beside it, gated on
-            #     experimental_dataflow, which also scatters the RoPE tables and
-            #     -- in LanguageLoss._forward -- the labels. The MTP block above
-            #     forbids experimental_dataflow whenever
-            #     num_nextn_predict_layers > 0, so this path is only reachable at
-            #     K == 0, and there it is legal: hence the guard is skipped
-            #     rather than applied to it.
-            # With neither active the hidden states stay length L while
-            # DotProductAttention computes seq_len = key.shape[1] * cp_size and
-            # expand() fails against an L-row mask -- a shape error naming
-            # neither use_erndata nor cp_balance_mode. Note use_erndata is set
-            # implicitly by erniebot whenever the YAML carries an `erndata:`
-            # section, so this is reachable without any MTP-specific flag.
-            if self.num_nextn_predict_layers <= 0 or self.mtp_load_weight_only:
+            # The erndata loader broadcasts every tensor full-length to the
+            # whole CP group, and cp_shard.to_cp_local takes this rank's share
+            # with a local slice (cp_shard_source == "local"). What that
+            # transform can and cannot serve:
+            if self.cp_balance_mode not in SUPPORTED_LOCAL_SLICE_MODES:
+                # Layout: the local slice reproduces only these two layouts.
                 raise ValueError(
-                    "use_erndata=True with context_parallel_size>1 needs some "
-                    "path that slices the loader's full-length sequence: "
-                    "either MTP (num_nextn_predict_layers>0, "
-                    "mtp_load_weight_only=False), which slices in GPTEmbedding, "
-                    "or experimental_dataflow=True, whose plain-path "
-                    "ContextParallelScatterOp does it. With neither, no CP "
-                    "sharding happens at all. Got num_nextn_predict_layers="
-                    f"{self.num_nextn_predict_layers}, mtp_load_weight_only="
-                    f"{self.mtp_load_weight_only}."
+                    "use_erndata=True with context_parallel_size>1 shards the "
+                    "sequence with a local slice, which supports cp_balance_mode "
+                    f"in {SUPPORTED_LOCAL_SLICE_MODES}, got "
+                    f"{self.cp_balance_mode!r}."
+                )
+            if self.gpt_model_use_experimental_version:
+                # RoPE: the flag nulls the rotary tables that to_cp_local
+                # shards and routes attention through the EC 3-axis MRoPE path,
+                # which expects position_ids with a mode axis; erndata
+                # delivers [B, L].
+                raise ValueError(
+                    "use_erndata=True with context_parallel_size>1 is "
+                    "incompatible with gpt_model_use_experimental_version=True: "
+                    "that flag switches attention to the EC 3-axis MRoPE path, "
+                    "which expects position_ids with a mode axis, while erndata "
+                    "delivers [B, L]. Set gpt_model_use_experimental_version=False."
+                )
+            if self.multimodal_embedding:
+                # Hidden states: the multimodal embedding path has no
+                # global -> local transform point, while its RoPE table does,
+                # so the two would disagree in length.
+                raise ValueError(
+                    "use_erndata=True with context_parallel_size>1 is "
+                    "incompatible with multimodal_embedding=True: the multimodal "
+                    "embedding path does not move its hidden states to local CP "
+                    "coordinates. Set multimodal_embedding=False."
+                )
+            if self.sequence_parallel and not mtp_layers_active(self):
+                # Hidden states: without MTP, LanguageModelEmbedding already
+                # scatters the sequence for SP, so the CP transform would run
+                # after SP instead of before it. The MTP branch disables that
+                # internal scatter and keeps the order, so MTP + SP is fine.
+                raise ValueError(
+                    "use_erndata=True with context_parallel_size>1 and "
+                    "sequence_parallel=True requires active MTP layers "
+                    f"(num_nextn_predict_layers={self.num_nextn_predict_layers}, "
+                    f"mtp_load_weight_only={self.mtp_load_weight_only}): the "
+                    "plain embedding path scatters for SP before the CP "
+                    "transform. Set sequence_parallel=False."
                 )
 
         if self.intermediate_size is None:
@@ -3211,7 +3184,6 @@ class TransformerConfig(ModelParallelConfig):
             if (
                 (has_csa_indexer or has_mqa_indexer)
                 and self.use_erndata
-                and self.num_nextn_predict_layers > 0
                 and self.context_parallel_size > 1
             ):
                 # Both Indexers assume input_ids arrives CP-*local*:
@@ -3225,12 +3197,11 @@ class TransformerConfig(ModelParallelConfig):
                 # the reshape, and the position_offset = cp_rank * sq slice below
                 # it would be wrong even with the reshape fixed.
                 #
-                # Accepting contiguous_allgather above made this combination
-                # config-legal for the first time (it previously required
-                # dualchunk_allgather, which the DSv4 layers reject), so reject
-                # it here rather than let it resurface as a runtime crash.
+                # Input ids: the Indexers expect local ids, which erndata does
+                # not deliver, with or without MTP. Reject here rather than let
+                # it resurface as a runtime crash.
                 raise ValueError(
-                    "use_erndata=True with MTP + context_parallel_size>1 does "
+                    "use_erndata=True with context_parallel_size>1 does "
                     "not support a model that builds an Indexer (CSAIndexer="
                     f"{has_csa_indexer}, DSAIndexer={has_mqa_indexer}). The "
                     "Indexer loss-mask path all-gathers input_ids and reshapes "
