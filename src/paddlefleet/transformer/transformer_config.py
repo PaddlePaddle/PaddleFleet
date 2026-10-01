@@ -1054,6 +1054,19 @@ class TransformerConfig(ModelParallelConfig):
     use_fp8_qat: bool = False
     """Whether to enable FP8 Quantization-Aware Training (QAT)."""
 
+    use_w4a8: bool = False
+    """Whether to use w4a8 for mlp gemm."""
+
+    use_w4a8_fused_quant: bool = False
+    """Whether to use fused CUDA operators for W4A8 online quantization."""
+
+    use_w4a8_weight_cache: bool = True
+    """W4A8: cache the per-optimizer-step FP4 stacked weight quant (both
+    transpose orientations) on the expert weight object and reuse it across
+    microbatches / recompute in fwd+bwd. Default True keeps the existing
+    behavior. Set False to re-quantize the FP4 weights on every fwd/bwd call
+    (the A/B control arm that isolates the cache's own contribution)."""
+
     ####################
     # initialization
     ####################

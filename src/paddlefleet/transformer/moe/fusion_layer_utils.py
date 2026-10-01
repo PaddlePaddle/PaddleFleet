@@ -395,6 +395,8 @@ class MlpNode:
         clamp_value=None,
         activation_type=None,
         use_accuracy_compatible=False,
+        use_w4a8=False,
+        use_w4a8_fused_quant=False,
     ):
         """
         Constructor
@@ -499,6 +501,8 @@ class MlpNode:
                     clamp_value=clamp_value,
                     activation_type=activation_type,
                     use_accuracy_compatible=use_accuracy_compatible,
+                    use_w4a8=use_w4a8,
+                    use_w4a8_fused_quant=use_w4a8_fused_quant,
                 )
                 for local_expert_id in range(self.num_experts_per_device)
             ]
@@ -518,6 +522,8 @@ class MlpNode:
                 clamp_value=clamp_value,
                 activation_type=activation_type,
                 use_accuracy_compatible=use_accuracy_compatible,
+                use_w4a8=use_w4a8,
+                use_w4a8_fused_quant=use_w4a8_fused_quant,
             )
         self.unzip_node = UnZipNode(self.token_dispatcher)
         self.zip_node = ZipNode(self.token_dispatcher)
@@ -3140,6 +3146,8 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
         clamp_value=None,
         activation_type=None,
         use_accuracy_compatible=False,
+        use_w4a8=False,
+        use_w4a8_fused_quant=False,
     ):
         """
         根据给定的参数执行前向传播操作。
@@ -3177,6 +3185,8 @@ class FusionMoePyLayer(paddle.autograd.PyLayer):
             clamp_value=clamp_value,
             activation_type=activation_type,
             use_accuracy_compatible=use_accuracy_compatible,
+            use_w4a8=use_w4a8,
+            use_w4a8_fused_quant=use_w4a8_fused_quant,
         )
 
         if fp8_dispatched_handle is not None:
@@ -3309,6 +3319,8 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
         clamp_value=None,
         use_ue8m0=False,
         use_accuracy_compatible=False,
+        use_w4a8=False,
+        use_w4a8_fused_quant=False,
     ):
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
@@ -3324,6 +3336,8 @@ class HybridEPMoePyLayer(paddle.autograd.PyLayer):
             clamp_value=clamp_value,
             activation_type=getattr(custom_map, "_activation_type", "swiglu"),
             use_accuracy_compatible=use_accuracy_compatible,
+            use_w4a8=use_w4a8,
+            use_w4a8_fused_quant=use_w4a8_fused_quant,
         )
         original_hidden_shape = tuple(hidden_states.shape)
         original_probs_shape = tuple(dispatched_probs.shape)

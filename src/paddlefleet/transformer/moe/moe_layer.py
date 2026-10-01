@@ -58,6 +58,7 @@ from paddlefleet.transformer.transformer_config import dw_overlap_enabled
 from paddlefleet.transformer.utils import profile
 
 from .fp8_utils import fused_stack_quant_without_cache
+from .fp8_utils import _w4a8_stack_quant
 from .fused_a2a import configure_buffer
 from .fusion_layer_utils import (
     FusionMoePyLayer,
@@ -190,6 +191,11 @@ class MoELayer(nn.Layer):
         self.moe_shared_expert_overlap = config.moe_shared_expert_overlap
         self.fp8 = config.fp8
         self.use_ue8m0 = config.use_ue8m0
+        self.use_w4a8 = config.use_w4a8
+        self.use_w4a8_fused_quant = config.use_w4a8_fused_quant
+        self.use_w4a8_weight_cache = getattr(
+            config, "use_w4a8_weight_cache", True
+        )
         # Two independent expert deferral points, one per expert weight:
         #   defer_expert_up_gate_dw -> w1 (up_gate_proj) weight grad
         #   defer_expert_down_dw    -> w2 (down_proj) weight grad, which
@@ -201,7 +207,7 @@ class MoELayer(nn.Layer):
             config, "moe_expert_down_proj"
         )
         self.using_sonic_moe = self.config.using_sonic_moe
-        self.fp8_dispatch = bool(config.fp8)
+        self.fp8_dispatch = bool(config.fp8) and not self.use_w4a8
         self.fp8_wgrad = config.fp8_wgrad
         self.fp8_dispatch_bwd = (
             self.fp8_dispatch and self.using_sonic_moe and self.fp8_wgrad
@@ -1123,6 +1129,8 @@ class MoELayer(nn.Layer):
                     use_accuracy_compatible=getattr(
                         self.config, "use_accuracy_compatible", False
                     ),
+                    use_w4a8=self.use_w4a8,
+                    use_w4a8_fused_quant=self.use_w4a8_fused_quant,
                 )
 
         hidden_states = inspect_tensor(
@@ -1199,6 +1207,8 @@ class MoELayer(nn.Layer):
             use_accuracy_compatible=getattr(
                 self.config, "use_accuracy_compatible", False
             ),
+            use_w4a8=self.use_w4a8,
+            use_w4a8_fused_quant=self.use_w4a8_fused_quant,
         )
 
     def dispatch_preprocess(self, args):
@@ -1308,6 +1318,8 @@ class MoELayer(nn.Layer):
                     use_accuracy_compatible=getattr(
                         self.config, "use_accuracy_compatible", False
                     ),
+                    use_w4a8=self.use_w4a8,
+                    use_w4a8_fused_quant=self.use_w4a8_fused_quant,
                 )
 
             if is_first_fwd:
@@ -1673,6 +1685,29 @@ class MoELayer(nn.Layer):
             )
             weight_obj.fp8_weight_stacked = fp8_weight
             weight_obj.fp8_scale_stacked = fp8_scale
+
+            # W4A8: 在 bf16 尚存活时预量化 fp4 stacked 权重。release/0.4 会在本步
+            # fp8 权重量化后释放常驻 bf16 专家权重，而 W4A8 的 fp4 stack-quant
+            # (fp8_utils._w4a8_stack_quant) 仍需 bf16；此处把两种转置变体缓存到权重
+            # 对象上，前反向直接复用（与在前向内计算逐位一致，只是提前到 bf16 存活时）。
+            # use_w4a8_weight_cache=False 时不写缓存属性，_w4a8_stack_quant 的
+            # getattr 取不到即退化为每次前反向重新量化（A/B 对照臂）。
+            # use_cache=False：刷新点必须绕过缓存读取，否则每步赋值退化为 no-op。
+            # 传 weight_list 而非 weight_obj：_stack_expert_weights 会把 list 堆成
+            # [E,H0,H1]，非 fusion 通路下 weight_obj 是单专家 2-D 权重会触发 ndim 断言。
+            if self.use_w4a8 and self.use_w4a8_weight_cache:
+                weight_obj.w4a8_fp4_stacked_transpose = _w4a8_stack_quant(
+                    weight_list,
+                    transpose=True,
+                    use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+                    use_cache=False,
+                )
+                weight_obj.w4a8_fp4_stacked = _w4a8_stack_quant(
+                    weight_list,
+                    transpose=False,
+                    use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+                    use_cache=False,
+                )
 
             if quant_transpose is None or quant_transpose is True:
                 fp8_weight_t, fp8_scale_t = fused_stack_quant_without_cache(
