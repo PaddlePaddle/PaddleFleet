@@ -21,6 +21,10 @@ from unittest import mock
 import numpy as np
 import paddle
 
+from paddlefleet.transformer.activations import (
+    situ_glu_scale_backward,
+    situ_glu_scale_forward,
+)
 from paddlefleet.transformer.moe import fp8_utils
 from paddlefleet.transformer.moe.fp8_utils import (
     ExpertsGroupGemmContiguousNode,
@@ -90,11 +94,13 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
                 num_experts_per_tok=1,
                 moe_expert_fusion=True,
                 moe_deep_gemm=True,
+                use_ue8m0=True,
                 use_w4a8=True,
                 use_w4a8_fused_quant=True,
             )
 
         self.assertTrue(gemm_node.call_args.kwargs["use_w4a8"])
+        self.assertTrue(gemm_node.call_args.kwargs["use_ue8m0"])
         self.assertTrue(gemm_node.call_args.kwargs["use_w4a8_fused_quant"])
 
     def test_fused_quant_flag_requires_custom_ops(self):
@@ -186,7 +192,11 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
                 self.assertEqual(
                     _w4a8_stack_quant(weights, transpose), python_result
                 )
-                python_quant.assert_called_once_with(weights, quant_dtype="fp4")
+                python_quant.assert_called_once_with(
+                    weights,
+                    quant_dtype="fp4",
+                    using_ue8m0_scale=True,
+                )
 
     def test_weighted_swiglu_dispatches_all_paths(self):
         value = mock.sentinel.value
@@ -283,7 +293,12 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
     @staticmethod
     def _make_node():
         node = object.__new__(ExpertsGroupGemmContiguousNode)
+        node.activation_type = "swiglu"
+        node.activation_situ_beta = 4.0
+        node.activation_situ_linear_beta = 25.0
+        node.situ_glu_fusion = False
         node.use_w4a8_fused_quant = True
+        node.use_ue8m0 = True
         node._w4a8_grouped_gemm = mock.Mock(
             side_effect=lambda _x, _xs, _w, _ws, output: output
         )
@@ -320,6 +335,7 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
                 weights,
                 transpose=True,
                 use_w4a8_fused_quant=True,
+                use_ue8m0=True,
             )
             quant.assert_called_once_with(
                 x,
@@ -355,6 +371,7 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
                 weights,
                 transpose=True,
                 use_w4a8_fused_quant=True,
+                use_ue8m0=True,
             )
             swiglu_quant.assert_called_once_with(
                 mock.sentinel.o1,
@@ -415,6 +432,7 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
                 weights,
                 transpose=False,
                 use_w4a8_fused_quant=True,
+                use_ue8m0=True,
             )
             quant.assert_called_once_with(
                 grad,
@@ -439,6 +457,7 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
                 weights,
                 transpose=False,
                 use_w4a8_fused_quant=True,
+                use_ue8m0=True,
             )
             quant.assert_called_once_with(
                 grad,
@@ -467,6 +486,127 @@ class TestW4A8RuntimeDispatch(unittest.TestCase):
                 node.input_scale,
                 use_w4a8_fused_quant=True,
             )
+
+    def test_situ_w4a8_forward_backward_matches_reference(self):
+        """SiTU W4A8 uses the same forward/backward formula as the BF16 path.
+
+        The GEMM and quantizers are stubbed so this regression is runnable
+        without a compiled W4A8 extension.  It still exercises both W4A8
+        activation dispatch sites and compares their complete tensor contract
+        with the validated SiTU reference helpers.
+        """
+        node = object.__new__(ExpertsGroupGemmContiguousNode)
+        node.activation_type = "situ"
+        node.activation_situ_beta = 4.0
+        node.activation_situ_linear_beta = 25.0
+        node.situ_glu_fusion = False
+        node.use_w4a8_fused_quant = False
+        node.use_ue8m0 = True
+        node.clamp_value = None
+
+        x = paddle.randn([4, 8], dtype="bfloat16")
+        probs = paddle.rand([4], dtype="float32")
+        expected_forward = situ_glu_scale_forward(x, probs, 4.0, 25.0)
+        expected_quant = (
+            expected_forward,
+            paddle.ones([4, 1], dtype="float32"),
+        )
+
+        with mock.patch.object(
+            fp8_utils,
+            "_w4a8_quant",
+            return_value=expected_quant,
+        ) as quant:
+            actual_quant = node._w4a8_act_quant(x, probs)
+
+        self.assertTrue(
+            paddle.equal_all(
+                actual_quant[0].astype("float32"),
+                expected_forward.astype("float32"),
+            )
+        )
+        self.assertTrue(
+            paddle.equal_all(
+                actual_quant[1].astype("float32"),
+                expected_quant[1].astype("float32"),
+            )
+        )
+        self.assertEqual(quant.call_count, 1)
+        quant_args, quant_kwargs = quant.call_args
+        self.assertTrue(
+            paddle.equal_all(
+                quant_args[0].astype("float32"),
+                expected_forward.astype("float32"),
+            )
+        )
+        self.assertEqual(
+            quant_kwargs,
+            {"quant_dtype": "fp8", "use_w4a8_fused_quant": False},
+        )
+
+        weights = mock.sentinel.weights
+        out_grad = paddle.randn([4, 4], dtype="bfloat16")
+        do2_s = paddle.full([4, 4], 0.25, dtype="bfloat16")
+
+        def fill_gemm_output(_x, _x_scale, _w, _w_scale, output):
+            output.set_value(do2_s)
+            return output
+
+        node._w4a8_grouped_gemm = mock.Mock(side_effect=fill_gemm_output)
+        weight_q = paddle.zeros([1, 4, 4], dtype="int8")
+        weight_scale = paddle.ones([1, 4, 1], dtype="float32")
+        grad_q = mock.Mock(shape=[4, 4])
+        grad_scale = paddle.ones([4, 1], dtype="float32")
+        expected_backward = situ_glu_scale_backward(
+            x,
+            probs,
+            do2_s,
+            4.0,
+            25.0,
+        )
+        with (
+            mock.patch.object(
+                fp8_utils,
+                "_w4a8_stack_quant",
+                return_value=(weight_q, weight_scale),
+            ) as stack_quant,
+            mock.patch.object(
+                fp8_utils,
+                "_w4a8_quant",
+                return_value=(grad_q, grad_scale),
+            ) as grad_quant,
+        ):
+            actual_backward = node._bwd_down_input_w4a8(
+                weights,
+                out_grad,
+                x,
+                probs,
+            )
+
+        for actual, expected in zip(actual_backward, expected_backward):
+            self.assertTrue(
+                paddle.equal_all(
+                    actual.astype("float32"), expected.astype("float32")
+                )
+            )
+        stack_quant.assert_called_once_with(
+            weights,
+            transpose=False,
+            use_w4a8_fused_quant=False,
+            use_ue8m0=True,
+        )
+        self.assertEqual(grad_quant.call_count, 1)
+        grad_args, grad_kwargs = grad_quant.call_args
+        self.assertTrue(
+            paddle.equal_all(
+                grad_args[0].astype("float32"),
+                out_grad.astype("float32"),
+            )
+        )
+        self.assertEqual(
+            grad_kwargs,
+            {"quant_dtype": "fp8", "use_w4a8_fused_quant": False},
+        )
 
 
 @unittest.skipUnless(IS_BLACKWELL, "requires a Blackwell CUDA device")

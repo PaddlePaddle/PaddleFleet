@@ -260,6 +260,7 @@ class TestEndToEndGranularityDiff(unittest.TestCase):
             moe_expert_fusion=True,
             use_bf16_gemm_weight_grad=True,
             use_w4a8=use_w4a8,
+            use_ue8m0=use_w4a8,
             dequant_input=dequant_input,
         )
         return node, experts

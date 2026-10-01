@@ -28,12 +28,14 @@ Run:
 """
 
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 import paddle
 import paddle.nn.functional as F
 
 from paddlefleet.transformer.moe import fp8_utils
+from paddlefleet.transformer.activations import situ_glu_scale_forward
 from paddlefleet.transformer.moe.fp8_utils import (
     W4A8_QUANT_BLOCK,
     ceil_to_ue8m0,
@@ -481,6 +483,7 @@ class TestW4A8GroupGemm(unittest.TestCase):
         dequant_input=False,
         recompute_moe_gate_up=False,
         use_w4a8_fused_quant=False,
+        activation_type="swiglu",
     ):
         """Build an ExpertsGroupGemmContiguousNode with use_w4a8=True."""
         from paddlefleet.transformer.moe.fp8_utils import (
@@ -488,16 +491,24 @@ class TestW4A8GroupGemm(unittest.TestCase):
         )
 
         experts, custom_map = _make_experts_and_map(num_experts, k, n)
+        if activation_type == "situ":
+            custom_map.config = SimpleNamespace(
+                activation_situ_beta=4.0,
+                activation_situ_linear_beta=25.0,
+                situ_glu_fusion=False,
+            )
         node = ExpertsGroupGemmContiguousNode(
             custom_map,
             use_fp8_mlp=True,
             moe_deep_gemm=True,
             moe_expert_fusion=True,
             use_w4a8=True,
+            use_ue8m0=True,
             clamp_value=clamp_value,
             dequant_input=dequant_input,
             recompute_moe_gate_up=recompute_moe_gate_up,
             use_w4a8_fused_quant=use_w4a8_fused_quant,
+            activation_type=activation_type,
         )
         return node, experts
 
@@ -513,6 +524,50 @@ class TestW4A8GroupGemm(unittest.TestCase):
             ref_parts.append(o2 @ experts.weight2[i].astype("float32"))
             start += t
         return paddle.concat(ref_parts, axis=0).numpy()
+
+    def _situ_ref_forward(self, x, probs, tokens, experts, n):
+        """fp32 SiTU-GLU reference for the W4A8 forward path."""
+        ref_parts = []
+        start = 0
+        for i, t in enumerate(tokens):
+            xi = x[start : start + t].astype("float32")
+            o1 = xi @ experts.weight1[i].astype("float32")
+            o2 = situ_glu_scale_forward(
+                o1,
+                probs[start : start + t],
+                beta=4.0,
+                linear_beta=25.0,
+            )
+            ref_parts.append(o2 @ experts.weight2[i].astype("float32"))
+            start += t
+        return paddle.concat(ref_parts, axis=0).numpy()
+
+    def _situ_autograd_reference(
+        self, x, probs, tokens, experts, n, out_grad
+    ):
+        """fp32 autograd reference returning SiTU dx/dprobs/dw1/dw2."""
+        x_ref = x.astype("float32").detach()
+        x_ref.stop_gradient = False
+        probs_ref = probs.astype("float32").detach()
+        probs_ref.stop_gradient = False
+        w1_ref = experts.weight1.astype("float32").detach()
+        w1_ref.stop_gradient = False
+        w2_ref = experts.weight2.astype("float32").detach()
+        w2_ref.stop_gradient = False
+        ref_parts = []
+        start = 0
+        for i, t in enumerate(tokens):
+            o1 = x_ref[start : start + t] @ w1_ref[i]
+            o2 = situ_glu_scale_forward(
+                o1,
+                probs_ref[start : start + t],
+                beta=4.0,
+                linear_beta=25.0,
+            )
+            ref_parts.append(o2 @ w2_ref[i])
+            start += t
+        paddle.concat(ref_parts, axis=0).backward(out_grad.astype("float32"))
+        return x_ref.grad, probs_ref.grad, w1_ref.grad, w2_ref.grad
 
     # ---------------- construction-time branches ----------------
 
@@ -531,6 +586,7 @@ class TestW4A8GroupGemm(unittest.TestCase):
                 use_fp8_mlp=False,
                 moe_deep_gemm=True,
                 moe_expert_fusion=True,
+                use_ue8m0=True,
                 use_w4a8=True,
             )
 
@@ -547,6 +603,7 @@ class TestW4A8GroupGemm(unittest.TestCase):
             moe_deep_gemm=True,
             moe_expert_fusion=True,
             use_bf16_gemm_weight_grad=False,
+            use_ue8m0=True,
             use_w4a8=True,
         )
         self.assertTrue(node.use_bf16_gemm_weight_grad)
@@ -595,6 +652,49 @@ class TestW4A8GroupGemm(unittest.TestCase):
         o3 = node.forward(x, probs, tokens)
         ref = self._bf16_ref_forward(x, probs, tokens, experts, n)
         self.assertGreater(_cos(o3.astype("float32").numpy(), ref), 0.97)
+
+    def test_situ_forward_backward_vs_fp32_reference(self):
+        """W4A8 SiTU preserves both forward and backward semantics."""
+        num_experts, k, n, tokens = 2, 256, 256, [128, 128]
+        node, experts = self._make_node(
+            num_experts,
+            k,
+            n,
+            activation_type="situ",
+        )
+        m = sum(tokens)
+        x = paddle.randn([m, k], dtype="bfloat16") * 0.5
+        probs = paddle.rand([m], dtype="float32")
+
+        output = node.forward(x, probs.unsqueeze(-1), tokens)
+        ref = self._situ_ref_forward(x, probs, tokens, experts, n)
+        self.assertGreater(
+            _cos(output.astype("float32").numpy(), ref),
+            0.95,
+        )
+
+        out_grad = paddle.randn([m, k], dtype="bfloat16")
+        dx, probs_grad = node.backward(out_grad.clone(), probs)
+        ref_dx, ref_pg, ref_dw1, ref_dw2 = self._situ_autograd_reference(
+            x, probs, tokens, experts, n, out_grad
+        )
+        self.assertGreater(
+            _cos(dx.astype("float32").numpy(), ref_dx.numpy()),
+            0.90,
+        )
+        self.assertGreater(
+            _cos(probs_grad.astype("float32").numpy(), ref_pg.numpy()),
+            0.90,
+        )
+        for got_dw, ref_dw in (
+            (experts.weight1.main_grad, ref_dw1),
+            (experts.weight2.main_grad, ref_dw2),
+        ):
+            self.assertIsNotNone(got_dw)
+            self.assertGreater(
+                _cos(got_dw.astype("float32").numpy(), ref_dw.numpy()),
+                0.90,
+            )
 
     def test_forward_clamp(self):
         """Forward with clamp_value matches the clamped bf16 reference."""
