@@ -4279,9 +4279,7 @@ class Trainer:
 
                 # Maybe delete some older hf checkpoints.
                 if self.is_local_process_zero():
-                    self._rotate_hf_checkpoints(
-                        use_mtime=True, output_dir=run_dir
-                    )
+                    self._rotate_hf_checkpoints(output_dir=run_dir)
 
     def log_trained_tokens(self):
         if self.args.count_trained_tokens:
@@ -6517,24 +6515,12 @@ class Trainer:
 
             self.runtime_timer.stop()
 
-            # Maybe delete some older checkpoints.
-            # For hybrid parallel training, the checkpoint files maybe on different node.
-            need_to_rotate_checkpoints = False
-            if self.args.use_hybrid_parallel:
-                if self.dp_group.rank <= 0 or self.args.use_expert_parallel:
-                    need_to_rotate_checkpoints = True
-            else:
-                need_to_rotate_checkpoints = self.args.should_save_model_state
-
-            # Delete only by one process
-            need_to_rotate_checkpoints = (
-                need_to_rotate_checkpoints and self.args.local_rank in [0, -1]
-            )
-            if need_to_rotate_checkpoints:
-                self._rotate_checkpoints(use_mtime=True, output_dir=run_dir)
-                self._rotate_checkpoints(
-                    use_mtime=True, output_dir=run_signal_dir
-                )
+            # One process per node rotates. Deletion is chosen by step (not
+            # mtime) and is idempotent, so nodes sharing output_dir (GPFS)
+            # agree on the same set, and node-local disks each get cleaned.
+            if self.is_local_process_zero():
+                self._rotate_checkpoints(output_dir=run_dir)
+                self._rotate_checkpoints(output_dir=run_signal_dir)
 
         if strtobool(os.getenv("FLAG_LLM_PDC", "False")) and not (
             "async_save" in self.args.unified_checkpoint_config
@@ -6568,6 +6554,13 @@ class Trainer:
         )
         self.enable_autocast_context_manager = False
 
+    def _checkpoint_step(self, path, checkpoint_prefix) -> Optional[int]:
+        name = os.path.basename(os.path.normpath(path))
+        regex_match = re.fullmatch(rf"{checkpoint_prefix}-([0-9]+)", name)
+        if regex_match is None:
+            return None
+        return int(regex_match.group(1))
+
     def _sorted_checkpoints(
         self,
         output_dir=None,
@@ -6581,16 +6574,11 @@ class Trainer:
         ]
 
         for path in glob_checkpoints:
-            if use_mtime:
-                ordering_and_checkpoint_path.append(
-                    (os.path.getmtime(path), path)
-                )
-            else:
-                regex_match = re.match(f".*{checkpoint_prefix}-([0-9]+)", path)
-                if regex_match is not None and regex_match.groups() is not None:
-                    ordering_and_checkpoint_path.append(
-                        (int(regex_match.groups()[0]), path)
-                    )
+            step = self._checkpoint_step(path, checkpoint_prefix)
+            if step is None:
+                continue
+            key = os.path.getmtime(path) if use_mtime else step
+            ordering_and_checkpoint_path.append((key, path))
 
         checkpoints_sorted = sorted(ordering_and_checkpoint_path)
         checkpoints_sorted = [
@@ -6598,89 +6586,74 @@ class Trainer:
         ]
         # Make sure we don't delete the best model.
         if self.state.best_model_checkpoint is not None:
-            best_model_index = checkpoints_sorted.index(
-                str(Path(self.state.best_model_checkpoint))
-            )
-            for i in range(best_model_index, len(checkpoints_sorted) - 2):
-                checkpoints_sorted[i], checkpoints_sorted[i + 1] = (
-                    checkpoints_sorted[i + 1],
-                    checkpoints_sorted[i],
-                )
+            best_path = str(Path(self.state.best_model_checkpoint))
+            if best_path in checkpoints_sorted:
+                best_model_index = checkpoints_sorted.index(best_path)
+                for i in range(best_model_index, len(checkpoints_sorted) - 2):
+                    checkpoints_sorted[i], checkpoints_sorted[i + 1] = (
+                        checkpoints_sorted[i + 1],
+                        checkpoints_sorted[i],
+                    )
         return checkpoints_sorted
 
-    def _rotate_checkpoints(self, use_mtime=False, output_dir=None) -> None:
-        if (
-            self.args.save_total_limit is None
-            or self.args.save_total_limit <= 0
-        ):
+    def _rotate_checkpoints_with_prefix(
+        self, output_dir, checkpoint_prefix, total_limit, limit_name, use_mtime
+    ) -> None:
+        if total_limit is None or total_limit <= 0:
             return
 
-        # Check if we should delete older checkpoint(s)
-        checkpoints_sorted = self._sorted_checkpoints(
-            use_mtime=use_mtime, output_dir=output_dir
-        )
-        if len(checkpoints_sorted) <= self.args.save_total_limit:
-            return
-
-        # If save_total_limit=1 with load_best_model_at_end=True, we could end up deleting the last checkpoint, which
-        # we don't do to allow resuming.
-        save_total_limit = self.args.save_total_limit
-        if (
-            self.state.best_model_checkpoint is not None
-            and self.args.save_total_limit == 1
-            and checkpoints_sorted[-1] != self.state.best_model_checkpoint
-        ):
-            save_total_limit = 2
-
-        number_of_checkpoints_to_delete = max(
-            0, len(checkpoints_sorted) - save_total_limit
-        )
-        checkpoints_to_be_deleted = checkpoints_sorted[
-            :number_of_checkpoints_to_delete
-        ]
-        for checkpoint in checkpoints_to_be_deleted:
-            logger.info(
-                f"Deleting older checkpoint [{checkpoint}] due to args.save_total_limit"
-            )
-            # ignore_errors for shared disks between train nodes.
-            shutil.rmtree(checkpoint, ignore_errors=True)
-
-    def _rotate_hf_checkpoints(self, use_mtime=False, output_dir=None) -> None:
-        if (
-            self.args.save_hf_total_limit is None
-            or self.args.save_hf_total_limit <= 0
-        ):
-            return
-
-        # Check if we should delete older hf checkpoint(s)
         checkpoints_sorted = self._sorted_checkpoints(
             use_mtime=use_mtime,
             output_dir=output_dir,
-            checkpoint_prefix=PREFIX_HF_CHECKPOINT_DIR,
+            checkpoint_prefix=checkpoint_prefix,
         )
-        if len(checkpoints_sorted) <= self.args.save_hf_total_limit:
+        # The checkpoint being saved now is never a deletion candidate, whether
+        # or not it is visible yet (other ranks/nodes may still be writing it).
+        current_step = self.state.global_step
+        candidates = [
+            path
+            for path in checkpoints_sorted
+            if self._checkpoint_step(path, checkpoint_prefix) != current_step
+        ]
+        keep = total_limit - 1
+
+        # Never delete the best model; with limit 1 keep it alongside the
+        # current one so training can still resume from the latest.
+        if self.state.best_model_checkpoint is not None:
+            best_path = str(Path(self.state.best_model_checkpoint))
+            if best_path in candidates:
+                candidates.remove(best_path)
+                candidates.append(best_path)
+                keep = max(keep, 1)
+
+        number_of_checkpoints_to_delete = len(candidates) - keep
+        if number_of_checkpoints_to_delete <= 0:
             return
 
-        save_hf_total_limit = self.args.save_hf_total_limit
-        if (
-            self.state.best_model_checkpoint is not None
-            and self.args.save_total_limit == 1
-            and checkpoints_sorted[-1] != self.state.best_model_checkpoint
-        ):
-            save_hf_total_limit = 2
-
-        number_of_checkpoints_to_delete = max(
-            0, len(checkpoints_sorted) - save_hf_total_limit
-        )
-        checkpoints_to_be_deleted = checkpoints_sorted[
-            :number_of_checkpoints_to_delete
-        ]
-        for checkpoint in checkpoints_to_be_deleted:
+        for checkpoint in candidates[:number_of_checkpoints_to_delete]:
             logger.info(
-                f"Deleting older hf checkpoint [{checkpoint}] due to args.save_hf_total_limit"
+                f"Deleting older checkpoint [{checkpoint}] due to args.{limit_name}"
             )
-            # ignore_errors for shared disks between train nodes.
+            # ignore_errors: other nodes sharing the disk may delete it too.
             shutil.rmtree(checkpoint, ignore_errors=True)
+
+    def _rotate_checkpoints(self, use_mtime=False, output_dir=None) -> None:
+        self._rotate_checkpoints_with_prefix(
+            output_dir,
+            PREFIX_CHECKPOINT_DIR,
+            self.args.save_total_limit,
+            "save_total_limit",
+            use_mtime,
+        )
+
+    def _rotate_hf_checkpoints(self, use_mtime=False, output_dir=None) -> None:
+        self._rotate_checkpoints_with_prefix(
+            output_dir,
+            PREFIX_HF_CHECKPOINT_DIR,
+            self.args.save_hf_total_limit,
+            "save_hf_total_limit",
+            use_mtime,
+        )
 
     def _save(
         self,
