@@ -230,6 +230,22 @@ class MoELayer(nn.Layer):
         self.moe_subbatch_token_num_after_dispatch = (
             config.moe_subbatch_token_num_after_dispatch
         )
+        if self.use_w4a8:
+            if not self.use_ue8m0:
+                raise ValueError(
+                    "use_w4a8 requires use_ue8m0=True because the W4A8 "
+                    "1x32 DeepGEMM path consumes UE8M0 scales."
+                )
+            if (
+                self.moe_subbatch_token_num_after_dispatch is not None
+                and self.moe_subbatch_token_num_after_dispatch > 0
+                and not getattr(config, "use_auto_subbatch", False)
+            ):
+                raise ValueError(
+                    "use_w4a8 does not support static "
+                    "moe_subbatch_token_num_after_dispatch; use_auto_subbatch=True "
+                    "or unset the static subbatch option."
+                )
         if self.using_sonic_moe:
             assert paddlefleet_ops.is_sonic_moe_available(), (
                 paddlefleet_ops.blocked_import_messages[
@@ -1701,12 +1717,14 @@ class MoELayer(nn.Layer):
                     transpose=True,
                     use_w4a8_fused_quant=self.use_w4a8_fused_quant,
                     use_cache=False,
+                    use_ue8m0=self.use_ue8m0,
                 )
                 weight_obj.w4a8_fp4_stacked = _w4a8_stack_quant(
                     weight_list,
                     transpose=False,
                     use_w4a8_fused_quant=self.use_w4a8_fused_quant,
                     use_cache=False,
+                    use_ue8m0=self.use_ue8m0,
                 )
 
             if quant_transpose is None or quant_transpose is True:

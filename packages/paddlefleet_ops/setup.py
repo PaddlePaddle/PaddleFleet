@@ -205,6 +205,10 @@ def setup_ops_extension():
             f"{_ext_rel}/tokens_unzip_slice.cu",
             f"{_ext_rel}/fuse_swiglu_scale.cu",
             f"{_ext_rel}/fuse_weighted_swiglu_fp8_quant.cu",
+            # W4A8 1x32 FP4/FP8 quantization operators.  Keep this explicit:
+            # clean release/0.4 wheels must ship the source, otherwise the
+            # Python W4A8 switch only fails later at runtime.
+            f"{_ext_rel}/w4a8_quant.cu",
             f"{_ext_rel}/router_metadata.cu",
             f"{_ext_rel}/count_cumsum.cu",
             f"{_ext_rel}/filter_scores.cu",

@@ -527,7 +527,11 @@ def _w4a8_quant(x, quant_dtype, use_w4a8_fused_quant=False):
 
 
 def _w4a8_stack_quant(
-    weights, transpose, use_w4a8_fused_quant=False, use_cache=True
+    weights,
+    transpose,
+    use_w4a8_fused_quant=False,
+    use_cache=True,
+    use_ue8m0=True,
 ):
     # release/0.4 的离线 fp8 权重量化会在每步构建 fp8 权重缓存后释放常驻 bf16 专家
     # 权重（FP8 前向只读 fp8 缓存）。W4A8 的 fp4 stack-quant 需要 bf16，
@@ -547,6 +551,11 @@ def _w4a8_stack_quant(
         if cache is not None:
             return cache
     if _use_w4a8_fused_quant(use_w4a8_fused_quant):
+        if not use_ue8m0:
+            raise ValueError(
+                "use_w4a8_fused_quant=True requires use_ue8m0=True; "
+                "the fused SM100 W4A8 kernels use UE8M0 scales"
+            )
         weights = _stack_expert_weights(weights)
         return w4a8_stack_quantize_1x32(weights, transpose)
     fn = (
@@ -554,7 +563,11 @@ def _w4a8_stack_quant(
         if transpose
         else fuse_stack_fp8_quant_python
     )
-    return fn(weights, quant_dtype="fp4")
+    return fn(
+        weights,
+        quant_dtype="fp4",
+        using_ue8m0_scale=use_ue8m0,
+    )
 
 
 def _w4a8_weighted_swiglu_quant(
@@ -752,6 +765,33 @@ class _PerExpertWeightView:
         start = self._local_id * rows_per_expert
         return t._slice(start, start + rows_per_expert)
 
+    def _slice_expert_tensor(self, tensor):
+        """Slice one expert from a stacked W4A8 tensor.
+
+        W4A8 caches are stored as ``(fp4, scale)`` tuples.  Unlike the FP8
+        cache, both tensors keep the expert dimension explicitly, while older
+        FP8 caches flatten it into the leading row dimension.  Accept both
+        layouts so per-expert deep-gemm views have one stable interface.
+        """
+        if tensor is None:
+            return None
+        if tensor.ndim >= 3:
+            return tensor._slice(self._local_id, self._local_id + 1)
+        rows_per_expert = tensor.shape[0] // self._num_experts
+        start = self._local_id * rows_per_expert
+        return tensor._slice(start, start + rows_per_expert)
+
+    def _slice_w4a8_cache(self, attr_name):
+        cached = getattr(self._parent, attr_name, None)
+        if cached is None:
+            return None
+        if not isinstance(cached, (tuple, list)) or len(cached) != 2:
+            raise TypeError(
+                f"{attr_name} must be a (quantized_weight, scale) tuple, "
+                f"got {type(cached).__name__}"
+            )
+        return tuple(self._slice_expert_tensor(t) for t in cached)
+
     @property
     def shape(self):
         return self._shape
@@ -778,6 +818,14 @@ class _PerExpertWeightView:
     @property
     def fp8_scale_stacked_transpose(self):
         return self._slice_stacked("fp8_scale_stacked_transpose")
+
+    @property
+    def w4a8_fp4_stacked(self):
+        return self._slice_w4a8_cache("w4a8_fp4_stacked")
+
+    @property
+    def w4a8_fp4_stacked_transpose(self):
+        return self._slice_w4a8_cache("w4a8_fp4_stacked_transpose")
 
     @property
     def main_grad(self):
@@ -996,6 +1044,31 @@ class ExpertsGroupGemmContiguousNode:
         self.use_w4a8 = use_w4a8
         self.use_w4a8_fused_quant = use_w4a8_fused_quant
         if use_w4a8:
+            try:
+                capability = paddle.device.cuda.get_device_capability()
+            except Exception as exc:
+                raise RuntimeError(
+                    "use_w4a8 requires a CUDA SM100 device; unable to query "
+                    "the current device capability."
+                ) from exc
+            if capability[0] != 10:
+                raise RuntimeError(
+                    "use_w4a8 requires an SM100 (compute capability 10.x) "
+                    f"device, got {capability[0]}.{capability[1]}."
+                )
+            if not use_ue8m0:
+                raise ValueError(
+                    "use_w4a8 requires use_ue8m0=True because the W4A8 "
+                    "1x32 kernel contract uses UE8M0 scales."
+                )
+            if (
+                moe_subbatch_token_num_after_dispatch is not None
+                and moe_subbatch_token_num_after_dispatch > 0
+            ):
+                raise ValueError(
+                    "use_w4a8 does not support static "
+                    "moe_subbatch_token_num_after_dispatch."
+                )
             assert moe_expert_fusion and moe_deep_gemm and use_fp8_mlp, (
                 "use_w4a8 需要 moe_expert_fusion + moe_deep_gemm + use_fp8_mlp"
             )
@@ -1289,6 +1362,7 @@ class ExpertsGroupGemmContiguousNode:
             expert_w1,
             transpose=True,
             use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+            use_ue8m0=self.use_ue8m0,
         )
         if x_fp8 is None:
             x_fp8, x_sf = _w4a8_quant(
@@ -1355,6 +1429,7 @@ class ExpertsGroupGemmContiguousNode:
             expert_w2,
             transpose=True,
             use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+            use_ue8m0=self.use_ue8m0,
         )
         o2_fp8, o2_sf = self._w4a8_act_quant(o1, unzipped_probs)
         if clear_o1:
@@ -1381,6 +1456,7 @@ class ExpertsGroupGemmContiguousNode:
             expert_w2,
             transpose=False,
             use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+            use_ue8m0=self.use_ue8m0,
         )
         grad_fp8, grad_sf = _w4a8_quant(
             unzipped_grad,
@@ -1442,6 +1518,7 @@ class ExpertsGroupGemmContiguousNode:
             expert_w1,
             transpose=False,
             use_w4a8_fused_quant=self.use_w4a8_fused_quant,
+            use_ue8m0=self.use_ue8m0,
         )
         do1_fp8, do1_sf = _w4a8_quant(
             do1,
