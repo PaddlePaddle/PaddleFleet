@@ -134,7 +134,7 @@ def get_kimi_k3_vision_spec(
                 "head_dim": get_kimi_k3_vision_head_dim(config),
                 "max_height": getattr(config, "max_height", 512),
                 "max_width": getattr(config, "max_width", 512),
-                "rotary_base": getattr(config, "rotary_base", 10000),
+                "rotary_base": config.rope_theta,
             },
         )
     )

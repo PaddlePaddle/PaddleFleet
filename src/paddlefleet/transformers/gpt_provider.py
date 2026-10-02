@@ -119,7 +119,7 @@ class GPTModelProvider(GPTConfig, ModelProviderMixin[GPTModel]):
     tie_word_embeddings: bool = True
     make_vocab_size_divisible_by: int = 128
     position_embedding_type: Literal["learned_absolute", "rope"] = "rope"
-    rotary_base: int = 10000
+    rope_theta: int = 10000
     rotary_percent: float = 1.0
     seq_len_interpolation_factor: Optional[float] = None
     seq_length: int = 1024

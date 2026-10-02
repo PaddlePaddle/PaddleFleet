@@ -111,7 +111,7 @@ class DeepSeekV3_2BaseProvider(GPTModelProvider):
     # ---- RoPE ----
     position_embedding_type: str = "rope"
     # DeepSeek V3.2 uses YaRN-style RoPE with base 10000
-    rotary_base: float = 10000.0
+    rope_theta: float = 10000.0
     # MLA uses interleaved RoPE; Indexer uses non-interleaved (handled internally)
     # Setting rotary_interleaved=True here enables the interleaved path for MLA Q/K
     rotary_interleaved: bool = True

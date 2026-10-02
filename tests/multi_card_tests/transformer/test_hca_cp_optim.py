@@ -288,6 +288,7 @@ class TestCompressorGroupSharding(unittest.TestCase):
             init_method=None,
             init_method_std=0.02,
             rms_norm_eps=1e-5,
+            high_precision_rope=False,
         )
         return Compressor(
             config=config,
@@ -367,6 +368,8 @@ def _csa_config(ratio, window_size, hidden_size=256, head_dim=64):
         dsa_indexer_use_sparse_loss=False,
         csa_indexer_backend="unfused",
         csa_sparse_attn_backend="unfused",
+        apply_rope_fusion=False,
+        high_precision_rope=False,
         init_method=None,
         init_method_std=0.02,
         layernorm_epsilon=1e-5,
