@@ -388,6 +388,7 @@ class TestMLAHySparseForwardRouting(unittest.TestCase):
             recompute_qkv_up_porj_and_rope=False,
             training=False,
             use_rr_flash_attention=False,
+            use_rr_o_proj=False,
             gated_attention=False,
             use_vha_postmix=False,
             layer_number=0,

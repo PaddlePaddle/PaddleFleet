@@ -45,6 +45,7 @@ from paddlefleet.parallel_state import (
 from paddlefleet.process_groups_config import ProcessGroupCollection
 from paddlefleet.recompute_utils import (
     keep_indexer_grad_path,
+    make_refined_recompute,
     module_needs_recompute,
 )
 from paddlefleet.tensor_parallel import RecomputeWithoutOutput
@@ -657,6 +658,11 @@ class MultiLatentAttention(Attention):
             )
         )
 
+        # A bias would put o_proj's bias Parameter through the boundary.
+        self.use_rr_o_proj, self._o_proj_rr = make_refined_recompute(
+            self, "mla_o_proj", supported=not self.config.use_bias
+        )
+
         self.recompute_qkv_up_porj_and_rope = (
             self.config.recompute_granularity == "selective"
             and module_needs_recompute(
@@ -1152,9 +1158,12 @@ class MultiLatentAttention(Attention):
             "mla_gate_output", get_current_layer(), core_attn_out
         )
 
-        output, bias = deferrable_linear(
-            self.config, "attn_out_proj", self.o_proj, core_attn_out
-        )
+        if self.use_rr_o_proj and self.training:
+            output, bias = self._o_proj_rr(self.o_proj, core_attn_out)
+        else:
+            output, bias = deferrable_linear(
+                self.config, "attn_out_proj", self.o_proj, core_attn_out
+            )
 
         if self.gated_attention and self.recompute_gated_attn:
             gate_recompute.discard_output_and_register_recompute(output)
