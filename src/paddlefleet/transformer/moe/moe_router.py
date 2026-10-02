@@ -160,9 +160,15 @@ def apply_learnable_routed_scaling(top_gate, top_idx, param):
     return top_gate * gathered_scales
 
 
+def _flatten_tokens(x):
+    """Collapse the leading dims of an activation to ``[N, x.shape[-1]]``."""
+    return x if len(x.shape) == 2 else x.reshape([-1, x.shape[-1]])
+
+
 class FusedGateDetachMatmul(paddle.autograd.PyLayer):
     """
     FusedGateDetachMatmul
+
     """
 
     @staticmethod
@@ -174,6 +180,7 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
         ctx.dtype = paddle.float32
         ctx.save_for_backward(x, w)
         w = w.T
+        x = _flatten_tokens(x)
         return F.linear(x.cast(ctx.dtype), w.cast(ctx.dtype))
 
     @staticmethod
@@ -186,6 +193,12 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
 
         w_stop_grad = w.stop_gradient
         x_stop_grad = x.stop_gradient
+        # Redone here rather than kept from forward; see the class docstring.
+        x_shape = x.shape
+        x = _flatten_tokens(x)
+
+        def _to_input_shape(x_grad):
+            return None if x_grad is None else x_grad.reshape(x_shape)
 
         def _compute_weight_grad(x_cast, y_grad, weight):
             with paddle.amp.auto_cast(False):
@@ -213,7 +226,9 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
             w_cast = w.cast(ctx.dtype)
 
             x_g = paddle.matmul(y_grad, w_cast.T, transpose_y=True)
-            x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+            x_grad = (
+                _to_input_shape(x_g.cast(x.dtype)) if not x_stop_grad else None
+            )
 
             if w_stop_grad:
                 return x_grad, None
@@ -239,12 +254,94 @@ class FusedGateDetachMatmul(paddle.autograd.PyLayer):
                 False,
             )
 
-            x_grad = x_g.cast(x.dtype) if not x_stop_grad else None
+            x_grad = (
+                _to_input_shape(x_g.cast(x.dtype)) if not x_stop_grad else None
+            )
             w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
             if w_grad is not None:
                 w_grad = w_grad.T
 
             return x_grad, w_grad
+
+
+class FusedTwoViewGate(paddle.autograd.PyLayer):
+    """Fusing the two split-feature gate projections into one autograd node"""
+
+    @staticmethod
+    def forward(ctx, x, w0, w1, defer_dw=False):
+        ctx.defer_dw = defer_dw
+        ctx.dtype = paddle.float32
+        ctx.save_for_backward(x, w0, w1)
+        x2d = _flatten_tokens(x)
+        logits_0 = F.linear(x2d.cast(ctx.dtype), w0.T.cast(ctx.dtype))
+        logits_1 = F.linear(x2d.cast(ctx.dtype), w1.T.cast(ctx.dtype))
+        return logits_0, logits_1
+
+    @staticmethod
+    def backward(ctx, g0, g1):
+        x, w0, w1 = ctx.saved_tensor()
+        assert ctx.dtype == g0.dtype == g1.dtype, "dtype not match"
+        x_shape = x.shape
+        x_stop_grad = x.stop_gradient
+        w0_stop_grad = w0.stop_gradient
+        w1_stop_grad = w1.stop_gradient
+        x2d = _flatten_tokens(x)
+
+        def _one_view(y_grad, w, w_stop_grad):
+            """Return (x_g_2d, w_grad) for one view; mirrors else-branch math."""
+            wt = w.T
+            x_g, w_g = matmul_grad(
+                x2d.cast(ctx.dtype), wt.cast(ctx.dtype), y_grad, False, False
+            )
+            x_g = x_g.cast(x2d.dtype) if not x_stop_grad else None
+            w_grad = w_g.cast(w.dtype) if not w_stop_grad else None
+            if w_grad is not None:
+                w_grad = w_grad.T
+            return x_g, w_grad
+
+        # defer_dw: weight grads go to WeightGradStore, both views separately,
+        # in the same creation order two independent nodes would have.
+        if ctx.defer_dw:
+            x2d_cast = x2d.cast(ctx.dtype)
+
+            def _wgrad_closure(w, y_grad):
+                def _fn(x_cast, y_grad, weight):
+                    with paddle.amp.auto_cast(False):
+                        wg = paddle.matmul(x_cast, y_grad, transpose_x=True).T
+                    if hasattr(weight, "main_grad"):
+                        if weight.main_grad is None:
+                            weight.main_grad = paddle.zeros(
+                                weight.shape, dtype=paddle.float32
+                            )
+                        weight.main_grad.add_(wg)
+                    else:
+                        raise AssertionError("fp8 overlap need main_grad")
+                    if hasattr(weight, "_apply_backward_hook"):
+                        weight._apply_backward_hook()
+
+                return partial(_fn, x2d_cast.detach(), y_grad.detach(), w)
+
+            gx0 = paddle.matmul(g0, w0.cast(ctx.dtype).T, transpose_y=True)
+            gx1 = paddle.matmul(g1, w1.cast(ctx.dtype).T, transpose_y=True)
+            x_g_2d = (gx0 + gx1).cast(x2d.dtype) if not x_stop_grad else None
+            x_grad = x_g_2d.reshape(x_shape) if x_g_2d is not None else None
+            if not w0_stop_grad or not w1_stop_grad:
+                WeightGradStore.enabled = True
+                if not w0_stop_grad:
+                    WeightGradStore.put(_wgrad_closure(w0, g0))
+                if not w1_stop_grad:
+                    WeightGradStore.put(_wgrad_closure(w1, g1))
+                WeightGradStore.enabled = False
+            return x_grad, None, None
+
+        gx0, w0_grad = _one_view(g0, w0, w0_stop_grad)
+        gx1, w1_grad = _one_view(g1, w1, w1_stop_grad)
+        # Sum the two view contributions in 2D, then reshape once
+        if x_stop_grad:
+            x_grad = None
+        else:
+            x_grad = (gx0 + gx1).reshape(x_shape)
+        return x_grad, w0_grad, w1_grad
 
 
 def gate_detach_matmul(
@@ -257,7 +354,9 @@ def gate_detach_matmul(
     if use_fuse:
         score = FusedGateDetachMatmul.apply(x, weight, defer_dw)
     else:
-        x = x.cast(paddle.float32)
+        # Flattened before the cast: the cast makes a copy, so no view of the
+        # caller's activation survives to pin it.
+        x = _flatten_tokens(x).cast(paddle.float32)
         score = F.linear(x, weight)
 
     if moe_router_force_load_balancing:
@@ -1172,6 +1271,10 @@ class TopKRouter(StandardMoERouter):
         self._setup_hash_layer(layer_number, is_mtp_layer=is_mtp_layer)
 
     def forward(self, input, input_ids=None, origin_input_ids=None):
+        # The gate matmul gets this tensor, not the flattened view made below:
+        # FusedGateDetachMatmul keeps what it is given until backward, so a view
+        # would pin the mHC layernorm output against the recompute's _clear_data().
+        gate_input = input
         if len(input.shape) == 3:
             if not self.sequence_parallel:
                 batch_size, seq_len, d_model = input.shape
@@ -1288,25 +1391,18 @@ class TopKRouter(StandardMoERouter):
                         "moe_split_feature_routing requires scoring_func "
                         f"== 'sigmoid', but got {self.scoring_func!r}."
                     )
-                # Two independent views; the routing score is the SUM of their
-                # per-expert scores. View 0 reuses the existing self.weight
-                # gate, view 1 uses the new self.weight_1 projection. Both
-                # reuse the fused gate matmul so they share the
-                # force-load-balancing and defer_dw paths.
-                logits_0 = gate_detach_matmul(
-                    input,
+                # NOTE(Difers): Fusing the two split-feature gate projections into a single autograd node
+                # leaves x.grad with only two terms—(gx0 + gx1) and the expert-dispatch gradient—thereby
+                # matching the previous behavior while avoiding ~1 ULP ordering-dependent drift.
+                logits_0, logits_1 = FusedTwoViewGate.apply(
+                    gate_input,
                     self.weight,
-                    True,
-                    self.config.moe_router_force_load_balancing,
-                    dw_overlap_enabled(self.config, "moe_router_gate"),
-                )
-                logits_1 = gate_detach_matmul(
-                    input,
                     self.weight_1,
-                    True,
-                    self.config.moe_router_force_load_balancing,
                     dw_overlap_enabled(self.config, "moe_router_gate"),
                 )
+                if self.config.moe_router_force_load_balancing:
+                    logits_0 = apply_random_logits(logits_0)
+                    logits_1 = apply_random_logits(logits_1)
 
                 logits_0, logits_1 = inspect_tensor(
                     "moe_gate_fused_logits",
@@ -1328,7 +1424,7 @@ class TopKRouter(StandardMoERouter):
                 logits = logits_0 + logits_1  # used by z-loss
             else:
                 logits = gate_detach_matmul(
-                    input,
+                    gate_input,
                     self.weight,
                     True,
                     self.config.moe_router_force_load_balancing,
