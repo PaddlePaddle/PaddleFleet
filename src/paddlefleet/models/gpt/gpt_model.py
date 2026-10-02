@@ -505,11 +505,25 @@ class GPTModel(PipelineLayer):
                 layers, LayerDesc(spec.embedding), name_prefix
             )
         i = 0
+        empty_index = 0
+
+        def next_empty_layer_name():
+            """Name for the next EmptyLayer.
+
+            Empty (placeholder) layers live in their own ``empty_layers.<n>``
+            namespace and do not consume a ``layers.<i>`` slot, so real
+            transformer/MTP layers count from ``layers.0`` without the
+            head/tail empty-layer offset.
+            """
+            nonlocal empty_index
+            name = f"{name_prefix}.empty_layers.{empty_index}"
+            empty_index += 1
+            return name
+
         for head_empty_layer in spec.head_empty_layers:
             self.add_sequential_layer(
-                layers, LayerDesc(head_empty_layer), f"{name_prefix}.layers.{i}"
+                layers, LayerDesc(head_empty_layer), next_empty_layer_name()
             )
-            i += 1
 
         if spec.mhc_expand is not None:
             self.add_sequential_layer(
@@ -642,9 +656,8 @@ class GPTModel(PipelineLayer):
 
         for tail_empty_layer in spec.tail_empty_layers:
             self.add_sequential_layer(
-                layers, LayerDesc(tail_empty_layer), f"{name_prefix}.layers.{i}"
+                layers, LayerDesc(tail_empty_layer), next_empty_layer_name()
             )
-            i += 1
 
         if (
             self.config.gpt_model_use_experimental_version

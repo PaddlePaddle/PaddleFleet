@@ -565,7 +565,7 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
         for layer_idx in range(num_hidden_layers):
             real_layer_number = layer_idx + config.num_empty_layers_add_in_head
             _add_layer_slice_config(
-                f"model.layers.{real_layer_number}", real_layer_number
+                f"model.layers.{layer_idx}", real_layer_number
             )
 
         # MTP layers
@@ -585,7 +585,8 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                 + num_hidden_layers
             )
             _add_layer_slice_config(
-                f"model.layers.{real_layer_number}", real_layer_number
+                f"model.layers.{num_hidden_layers + layer_idx}",
+                real_layer_number,
             )
         for layer_idx in range(num_nextn_predict_layers):
             real_layer_number = (
@@ -594,7 +595,7 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                 + num_hidden_layers
             )
             _add_layer_slice_config(
-                f"model.layers.{real_layer_number}.transformer_layer",
+                f"model.layers.{num_hidden_layers + layer_idx}.transformer_layer",
                 real_layer_number,
             )
 
@@ -718,12 +719,6 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
             ]
 
         num_hidden_layers = config.num_hidden_layers
-        num_head_empty_layers = (
-            config.num_empty_layers_add_in_head
-            if hasattr(config, "num_empty_layers_add_in_head")
-            and config.num_empty_layers_add_in_head
-            else 0
-        )
 
         # NOTE: MiniMax-M2 has no dense layers (first_k_dense_replace=0)
 
@@ -752,38 +747,36 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                 num_hidden_layers, num_hidden_layers + num_nextn_predict_layers
             )
         ):
-            layer_idx_offset = layer_idx + num_head_empty_layers
             prefix = f"model.layers.{layer_idx}"
-            prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
+            fleet_prefix = f"{model_prefix}layers.{layer_idx}"
             aoa_config["aoa_statements"] += [
-                f"{prefix}.eh_proj.weight^T -> {prefix_offset}.eh_proj.weight",
-                f"{prefix}.enorm.weight -> {prefix_offset}.enorm.weight",
-                f"{prefix}.hnorm.weight -> {prefix_offset}.hnorm.weight",
-                f"{prefix}.shared_head.norm.weight -> {prefix_offset}.norm.weight",
+                f"{prefix}.eh_proj.weight^T -> {fleet_prefix}.eh_proj.weight",
+                f"{prefix}.enorm.weight -> {fleet_prefix}.enorm.weight",
+                f"{prefix}.hnorm.weight -> {fleet_prefix}.hnorm.weight",
+                f"{prefix}.shared_head.norm.weight -> {fleet_prefix}.norm.weight",
             ]
 
             # transformer_layer.mlp.up_gate_proj.weight
             if getattr(config, "use_dense_mtp", False):
-                prefix_offset += ".transformer_layer"
+                fleet_prefix += ".transformer_layer"
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.mlp.gate_proj.weight^T, {prefix}.mlp.up_proj.weight^T -> {prefix_offset}.mlp.up_gate_proj.weight, fused_ffn",
-                    f"{prefix}.mlp.down_proj.weight^T -> {prefix_offset}.mlp.down_proj.weight",
+                    f"{prefix}.mlp.gate_proj.weight^T, {prefix}.mlp.up_proj.weight^T -> {fleet_prefix}.mlp.up_gate_proj.weight, fused_ffn",
+                    f"{prefix}.mlp.down_proj.weight^T -> {fleet_prefix}.mlp.down_proj.weight",
                 ]
 
         # layer0 - layer_num_hidden_layers
         for layer_idx in reversed(
             range(0, num_hidden_layers + num_nextn_predict_layers)
         ):
-            layer_idx_offset = layer_idx + num_head_empty_layers
             prefix = f"model.layers.{layer_idx}"
-            prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
+            fleet_prefix = f"{model_prefix}layers.{layer_idx}"
             if layer_idx >= num_hidden_layers:
                 # for mtp
-                prefix_offset += ".transformer_layer"
+                fleet_prefix += ".transformer_layer"
             aoa_config["aoa_statements"] += [
-                f"{prefix}.input_layernorm.weight -> {prefix_offset}.input_layernorm.weight",
-                f"{prefix}.post_attention_layernorm.weight -> {prefix_offset}.post_attention_layernorm.weight",
-                f"{prefix}.self_attn.o_proj.weight^T -> {prefix_offset}.self_attn.o_proj.weight",
+                f"{prefix}.input_layernorm.weight -> {fleet_prefix}.input_layernorm.weight",
+                f"{prefix}.post_attention_layernorm.weight -> {fleet_prefix}.post_attention_layernorm.weight",
+                f"{prefix}.self_attn.o_proj.weight^T -> {fleet_prefix}.self_attn.o_proj.weight",
             ]
 
             use_mla = bool(getattr(config, "multi_latent_attention", False))
@@ -791,7 +784,7 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
             if config.use_gated_attn and use_mla:
                 # MLA mode: gate_proj is a separate parameter
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.self_attn.gate_proj.weight^T -> {prefix_offset}.self_attn.gate_proj.weight",
+                    f"{prefix}.self_attn.gate_proj.weight^T -> {fleet_prefix}.self_attn.gate_proj.weight",
                 ]
 
             is_swa = is_layer_window_attention(
@@ -803,32 +796,32 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                 or (config.add_swa_attention_sink_bias and is_swa)
             ):
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.self_attn.core_attention.softmax_offset -> {prefix_offset}.self_attn.core_attention.softmax_offset",
+                    f"{prefix}.self_attn.core_attention.softmax_offset -> {fleet_prefix}.self_attn.core_attention.softmax_offset",
                 ]
 
             if config.use_vha_attention:
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.self_attn.vha_premix_weight -> {prefix_offset}.self_attn.vha_premix_weight",
+                    f"{prefix}.self_attn.vha_premix_weight -> {fleet_prefix}.self_attn.vha_premix_weight",
                 ]
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.self_attn.vha_postmix_U -> {prefix_offset}.self_attn.vha_postmix_U",
+                    f"{prefix}.self_attn.vha_postmix_U -> {fleet_prefix}.self_attn.vha_postmix_U",
                 ]
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.self_attn.vha_postmix_V -> {prefix_offset}.self_attn.vha_postmix_V",
+                    f"{prefix}.self_attn.vha_postmix_V -> {fleet_prefix}.self_attn.vha_postmix_V",
                 ]
 
             if use_mla:
                 # MLA attention
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.self_attn.q_a_proj.weight^T -> {prefix_offset}.self_attn.q_a_proj.weight",
-                    f"{prefix}.self_attn.q_b_proj.weight^T -> {prefix_offset}.self_attn.q_b_proj.weight",
-                    f"{prefix}.self_attn.kv_a_proj_with_mqa.weight^T -> {prefix_offset}.self_attn.kv_a_proj_with_mqa.weight",
-                    f"{prefix}.self_attn.kv_b_proj.weight^T -> {prefix_offset}.self_attn.kv_b_proj.weight",
+                    f"{prefix}.self_attn.q_a_proj.weight^T -> {fleet_prefix}.self_attn.q_a_proj.weight",
+                    f"{prefix}.self_attn.q_b_proj.weight^T -> {fleet_prefix}.self_attn.q_b_proj.weight",
+                    f"{prefix}.self_attn.kv_a_proj_with_mqa.weight^T -> {fleet_prefix}.self_attn.kv_a_proj_with_mqa.weight",
+                    f"{prefix}.self_attn.kv_b_proj.weight^T -> {fleet_prefix}.self_attn.kv_b_proj.weight",
                 ]
                 if config.use_qk_norm:
                     aoa_config["aoa_statements"] += [
-                        f"{prefix}.self_attn.q_a_layernorm.weight -> {prefix_offset}.self_attn.q_a_layernorm.weight",
-                        f"{prefix}.self_attn.kv_a_layernorm.weight -> {prefix_offset}.self_attn.kv_a_layernorm.weight",
+                        f"{prefix}.self_attn.q_a_layernorm.weight -> {fleet_prefix}.self_attn.q_a_layernorm.weight",
+                        f"{prefix}.self_attn.kv_a_layernorm.weight -> {fleet_prefix}.self_attn.kv_a_layernorm.weight",
                     ]
 
             elif config.experimental_attention_variant == "dsv4_hybrid":
@@ -845,44 +838,44 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                 csa_ratio = config.csa_compress_ratios[layer_idx]
                 aoa_config["aoa_statements"] += [
                     # Linear projections (transpose: HF [out, in] -> paddle [in, out])
-                    f"{prefix}.self_attn.linear_q_down_proj.weight^T -> {prefix_offset}.self_attn.linear_q_down_proj.weight",
-                    f"{prefix}.self_attn.linear_q_up_proj.weight^T -> {prefix_offset}.self_attn.linear_q_up_proj.weight",
-                    f"{prefix}.self_attn.linear_kv_proj.weight^T -> {prefix_offset}.self_attn.linear_kv_proj.weight",
-                    f"{prefix}.self_attn.o_proj.weight^T -> {prefix_offset}.self_attn.o_proj.weight",
+                    f"{prefix}.self_attn.linear_q_down_proj.weight^T -> {fleet_prefix}.self_attn.linear_q_down_proj.weight",
+                    f"{prefix}.self_attn.linear_q_up_proj.weight^T -> {fleet_prefix}.self_attn.linear_q_up_proj.weight",
+                    f"{prefix}.self_attn.linear_kv_proj.weight^T -> {fleet_prefix}.self_attn.linear_kv_proj.weight",
+                    f"{prefix}.self_attn.o_proj.weight^T -> {fleet_prefix}.self_attn.o_proj.weight",
                     # Layer norms (no transpose, 1D)
-                    f"{prefix}.self_attn.q_layernorm.weight -> {prefix_offset}.self_attn.q_layernorm.weight",
-                    f"{prefix}.self_attn.kv_layernorm.weight -> {prefix_offset}.self_attn.kv_layernorm.weight",
+                    f"{prefix}.self_attn.q_layernorm.weight -> {fleet_prefix}.self_attn.q_layernorm.weight",
+                    f"{prefix}.self_attn.kv_layernorm.weight -> {fleet_prefix}.self_attn.kv_layernorm.weight",
                     # Grouped output projection (raw parameter, shape [out, in] on both sides)
-                    f"{prefix}.self_attn.linear_o_group_proj -> {prefix_offset}.self_attn.linear_o_group_proj",
+                    f"{prefix}.self_attn.linear_o_group_proj -> {fleet_prefix}.self_attn.linear_o_group_proj",
                     # Core attention: learnable attention sink (1D, no transpose)
-                    f"{prefix}.self_attn.core_attention.attn_sink -> {prefix_offset}.self_attn.core_attention.attn_sink",
+                    f"{prefix}.self_attn.core_attention.attn_sink -> {fleet_prefix}.self_attn.core_attention.attn_sink",
                 ]
                 # Compressor exists only when compress_ratio > 1 (i.e. ratio in {4, 128})
                 if csa_ratio > 1:
                     aoa_config["aoa_statements"] += [
-                        f"{prefix}.self_attn.core_attention.compressor.linear_wkv.weight^T -> {prefix_offset}.self_attn.core_attention.compressor.linear_wkv.weight",
-                        f"{prefix}.self_attn.core_attention.compressor.linear_wgate.weight^T -> {prefix_offset}.self_attn.core_attention.compressor.linear_wgate.weight",
-                        f"{prefix}.self_attn.core_attention.compressor.norm.weight -> {prefix_offset}.self_attn.core_attention.compressor.norm.weight",
-                        f"{prefix}.self_attn.core_attention.compressor.ape -> {prefix_offset}.self_attn.core_attention.compressor.ape",
+                        f"{prefix}.self_attn.core_attention.compressor.linear_wkv.weight^T -> {fleet_prefix}.self_attn.core_attention.compressor.linear_wkv.weight",
+                        f"{prefix}.self_attn.core_attention.compressor.linear_wgate.weight^T -> {fleet_prefix}.self_attn.core_attention.compressor.linear_wgate.weight",
+                        f"{prefix}.self_attn.core_attention.compressor.norm.weight -> {fleet_prefix}.self_attn.core_attention.compressor.norm.weight",
+                        f"{prefix}.self_attn.core_attention.compressor.ape -> {fleet_prefix}.self_attn.core_attention.compressor.ape",
                     ]
                 # Indexer exists only when compress_ratio == 4 and not csa_dense_mode
                 if csa_ratio == 4 and not getattr(
                     config, "csa_dense_mode", False
                 ):
                     aoa_config["aoa_statements"] += [
-                        f"{prefix}.self_attn.core_attention.indexer.linear_wq_b.weight^T -> {prefix_offset}.self_attn.core_attention.indexer.linear_wq_b.weight",
-                        f"{prefix}.self_attn.core_attention.indexer.linear_weights_proj.weight^T -> {prefix_offset}.self_attn.core_attention.indexer.linear_weights_proj.weight",
-                        f"{prefix}.self_attn.core_attention.indexer.compressor.linear_wkv.weight^T -> {prefix_offset}.self_attn.core_attention.indexer.compressor.linear_wkv.weight",
-                        f"{prefix}.self_attn.core_attention.indexer.compressor.linear_wgate.weight^T -> {prefix_offset}.self_attn.core_attention.indexer.compressor.linear_wgate.weight",
-                        f"{prefix}.self_attn.core_attention.indexer.compressor.norm.weight -> {prefix_offset}.self_attn.core_attention.indexer.compressor.norm.weight",
-                        f"{prefix}.self_attn.core_attention.indexer.compressor.ape -> {prefix_offset}.self_attn.core_attention.indexer.compressor.ape",
+                        f"{prefix}.self_attn.core_attention.indexer.linear_wq_b.weight^T -> {fleet_prefix}.self_attn.core_attention.indexer.linear_wq_b.weight",
+                        f"{prefix}.self_attn.core_attention.indexer.linear_weights_proj.weight^T -> {fleet_prefix}.self_attn.core_attention.indexer.linear_weights_proj.weight",
+                        f"{prefix}.self_attn.core_attention.indexer.compressor.linear_wkv.weight^T -> {fleet_prefix}.self_attn.core_attention.indexer.compressor.linear_wkv.weight",
+                        f"{prefix}.self_attn.core_attention.indexer.compressor.linear_wgate.weight^T -> {fleet_prefix}.self_attn.core_attention.indexer.compressor.linear_wgate.weight",
+                        f"{prefix}.self_attn.core_attention.indexer.compressor.norm.weight -> {fleet_prefix}.self_attn.core_attention.indexer.compressor.norm.weight",
+                        f"{prefix}.self_attn.core_attention.indexer.compressor.ape -> {fleet_prefix}.self_attn.core_attention.indexer.compressor.ape",
                     ]
 
             else:
                 if config.use_qk_norm:
                     aoa_config["aoa_statements"] += [
-                        f"{prefix}.self_attn.q_norm.weight -> {prefix_offset}.self_attn.q_norm.weight",
-                        f"{prefix}.self_attn.k_norm.weight -> {prefix_offset}.self_attn.k_norm.weight",
+                        f"{prefix}.self_attn.q_norm.weight -> {fleet_prefix}.self_attn.q_norm.weight",
+                        f"{prefix}.self_attn.k_norm.weight -> {fleet_prefix}.self_attn.k_norm.weight",
                     ]
 
                 # attention qkv
@@ -914,23 +907,23 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
 
                 if config.use_vha_attention:
                     aoa_config["aoa_statements"] += [
-                        f"{prefix}.self_attn.q_proj.weight^T -> {prefix_offset}.self_attn.q_proj.weight",
-                        f"{prefix}.self_attn.k_proj.weight^T -> {prefix_offset}.self_attn.k_proj.weight",
-                        f"{prefix}.self_attn.v_proj.weight^T -> {prefix_offset}.self_attn.v_proj.weight",
+                        f"{prefix}.self_attn.q_proj.weight^T -> {fleet_prefix}.self_attn.q_proj.weight",
+                        f"{prefix}.self_attn.k_proj.weight^T -> {fleet_prefix}.self_attn.k_proj.weight",
+                        f"{prefix}.self_attn.v_proj.weight^T -> {fleet_prefix}.self_attn.v_proj.weight",
                     ]
                     if use_gated_attn:
                         aoa_config["aoa_statements"].append(
-                            f"{prefix}.self_attn.gate_proj.weight^T -> {prefix_offset}.self_attn.gate_proj.weight"
+                            f"{prefix}.self_attn.gate_proj.weight^T -> {fleet_prefix}.self_attn.gate_proj.weight"
                         )
                     if config.attention_bias:
                         aoa_config["aoa_statements"] += [
-                            f"{prefix}.self_attn.q_proj.bias -> {prefix_offset}.self_attn.q_proj.bias",
-                            f"{prefix}.self_attn.k_proj.bias -> {prefix_offset}.self_attn.k_proj.bias",
-                            f"{prefix}.self_attn.v_proj.bias -> {prefix_offset}.self_attn.v_proj.bias",
+                            f"{prefix}.self_attn.q_proj.bias -> {fleet_prefix}.self_attn.q_proj.bias",
+                            f"{prefix}.self_attn.k_proj.bias -> {fleet_prefix}.self_attn.k_proj.bias",
+                            f"{prefix}.self_attn.v_proj.bias -> {fleet_prefix}.self_attn.v_proj.bias",
                         ]
                         if use_gated_attn:
                             aoa_config["aoa_statements"].append(
-                                f"{prefix}.self_attn.gate_proj.bias -> {prefix_offset}.self_attn.gate_proj.bias"
+                                f"{prefix}.self_attn.gate_proj.bias -> {fleet_prefix}.self_attn.gate_proj.bias"
                             )
 
                 else:
@@ -1018,7 +1011,7 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                         f"{','.join(ordered)} -> {fused_tmp}, axis=0"
                     )
                     aoa_config["aoa_statements"].append(
-                        f"{fused_tmp}^T -> {prefix_offset}.self_attn.qkv_proj.weight"
+                        f"{fused_tmp}^T -> {fleet_prefix}.self_attn.qkv_proj.weight"
                     )
 
                     if config.attention_bias:
@@ -1032,7 +1025,7 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                             f"{prefix}.self_attn.v_proj.bias -> {','.join(v_bias_names)}, axis=0"
                         )
                         aoa_config["aoa_statements"].append(
-                            f"{','.join(bias_ordered)} -> {prefix_offset}.self_attn.qkv_proj.bias, axis=0"
+                            f"{','.join(bias_ordered)} -> {fleet_prefix}.self_attn.qkv_proj.bias, axis=0"
                         )
 
         moe_layer_start = config.first_k_dense_replace
@@ -1043,26 +1036,25 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
         )
         # All layers are MoE (first_k_dense_replace=0)
         for layer_idx in reversed(range(moe_layer_start, moe_layer_end)):
-            layer_idx_offset = layer_idx + num_head_empty_layers
             prefix = f"model.layers.{layer_idx}"
-            prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
+            fleet_prefix = f"{model_prefix}layers.{layer_idx}"
             if layer_idx >= num_hidden_layers:
                 # for mtp
-                prefix_offset += ".transformer_layer"
+                fleet_prefix += ".transformer_layer"
             if getattr(config, "use_accuracy_compatible", False):
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.block_sparse_moe.e_score_correction_bias -> {prefix_offset}.mlp.gate.e_score_correction_bias",
-                    f"{prefix}.block_sparse_moe.gate.weight -> {prefix_offset}.mlp.gate.weight, dtype='bfloat16'",
+                    f"{prefix}.block_sparse_moe.e_score_correction_bias -> {fleet_prefix}.mlp.gate.e_score_correction_bias",
+                    f"{prefix}.block_sparse_moe.gate.weight -> {fleet_prefix}.mlp.gate.weight, dtype='bfloat16'",
                 ]
             else:
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.block_sparse_moe.e_score_correction_bias -> {prefix_offset}.mlp.gate.e_score_correction_bias",
-                    f"{prefix}.block_sparse_moe.gate.weight -> {prefix_offset}.mlp.gate.weight",
+                    f"{prefix}.block_sparse_moe.e_score_correction_bias -> {fleet_prefix}.mlp.gate.e_score_correction_bias",
+                    f"{prefix}.block_sparse_moe.gate.weight -> {fleet_prefix}.mlp.gate.weight",
                 ]
 
             if config.routed_scaling_factor_learnable:
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.block_sparse_moe.gate.routed_scaling_factor_param -> {prefix_offset}.mlp.gate.routed_scaling_factor_param",
+                    f"{prefix}.block_sparse_moe.gate.routed_scaling_factor_param -> {fleet_prefix}.mlp.gate.routed_scaling_factor_param",
                 ]
 
             if (
@@ -1070,33 +1062,33 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                 and config.moe_latent_size > 0
             ):
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.block_sparse_moe.fc1_latent_proj.weight^T -> {prefix_offset}.mlp.fc1_latent_proj.weight",
-                    f"{prefix}.block_sparse_moe.fc2_latent_proj.weight^T -> {prefix_offset}.mlp.fc2_latent_proj.weight",
+                    f"{prefix}.block_sparse_moe.fc1_latent_proj.weight^T -> {fleet_prefix}.mlp.fc1_latent_proj.weight",
+                    f"{prefix}.block_sparse_moe.fc2_latent_proj.weight^T -> {fleet_prefix}.mlp.fc2_latent_proj.weight",
                 ]
 
             if using_sonic_moe:
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.block_sparse_moe.experts.$EXPERT_ID.w2.weight -> {prefix_offset}.mlp.experts.$EXPERT_ID.down_proj.weight",
+                    f"{prefix}.block_sparse_moe.experts.$EXPERT_ID.w2.weight -> {fleet_prefix}.mlp.experts.$EXPERT_ID.down_proj.weight",
                 ]
             else:
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.block_sparse_moe.experts.$EXPERT_ID.w2.weight^T -> {prefix_offset}.mlp.experts.$EXPERT_ID.down_proj.weight",
+                    f"{prefix}.block_sparse_moe.experts.$EXPERT_ID.w2.weight^T -> {fleet_prefix}.mlp.experts.$EXPERT_ID.down_proj.weight",
                 ]
 
             if n_shared_experts > 0:
                 aoa_config["aoa_statements"] += [
-                    f"{prefix}.block_sparse_moe.shared_experts.w1.weight^T, {prefix}.block_sparse_moe.shared_experts.w3.weight^T -> {prefix_offset}.mlp.shared_experts.up_gate_proj.weight, fused_ffn",
-                    f"{prefix}.block_sparse_moe.shared_experts.w2.weight^T -> {prefix_offset}.mlp.shared_experts.down_proj.weight",
+                    f"{prefix}.block_sparse_moe.shared_experts.w1.weight^T, {prefix}.block_sparse_moe.shared_experts.w3.weight^T -> {fleet_prefix}.mlp.shared_experts.up_gate_proj.weight, fused_ffn",
+                    f"{prefix}.block_sparse_moe.shared_experts.w2.weight^T -> {fleet_prefix}.mlp.shared_experts.down_proj.weight",
                 ]
 
             for expert_id in range(config.n_routed_experts):
                 if using_sonic_moe:
                     aoa_config["aoa_statements"] += [
-                        f"{prefix}.block_sparse_moe.experts.{expert_id}.w1.weight, {prefix}.block_sparse_moe.experts.{expert_id}.w3.weight -> {prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight, axis=0",
+                        f"{prefix}.block_sparse_moe.experts.{expert_id}.w1.weight, {prefix}.block_sparse_moe.experts.{expert_id}.w3.weight -> {fleet_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight, axis=0",
                     ]
                 else:
                     aoa_config["aoa_statements"] += [
-                        f"{prefix}.block_sparse_moe.experts.{expert_id}.w1.weight^T, {prefix}.block_sparse_moe.experts.{expert_id}.w3.weight^T -> {prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight, axis=1",
+                        f"{prefix}.block_sparse_moe.experts.{expert_id}.w1.weight^T, {prefix}.block_sparse_moe.experts.{expert_id}.w3.weight^T -> {fleet_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight, axis=1",
                     ]
 
             use_fused_weight = config.moe_expert_fusion
@@ -1120,16 +1112,16 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                 ep_weight2 = []
                 for expert_id in range(num_experts):
                     ep_weight1.append(
-                        f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                        f"{fleet_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight"
                     )
                     ep_weight2.append(
-                        f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight"
+                        f"{fleet_prefix}.mlp.experts.{expert_id}.down_proj.weight"
                     )
                 group_gemm1 = ",".join(ep_weight1)
                 group_gemm2 = ",".join(ep_weight2)
                 aoa_config["aoa_statements"] += [
-                    f"{group_gemm1} -> {prefix_offset}.mlp.grouped_gemm_experts.weight1, axis=0",
-                    f"{group_gemm2} -> {prefix_offset}.mlp.grouped_gemm_experts.weight2, axis=0",
+                    f"{group_gemm1} -> {fleet_prefix}.mlp.grouped_gemm_experts.weight1, axis=0",
+                    f"{group_gemm2} -> {fleet_prefix}.mlp.grouped_gemm_experts.weight2, axis=0",
                 ]
             else:
                 if config.get("fd_fallback", False):
@@ -1137,16 +1129,16 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                     ep_weight2 = []
                     for expert_id in range(num_experts):
                         ep_weight1.append(
-                            f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                            f"{fleet_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight"
                         )
                         ep_weight2.append(
-                            f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight"
+                            f"{fleet_prefix}.mlp.experts.{expert_id}.down_proj.weight"
                         )
                     group1 = ",".join(ep_weight1)
                     group2 = ",".join(ep_weight2)
                     aoa_config["aoa_statements"] += [
-                        f"{group1} -> {prefix_offset}.mlp.experts.up_gate_proj, axis=0",
-                        f"{group2} -> {prefix_offset}.mlp.experts.down_proj, axis=0",
+                        f"{group1} -> {fleet_prefix}.mlp.experts.up_gate_proj, axis=0",
+                        f"{group2} -> {fleet_prefix}.mlp.experts.down_proj, axis=0",
                     ]
 
         return aoa_config
@@ -1189,12 +1181,6 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
             ]
 
         num_hidden_layers = config.num_hidden_layers
-        num_head_empty_layers = (
-            config.num_empty_layers_add_in_head
-            if hasattr(config, "num_empty_layers_add_in_head")
-            and config.num_empty_layers_add_in_head
-            else 0
-        )
 
         # NOTE: MiniMax-M2 has no dense layers (first_k_dense_replace=0)
 
@@ -1223,39 +1209,37 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                 num_hidden_layers, num_hidden_layers + num_nextn_predict_layers
             )
         ):
-            layer_idx_offset = layer_idx + num_head_empty_layers
             prefix = f"model.layers.{layer_idx}"
-            prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
+            fleet_prefix = f"{model_prefix}layers.{layer_idx}"
             aoa_statements += [
-                f"{prefix_offset}.eh_proj.weight^T -> {prefix}.eh_proj.weight",
-                f"{prefix_offset}.enorm.weight -> {prefix}.enorm.weight",
-                f"{prefix_offset}.hnorm.weight -> {prefix}.hnorm.weight",
-                f"{prefix_offset}.norm.weight -> {prefix}.shared_head.norm.weight",
+                f"{fleet_prefix}.eh_proj.weight^T -> {prefix}.eh_proj.weight",
+                f"{fleet_prefix}.enorm.weight -> {prefix}.enorm.weight",
+                f"{fleet_prefix}.hnorm.weight -> {prefix}.hnorm.weight",
+                f"{fleet_prefix}.norm.weight -> {prefix}.shared_head.norm.weight",
             ]
 
             # dense MTP: inverse mapping for dense MLP weights
             if getattr(config, "use_dense_mtp", False):
-                prefix_offset_tf = f"{prefix_offset}.transformer_layer"
+                fleet_prefix_tf = f"{fleet_prefix}.transformer_layer"
                 aoa_statements += [
-                    f"{prefix_offset_tf}.mlp.up_gate_proj.weight -> {prefix}.mlp.gate_proj.weight, {prefix}.mlp.up_proj.weight, fused_ffn",
+                    f"{fleet_prefix_tf}.mlp.up_gate_proj.weight -> {prefix}.mlp.gate_proj.weight, {prefix}.mlp.up_proj.weight, fused_ffn",
                     f"{prefix}.mlp.gate_proj.weight^T -> {prefix}.mlp.gate_proj.weight",
                     f"{prefix}.mlp.up_proj.weight^T -> {prefix}.mlp.up_proj.weight",
-                    f"{prefix_offset_tf}.mlp.down_proj.weight^T -> {prefix}.mlp.down_proj.weight",
+                    f"{fleet_prefix_tf}.mlp.down_proj.weight^T -> {prefix}.mlp.down_proj.weight",
                 ]
 
         # layer 0 -> layer num_hidden_layers-1
         for layer_idx in range(0, num_hidden_layers + num_nextn_predict_layers):
-            layer_idx_offset = layer_idx + num_head_empty_layers
-            prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
+            fleet_prefix = f"{model_prefix}layers.{layer_idx}"
             prefix = f"model.layers.{layer_idx}"
             if layer_idx >= num_hidden_layers:
                 # for mtp
-                prefix_offset += ".transformer_layer"
+                fleet_prefix += ".transformer_layer"
 
             aoa_statements += [
-                f"{prefix_offset}.input_layernorm.weight -> {prefix}.input_layernorm.weight",
-                f"{prefix_offset}.post_attention_layernorm.weight -> {prefix}.post_attention_layernorm.weight",
-                f"{prefix_offset}.self_attn.o_proj.weight^T -> {prefix}.self_attn.o_proj.weight",
+                f"{fleet_prefix}.input_layernorm.weight -> {prefix}.input_layernorm.weight",
+                f"{fleet_prefix}.post_attention_layernorm.weight -> {prefix}.post_attention_layernorm.weight",
+                f"{fleet_prefix}.self_attn.o_proj.weight^T -> {prefix}.self_attn.o_proj.weight",
             ]
 
             use_mla = bool(getattr(config, "multi_latent_attention", False))
@@ -1266,18 +1250,18 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
             if config.use_gated_attn and use_mla:
                 # MLA mode: gate_proj is a separate parameter
                 aoa_statements += [
-                    f"{prefix_offset}.self_attn.gate_proj.weight^T -> {prefix}.self_attn.gate_proj.weight",
+                    f"{fleet_prefix}.self_attn.gate_proj.weight^T -> {prefix}.self_attn.gate_proj.weight",
                 ]
 
             if config.use_vha_attention:
                 aoa_statements += [
-                    f"{prefix_offset}.self_attn.vha_premix_weight -> {prefix}.self_attn.vha_premix_weight",
+                    f"{fleet_prefix}.self_attn.vha_premix_weight -> {prefix}.self_attn.vha_premix_weight",
                 ]
                 aoa_statements += [
-                    f"{prefix_offset}.self_attn.vha_postmix_U -> {prefix}.self_attn.vha_postmix_U",
+                    f"{fleet_prefix}.self_attn.vha_postmix_U -> {prefix}.self_attn.vha_postmix_U",
                 ]
                 aoa_statements += [
-                    f"{prefix_offset}.self_attn.vha_postmix_V -> {prefix}.self_attn.vha_postmix_V",
+                    f"{fleet_prefix}.self_attn.vha_postmix_V -> {prefix}.self_attn.vha_postmix_V",
                 ]
 
             if (
@@ -1286,21 +1270,21 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                 or (config.add_swa_attention_sink_bias and is_swa)
             ):
                 aoa_statements += [
-                    f"{prefix_offset}.self_attn.core_attention.softmax_offset -> {prefix}.self_attn.core_attention.softmax_offset",
+                    f"{fleet_prefix}.self_attn.core_attention.softmax_offset -> {prefix}.self_attn.core_attention.softmax_offset",
                 ]
 
             if use_mla:
                 # MLA attention
                 aoa_statements += [
-                    f"{prefix_offset}.self_attn.q_a_proj.weight^T -> {prefix}.self_attn.q_a_proj.weight",
-                    f"{prefix_offset}.self_attn.q_b_proj.weight^T -> {prefix}.self_attn.q_b_proj.weight",
-                    f"{prefix_offset}.self_attn.kv_a_proj_with_mqa.weight^T -> {prefix}.self_attn.kv_a_proj_with_mqa.weight",
-                    f"{prefix_offset}.self_attn.kv_b_proj.weight^T -> {prefix}.self_attn.kv_b_proj.weight",
+                    f"{fleet_prefix}.self_attn.q_a_proj.weight^T -> {prefix}.self_attn.q_a_proj.weight",
+                    f"{fleet_prefix}.self_attn.q_b_proj.weight^T -> {prefix}.self_attn.q_b_proj.weight",
+                    f"{fleet_prefix}.self_attn.kv_a_proj_with_mqa.weight^T -> {prefix}.self_attn.kv_a_proj_with_mqa.weight",
+                    f"{fleet_prefix}.self_attn.kv_b_proj.weight^T -> {prefix}.self_attn.kv_b_proj.weight",
                 ]
                 if config.use_qk_norm:
                     aoa_statements += [
-                        f"{prefix_offset}.self_attn.q_a_layernorm.weight -> {prefix}.self_attn.q_a_layernorm.weight",
-                        f"{prefix_offset}.self_attn.kv_a_layernorm.weight -> {prefix}.self_attn.kv_a_layernorm.weight",
+                        f"{fleet_prefix}.self_attn.q_a_layernorm.weight -> {prefix}.self_attn.q_a_layernorm.weight",
+                        f"{fleet_prefix}.self_attn.kv_a_layernorm.weight -> {prefix}.self_attn.kv_a_layernorm.weight",
                     ]
             elif config.experimental_attention_variant == "dsv4_hybrid":
                 # csa_compress_ratios has length num_hidden_layers + num_nextn_predict_layers,
@@ -1316,43 +1300,43 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                 csa_ratio = config.csa_compress_ratios[layer_idx]
                 aoa_statements += [
                     # Linear projections (transpose: paddle [in, out] -> HF [out, in])
-                    f"{prefix_offset}.self_attn.linear_q_down_proj.weight^T -> {prefix}.self_attn.linear_q_down_proj.weight",
-                    f"{prefix_offset}.self_attn.linear_q_up_proj.weight^T -> {prefix}.self_attn.linear_q_up_proj.weight",
-                    f"{prefix_offset}.self_attn.linear_kv_proj.weight^T -> {prefix}.self_attn.linear_kv_proj.weight",
-                    f"{prefix_offset}.self_attn.o_proj.weight^T -> {prefix}.self_attn.o_proj.weight",
+                    f"{fleet_prefix}.self_attn.linear_q_down_proj.weight^T -> {prefix}.self_attn.linear_q_down_proj.weight",
+                    f"{fleet_prefix}.self_attn.linear_q_up_proj.weight^T -> {prefix}.self_attn.linear_q_up_proj.weight",
+                    f"{fleet_prefix}.self_attn.linear_kv_proj.weight^T -> {prefix}.self_attn.linear_kv_proj.weight",
+                    f"{fleet_prefix}.self_attn.o_proj.weight^T -> {prefix}.self_attn.o_proj.weight",
                     # Layer norms (no transpose, 1D)
-                    f"{prefix_offset}.self_attn.q_layernorm.weight -> {prefix}.self_attn.q_layernorm.weight",
-                    f"{prefix_offset}.self_attn.kv_layernorm.weight -> {prefix}.self_attn.kv_layernorm.weight",
+                    f"{fleet_prefix}.self_attn.q_layernorm.weight -> {prefix}.self_attn.q_layernorm.weight",
+                    f"{fleet_prefix}.self_attn.kv_layernorm.weight -> {prefix}.self_attn.kv_layernorm.weight",
                     # Grouped output projection (raw parameter, shape [out, in] on both sides)
-                    f"{prefix_offset}.self_attn.linear_o_group_proj -> {prefix}.self_attn.linear_o_group_proj",
+                    f"{fleet_prefix}.self_attn.linear_o_group_proj -> {prefix}.self_attn.linear_o_group_proj",
                     # Core attention: learnable attention sink (1D, no transpose)
-                    f"{prefix_offset}.self_attn.core_attention.attn_sink -> {prefix}.self_attn.core_attention.attn_sink",
+                    f"{fleet_prefix}.self_attn.core_attention.attn_sink -> {prefix}.self_attn.core_attention.attn_sink",
                 ]
                 # Compressor exists only when compress_ratio > 1 (i.e. ratio in {4, 128})
                 if csa_ratio > 1:
                     aoa_statements += [
-                        f"{prefix_offset}.self_attn.core_attention.compressor.linear_wkv.weight^T -> {prefix}.self_attn.core_attention.compressor.linear_wkv.weight",
-                        f"{prefix_offset}.self_attn.core_attention.compressor.linear_wgate.weight^T -> {prefix}.self_attn.core_attention.compressor.linear_wgate.weight",
-                        f"{prefix_offset}.self_attn.core_attention.compressor.norm.weight -> {prefix}.self_attn.core_attention.compressor.norm.weight",
-                        f"{prefix_offset}.self_attn.core_attention.compressor.ape -> {prefix}.self_attn.core_attention.compressor.ape",
+                        f"{fleet_prefix}.self_attn.core_attention.compressor.linear_wkv.weight^T -> {prefix}.self_attn.core_attention.compressor.linear_wkv.weight",
+                        f"{fleet_prefix}.self_attn.core_attention.compressor.linear_wgate.weight^T -> {prefix}.self_attn.core_attention.compressor.linear_wgate.weight",
+                        f"{fleet_prefix}.self_attn.core_attention.compressor.norm.weight -> {prefix}.self_attn.core_attention.compressor.norm.weight",
+                        f"{fleet_prefix}.self_attn.core_attention.compressor.ape -> {prefix}.self_attn.core_attention.compressor.ape",
                     ]
                 # Indexer exists only when compress_ratio == 4 and not csa_dense_mode
                 if csa_ratio == 4 and not getattr(
                     config, "csa_dense_mode", False
                 ):
                     aoa_statements += [
-                        f"{prefix_offset}.self_attn.core_attention.indexer.linear_wq_b.weight^T -> {prefix}.self_attn.core_attention.indexer.linear_wq_b.weight",
-                        f"{prefix_offset}.self_attn.core_attention.indexer.linear_weights_proj.weight^T -> {prefix}.self_attn.core_attention.indexer.linear_weights_proj.weight",
-                        f"{prefix_offset}.self_attn.core_attention.indexer.compressor.linear_wkv.weight^T -> {prefix}.self_attn.core_attention.indexer.compressor.linear_wkv.weight",
-                        f"{prefix_offset}.self_attn.core_attention.indexer.compressor.linear_wgate.weight^T -> {prefix}.self_attn.core_attention.indexer.compressor.linear_wgate.weight",
-                        f"{prefix_offset}.self_attn.core_attention.indexer.compressor.norm.weight -> {prefix}.self_attn.core_attention.indexer.compressor.norm.weight",
-                        f"{prefix_offset}.self_attn.core_attention.indexer.compressor.ape -> {prefix}.self_attn.core_attention.indexer.compressor.ape",
+                        f"{fleet_prefix}.self_attn.core_attention.indexer.linear_wq_b.weight^T -> {prefix}.self_attn.core_attention.indexer.linear_wq_b.weight",
+                        f"{fleet_prefix}.self_attn.core_attention.indexer.linear_weights_proj.weight^T -> {prefix}.self_attn.core_attention.indexer.linear_weights_proj.weight",
+                        f"{fleet_prefix}.self_attn.core_attention.indexer.compressor.linear_wkv.weight^T -> {prefix}.self_attn.core_attention.indexer.compressor.linear_wkv.weight",
+                        f"{fleet_prefix}.self_attn.core_attention.indexer.compressor.linear_wgate.weight^T -> {prefix}.self_attn.core_attention.indexer.compressor.linear_wgate.weight",
+                        f"{fleet_prefix}.self_attn.core_attention.indexer.compressor.norm.weight -> {prefix}.self_attn.core_attention.indexer.compressor.norm.weight",
+                        f"{fleet_prefix}.self_attn.core_attention.indexer.compressor.ape -> {prefix}.self_attn.core_attention.indexer.compressor.ape",
                     ]
             else:
                 if config.use_qk_norm:
                     aoa_statements += [
-                        f"{prefix_offset}.self_attn.q_norm.weight -> {prefix}.self_attn.q_norm.weight",
-                        f"{prefix_offset}.self_attn.k_norm.weight -> {prefix}.self_attn.k_norm.weight",
+                        f"{fleet_prefix}.self_attn.q_norm.weight -> {prefix}.self_attn.q_norm.weight",
+                        f"{fleet_prefix}.self_attn.k_norm.weight -> {prefix}.self_attn.k_norm.weight",
                     ]
 
                 (
@@ -1381,27 +1365,27 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
 
                 if config.use_vha_attention:
                     aoa_statements += [
-                        f"{prefix_offset}.self_attn.q_proj.weight^T -> {prefix}.self_attn.q_proj.weight",
-                        f"{prefix_offset}.self_attn.k_proj.weight^T -> {prefix}.self_attn.k_proj.weight",
-                        f"{prefix_offset}.self_attn.v_proj.weight^T -> {prefix}.self_attn.v_proj.weight",
+                        f"{fleet_prefix}.self_attn.q_proj.weight^T -> {prefix}.self_attn.q_proj.weight",
+                        f"{fleet_prefix}.self_attn.k_proj.weight^T -> {prefix}.self_attn.k_proj.weight",
+                        f"{fleet_prefix}.self_attn.v_proj.weight^T -> {prefix}.self_attn.v_proj.weight",
                     ]
                     if use_gated_attn:
                         aoa_statements.append(
-                            f"{prefix_offset}.self_attn.gate_proj.weight^T -> {prefix}.self_attn.gate_proj.weight"
+                            f"{fleet_prefix}.self_attn.gate_proj.weight^T -> {prefix}.self_attn.gate_proj.weight"
                         )
                     if config.attention_bias:
                         aoa_statements += [
-                            f"{prefix_offset}.self_attn.q_proj.bias -> {prefix}.self_attn.q_proj.bias",
-                            f"{prefix_offset}.self_attn.k_proj.bias -> {prefix}.self_attn.k_proj.bias",
-                            f"{prefix_offset}.self_attn.v_proj.bias -> {prefix}.self_attn.v_proj.bias",
+                            f"{fleet_prefix}.self_attn.q_proj.bias -> {prefix}.self_attn.q_proj.bias",
+                            f"{fleet_prefix}.self_attn.k_proj.bias -> {prefix}.self_attn.k_proj.bias",
+                            f"{fleet_prefix}.self_attn.v_proj.bias -> {prefix}.self_attn.v_proj.bias",
                         ]
                         if use_gated_attn:
                             aoa_statements.append(
-                                f"{prefix_offset}.self_attn.gate_proj.bias -> {prefix}.self_attn.gate_proj.bias"
+                                f"{fleet_prefix}.self_attn.gate_proj.bias -> {prefix}.self_attn.gate_proj.bias"
                             )
 
                 else:
-                    fleet_key = f"{prefix_offset}.self_attn.qkv_proj.weight"
+                    fleet_key = f"{fleet_prefix}.self_attn.qkv_proj.weight"
                     fused_tmp = f"{prefix}.self_attn.qkv_fused_tmp"
 
                     # Step 1: Transpose fleet weight
@@ -1501,7 +1485,7 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
 
                     if config.attention_bias:
                         aoa_statements.append(
-                            f"{prefix_offset}.self_attn.qkv_proj.bias -> {','.join(bias_chunk_names)}, axis=0"
+                            f"{fleet_prefix}.self_attn.qkv_proj.bias -> {','.join(bias_chunk_names)}, axis=0"
                         )
                         aoa_statements.append(
                             f"{','.join(bias_q_ordered)} -> {prefix}.self_attn.q_proj.bias, axis=0"
@@ -1520,12 +1504,11 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
             else num_hidden_layers + num_nextn_predict_layers
         )
         for layer_idx in range(config.first_k_dense_replace, moe_layer_end):
-            layer_idx_offset = layer_idx + num_head_empty_layers
-            prefix_offset = f"{model_prefix}layers.{layer_idx_offset}"
+            fleet_prefix = f"{model_prefix}layers.{layer_idx}"
             prefix = f"model.layers.{layer_idx}"
             if layer_idx >= num_hidden_layers:
                 # for mtp
-                prefix_offset += ".transformer_layer"
+                fleet_prefix += ".transformer_layer"
 
             use_fused_weight = config.moe_expert_fusion
             if (
@@ -1548,16 +1531,16 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                 ep_weight2 = []
                 for expert_id in range(config.n_routed_experts):
                     ep_weight1.append(
-                        f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                        f"{fleet_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight"
                     )
                     ep_weight2.append(
-                        f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight"
+                        f"{fleet_prefix}.mlp.experts.{expert_id}.down_proj.weight"
                     )
                 group_gemm1 = ",".join(ep_weight1)
                 group_gemm2 = ",".join(ep_weight2)
                 aoa_statements += [
-                    f"{prefix_offset}.mlp.grouped_gemm_experts.weight1 -> {group_gemm1}, axis=0",
-                    f"{prefix_offset}.mlp.grouped_gemm_experts.weight2 -> {group_gemm2}, axis=0",
+                    f"{fleet_prefix}.mlp.grouped_gemm_experts.weight1 -> {group_gemm1}, axis=0",
+                    f"{fleet_prefix}.mlp.grouped_gemm_experts.weight2 -> {group_gemm2}, axis=0",
                 ]
             else:
                 if config.get("fd_fallback", False):
@@ -1565,40 +1548,40 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                     ep_weight2 = []
                     for expert_id in range(num_experts):
                         ep_weight1.append(
-                            f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight"
+                            f"{fleet_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight"
                         )
                         ep_weight2.append(
-                            f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight"
+                            f"{fleet_prefix}.mlp.experts.{expert_id}.down_proj.weight"
                         )
                     group1 = ",".join(ep_weight1)
                     group2 = ",".join(ep_weight2)
                     aoa_statements += [
-                        f"{prefix_offset}.mlp.experts.up_gate_proj -> {group1}, axis=0",
-                        f"{prefix_offset}.mlp.experts.down_proj -> {group2}, axis=0",
+                        f"{fleet_prefix}.mlp.experts.up_gate_proj -> {group1}, axis=0",
+                        f"{fleet_prefix}.mlp.experts.down_proj -> {group2}, axis=0",
                     ]
 
             if n_shared_experts > 0:
                 aoa_statements += [
-                    f"{prefix_offset}.mlp.shared_experts.down_proj.weight^T -> {prefix}.block_sparse_moe.shared_experts.w2.weight",
-                    f"{prefix_offset}.mlp.shared_experts.up_gate_proj.weight -> {prefix_offset}.block_sparse_moe.shared_experts.gate_proj.weight, {prefix_offset}.block_sparse_moe.shared_experts.up_proj.weight, fused_ffn",
-                    f"{prefix_offset}.block_sparse_moe.shared_experts.gate_proj.weight^T -> {prefix}.block_sparse_moe.shared_experts.w1.weight",
-                    f"{prefix_offset}.block_sparse_moe.shared_experts.up_proj.weight^T -> {prefix}.block_sparse_moe.shared_experts.w3.weight",
+                    f"{fleet_prefix}.mlp.shared_experts.down_proj.weight^T -> {prefix}.block_sparse_moe.shared_experts.w2.weight",
+                    f"{fleet_prefix}.mlp.shared_experts.up_gate_proj.weight -> {fleet_prefix}.block_sparse_moe.shared_experts.gate_proj.weight, {fleet_prefix}.block_sparse_moe.shared_experts.up_proj.weight, fused_ffn",
+                    f"{fleet_prefix}.block_sparse_moe.shared_experts.gate_proj.weight^T -> {prefix}.block_sparse_moe.shared_experts.w1.weight",
+                    f"{fleet_prefix}.block_sparse_moe.shared_experts.up_proj.weight^T -> {prefix}.block_sparse_moe.shared_experts.w3.weight",
                 ]
 
             if getattr(config, "use_accuracy_compatible", False):
                 aoa_statements += [
-                    f"{prefix_offset}.mlp.gate.weight -> {prefix}.block_sparse_moe.gate.weight, dtype='float32'",
-                    f"{prefix_offset}.mlp.gate.e_score_correction_bias -> {prefix}.block_sparse_moe.e_score_correction_bias",
+                    f"{fleet_prefix}.mlp.gate.weight -> {prefix}.block_sparse_moe.gate.weight, dtype='float32'",
+                    f"{fleet_prefix}.mlp.gate.e_score_correction_bias -> {prefix}.block_sparse_moe.e_score_correction_bias",
                 ]
             else:
                 aoa_statements += [
-                    f"{prefix_offset}.mlp.gate.weight -> {prefix}.block_sparse_moe.gate.weight",
-                    f"{prefix_offset}.mlp.gate.e_score_correction_bias -> {prefix}.block_sparse_moe.e_score_correction_bias",
+                    f"{fleet_prefix}.mlp.gate.weight -> {prefix}.block_sparse_moe.gate.weight",
+                    f"{fleet_prefix}.mlp.gate.e_score_correction_bias -> {prefix}.block_sparse_moe.e_score_correction_bias",
                 ]
 
             if config.routed_scaling_factor_learnable:
                 aoa_statements += [
-                    f"{prefix_offset}.mlp.gate.routed_scaling_factor_param -> {prefix}.block_sparse_moe.gate.routed_scaling_factor_param",
+                    f"{fleet_prefix}.mlp.gate.routed_scaling_factor_param -> {prefix}.block_sparse_moe.gate.routed_scaling_factor_param",
                 ]
 
             if (
@@ -1606,33 +1589,33 @@ class MiniMaxM2PreTrainedModel(PretrainedModel):
                 and config.moe_latent_size > 0
             ):
                 aoa_statements += [
-                    f"{prefix_offset}.mlp.fc1_latent_proj.weight^T -> {prefix}.block_sparse_moe.fc1_latent_proj.weight ",
-                    f"{prefix_offset}.mlp.fc2_latent_proj.weight^T -> {prefix}.block_sparse_moe.fc2_latent_proj.weight",
+                    f"{fleet_prefix}.mlp.fc1_latent_proj.weight^T -> {prefix}.block_sparse_moe.fc1_latent_proj.weight ",
+                    f"{fleet_prefix}.mlp.fc2_latent_proj.weight^T -> {prefix}.block_sparse_moe.fc2_latent_proj.weight",
                 ]
 
             if using_sonic_moe:
                 aoa_statements += [
-                    f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight -> {prefix_offset}.block_sparse_moe.experts.{expert_id}.w1.weight, {prefix_offset}.block_sparse_moe.experts.{expert_id}.w3.weight, axis=0"
+                    f"{fleet_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight -> {fleet_prefix}.block_sparse_moe.experts.{expert_id}.w1.weight, {fleet_prefix}.block_sparse_moe.experts.{expert_id}.w3.weight, axis=0"
                     for expert_id in range(config.n_routed_experts)
                 ]
             else:
                 aoa_statements += [
-                    f"{prefix_offset}.mlp.experts.{expert_id}.up_gate_proj.weight -> {prefix_offset}.block_sparse_moe.experts.{expert_id}.w1.weight, {prefix_offset}.block_sparse_moe.experts.{expert_id}.w3.weight, axis=1"
+                    f"{fleet_prefix}.mlp.experts.{expert_id}.up_gate_proj.weight -> {fleet_prefix}.block_sparse_moe.experts.{expert_id}.w1.weight, {fleet_prefix}.block_sparse_moe.experts.{expert_id}.w3.weight, axis=1"
                     for expert_id in range(config.n_routed_experts)
                 ]
 
             if not using_sonic_moe:
                 aoa_statements += (
                     [
-                        f"{prefix_offset}.block_sparse_moe.experts.{expert_id}.w1.weight^T -> {prefix}.block_sparse_moe.experts.{expert_id}.w1.weight"
+                        f"{fleet_prefix}.block_sparse_moe.experts.{expert_id}.w1.weight^T -> {prefix}.block_sparse_moe.experts.{expert_id}.w1.weight"
                         for expert_id in range(config.n_routed_experts)
                     ]
                     + [
-                        f"{prefix_offset}.block_sparse_moe.experts.{expert_id}.w3.weight^T -> {prefix}.block_sparse_moe.experts.{expert_id}.w3.weight"
+                        f"{fleet_prefix}.block_sparse_moe.experts.{expert_id}.w3.weight^T -> {prefix}.block_sparse_moe.experts.{expert_id}.w3.weight"
                         for expert_id in range(config.n_routed_experts)
                     ]
                     + [
-                        f"{prefix_offset}.mlp.experts.{expert_id}.down_proj.weight^T-> {prefix}.block_sparse_moe.experts.{expert_id}.w2.weight"
+                        f"{fleet_prefix}.mlp.experts.{expert_id}.down_proj.weight^T-> {prefix}.block_sparse_moe.experts.{expert_id}.w2.weight"
                         for expert_id in range(config.n_routed_experts)
                     ]
                 )

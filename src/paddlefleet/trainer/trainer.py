@@ -139,6 +139,7 @@ if TYPE_CHECKING:
 
 from paddle.framework.recall_error import LOSS_INF_ERROR, LOSS_NAN_ERROR
 
+from paddlefleet.models.gpt.aoa_dispatch import resolve_aoa_config
 from paddlefleet.utils import use_dsv4_accuracy_compatible
 
 from ..transformers.context_parallel_utils import (
@@ -1580,7 +1581,7 @@ class Trainer:
             worker_groups = None
 
         if self.args.load_from_hf:
-            hf_aoa_config = self.model._gen_aoa_config(self.model.config)
+            hf_aoa_config = resolve_aoa_config(self.model, self.model.config)
             # The checkpoint's own config.json states whether its weights are
             # quantized, so nothing has to declare it through an argument.
             hf_quan_config = None
@@ -2516,7 +2517,7 @@ class Trainer:
             if resume_from_checkpoint is not None:
                 if self.args.convert_from_hf:
                     model_sharded_state_dict = model.sharded_state_dict()
-                    aoa_config = model._gen_aoa_config(model.config)
+                    aoa_config = resolve_aoa_config(model, model.config)
                     dist.load_state_dict(
                         model_sharded_state_dict,
                         resume_from_checkpoint,

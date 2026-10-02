@@ -227,12 +227,14 @@ class TestQwen3VLVisionModelGetLayerDescList(unittest.TestCase):
         self.assertIs(layers[1]["layer"].layer_spec, body[0])
         self.assertIs(layers[-1]["layer"].layer_spec, merger)
 
-    def test_shared_index_counter_across_sections(self):
-        """head/transformer/tail share one 0-based ``.layers.{i}`` counter.
+    def test_empty_and_transformer_use_separate_counters(self):
+        """head/tail empties share a 0-based ``empty_layers.{n}`` counter,
+        kept separate from the transformer layers' ``layers.{i}`` counter.
 
-        A per-section index reset would repeat ``.layers.0`` and be caught by
-        the exact prefix chain below; the layer_func identity list also pins
-        that no section is dropped or reordered.
+        A per-section index reset (or re-coupling the two namespaces) would
+        misplace an entry and be caught by the exact prefix chain below; the
+        layer_spec identity list also pins that no section is dropped or
+        reordered.
         """
         spec, emb, head, body, tail, merger = self._spec(1, 2, 1)
         model = _new_vision_model("vision")
@@ -242,10 +244,10 @@ class TestQwen3VLVisionModelGetLayerDescList(unittest.TestCase):
             [entry["name_prefix"] for entry in layers],
             [
                 "model.vision",
-                "model.vision.layers.0",  # head_empty[0]
-                "model.vision.layers.1",  # transformer[0]
-                "model.vision.layers.2",  # transformer[1]
-                "model.vision.layers.3",  # tail_empty[0]
+                "model.vision.empty_layers.0",  # head_empty[0]
+                "model.vision.layers.0",  # transformer[0]
+                "model.vision.layers.1",  # transformer[1]
+                "model.vision.empty_layers.1",  # tail_empty[0]
                 "model.vision.merger",
             ],
         )

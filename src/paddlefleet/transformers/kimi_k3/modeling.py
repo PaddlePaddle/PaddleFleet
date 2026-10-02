@@ -137,9 +137,6 @@ class KimiK3PretrainedModel(PretrainedModel):
             config, "params_dtype", getattr(config, "dtype", "bfloat16")
         )
         layer_types = config.layer_types
-        num_head_empty_layers = (
-            getattr(config, "num_empty_layers_add_in_head", 0) or 0
-        )
 
         src_model = "language_model.model"
         statements = [
@@ -280,7 +277,7 @@ class KimiK3PretrainedModel(PretrainedModel):
 
         for layer_idx, attention_type in enumerate(layer_types):
             src = f"{src_model}.layers.{layer_idx}"
-            dst = f"model.layers.{layer_idx + num_head_empty_layers}"
+            dst = f"model.layers.{layer_idx}"
             add_attention(src, dst, attention_type)
             add_attention_residual(src, dst)
             if cls._is_moe_layer(config, layer_idx):
@@ -292,7 +289,7 @@ class KimiK3PretrainedModel(PretrainedModel):
         if num_mtp_layers:
             for mtp_idx in range(num_mtp_layers):
                 layer_idx = num_layers + mtp_idx
-                mtp = f"model.layers.{layer_idx + num_head_empty_layers}"
+                mtp = f"model.layers.{layer_idx}"
                 dst = f"{mtp}.transformer_layer"
                 statements.extend(
                     [
@@ -387,9 +384,6 @@ class KimiK3PretrainedModel(PretrainedModel):
         num_experts = config.n_routed_experts
         num_mtp_layers = getattr(config, "num_nextn_predict_layers", 0) or 0
         layer_types = config.layer_types
-        num_head_empty_layers = (
-            getattr(config, "num_empty_layers_add_in_head", 0) or 0
-        )
         if getattr(config, "moe_expert_fusion", False):
             raise ValueError(
                 "Kimi-K3 HF export does not support fused expert weights."
@@ -559,7 +553,7 @@ class KimiK3PretrainedModel(PretrainedModel):
                 )
 
         for layer_idx, attention_type in reversed(list(enumerate(layer_types))):
-            src = f"model.layers.{layer_idx + num_head_empty_layers}"
+            src = f"model.layers.{layer_idx}"
             dst = f"{hf_model}.layers.{layer_idx}"
             add_attention(src, dst, attention_type)
             add_attention_residual(src, dst)
@@ -573,7 +567,7 @@ class KimiK3PretrainedModel(PretrainedModel):
         # an otherwise reloadable HF checkpoint.
         for mtp_idx in range(num_mtp_layers):
             layer_idx = num_layers + mtp_idx
-            mtp = f"model.layers.{layer_idx + num_head_empty_layers}"
+            mtp = f"model.layers.{layer_idx}"
             transformer = f"{mtp}.transformer_layer"
             mtp_keys = [
                 f"{mtp}.enorm.weight",

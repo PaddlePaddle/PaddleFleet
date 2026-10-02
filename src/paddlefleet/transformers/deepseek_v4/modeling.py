@@ -153,9 +153,6 @@ class DeepseekV4PreTrainedModel(PretrainedModel):
         moe_grouped_gemm = getattr(config, "moe_grouped_gemm", False)
         use_gated_attn = getattr(config, "use_gated_attn", False)
         csa_compress_ratios = getattr(config, "csa_compress_ratios", None)
-        num_empty_layers_add_in_head = getattr(
-            config, "num_empty_layers_add_in_head", 0
-        )
 
         # Get Muon configuration from muon_configs
         muon_qkv_update_mode = muon_configs.get(
@@ -368,7 +365,7 @@ class DeepseekV4PreTrainedModel(PretrainedModel):
         # Main layers
         for layer_idx in range(num_hidden_layers):
             _add_layer_slice_config(
-                f"model.layers.{layer_idx + num_empty_layers_add_in_head}",
+                f"model.layers.{layer_idx}",
                 layer_idx,
             )
 
@@ -383,12 +380,12 @@ class DeepseekV4PreTrainedModel(PretrainedModel):
             )
         for layer_idx in range(num_nextn_predict_layers):
             _add_layer_slice_config(
-                f"model.layers.{num_hidden_layers + num_empty_layers_add_in_head + layer_idx}",
+                f"model.layers.{num_hidden_layers + layer_idx}",
                 num_hidden_layers + layer_idx,
             )
         for layer_idx in range(num_nextn_predict_layers):
             _add_layer_slice_config(
-                f"model.layers.{num_hidden_layers + num_empty_layers_add_in_head + layer_idx}.transformer_layer",
+                f"model.layers.{num_hidden_layers + layer_idx}.transformer_layer",
                 num_hidden_layers + layer_idx,
             )
 
@@ -528,12 +525,6 @@ class DeepseekV4PreTrainedModel(PretrainedModel):
         moe_n_hash_layers = getattr(config, "moe_n_hash_layers", 3)
         dense_mode = getattr(config, "csa_dense_mode", False)
         csa_compress_ratios = config.csa_compress_ratios
-        num_head_empty_layers = (
-            config.num_empty_layers_add_in_head
-            if hasattr(config, "num_empty_layers_add_in_head")
-            and config.num_empty_layers_add_in_head
-            else 0
-        )
         if config.mtp_num_layers > 0:
             mtp_num_layers = config.mtp_num_layers
         else:
@@ -556,9 +547,7 @@ class DeepseekV4PreTrainedModel(PretrainedModel):
             config, "enable_mtp_magic_send", False
         ):
             for mtp_i in range(mtp_num_layers):
-                mtp_embed_idx = (
-                    num_decoder_layers + num_head_empty_layers + mtp_i
-                )
+                mtp_embed_idx = num_decoder_layers + mtp_i
                 stmts.append(
                     f"embed.weight -> model.layers.{mtp_embed_idx}.mtp_embed.weight"
                 )
@@ -587,7 +576,7 @@ class DeepseekV4PreTrainedModel(PretrainedModel):
 
         for L in range(num_decoder_layers):
             src = f"layers.{L}"
-            tgt = f"model.layers.{L + num_head_empty_layers}"
+            tgt = f"model.layers.{L}"
 
             # --- LayerNorm ---
             stmts += [
@@ -728,9 +717,7 @@ class DeepseekV4PreTrainedModel(PretrainedModel):
         # === 4. MTP (Multi-Token Prediction) layers ===
         for i in range(mtp_num_layers):
             mtp_src = f"mtp.{i}"
-            mtp_tgt = (
-                f"model.layers.{num_decoder_layers + num_head_empty_layers + i}"
-            )
+            mtp_tgt = f"model.layers.{num_decoder_layers + i}"
             tl = f"{mtp_tgt}.transformer_layer"  # transformer_layer prefix in MTP
 
             # --- MTP-specific projections ---
@@ -877,12 +864,6 @@ class DeepseekV4PreTrainedModel(PretrainedModel):
         moe_n_hash_layers = getattr(config, "moe_n_hash_layers", 3)
         dense_mode = getattr(config, "csa_dense_mode", False)
         csa_compress_ratios = config.csa_compress_ratios
-        num_head_empty_layers = (
-            config.num_empty_layers_add_in_head
-            if hasattr(config, "num_empty_layers_add_in_head")
-            and config.num_empty_layers_add_in_head
-            else 0
-        )
         if config.mtp_num_layers > 0:
             mtp_num_layers = config.mtp_num_layers
         else:
@@ -902,9 +883,7 @@ class DeepseekV4PreTrainedModel(PretrainedModel):
             config, "enable_mtp_magic_send", False
         ):
             for mtp_i in range(mtp_num_layers):
-                mtp_embed_idx = (
-                    num_decoder_layers + num_head_empty_layers + mtp_i
-                )
+                mtp_embed_idx = num_decoder_layers + mtp_i
                 stmts.append(
                     f"model.layers.{mtp_embed_idx}.mtp_embed.weight -> embed.weight"
                 )
@@ -932,9 +911,7 @@ class DeepseekV4PreTrainedModel(PretrainedModel):
         # === 2. MTP layers (inverse, reversed order) ===
         for i in reversed(range(mtp_num_layers)):
             mtp_tgt = f"mtp.{i}"
-            mtp_src = (
-                f"model.layers.{num_decoder_layers + num_head_empty_layers + i}"
-            )
+            mtp_src = f"model.layers.{num_decoder_layers + i}"
             tl = f"{mtp_src}.transformer_layer"
 
             # --- MTP-specific projections ---
@@ -1074,7 +1051,7 @@ class DeepseekV4PreTrainedModel(PretrainedModel):
 
         # === 4. Per-layer mappings (reversed to avoid intermediate tensor name collisions) ===
         for L in reversed(range(num_decoder_layers)):
-            src = f"model.layers.{L + num_head_empty_layers}"
+            src = f"model.layers.{L}"
             tgt = f"layers.{L}"
 
             # --- LayerNorm ---

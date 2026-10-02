@@ -167,11 +167,25 @@ class TransformerEncoder(PipelineLayer):
 
     def get_encoder_layer_desc_list(self, layers, spec, name_prefix):
         i = 0
+        empty_index = 0
+
+        def next_empty_layer_name():
+            """Name for the next EmptyLayer.
+
+            Empty (placeholder) layers live in their own ``empty_layers.<n>``
+            namespace and do not consume a ``layers.<i>`` slot, so real
+            transformer layers count from ``layers.0`` without the head/tail
+            empty-layer offset.
+            """
+            nonlocal empty_index
+            name = f"{name_prefix}.empty_layers.{empty_index}"
+            empty_index += 1
+            return name
+
         for head_empty_layer in spec.head_empty_layers:
             self.add_sequential_layer(
-                layers, LayerDesc(head_empty_layer), f"{name_prefix}.layers.{i}"
+                layers, LayerDesc(head_empty_layer), next_empty_layer_name()
             )
-            i += 1
         for transformer_layer_spec in spec.transformer_layers:
             self.add_sequential_layer(
                 layers,
@@ -181,9 +195,8 @@ class TransformerEncoder(PipelineLayer):
             i += 1
         for tail_empty_layer in spec.tail_empty_layers:
             self.add_sequential_layer(
-                layers, LayerDesc(tail_empty_layer), f"{name_prefix}.layers.{i}"
+                layers, LayerDesc(tail_empty_layer), next_empty_layer_name()
             )
-            i += 1
 
     def overlapped_forward_backward(
         self,
