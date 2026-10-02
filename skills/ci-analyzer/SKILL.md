@@ -26,7 +26,7 @@ description: 分析当前仓库 Pull Request 的失败 CI，基于完整日志�
 
 ## Bot Approval/提交门禁
 
-- `Bot Approval Required` 必须遵循 workflow 的 OR 逻辑：检查 `REQUIRED_BOT_LOGINS` 列表中每个机器人的当前 head 最新决定性状态；列表当前包含 `risemeup1111` 和 `Paddle-Bot`，任一机器人 `APPROVED` 即满足机器人审批条件。
+- `Bot Approval Required` 必须遵循 workflow 的 OR 逻辑：检查 `REQUIRED_BOT_LOGINS` 列表中每个机器人的当前 head 最新决定性状态；列表当前包含 `Paddle-Review-Bot`（取代原 `risemeup1111`、`Paddle-Bot`），任一机器人 `APPROVED` 即满足机器人审批条件。
 - 若没有机器人通过，workflow 仍允许 `APPROVERS` 列表中的 `sneaxiy` 或 `From00` 对当前 head `APPROVED` 作为人工审批条件；不得把人工审批误报为机器人审批失败。
 - 机器人或人工 review 的状态必须按当前 head 的最新决定性状态（`APPROVED`、`CHANGES_REQUESTED`、`DISMISSED`）判断；旧 head 的审批不能替代当前结论。
 - P0/P1 意见必须修复代码、测试或配置并提交新 commit；P2/P3 意见按 workflow 要求回复，已修改时回复 Done，不同意时给出理由，不得要求未规定的额外代码修改。
