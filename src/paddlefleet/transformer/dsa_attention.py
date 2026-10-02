@@ -159,12 +159,42 @@ def rotate_activation(
 # ---------------------------------------------------------------------------
 # Unfused DSA attention (explicit bmm, supports asymmetric Q/K vs V dims)
 # ---------------------------------------------------------------------------
+class _AccuracyCompatibleSoftmax(paddle.autograd.PyLayer):
+    @staticmethod
+    def forward(ctx, logits: Tensor) -> Tensor:
+        probs = F.softmax(logits, axis=-1)
+        ctx.save_for_backward(probs)
+        return probs
+
+    @staticmethod
+    def backward(ctx, grad_output: Tensor) -> Tensor:
+        (probs,) = ctx.saved_tensor()
+        row_sum = _aligned_sum_last_axis(grad_output * probs).cast("float32")
+        return probs * (grad_output - row_sum)
+
+
+def _aligned_sum_axis(x: Tensor, axis: int) -> Tensor:
+    axis = axis % len(x.shape)
+    n = int(x.shape[axis])
+    xd = x.cast("float64")
+    acc = paddle.slice(xd, axes=[axis], starts=[0], ends=[1])
+    for i in range(1, n):
+        acc = acc + paddle.slice(xd, axes=[axis], starts=[i], ends=[i + 1])
+    return acc
+
+
+def _aligned_sum_last_axis(x: Tensor) -> Tensor:
+    """``_aligned_sum_axis`` over the last axis."""
+    return _aligned_sum_axis(x, len(x.shape) - 1)
+
+
 def _unfused_dsa_attention(
     query: Tensor,
     key: Tensor,
     value: Tensor,
     combined_mask: Tensor | None,
     softmax_scale: float,
+    accuracy_compatible: bool = False,
 ) -> Tensor:
     """Unfused DSA sparse attention
 
@@ -205,7 +235,10 @@ def _unfused_dsa_attention(
         )
         attn_scores = attn_scores + mask.cast("float32")
 
-    attn_weights = F.softmax(attn_scores, axis=-1)
+    if accuracy_compatible:
+        attn_weights = _AccuracyCompatibleSoftmax.apply(attn_scores)
+    else:
+        attn_weights = F.softmax(attn_scores, axis=-1)
 
     # Attention_weights * V: [b*nhpp, s, v_hd]
     output = paddle.bmm(attn_weights.cast(v.dtype), v)
@@ -506,6 +539,7 @@ class DSAIndexer(paddle.nn.Layer):
         q_latent: Tensor,  # [b, s, q_lora_rank] or [s/TP, b, q_lora_rank] (SP mode)
         position_offset: int = 0,
         cp_group=None,
+        rotary_pos_emb: Tensor = None,
     ):
         """Compute q, k, weights before top-k selection.
 
@@ -551,7 +585,15 @@ class DSAIndexer(paddle.nn.Layer):
 
         # Compute RoPE internally, at the global sequence length under CP.
         rotary_seq_len = seqlen * cp_size
-        if self.config.rope_type == "rope":
+        reuse_shared_freqs = (
+            rotary_pos_emb is not None
+            and cp_size == 1
+            and bool(getattr(self.config, "use_accuracy_compatible", False))
+        )
+        if reuse_shared_freqs:
+            freqs = rotary_pos_emb
+            mscale = 1.0
+        elif self.config.rope_type == "rope":
             freqs = self.rotary_pos_emb(rotary_seq_len, packed_seq=False)
             mscale = 1.0
         else:
@@ -896,6 +938,7 @@ def _bwd_fused_indexer_loss(
     grad_loss: Tensor,
     tp_group,
     causal_mask_override: Tensor | None = None,
+    use_fp64_accum: bool = False,
 ) -> tuple[Tensor, Tensor, Tensor]:
     """Manual backward for fused indexer loss.
 
@@ -999,7 +1042,14 @@ def _bwd_fused_indexer_loss(
         )
 
     # Sum attention scores across heads: [b, np, sq, sk] -> [b, sq, sk]
-    attention_scores_sum = attention_scores_softmax.sum(axis=1)
+    if use_fp64_accum:
+        attention_scores_sum = (
+            _aligned_sum_axis(attention_scores_softmax, 1)
+            .squeeze(1)
+            .cast("float32")
+        )
+    else:
+        attention_scores_sum = attention_scores_softmax.sum(axis=1)
     del attention_scores_softmax
 
     if tp_group is not None and tp_group.nranks > 1:
@@ -1008,10 +1058,11 @@ def _bwd_fused_indexer_loss(
         )
 
     # L1 normalize
-    attention_scores_normalized = (
-        attention_scores_sum
-        / attention_scores_sum.sum(axis=-1, keepdim=True).clip(min=1e-10)
-    )
+    if use_fp64_accum:
+        _denom = _aligned_sum_last_axis(attention_scores_sum).cast("float32")
+    else:
+        _denom = attention_scores_sum.sum(axis=-1, keepdim=True)
+    attention_scores_normalized = attention_scores_sum / _denom.clip(min=1e-10)
     del attention_scores_sum
 
     # Backward through loss = kl_div * loss_coeff
@@ -1034,9 +1085,14 @@ def _bwd_fused_indexer_loss(
 
     # Backward through softmax:
     # dL/dx = softmax * (dL/d_softmax - sum(dL/d_softmax * softmax))
-    sum_grad = (grad_index_scores_softmax * index_scores_softmax).sum(
-        axis=-1, keepdim=True
-    )
+    if use_fp64_accum:
+        sum_grad = _aligned_sum_last_axis(
+            grad_index_scores_softmax * index_scores_softmax
+        ).cast("float32")
+    else:
+        sum_grad = (grad_index_scores_softmax * index_scores_softmax).sum(
+            axis=-1, keepdim=True
+        )
     grad_index_scores_logits = index_scores_softmax * (
         grad_index_scores_softmax - sum_grad
     )
@@ -1089,9 +1145,16 @@ def _bwd_fused_indexer_loss(
 
     # Backward through multiplication by weights:
     # dL/d_weights = grad * relu_scores (sum over sk)
-    grad_weights = (grad_weighted_scores * scores_after_relu).sum(
-        axis=-1
-    )  # [b, sq, h]
+    if use_fp64_accum:
+        grad_weights = (
+            _aligned_sum_last_axis(grad_weighted_scores * scores_after_relu)
+            .squeeze(-1)
+            .cast("float32")
+        )  # [b, sq, h]
+    else:
+        grad_weights = (grad_weighted_scores * scores_after_relu).sum(
+            axis=-1
+        )  # [b, sq, h]
 
     # dL/d_relu_scores = grad * weights
     grad_scores_after_relu = grad_weighted_scores * weights.unsqueeze(
@@ -1107,11 +1170,15 @@ def _bwd_fused_indexer_loss(
 
     # Backward through einsum 'bshd,btd->bsht'
     # ∂L/∂q = einsum('bsht,btd->bshd', grad_scores, k)
-    grad_q = paddle.einsum(
-        "bsht,btd->bshd", grad_scores, k.cast("float32")
-    )  # [b, sq, h, d]
     # ∂L/∂k = einsum('bsht,bshd->btd', grad_scores, q)
-    if use_dsv4_accuracy_compatible():
+    if use_fp64_accum:
+        grad_q = paddle.einsum(
+            "bsht,btd->bshd", grad_scores.cast("float64"), k.cast("float64")
+        ).cast("float32")  # [b, sq, h, d]
+        grad_k = paddle.einsum(
+            "bsht,bshd->btd", grad_scores.cast("float64"), q.cast("float64")
+        ).cast("float32")  # [b, sk, d]
+    elif use_dsv4_accuracy_compatible():
         from paddlefleet.accuracy_compatible_patch import compatible_einsum
 
         grad_k = compatible_einsum(
@@ -1153,6 +1220,7 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
         tp_group=None,
         loss_mask: Tensor | None = None,
         global_valid_count: float | None = None,
+        use_fp64_accum: bool = False,
     ) -> Tensor:
         """Fused forward: compute index_scores, topk, and KL loss.
 
@@ -1202,6 +1270,7 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
         ctx.sparse_loss = sparse_loss
         ctx.tp_group = tp_group
         ctx.causal_mask_override = mask
+        ctx.use_fp64_accum = use_fp64_accum
 
         return indexer_loss
 
@@ -1229,6 +1298,7 @@ class FusedDSAIndexerLoss(paddle.autograd.PyLayer):
                 grad_loss,
                 ctx.tp_group,
                 causal_mask_override=ctx.causal_mask_override,
+                use_fp64_accum=ctx.use_fp64_accum,
             )
 
         return grad_q, grad_weights, grad_k, None, None, None
@@ -1531,6 +1601,7 @@ class DSAttention(FleetLayer):
         # DSA-specific parameters
         x: Tensor | None = None,
         qr: Tensor | None = None,
+        rotary_pos_emb: Tensor | None = None,
         # ignore fastdeploy specific parameters
         kv_compressed: paddle.Tensor = None,
         k_pos_emb: paddle.Tensor = None,
@@ -1614,9 +1685,9 @@ class DSAttention(FleetLayer):
         # Training with indexer loss (coeff is normalized to 0.0 when
         # unset/None, so ``> 0`` is the single "enabled" check)
         if self.training and self.dsa_indexer_loss_coeff > 0:
-            # Indexer forward_before_topk runs WITH gradient tracking
-            # RoPE is computed internally by the indexer
-            q_idx, k_idx, weights_idx = self.indexer.forward_before_topk(x, qr)
+            q_idx, k_idx, weights_idx = self.indexer.forward_before_topk(
+                x, qr, rotary_pos_emb=rotary_pos_emb
+            )
 
             indexer_loss = FusedDSAIndexerLoss.apply(
                 q_idx,
@@ -1633,6 +1704,9 @@ class DSAttention(FleetLayer):
                 if self.pg_collection.tp is not None
                 and self.pg_collection.tp.nranks > 1
                 else None,
+                use_fp64_accum=bool(
+                    getattr(self.config, "use_accuracy_compatible", False)
+                ),
             )
             topk_indices = FusedDSAIndexerLoss._last_topk_indices
         else:
@@ -1666,7 +1740,14 @@ class DSAttention(FleetLayer):
 
         # Run sparse attention (batch-first layout)
         core_attn_out = _unfused_dsa_attention(
-            query, key, value, combined_mask, self.softmax_scale
+            query,
+            key,
+            value,
+            combined_mask,
+            self.softmax_scale,
+            accuracy_compatible=bool(
+                getattr(self.config, "use_accuracy_compatible", False)
+            ),
         )
 
         # Attach indexer loss if training

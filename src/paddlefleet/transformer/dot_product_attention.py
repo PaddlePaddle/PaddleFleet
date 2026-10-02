@@ -526,6 +526,7 @@ class DotProductAttention(FleetLayer):
         # DSA-specific parameters (ignored by DotProductAttention)
         x: Tensor | None = None,
         qr: Tensor | None = None,
+        rotary_pos_emb: Tensor | None = None,
         # fastdeploy specific parameters
         kv_compressed: paddle.Tensor = None,
         k_pos_emb: paddle.Tensor = None,
