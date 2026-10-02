@@ -459,11 +459,42 @@ def fill_feature(input_embeds, target_index, value):
         Tensor: Feature tensor with specified positions filled by `value`,
                 same shape as `input_embeds`.
     """
-    input_embeds_shape = input_embeds.shape
-    input_embeds = input_embeds.reshape([-1, input_embeds.shape[-1]])
-    indices = paddle.nonzero(target_index.flatten()).flatten()
     assert not isinstance(value, paddle.Tensor), type(value)
-    if input_embeds.size > 0 and indices.size > 0:
-        input_embeds[indices] = value
-    input_embeds = input_embeds.reshape(input_embeds_shape)
-    return input_embeds
+    if input_embeds.size == 0:
+        return input_embeds
+
+    # Do not write ``input_embeds[indices] = value`` here: the
+    # index_elementwise_put kernel asserts N <= int32_max
+    # (index_elementwise_put_kernel.cu:88), where N is the number of *written*
+    # elements, i.e. n_fill * D -- not the numel of the whole tensor. Embedding
+    # runs on the full sequence before the context-parallel split, so at a 1M
+    # context with D=4096 a single micro-batch holding more than 524287 padding
+    # positions (over half the sequence) already trips PreconditionNotMetError.
+    # Measured boundary: 524287 positions are fine, 524288 fail.
+    #
+    # Mask arithmetic instead: elementwise kernels index with int64 and have no
+    # such limit. The backward pass stays equivalent to setitem (filled
+    # positions still get a zero gradient, which is exactly what this function's
+    # "avoid gradient propagation" is for) and it sidesteps the sparse scatter
+    # backward. Same trick the image/video branches in gpt_embedding.py use to
+    # replace masked_scatter with an arithmetic blend.
+    #
+    # The cost is being out-of-place: one extra tensor the size of input_embeds
+    # (~8 GB in bf16 at 1M). Hence the early return below -- batches that pack
+    # full have nothing to fill and must not pay for it, and they are the
+    # common case.
+    if not bool(target_index.any()):
+        return input_embeds
+
+    input_embeds_shape = input_embeds.shape
+    flat = input_embeds.reshape([-1, input_embeds_shape[-1]])
+    # keep: [N, 1], 0 on positions to fill and 1 elsewhere, broadcast to [N, D]
+    keep = (
+        paddle.logical_not(target_index)
+        .reshape([-1, 1])
+        .astype(input_embeds.dtype)
+    )
+    flat = flat * keep
+    if value != 0:
+        flat = flat + value * (1 - keep)
+    return flat.reshape(input_embeds_shape)

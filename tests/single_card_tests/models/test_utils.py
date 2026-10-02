@@ -555,6 +555,22 @@ class TestFillFeature(unittest.TestCase):
             (paddle.ones([2, 3, 4]) * 5.0).numpy().tolist(),
         )
 
+    def test_nonzero_value_is_written_to_marked_positions(self):
+        import paddle
+
+        embeds = paddle.ones([1, 3, 2], dtype="float32") * 2.0
+        target = paddle.to_tensor([[False, True, False]])
+        out = GPT_UTILS.fill_feature(embeds, target, -1.5)
+        expected = [[[2.0, 2.0], [-1.5, -1.5], [2.0, 2.0]]]
+        self.assertEqual(out.numpy().tolist(), expected)
+
+    def test_empty_input_is_returned_as_is(self):
+        import paddle
+
+        embeds = paddle.zeros([0, 4], dtype="float32")
+        target = paddle.zeros([0], dtype="bool")
+        self.assertIs(GPT_UTILS.fill_feature(embeds, target, 1.0), embeds)
+
 
 if __name__ == "__main__":
     unittest.main()
