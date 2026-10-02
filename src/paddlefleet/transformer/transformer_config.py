@@ -1705,6 +1705,14 @@ class TransformerConfig(ModelParallelConfig):
     by TransformerConfig.transform_rules.
     """
 
+    dsa_index_topk_backend: Literal["paddle", "deep_select"] = "paddle"
+    """Top-k implementation for the sparse DSA indexer.
+
+    One of ``{"paddle", "deep_select"}``. ``"paddle"`` is the default to
+    preserve existing behavior. ``"deep_select"`` uses native row limits,
+    unsorted output, int32 indices, and omits values outside the loss pass.
+    """
+
     dsa_indexer_loss_coeff: float = 0.0
     """KL loss coefficient for DSA Indexer training. 0 disables the KL loss.
 
@@ -3166,6 +3174,12 @@ class TransformerConfig(ModelParallelConfig):
                     "recompute_granularity='full', under which the fusion runs "
                     "inside the full-layer recompute."
                 )
+
+        if self.dsa_index_topk_backend not in {"paddle", "deep_select"}:
+            raise ValueError(
+                f"dsa_index_topk_backend={self.dsa_index_topk_backend!r} is invalid. "
+                "Must be one of {'paddle', 'deep_select'}."
+            )
 
         # DSv4 Hybrid Attention validation
         if self.experimental_attention_variant == "dsv4_hybrid":
