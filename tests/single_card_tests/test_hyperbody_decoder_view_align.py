@@ -38,7 +38,10 @@ from paddlefleet.transformers.hyperbody.configuration import (
     HyperBodyDecoderConfig,
     HyperBodyEncoderConfig,
 )
-from paddlefleet.transformers.hyperbody.modeling import _build_decoder_view
+from paddlefleet.transformers.hyperbody.modeling import (
+    _build_decoder_view,
+    _build_encoder_view,
+)
 
 _DECODER_GEOMETRY = {
     "vocab_size": 128,
@@ -151,6 +154,37 @@ def test_dense_use_long_query_rejects_mixed_list():
     assert raised, "mixed [True, False] must raise ValueError"
 
 
+def test_encoder_pad_token_id_configurable():
+    """A top-level ``pad_token_id`` flows onto the encoder view.
+
+    ``_build_encoder_view`` forwards the global ``pad_token_id`` into the
+    transient ``HyperEncoderConfig``; ``HyperEncoderProvider.__post_init__`` no
+    longer hard-pins 0, so the configured value survives onto the view.
+    """
+    cfg = _make_config(pad_token_id=7)
+    view = _build_encoder_view(cfg, decoder_hidden=64)
+    assert view.pad_token_id == 7, view.pad_token_id
+
+
+def test_encoder_pad_token_id_defaults_to_zero_when_absent():
+    """With no configured ``pad_token_id`` the encoder view falls back to 0
+    (previous behavior), so unset configs are unchanged.
+    """
+    cfg = _make_config()
+    assert getattr(cfg, "pad_token_id", None) is None
+    view = _build_encoder_view(cfg, decoder_hidden=64)
+    assert view.pad_token_id == 0, view.pad_token_id
+
+
+def test_encoder_and_decoder_share_pad_token_id():
+    """Encoder and decoder views read the SAME top-level ``pad_token_id``."""
+    cfg = _make_config(pad_token_id=5)
+    dec = _build_decoder_view(cfg)
+    enc = _build_encoder_view(cfg, decoder_hidden=64)
+    assert dec.pad_token_id == 5, dec.pad_token_id
+    assert enc.pad_token_id == 5, enc.pad_token_id
+
+
 if __name__ == "__main__":
     try:
         test_nested_dict_promoted_to_subconfigs()
@@ -159,6 +193,9 @@ if __name__ == "__main__":
         test_first_k_dense_replace_builds_dense_first_without_conflict()
         test_dense_use_long_query_scalar_and_homogeneous_list()
         test_dense_use_long_query_rejects_mixed_list()
+        test_encoder_pad_token_id_configurable()
+        test_encoder_pad_token_id_defaults_to_zero_when_absent()
+        test_encoder_and_decoder_share_pad_token_id()
     except AssertionError:
         import traceback
 
