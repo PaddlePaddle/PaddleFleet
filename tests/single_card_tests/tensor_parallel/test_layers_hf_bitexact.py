@@ -57,6 +57,10 @@ from paddlefleet.tensor_parallel.layers import (
     _HFEmbeddingGather,
     _index_put_columns,
 )
+from paddlefleet.utils import (
+    set_kimik2_accuracy_compatible,
+    use_kimik2_accuracy_compatible,
+)
 
 
 def _mock_group(world_size=1, rank=0):
@@ -327,6 +331,60 @@ class TestLinearGroupedDgrad(unittest.TestCase):
         gi_plain, _ = self._grads(None)
         np.testing.assert_allclose(
             gi.numpy(), gi_plain.numpy(), rtol=1e-6, atol=1e-6
+        )
+
+
+class TestLinearKimiK2UngroupedWgrad(unittest.TestCase):
+    """An untagged weight under ``use_kimik2_accuracy`` forms its wgrad as
+    ``grad_output^T @ input`` (the reference's ``[out, in]`` GEMM) and
+    transposes, instead of ``input^T @ grad_output``."""
+
+    def setUp(self):
+        previous = use_kimik2_accuracy_compatible()
+        self.addCleanup(set_kimik2_accuracy_compatible, previous)
+
+    def _wgrad(self, enabled, dtype=paddle.bfloat16, seed=11):
+        set_kimik2_accuracy_compatible(enabled)
+        paddle.seed(seed)
+        inp = paddle.randn([64, 96], dtype="float32").astype(dtype)
+        inp.stop_gradient = False
+        weight = paddle.randn([96, 16], dtype="float32").astype(dtype)
+        weight.stop_gradient = False
+        out = _Linear.apply(
+            inp,
+            weight,
+            None,
+            False,  # gradient_accumulation_fusion
+            False,  # allreduce_dgrad
+            False,  # sequence_parallel
+            None,  # grad_output_buffer
+            0,  # wgrad_deferral_limit
+            _mock_group(),  # tp_group
+            "megatron",  # use_accuracy_compatible
+        )
+        g = paddle.randn(out.shape, dtype="float32").astype(dtype)
+        _, gw = paddle.grad([out], [inp, weight], grad_outputs=[g])
+        return inp.detach(), g, gw
+
+    def test_enabled_matches_the_reference_orientation_bitwise(self):
+        inp, g, gw = self._wgrad(True)
+        expected = paddle.matmul(g, inp, transpose_x=True).t()
+        self.assertEqual(gw.shape, [96, 16])
+        self.assertEqual(gw.dtype, paddle.bfloat16)
+        np.testing.assert_array_equal(
+            gw.astype("float32").numpy(), expected.astype("float32").numpy()
+        )
+
+    def test_enabled_result_is_contiguous(self):
+        _, _, gw = self._wgrad(True)
+        self.assertTrue(gw.is_contiguous())
+
+    def test_default_agrees_in_value(self):
+        """Same product either way; only the GEMM orientation differs."""
+        _, _, gw_on = self._wgrad(True, dtype=paddle.float32)
+        _, _, gw_off = self._wgrad(False, dtype=paddle.float32)
+        np.testing.assert_allclose(
+            gw_on.numpy(), gw_off.numpy(), rtol=1e-5, atol=1e-5
         )
 
 

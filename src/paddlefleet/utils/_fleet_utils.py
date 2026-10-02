@@ -39,6 +39,7 @@ from paddlefleet.context_parallel_utils import ContextParallelScatterOp
 # the environment: a switch that changes numerics and communication paths must
 # be declared as a config field and go through config review.
 _USE_DSV4_ACCURACY = False
+_USE_KIMIK2_ACCURACY = False
 
 try:
     from packaging.version import Version as PkgVersion
@@ -598,3 +599,23 @@ def set_dsv4_accuracy_compatible(enabled: bool) -> None:
     """
     global _USE_DSV4_ACCURACY
     _USE_DSV4_ACCURACY = bool(enabled)
+
+
+def use_kimik2_accuracy_compatible():
+    """Whether the Kimi-K2 accuracy-compatible (Megatron-aligned) paths are on.
+
+    Driven by the ``TransformerConfig.use_kimik2_accuracy`` field through
+    :func:`set_kimik2_accuracy_compatible`; defaults to off so the original
+    numeric paths are used.
+    """
+    return _USE_KIMIK2_ACCURACY
+
+
+def set_kimik2_accuracy_compatible(enabled: bool) -> None:
+    """Set the Kimi-K2 accuracy-compatible switch.
+
+    The only writer of the switch state; ``TransformerConfig.__post_init__``
+    calls it from the ``use_kimik2_accuracy`` config field.
+    """
+    global _USE_KIMIK2_ACCURACY
+    _USE_KIMIK2_ACCURACY = bool(enabled)
