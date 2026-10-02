@@ -197,6 +197,36 @@ class GPTModel(PipelineLayer):
         **kwargs,
     ) -> None:
         self.config = kwargs["config"]
+        if getattr(self.config, "indexcache_topk_pattern", None):
+            # Validate before building layers so every caller can use native PP.
+            if self.config.virtual_pipeline_model_parallel_size not in (
+                None,
+                1,
+            ):
+                raise NotImplementedError(
+                    "IndexCache supports only ordinary 1F1B (VPP=1)"
+                )
+            if kwargs.get("use_dualpipev", False):
+                raise NotImplementedError(
+                    "IndexCache does not support DualPipeV scheduling"
+                )
+            strategy = getattr(fleet.fleet, "_user_defined_strategy", None)
+            if strategy is not None:
+                pp_config = strategy.hybrid_configs["pp_configs"]
+                if (
+                    pp_config.use_dualpipev
+                    or pp_config.forward_backward_overlap_scheduler
+                ):
+                    raise NotImplementedError(
+                        "IndexCache does not support DualPipeV or compute-overlap scheduling"
+                    )
+                if (
+                    self.config.pipeline_model_parallel_size > 1
+                    and strategy.amp
+                ):
+                    raise NotImplementedError(
+                        "IndexCache PP requires Trainer-managed AMP/scaler rather than strategy.amp"
+                    )
         tie_word_embeddings = (
             kwargs["tie_word_embeddings"]
             and self.config.pipeline_model_parallel_size > 1
