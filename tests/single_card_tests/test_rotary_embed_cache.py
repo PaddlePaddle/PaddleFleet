@@ -37,7 +37,9 @@ from paddlefleet.models.common.embeddings.rope_utils import (
     _apply_rotary_pos_emb_bshd,
 )
 from paddlefleet.models.common.embeddings.rotary_pos_embedding import (
+    _SHARED_EMB_CACHE,
     RotaryEmbedding,
+    clear_shared_rotary_embed_cache,
 )
 
 HEAD_DIM = 64
@@ -62,7 +64,17 @@ def _bits_equal(a: paddle.Tensor, b: paddle.Tensor) -> bool:
     return np.array_equal(x.view(np.uint8), y.view(np.uint8))
 
 
-class TestRotaryEmbedCache(unittest.TestCase):
+class RotaryCacheTestBase(unittest.TestCase):
+    """The cache is process-wide, so every test starts from an empty store."""
+
+    def setUp(self) -> None:
+        clear_shared_rotary_embed_cache()
+
+    def tearDown(self) -> None:
+        clear_shared_rotary_embed_cache()
+
+
+class TestRotaryEmbedCache(RotaryCacheTestBase):
     """Forward / backward equivalence of the memoised angle table."""
 
     def test_off_by_default(self) -> None:
@@ -70,13 +82,13 @@ class TestRotaryEmbedCache(unittest.TestCase):
         self.assertFalse(rope.rotary_embed_cache)
         rope(8192, 0)
         rope(8192, 0)
-        self.assertIsNone(rope._emb_cache_key)
+        self.assertEqual(len(_SHARED_EMB_CACHE), 0)
 
     def test_off_does_not_cache(self) -> None:
         rope = _build(False)
         first = rope(8192, 0)
         second = rope(8192, 0)
-        self.assertIsNone(rope._emb_cache_key)
+        self.assertEqual(len(_SHARED_EMB_CACHE), 0)
         self.assertIsNot(first, second)
         self.assertTrue(_bits_equal(first, second))
 
@@ -85,7 +97,7 @@ class TestRotaryEmbedCache(unittest.TestCase):
         first = rope(8192, 0)
         second = rope(8192, 0)
         self.assertIs(first, second)
-        self.assertEqual(rope._emb_cache_key, (8192, 0))
+        self.assertEqual(_SHARED_EMB_CACHE[rope._emb_cache_sig][0], (8192, 0))
 
     def test_distinct_keys_are_not_confused(self) -> None:
         """Only one table is retained, but a different key must never be served
@@ -127,7 +139,7 @@ class TestRotaryEmbedCache(unittest.TestCase):
         position_ids = paddle.arange(128)
         first = rope(128, 0, position_ids=position_ids)
         second = rope(128, 0, position_ids=position_ids)
-        self.assertIsNone(rope._emb_cache_key)
+        self.assertEqual(len(_SHARED_EMB_CACHE), 0)
         self.assertIsNot(first, second)
         self.assertTrue(_bits_equal(first, second))
 
@@ -141,7 +153,7 @@ class TestRotaryEmbedCache(unittest.TestCase):
         self.assertFalse(_bits_equal(plain, with_ids))
 
 
-class TestRotaryEmbedCacheBackward(unittest.TestCase):
+class TestRotaryEmbedCacheBackward(RotaryCacheTestBase):
     """Gradients must be unchanged, including across a shared table object."""
 
     @staticmethod
@@ -201,7 +213,7 @@ class TestRotaryEmbedCacheBackward(unittest.TestCase):
         self.assertTrue(_bits_equal(before, rope(256, 0)))
 
 
-class TestRotaryEmbedCacheBounded(unittest.TestCase):
+class TestRotaryEmbedCacheBounded(RotaryCacheTestBase):
     """The cache must stay bounded when the key varies (incremental decode)."""
 
     def test_growing_max_seq_len_does_not_grow_cache(self) -> None:
@@ -213,16 +225,18 @@ class TestRotaryEmbedCacheBounded(unittest.TestCase):
         for seq_len in range(1, 40):
             got = rope(seq_len, 0)
             self.assertTrue(_bits_equal(off(seq_len, 0), got))
-            self.assertEqual(rope._emb_cache_key, (seq_len, 0))
+            self.assertEqual(
+                _SHARED_EMB_CACHE[rope._emb_cache_sig][0], (seq_len, 0)
+            )
 
     def test_only_the_latest_key_is_retained(self) -> None:
         """A single slot cannot accumulate tables, whatever the caller asks for."""
         rope = _build(True)
         rope(16, 0)
         rope(32, 0)
-        self.assertEqual(rope._emb_cache_key, (32, 0))
+        self.assertEqual(_SHARED_EMB_CACHE[rope._emb_cache_sig][0], (32, 0))
         rope(64, 7)
-        self.assertEqual(rope._emb_cache_key, (64, 7))
+        self.assertEqual(_SHARED_EMB_CACHE[rope._emb_cache_sig][0], (64, 7))
 
     def test_repeated_single_key_never_evicts(self) -> None:
         """The training pattern: one key, unlimited hits, one entry."""
@@ -230,7 +244,7 @@ class TestRotaryEmbedCacheBounded(unittest.TestCase):
         first = rope(8192, 0)
         for _ in range(50):
             self.assertIs(rope(8192, 0), first)
-        self.assertEqual(rope._emb_cache_key, (8192, 0))
+        self.assertEqual(_SHARED_EMB_CACHE[rope._emb_cache_sig][0], (8192, 0))
 
 
 if __name__ == "__main__":
