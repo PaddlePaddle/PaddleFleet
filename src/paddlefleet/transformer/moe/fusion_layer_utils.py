@@ -46,51 +46,78 @@ from .vmm_utils import (
     tokens_zip_unique_add_with_subbatch,
 )
 
-if paddlefleet_ops.is_sonic_moe_available():
-    from paddlefleet_ops.sonicmoe.enums import ActivationType
-    from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
-        deepep_topk_to_sonic_metadata,
-    )
+# SonicMoE symbols are imported on demand via _load_sonic_symbols(); see the
+# same-named helper in moe_expert.py for the rationale. MoELayer.__init__ calls
+# this when using_sonic_moe is set, before any expert runs.
+ActivationType = None
+deepep_topk_to_sonic_metadata = None
+deepep_topk_to_sonic_metadata_with_scales = None
+_differentiable_router_scores = None
+_DownProjection = None
+_UpProjection = None
+enable_fp8 = None
+_scatter_router_scores_i32 = None
+attach_preallocated_gated_outputs = None
+_sonic_symbols_loaded = False
 
-    try:
-        from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
-            deepep_topk_to_sonic_metadata_with_scales,
-        )
-    except ImportError:
-        # Older installed paddlefleet_ops binaries (pre-#1348) do not export
-        # the fp8-scales variant; the sibling optional imports below use the
-        # same guard. Only the fp8 + fp8_scale MoE path calls it, which this
-        # config does not exercise.
-        deepep_topk_to_sonic_metadata_with_scales = None
+
+def _load_sonic_symbols():
+    global _sonic_symbols_loaded, ActivationType, deepep_topk_to_sonic_metadata
+    global deepep_topk_to_sonic_metadata_with_scales
+    global _differentiable_router_scores, _DownProjection, _UpProjection
+    global enable_fp8, _scatter_router_scores_i32
+    global attach_preallocated_gated_outputs
+    if _sonic_symbols_loaded:
+        return
+    paddlefleet_ops.load_sonic_moe()
+    from paddlefleet_ops.sonicmoe.enums import ActivationType as _AT
+    from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
+        deepep_topk_to_sonic_metadata as _dm,
+    )
     from paddlefleet_ops.sonicmoe.ernie_compat.mlp_node_v2 import (
-        _differentiable_router_scores,
+        _differentiable_router_scores as _drs,
     )
     from paddlefleet_ops.sonicmoe.functional import (
-        _DownProjection,
-        _UpProjection,
+        _DownProjection as _dp,
+        _UpProjection as _up,
     )
-    from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8
+    from paddlefleet_ops.sonicmoe.functional.utils import enable_fp8 as _ef
 
-    try:
-        from paddlefleet_ops.sonicmoe.quack_utils.blockscaled_fp8_gemm import (
-            _scatter_router_scores_i32,
-        )
-    except (ImportError, RuntimeError):
-        _scatter_router_scores_i32 = None
+    ActivationType = _AT
+    deepep_topk_to_sonic_metadata = _dm
+    _differentiable_router_scores = _drs
+    _DownProjection = _dp
+    _UpProjection = _up
+    enable_fp8 = _ef
 
+    # Older installed paddlefleet_ops binaries (pre-#1348) do not export the
+    # fp8-scales variant; only the fp8 + fp8_scale MoE path calls it.
     try:
         from paddlefleet_ops.sonicmoe.ernie_compat.deepep_metadata import (
-            deepep_topk_to_sonic_metadata_with_scales,
+            deepep_topk_to_sonic_metadata_with_scales as _dms,
         )
+
+        deepep_topk_to_sonic_metadata_with_scales = _dms
     except (ImportError, RuntimeError):
         deepep_topk_to_sonic_metadata_with_scales = None
+    try:
+        from paddlefleet_ops.sonicmoe.quack_utils.blockscaled_fp8_gemm import (
+            _scatter_router_scores_i32 as _srs,
+        )
 
+        _scatter_router_scores_i32 = _srs
+    except (ImportError, RuntimeError):
+        _scatter_router_scores_i32 = None
     try:
         from paddlefleet_ops.sonicmoe.functional import (
-            attach_preallocated_gated_outputs,
+            attach_preallocated_gated_outputs as _apo,
         )
+
+        attach_preallocated_gated_outputs = _apo
     except ImportError:
         attach_preallocated_gated_outputs = None
+    _sonic_symbols_loaded = True
+
 
 logger = logging.getLogger(__name__)
 

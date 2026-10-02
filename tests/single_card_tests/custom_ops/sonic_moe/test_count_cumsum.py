@@ -16,6 +16,9 @@ import random
 from collections.abc import Callable
 
 import paddle
+import paddlefleet_ops
+
+paddlefleet_ops.load_sonic_moe()  # sonicmoe is imported on demand
 from paddlefleet_ops.sonicmoe import count_cumsum
 from parameterized import parameterized
 
