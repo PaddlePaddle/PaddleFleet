@@ -86,6 +86,11 @@ def _make_loss_stub(
         pg_collection=None,
         enable_parallel_cross_entropy=False,
         loss_func=_ones_loss_func,
+        # forward_impl's per-token eval guard reads self.training; a real
+        # LanguageLoss gets it from nn.Layer.__init__, which this stub skips.
+        training=True,
+        # Cached in __init__ (skipped here); forward paths read the instance attr.
+        calculate_per_token_loss=False,
     )
     stub.forward_impl = types.MethodType(
         language_loss.LanguageLoss.forward_impl, stub

@@ -79,6 +79,8 @@ def _base_loss(K):
     loss.config.num_nextn_predict_layers = K
     loss.config.use_erndata = True
     loss.ignored_index = IGNORED
+    # Cached in __init__ (skipped by __new__); forward paths read the instance attr.
+    loss.calculate_per_token_loss = False
     return loss
 
 
@@ -171,6 +173,8 @@ class TestMTPLanguageLossMegatron(unittest.TestCase):
         cfg.mtp_distillation_loss = False
         loss.config = cfg
         loss.ignored_index = IGNORED
+        # Cached in __init__ (skipped by __new__); forward reads the instance attr.
+        loss.calculate_per_token_loss = False
         return loss
 
     def test_per_depth_labels_are_length_L_and_boundary_masked(self) -> None:
@@ -232,6 +236,8 @@ class TestMainLanguageLossMegatron(unittest.TestCase):
         cfg.mtp_loss_scaling_factor = 1.0
         loss.config = cfg
         loss.ignored_index = IGNORED
+        # Cached in __init__ (skipped by __new__); forward reads the instance attr.
+        loss.calculate_per_token_loss = False
         return loss
 
     def test_main_label_is_full_length_L(self) -> None:

@@ -98,6 +98,8 @@ def _make_language_loss():
     layer.use_accuracy_compatible = False
     layer.use_subbatch = False
     layer.loss_subbatch_sequence_length = 0
+    # Cached in __init__ (skipped by __new__); forward_impl reads the instance attr.
+    layer.calculate_per_token_loss = False
     layer.loss_func = paddle.nn.CrossEntropyLoss(reduction="none")
     return layer
 

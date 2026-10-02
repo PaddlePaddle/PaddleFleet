@@ -2271,6 +2271,35 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+        # calculate_per_token_loss token accounting is only worked out for the
+        # configs it has been validated against; block the two axes whose token
+        # count it does not yet handle, rather than train on a silently mis-scaled
+        # objective (same philosophy as the per-token MTP guards in language_loss).
+        if self.calculate_per_token_loss:
+            # T_global (language_loss.py) counts THIS shard's non-padded labels and
+            # is all-reduce-SUM'd over the sharding group only -- the TP/SP axis is
+            # NOT in that group. Under sequence_parallel the sequence is TP-sharded,
+            # so language_loss (which gathers over CP but never over TP) would count
+            # ~1/tp of the tokens on each rank; T_global ends up ~tp times too small
+            # and every gradient (main + router aux/z) is inflated by ~tp. Block it
+            # until the count is either taken on un-sharded labels or reduced over a
+            # group that includes TP.
+            assert not self.sequence_parallel, (
+                "calculate_per_token_loss + sequence_parallel is unsupported: "
+                "T_global counts per-shard labels and is reduced over the sharding "
+                "group only (TP not included), so a TP-sharded sequence undercounts "
+                "T_global by ~tp and inflates every gradient by ~tp."
+            )
+            # CSA layers compress the attention sequence, so the token count seen by
+            # the attention/router path no longer matches the label count used for
+            # T_global. The per-token normalisation has not been validated for that
+            # layout, so reject it up front.
+            assert self.csa_compress_ratios is None, (
+                "calculate_per_token_loss + csa_compress_ratios is unsupported: "
+                "CSA compresses the sequence, so the per-token token count is not "
+                "consistent with the label-based T_global; the normalisation has "
+                "not been worked out for this layout."
+            )
         # ``True`` predates the "hf" target and has always meant Megatron, so
         # canonicalize it to the explicit name; every falsy spelling collapses to
         # False. An unknown target raises rather than falling back to the default

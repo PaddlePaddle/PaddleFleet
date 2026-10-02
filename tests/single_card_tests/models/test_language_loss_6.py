@@ -105,6 +105,8 @@ class TestMTPLanguageLossErnie5Forward(unittest.TestCase):
         cfg.mtp_distillation_loss = mtp_distillation_loss
         loss.config = cfg
         loss.ignored_index = IGNORED
+        # Cached in __init__ (skipped by __new__); forward paths read the attr.
+        loss.calculate_per_token_loss = False
         return loss
 
     def test_per_depth_labels_sliced_and_dict_mutated(self):
@@ -231,6 +233,8 @@ class TestMainLanguageLossErnie5Forward(unittest.TestCase):
         cfg.mtp_loss_scaling_factor = scaling
         loss.config = cfg
         loss.ignored_index = IGNORED
+        # Cached in __init__ (skipped by __new__); MainLanguageLoss.forward reads it.
+        loss.calculate_per_token_loss = False
         # Isolate the global training-log sink (a non-tested collaborator).
         p = mock.patch(
             "paddlefleet.models.common.language_loss.language_loss."

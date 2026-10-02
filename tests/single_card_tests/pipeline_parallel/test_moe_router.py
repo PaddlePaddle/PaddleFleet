@@ -48,6 +48,7 @@ orchestration, not cross-rank semantics.
 """
 
 import unittest
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -83,6 +84,9 @@ class _RouterStub:
 
     def __init__(self, num_experts):
         self.num_experts = num_experts
+        # _cal_aux_loss now reads getattr(self.config, "calculate_per_token_loss",
+        # False); give the stub a config so the guard sees the legacy (False) path.
+        self.config = SimpleNamespace(calculate_per_token_loss=False)
 
 
 @unittest.skipUnless(_HAS_DEPS, _SKIP_REASON)
