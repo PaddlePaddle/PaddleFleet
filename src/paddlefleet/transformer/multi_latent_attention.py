@@ -22,6 +22,11 @@ import paddle
 from paddle import Tensor
 from paddle.distributed.fleet.meta_parallel import LayerSpec, build_spec_layer
 from paddle.distributed.fleet.utils import recompute
+from paddle.distributed.flex_checkpoint.aoa.generation import (
+    resolve_checkpoint_name_from_anchor,
+    resolve_names,
+    resolve_single_name,
+)
 
 from paddlefleet.context_parallel_utils import (
     ContextParallelAllGatherOp,
@@ -1551,6 +1556,246 @@ class MLASelfAttention(MultiLatentAttention):
             config=self.config,
             eps=qk_norm_eps,
         )
+
+    # ``k_b_proj`` and ``v_b_proj`` are the two ends of one chain over the
+    # single checkpoint ``kv_b_proj.weight`` key, so the own-parameter walk must
+    # skip both: an extra identity statement for either would add a second
+    # producer for the same target once a ``checkpoint_name_mapping`` makes its
+    # source differ from its target.
+    _SPLIT_KV_B_LOCAL_NAMES = ("k_b_proj", "v_b_proj")
+
+    def _split_kv_b_head_blocks(self):
+        """``(heads, n_k, n_v)``: row-block geometry of one head's slice.
+
+        The checkpoint keeps ``kv_b_proj.weight`` as the transpose of the Fleet
+        weight, i.e. ``[heads * (qk_nope_head_dim + v_head_dim), kv_lora_rank]``,
+        with head-major rows: per head the ``qk_nope`` K rows first, then the
+        ``v_head`` V rows. An AOA split only produces *equal* blocks, so the
+        granularity is ``gcd(qk_nope, v_head)`` and one head spans ``n_k + n_v``
+        of those blocks. TP is forced to 1 in this mode, hence the per-partition
+        head count is the full head count.
+        """
+        chunk = math.gcd(self.qk_nope_head_dim, self.v_head_dim)
+        return (
+            self.num_attention_heads_per_partition,
+            self.qk_nope_head_dim // chunk,
+            self.v_head_dim // chunk,
+        )
+
+    def _split_kv_b_names(
+        self, ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+    ):
+        """``(k_model, v_model, kv_checkpoint)`` names for the split chain.
+
+        ``kv_b_proj`` exists only on the checkpoint side here (``__init__`` sets
+        ``self.kv_b_proj = None``), so it is anchored on the real ``k_b_proj``
+        parameter, the same idiom ``SelfAttention`` uses to name its
+        checkpoint-only q/k/v keys.
+        """
+
+        def _model(local):
+            return resolve_single_name(
+                local,
+                structured_name_prefix,
+                ctx.pp_to_single_mapping,
+                model_name_prefix=ctx.model_name_prefix,
+            )
+
+        k_model = _model("k_b_proj")
+        v_model = _model("v_b_proj")
+        kv_checkpoint = resolve_checkpoint_name_from_anchor(
+            k_model,
+            "k_b_proj",
+            "kv_b_proj.weight",
+            ctx.checkpoint_name_prefix,
+            ctx.checkpoint_name_mapping,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            model_name_prefix=ctx.model_name_prefix,
+        )
+        return k_model, v_model, kv_checkpoint
+
+    def _gen_split_kv_b_aoa_statements(
+        self, ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+    ):
+        """Checkpoint->model chain for the split ``kv_b_proj``.
+
+        Splits the checkpoint ``kv_b_proj.weight`` into ``heads * (n_k + n_v)``
+        equal row blocks, then per head concatenates the K blocks back to
+        ``[qk_nope, kv_lora]`` and transposes to the stored ``[kv_lora,
+        qk_nope]``, and concatenates the V blocks to ``[v_head, kv_lora]``,
+        which is already the stored orientation. The per-head results are
+        concatenated on axis 0 into the folded 2-D parameters. Nothing is
+        emitted for ``kv_b_proj`` itself: it is not built in this mode. Every
+        temporary is read exactly once.
+        """
+        heads, n_k, n_v = self._split_kv_b_head_blocks()
+        per_head = n_k + n_v
+        k_model, v_model, kv_checkpoint = self._split_kv_b_names(
+            ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+        )
+        tmp = f"{k_model}._kvb"
+        rows = [
+            f"{tmp}_r{h}_{j}" for h in range(heads) for j in range(per_head)
+        ]
+        statements = [f"{kv_checkpoint} -> {','.join(rows)}, axis=0"]
+        k_parts = []
+        v_parts = []
+        for h in range(heads):
+            head_rows = rows[h * per_head : (h + 1) * per_head]
+            k_flat = f"{tmp}_k{h}"
+            k_part = f"{tmp}_kt{h}"
+            k_src = ",".join(head_rows[:n_k])
+            statements.append(f"{k_src} -> {k_flat}, axis=0")
+            statements.append(f"{k_flat}^T -> {k_part}")
+            k_parts.append(k_part)
+            v_part = f"{tmp}_v{h}"
+            v_src = ",".join(head_rows[n_k:])
+            statements.append(f"{v_src} -> {v_part}, axis=0")
+            v_parts.append(v_part)
+
+        statements.append(f"{','.join(k_parts)} -> {k_model}, axis=0")
+        statements.append(f"{','.join(v_parts)} -> {v_model}, axis=0")
+        return statements
+
+    def _gen_inv_split_kv_b_aoa_statements(
+        self, ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+    ):
+        """Model->checkpoint chain for the split ``kv_b_proj``.
+
+        Rebuilds the Fleet-oriented ``[kv_lora, heads * (qk_nope + v_head)]``
+        matrix -- ``k_b_proj`` split per head on axis 0 already yields
+        ``[kv_lora, qk_nope]``, ``v_b_proj^T`` split per head on axis 1 yields
+        ``[kv_lora, v_head]`` -- concatenates K then V per head to reproduce the
+        head-major column order, and transposes once into the checkpoint key.
+        Written as an independent inverse.
+        """
+        heads, _, _ = self._split_kv_b_head_blocks()
+        k_model, v_model, kv_checkpoint = self._split_kv_b_names(
+            ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+        )
+        tmp = f"{k_model}._inv_kvb"
+        k_parts = [f"{tmp}_k{h}" for h in range(heads)]
+        statements = [f"{k_model} -> {','.join(k_parts)}, axis=0"]
+        v_t = f"{tmp}_vt"
+        statements.append(f"{v_model}^T -> {v_t}")
+        v_parts = [f"{tmp}_v{h}" for h in range(heads)]
+        statements.append(f"{v_t} -> {','.join(v_parts)}, axis=1")
+        head_parts = []
+        for h in range(heads):
+            part = f"{tmp}_h{h}"
+            pair = ",".join((k_parts[h], v_parts[h]))
+            statements.append(f"{pair} -> {part}, axis=1")
+            head_parts.append(part)
+        rebuilt = f"{tmp}_kv"
+        statements.append(f"{','.join(head_parts)} -> {rebuilt}, axis=1")
+        statements.append(f"{rebuilt}^T -> {kv_checkpoint}")
+        return statements
+
+    def gen_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Checkpoint->model generator for MLA.
+
+        Only ``mqa_split_kv_b_proj`` needs a component override. Without it
+        every MLA projection is a TP-linear sublayer whose own generator
+        supplies the transpose, so the generic recursion is delegated to
+        unchanged. With it, ``kv_b_proj`` is not built and its checkpoint tensor
+        has to be split into the two standalone absorption parameters, which no
+        generic per-leaf rule can express.
+        """
+        if not self.mqa_latent_split_kv_b:
+            return super().gen_aoa_statements(
+                ctx,
+                structured_name_prefix=structured_name_prefix,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+        statements = self._gen_split_kv_b_aoa_statements(
+            ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+        )
+        local_state_dict = self.state_dict(
+            structured_name_prefix="", include_sublayers=False
+        )
+        for name in local_state_dict:
+            if name in self._SPLIT_KV_B_LOCAL_NAMES:
+                continue
+            checkpoint_name, model_name = resolve_names(
+                name,
+                ctx.checkpoint_name_prefix,
+                structured_name_prefix,
+                ctx.pp_to_single_mapping,
+                ctx.checkpoint_name_mapping,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+                model_name_prefix=ctx.model_name_prefix,
+            )
+            if checkpoint_name != model_name:
+                statements.append(f"{checkpoint_name} -> {model_name}")
+        for layer_name, sublayer in self._sub_layers.items():
+            if sublayer is None:
+                continue
+            statements += sublayer.gen_aoa_statements(
+                ctx,
+                structured_name_prefix=(
+                    f"{structured_name_prefix}{layer_name}."
+                ),
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+        return statements
+
+    def gen_inv_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Model->checkpoint generator for MLA.
+
+        Mirror of :meth:`gen_aoa_statements`: delegates to the generic recursion
+        unless ``mqa_split_kv_b_proj`` is on, in which case the two absorption
+        parameters are merged back into the single checkpoint ``kv_b_proj.weight``
+        key and skipped by the own-parameter walk.
+        """
+        if not self.mqa_latent_split_kv_b:
+            return super().gen_inv_aoa_statements(
+                ctx,
+                structured_name_prefix=structured_name_prefix,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+        statements = self._gen_inv_split_kv_b_aoa_statements(
+            ctx, structured_name_prefix, checkpoint_lookup_drop_segment
+        )
+        local_state_dict = self.state_dict(
+            structured_name_prefix="", include_sublayers=False
+        )
+        for name in local_state_dict:
+            if name in self._SPLIT_KV_B_LOCAL_NAMES:
+                continue
+            checkpoint_name, model_name = resolve_names(
+                name,
+                ctx.checkpoint_name_prefix,
+                structured_name_prefix,
+                ctx.pp_to_single_mapping,
+                ctx.checkpoint_name_mapping,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+                model_name_prefix=ctx.model_name_prefix,
+            )
+            if checkpoint_name != model_name:
+                statements.append(f"{model_name} -> {checkpoint_name}")
+        for layer_name, sublayer in self._sub_layers.items():
+            if sublayer is None:
+                continue
+            statements += sublayer.gen_inv_aoa_statements(
+                ctx,
+                structured_name_prefix=(
+                    f"{structured_name_prefix}{layer_name}."
+                ),
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+        return statements
 
     def muon_slice_specs(self, muon_configs):
         """Muon orthogonal-slice specs for MLA projections (split_head only)."""

@@ -41,6 +41,10 @@ from paddlefleet.models.common.embeddings.rope_utils import (
 )
 from paddlefleet.transformer import FleetLayer
 from paddlefleet.transformer.dw_overlap import deferrable_linear
+from paddlefleet.transformer.init_from_scratch_aoa import (
+    gen_init_from_scratch_aoa,
+    resolve_init_from_scratch,
+)
 from paddlefleet.utils import use_dsv4_accuracy_compatible
 
 _ACCURACY_COMPATIBLE_KERNEL: bool = (
@@ -2196,6 +2200,36 @@ class CSAIndexer(nn.Layer):
 
         self.use_fp8_qat = getattr(config, "use_fp8_qat", False)
         self.use_fast_hadamard = getattr(config, "use_fast_hadamard", False)
+
+    def gen_aoa_statements(
+        self,
+        ctx,
+        *,
+        structured_name_prefix="",
+        checkpoint_lookup_drop_segment=None,
+    ):
+        """Checkpoint -> model, with the phase-1 add branch.
+
+        Phase 1 runs with ``csa_dense_mode=true`` and builds no Indexer, so this
+        subtree (including its nested ``compressor``) can be absent from the
+        checkpoint being resumed. ``indexer_init_from_scratch`` says whether it
+        is; see ``init_from_scratch_aoa.gen_init_from_scratch_aoa``. The inverse
+        direction is intentionally not overridden.
+        """
+        if not resolve_init_from_scratch(
+            self.config, "a CSA Indexer", "csa_dense_mode=false"
+        ):
+            return super().gen_aoa_statements(
+                ctx,
+                structured_name_prefix=structured_name_prefix,
+                checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+            )
+        return gen_init_from_scratch_aoa(
+            self,
+            ctx,
+            structured_name_prefix=structured_name_prefix,
+            checkpoint_lookup_drop_segment=checkpoint_lookup_drop_segment,
+        )
 
     def muon_slice_specs(self, muon_configs):
         """Muon orthogonal-slice spec for the indexer q-up projection."""
