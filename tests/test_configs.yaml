@@ -28,6 +28,20 @@ tests:
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_with_mtp.py]
     products:
       - num_gpus: 8
+  # PP=2 mtp_depth_sampling: the sampled K must not issue cross-stage collectives.
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_depth_sampling.py]
+    products:
+      - num_gpus: 2
+  # EP=2 mtp_depth_sampling: K identical on every EP rank, prefix-average loss,
+  # optimizer steps with sampled-out depths, combined MTP weight sharing.
+  - test_case: [tests/multi_card_tests/moe/test_gpt_mtp_depth_sampling_ep.py]
+    products:
+      - num_gpus: 2
+  # PP=2 mtp_shared_weights + mtp_shared_last_layer: body tied to the backbone
+  # last layer across stages, fusion tied across depths.
+  - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_combined_sharing.py]
+    products:
+      - num_gpus: 2
   - test_case: [tests/multi_card_tests/pipeline_parallel/test_gpt_pp_with_moe_with_mtp_with_overlap.py]
     products:
       - num_gpus: 8

@@ -197,6 +197,167 @@ class GPTModel(PipelineLayer):
                     shared_embed_weight = layer.embedding_weight
                 if isinstance(layer, GPTLMHead):
                     layer.weight = shared_embed_weight
+        if (
+            getattr(self.config, "mtp_shared_weights", False)
+            and getattr(self.config, "mtp_shared_last_layer", False)
+            and self.config.pipeline_model_parallel_size > 1
+        ):
+            self._assert_mtp_depths_colocated_for_combined_sharing()
+        if getattr(self.config, "mtp_shared_weights", False) and getattr(
+            self.config, "mtp_shared_last_layer", False
+        ):
+            self._alias_mtp_fusion_weights()
+
+    def _assert_mtp_depths_colocated_for_combined_sharing(self):
+        """Require combined MTP sharing to keep all depths on one PP stage.
+
+        ``mtp_shared_last_layer`` uses the shared-layer key for the transformer
+        body and the backbone-last pivot. ``mtp_shared_weights`` additionally
+        aliases the per-depth fusion modules. Those fusion parameters have no
+        second SharedLayerDesc key, so the combined mode can only synchronize
+        them by rank-local aliasing after construction.
+        """
+        import paddle.distributed
+
+        local_depths = sorted(
+            layer.layer_number for layer in self._get_all_mtp_layers()
+        )
+        hcg = fleet.get_hybrid_communicate_group()
+        gathered = []
+        paddle.distributed.all_gather_object(
+            gathered, local_depths, group=hcg.get_pipe_parallel_group()
+        )
+        holders = [depths for depths in gathered if depths]
+        expected = list(range(self.config.num_nextn_predict_layers))
+        if len(holders) != 1 or sorted(holders[0]) != expected:
+            raise RuntimeError(
+                "mtp_shared_weights + mtp_shared_last_layer requires all MTP "
+                f"depths on one pipeline stage, but the layout is {gathered}. "
+                "The transformer body is shared through the backbone pivot, while "
+                "the per-depth fusion parameters are aliased within that stage."
+            )
+
+    def _alias_mtp_fusion_weights(self):
+        """Share non-transformer parameters across MTP depths in this PP stage."""
+        mtp_layers = [
+            layer
+            for layer in self.run_function
+            if isinstance(layer, MultiTokenPredictionLayer)
+        ]
+        if len(mtp_layers) < 2:
+            return
+
+        source_params = dict(mtp_layers[0].all_weights)
+        fusion_params = {
+            name: param
+            for name, param in source_params.items()
+            if not name.startswith("transformer_layer.")
+        }
+        for dest_layer in mtp_layers[1:]:
+            for name, dest_param in dest_layer.all_weights:
+                if name.startswith("transformer_layer."):
+                    continue
+                source_param = fusion_params.get(name)
+                if source_param is None:
+                    raise RuntimeError(
+                        f"MTP fusion parameter {name!r} is missing at depth "
+                        f"{mtp_layers[0].layer_number}"
+                    )
+                if tuple(source_param.shape) != tuple(dest_param.shape):
+                    raise RuntimeError(
+                        f"MTP fusion parameter {name!r} has incompatible shapes "
+                        f"between depths {mtp_layers[0].layer_number} and "
+                        f"{dest_layer.layer_number}: {source_param.shape} vs "
+                        f"{dest_param.shape}"
+                    )
+                parts = name.split(".")
+                owner = dest_layer
+                for part in parts[:-1]:
+                    owner = getattr(owner, part)
+                leaf = parts[-1]
+                owner._parameters[leaf] = source_param
+
+    def _alias_shared_layer(self, dest_layer, src_layer):
+        """Alias a whole MTP layer, not just its ``transformer_layer``.
+
+        paddle's ``PipelineLayer._alias_shared_layer`` hardcodes
+        ``dest_layer.transformer_layer`` as the aliasing scope. That is correct for
+        ``mtp_shared_last_layer``, whose pivot is a backbone TransformerLayer: the
+        pivot's parameter names line up with the names under the MTP body. It is too
+        narrow for ``mtp_shared_weights``, where every MTP depth must also share the
+        fusion modules (enorm / hnorm / eh_proj or e_proj+h_proj / norm).
+
+        When both sides are MTP layers, pivot and destination are the same class, so
+        their ``named_parameters()`` live at the same level and aliasing the whole
+        layer is both correct and complete. Everything else falls through to paddle,
+        so ``mtp_shared_last_layer`` and the embedding / lm_head keys are untouched.
+
+        Only rank-local Parameter identity is established here; the cross-stage
+        broadcast and gradient allreduce come from ``PipelineLayer.shared_comm``,
+        which is built from the desc's ``shared_weight_attr`` (``all_weights`` for the
+        mtp_shared_weights key, so every parameter is covered).
+
+        The widening is gated on ``config.mtp_shared_weights``, not on the operand
+        types alone: under ``mtp_shared_last_layer`` the pivot can be an MTP layer too
+        (when the backbone-last pivot lands off-stage), but that key's
+        ``shared_weight_attr`` is ``transformer_layer_weights``, so widening there
+        would alias fusion params that shared_comm never syncs -- silently divergent
+        across stages instead of loudly broken.
+
+        TODO(upstream): this override exists only because paddle's
+        ``PipelineLayer._alias_shared_layer`` hardcodes
+        ``dest_layer.transformer_layer`` and ignores the desc's
+        ``shared_weight_attr``, which it already carries. Once the alias scope is
+        driven off ``shared_weight_attr`` upstream, delete this method.
+        """
+        if not (
+            getattr(self.config, "mtp_shared_weights", False)
+            and isinstance(dest_layer, MultiTokenPredictionLayer)
+            and isinstance(src_layer, MultiTokenPredictionLayer)
+        ):
+            return super()._alias_shared_layer(dest_layer, src_layer)
+
+        # Drive the alias scope off all_weights so it stays identical to what
+        # shared_comm syncs. In particular mtp_embed is excluded there (GPTModel
+        # owns it through _tie_mtp_embed_weights_intra_rank and the
+        # _mtp_embed_global_group broadcast), and aliasing something shared_comm
+        # does not sync is exactly the silent cross-stage divergence this override
+        # exists to avoid.
+        source_params = dict(src_layer.all_weights)
+        dest_named = list(dest_layer.all_weights)
+        aliased = missing = shape_mismatch = 0
+        for name, dest_param in dest_named:
+            src_param = source_params.get(name)
+            if src_param is None:
+                missing += 1
+                continue
+            if tuple(src_param.shape) != tuple(dest_param.shape):
+                shape_mismatch += 1
+                continue
+            # Overwrite the entry in the owning module's _parameters dict so the
+            # Parameter object identity is shared, leaving the LayerDesc tree (and
+            # therefore the per-depth checkpoint keys) intact.
+            parts = name.split(".")
+            owner = dest_layer
+            for p in parts[:-1]:
+                owner = getattr(owner, p)
+            owner._parameters[parts[-1]] = src_param
+            aliased += 1
+
+        # Raise, not assert: ``python -O`` strips assertions, and this guards a
+        # correctness-critical invariant. If a spec really diverged, an assert-less
+        # run would continue with a partially aliased depth while shared_comm still
+        # syncs the full all_weights set -- the silent cross-stage divergence this
+        # override exists to prevent.
+        if aliased != len(dest_named):
+            raise RuntimeError(
+                f"MTP depth {dest_layer.layer_number} cannot be fully aliased onto "
+                f"depth {src_layer.layer_number}: aliased={aliased}/"
+                f"{len(dest_named)}, missing={missing}, "
+                f"shape_mismatch={shape_mismatch}. All MTP depths are built from the "
+                "same spec, so a mismatch means the specs diverged (e.g. "
+                "use_dense_mtp differing across depths)."
+            )
 
     def _get_weight_only_params(self):
         """Get all parameters marked with is_weight_only_mtp flag."""
@@ -273,6 +434,9 @@ class GPTModel(PipelineLayer):
                 and getattr(self.config, "mtp_shared_last_layer", False)
                 and spec.mtp
             ):
+                # In the combined mode this key shares each MTP body's
+                # transformer_layer with the backbone pivot. The fusion parameters
+                # are aliased across MTP depths after construction.
                 desc = SharedLayerDesc(
                     "mtp_reuse_transformer",
                     transformer_layer_spec,
@@ -318,12 +482,27 @@ class GPTModel(PipelineLayer):
                     f"{name_prefix}.mtp_embedding",
                 )
             for mtp_spec in spec.mtp:
+                # The if/elif below picks which shared KEY this desc carries, not
+                # which flag applies at which depth count: paddle keys
+                # shared_layers by the desc's single layer_name, so one desc
+                # cannot join both groups. With both flags on the backbone key
+                # wins here and the per-depth fusion params are aliased afterwards
+                # by _alias_mtp_fusion_weights. The flags are orthogonal, with
+                # different pivots and scopes -- see
+                # TransformerConfig.mtp_shared_weights.
                 if getattr(self.config, "mtp_shared_last_layer", False):
                     desc = SharedLayerDesc(
                         "mtp_reuse_transformer",
                         mtp_spec,
                         shared_submodule_weight_only=True,
                         shared_weight_attr="transformer_layer_weights",
+                    )
+                elif getattr(self.config, "mtp_shared_weights", False):
+                    desc = SharedLayerDesc(
+                        "mtp_shared_all",
+                        mtp_spec,
+                        shared_submodule_weight_only=True,
+                        shared_weight_attr="all_weights",
                     )
                 else:
                     desc = LayerDesc(mtp_spec)
@@ -816,3 +995,115 @@ class GPTModel(PipelineLayer):
                 if isinstance(layer, TransformerLayer) and layer.use_fp8():
                     return True
             return False
+
+    # Backported from develop together with #2117: the MTP sharing code and
+    # its tests call these three. _get_all_mtp_layers came with #1430, the
+    # other two predate #2117 -- without the allreduce override this branch
+    # falls back to paddle's base implementation, which does not dedup a
+    # Parameter reached twice through one comm group.
+    def _get_all_mtp_layers(self):
+        """Traverse all virtual chunks and collect MultiTokenPredictionLayer instances."""
+        layers = []
+        if (
+            self._num_virtual_pipeline_stages > 1
+            and hasattr(self, "_model_chunks")
+            and self._model_chunks
+        ):
+            for chunk in self._model_chunks:
+                for layer in chunk.run_function:
+                    if isinstance(layer, MultiTokenPredictionLayer):
+                        layers.append(layer)
+        else:
+            for layer in self.run_function:
+                if isinstance(layer, MultiTokenPredictionLayer):
+                    layers.append(layer)
+        return layers
+
+    def _get_mtp_embed_primary_weight(self):
+        """Get the primary (shared) Parameter for mtp_embed weight on this rank."""
+        if "mtp_embed" in self.shared_layers:
+            return self.shared_layers["mtp_embed"].embedding_weight
+        mtp_layers = self._get_all_mtp_layers()
+        if mtp_layers:
+            return mtp_layers[0].mtp_embed.weight
+        return None
+
+    def allreduce_shared_weight_gradients(self):
+        """Override: mtp_embed uses a dedicated sub-group allreduce;
+        other shared layers keep the framework's original pairwise logic.
+        """
+        import paddle
+        import paddle.distributed
+        from paddle.framework import core
+
+        def _attached_grad(param):
+            """Return the grad buffer to reduce, allocating a zero one if absent.
+
+            Dygraph-only, like the whole PP backward path this is called from.
+            The base class also carries a non-dygraph branch, but it is fluid-era
+            dead code (it drives ``_dygraph_tracer().trace_op``), and raising
+            there instead of reducing a zero buffer would desynchronize the PP
+            group's collectives into a hang.
+            """
+            if hasattr(param, "main_grad"):
+                if param.main_grad is None:
+                    param.main_grad = core.eager.Tensor(
+                        value=paddle.zeros_like(param, dtype="float32").value(),
+                        place=param.place,
+                        name="main_grad@" + param.name,
+                    )
+                return param.main_grad
+            if param.grad is None:
+                param.grad = core.eager.Tensor(
+                    value=paddle.zeros_like(param).value(),
+                    place=param.place,
+                    name="grad@" + param.name,
+                )
+            return param.grad
+
+        mtp_embed_weight = None
+        if hasattr(self, "_mtp_embed_global_group"):
+            mtp_embed_weight = self._get_mtp_embed_primary_weight()
+        mtp_embed_param_id = (
+            id(mtp_embed_weight) if mtp_embed_weight is not None else None
+        )
+        reduced_param_groups = set()
+
+        # Pairwise allreduce for other shared layers (skip mtp_embed by Parameter
+        # identity, and reduce aliases once per communication group).
+        for key, comm in self.shared_comm.items():
+            for weight_attr in comm["weight_attr"]:
+                obj = getattr(comm["layer"], weight_attr)
+                params = (
+                    [("", obj)] if isinstance(obj, paddle.Tensor) else list(obj)
+                )
+                for _, param in params:
+                    param_id = id(param)
+                    param_group_key = (param_id, id(comm["group"]))
+                    if (
+                        param_id == mtp_embed_param_id
+                        or param_group_key in reduced_param_groups
+                    ):
+                        continue
+                    grad = _attached_grad(param)
+                    with paddle.framework.no_grad():
+                        paddle.distributed.all_reduce(
+                            grad.contiguous(), group=comm["group"]
+                        )
+                    reduced_param_groups.add(param_group_key)
+
+        # mtp_embed: allreduce within dedicated sub-group
+        if (
+            mtp_embed_weight is not None
+            and hasattr(self, "_mtp_embed_global_group")
+            and self._mtp_embed_global_group is not None
+        ):
+            grad = _attached_grad(mtp_embed_weight)
+            with paddle.framework.no_grad():
+                paddle.distributed.all_reduce(
+                    grad.contiguous(), group=self._mtp_embed_global_group
+                )
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # AOA modular generation: whole-model entries
+    # ═══════════════════════════════════════════════════════════════════════════

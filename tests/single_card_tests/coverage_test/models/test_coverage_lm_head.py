@@ -97,6 +97,12 @@ class TestGPTLMHeadForward(unittest.TestCase):
                 block_attention_residuals=False,
                 num_nextn_predict_layers=2,
                 mtp_load_weight_only=False,
+                # Pinned like the two flags above: forward reads this to decide
+                # whether to run mtp_depth_sampling, and a bare MagicMock would
+                # hand it a truthy auto-attribute whose __iter__ is empty, which
+                # np.random.Generator.choice then rejects. This test covers the
+                # D+1 logits split, not sampling.
+                mtp_depth_sampling=None,
             ),
         )
         head._forward = MagicMock(
