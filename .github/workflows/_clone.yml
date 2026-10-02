@@ -40,13 +40,16 @@ jobs:
     if: ${{ github.repository_owner == 'PaddlePaddle' }}
     runs-on:
       group: HongKong-Clone
+    env:
+      GIT_HTTP_LOW_SPEED_LIMIT: "65536"
+      GIT_HTTP_LOW_SPEED_TIME: "120"
     steps:
       - name: Clone paddle
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref }}
           submodules: ${{ inputs.submodule }}
-          fetch-depth: 1000
+          fetch-depth: 0
 
       - name: Merge PR to test branch
         id: check-execution
@@ -89,9 +92,9 @@ jobs:
           python -m pip install bce-python-sdk==0.8.74
           echo "::endgroup::"
           if [ -n "${{ inputs.commit }}" ]; then
-            python ${bos_file} PaddleFleet.tar.gz paddle-github-action/PaddleFleet/${{ inputs.clone_dir }}/${PR_ID}/${{ inputs.commit }}
+            python ${bos_file} PaddleFleet.tar.gz only-internal-network-support/PaddleFleet/${{ inputs.clone_dir }}/${PR_ID}/${{ inputs.commit }}
           else
-            python ${bos_file} PaddleFleet.tar.gz paddle-github-action/PaddleFleet/${{ inputs.clone_dir }}/${PR_ID}/${COMMIT_ID}
+            python ${bos_file} PaddleFleet.tar.gz only-internal-network-support/PaddleFleet/${{ inputs.clone_dir }}/${PR_ID}/${COMMIT_ID}
           fi
 
       - name: Clean environment
