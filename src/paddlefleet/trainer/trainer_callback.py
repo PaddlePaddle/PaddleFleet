@@ -756,7 +756,8 @@ class DefaultFlowCallback(TrainerCallback):
             if args.save_last_step:
                 control.should_save = True
 
-        # Save hf
+        # Save hf. TrainingArguments already resolved save_to_hf into
+        # save_hf_steps.
         if (
             args.save_strategy == IntervalStrategy.STEPS
             and args.save_hf_steps > 0
