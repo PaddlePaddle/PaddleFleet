@@ -25,7 +25,14 @@ from paddlefleet.models.common.language_loss import language_loss
 
 class TestAccuracyCompatibleMTPLossAttachment(unittest.TestCase):
     def forward(
-        self, main, auxiliary, *, compatible=True, add_mtp=True, scale=0.5
+        self,
+        main,
+        auxiliary,
+        *,
+        compatible=True,
+        add_mtp=True,
+        scale=0.5,
+        main_tokens=None,
     ):
         # Stub per-head CE, but execute the real label slicing, MTP averaging,
         # attachment, tracker update, and return path together.
@@ -42,33 +49,63 @@ class TestAccuracyCompatibleMTPLossAttachment(unittest.TestCase):
                 mtp_loss_scaling_factor=scale,
             ),
             use_accuracy_compatible=compatible,
-            _forward=Mock(side_effect=[main, *auxiliary]),
         )
+        active = [
+            (i + 1, value)
+            for i, value in enumerate(auxiliary)
+            if value is not None
+        ]
+        values = iter([main, *(value for _, value in active)])
+
+        def head_loss(*_):
+            if instance._forward.call_count > 1:
+                self.assertEqual(instance._deferred_main_tokens, main_tokens)
+            return next(values)
+
+        instance._forward = Mock(side_effect=head_loss)
         labels = paddle.arange(3 + depth).reshape([1, 3 + depth])
-        logits = [object() for _ in range(depth + 1)]
+        logits = [
+            object(),
+            *(object() if value is not None else None for value in auxiliary),
+        ]
         with (
             patch.dict(language_loss.LanguageLoss.mtp_loss_tracker, clear=True),
             patch.object(
                 language_loss, "get_global_training_logs", return_value=None
             ),
             patch.object(
-                language_loss, "get_pending_gradient_divisor", return_value=None
+                language_loss,
+                "get_pending_gradient_divisor",
+                return_value=main_tokens,
             ),
         ):
             output = language_loss.LanguageLoss.forward(
                 instance, logits, labels
             )
             self.assertEqual(
-                len(language_loss.LanguageLoss.mtp_loss_tracker), depth
+                len(language_loss.LanguageLoss.mtp_loss_tracker), len(active)
             )
         self.assertIsNone(instance._deferred_main_tokens)
-        self.assertEqual(instance._forward.call_count, depth + 1)
-        for index, call in enumerate(instance._forward.call_args_list):
+        self.assertEqual(instance._forward.call_count, len(active) + 1)
+        for index, call in zip(
+            [0, *(i for i, _ in active)], instance._forward.call_args_list
+        ):
             self.assertIs(call.args[0], logits[index])
             self.assertEqual(
                 call.args[1].tolist(), [list(range(index, index + 3))]
             )
         return output
+
+    def test_sampled_depths_keep_main_divisor_and_average_only_computed_losses(
+        self,
+    ):
+        main, first, last = (self.scalar(value) for value in (1.0, 4.0, 8.0))
+        output = self.forward(main, [first, last, None, None], main_tokens=17.0)
+        self.assertEqual(output.numpy().tobytes(), main.numpy().tobytes())
+        output.backward()
+        self.assertEqual(main.grad.item(), 1.0)
+        self.assertEqual(first.grad.item(), 0.25)
+        self.assertEqual(last.grad.item(), 0.25)
 
     @staticmethod
     def scalar(value):
