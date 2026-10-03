@@ -472,7 +472,7 @@ class TestIndexerCompressedTopkBackendGating(unittest.TestCase):
     The flag overrides the configured indexer backend to ``"unfused"``. With a
     configured ``"cudnn"`` backend, flag off keeps the cuDNN branch (which calls
     ``indexer.forward_before_topk`` + the cuDNN kernel), while flag on forces the
-    unfused branch (which calls the indexer module directly). ``training=False``
+    unfused branch (which scores the indexer's tensors in Paddle). ``training=False``
     keeps the loss path out so the branch choice is the only observable.
     """
 
@@ -488,12 +488,16 @@ class TestIndexerCompressedTopkBackendGating(unittest.TestCase):
         s.softmax_scale = 0.5
         s.tp_group = None
         s.layer_number = 0
-        topk = paddle.zeros([1, 3, 2], dtype="int64")
+        topk = paddle.to_tensor([[[3, 2]] * 3], dtype="int64")
         s.indexer = MagicMock()
+        s.indexer.softmax_scale = 0.5
         s.indexer.forward_before_topk = MagicMock(
-            return_value=(MagicMock(), MagicMock(), MagicMock())
+            return_value=(
+                paddle.ones([1, 3, 2, 4]),
+                paddle.arange(16, dtype="float32").reshape([1, 4, 4]),
+                paddle.ones([1, 3, 2]),
+            )
         )
-        s.indexer.return_value = (None, topk)
         s._resolve_topk_effective = MagicMock(return_value=2)
         self._topk = topk
         return s
@@ -516,7 +520,12 @@ class TestIndexerCompressedTopkBackendGating(unittest.TestCase):
                 csa_attention,
                 "_map_compressed_topk_to_kv_full",
                 return_value="SENTINEL",
-            ),
+            ) as mapped,
+            patch.object(
+                csa_attention,
+                "fused_qk_topk_naive",
+                wraps=csa_attention.fused_qk_topk_naive,
+            ) as unfused,
             patch.object(
                 csa_indexer_fwd_cudnn,
                 "cudnn_indexer_topk_fwd",
@@ -526,18 +535,28 @@ class TestIndexerCompressedTopkBackendGating(unittest.TestCase):
             csa_attention.CompressedSparseAttention._compute_indexer_compressed_topk_idxs(
                 s, query, x, qr, compressed_kv, 4, 0
             )
-        return s, cudnn
+        mapped.assert_called_once()
+        np.testing.assert_array_equal(
+            mapped.call_args.args[0].numpy(), self._topk.numpy()
+        )
+        return s, cudnn, unfused
 
     def test_flag_off_keeps_configured_cudnn_backend(self):
-        s, cudnn = self._run(False)
+        s, cudnn, unfused = self._run(False)
         s.indexer.forward_before_topk.assert_called_once()
         cudnn.assert_called_once()
+        unfused.assert_not_called()
         s.indexer.assert_not_called()
 
     def test_flag_on_forces_unfused_backend(self):
-        s, cudnn = self._run(True)
-        s.indexer.assert_called_once()
-        s.indexer.forward_before_topk.assert_not_called()
+        s, cudnn, unfused = self._run(True)
+        s.indexer.assert_not_called()
+        s.indexer.forward_before_topk.assert_called_once()
+        unfused.assert_called_once()
+        self.assertEqual(unfused.call_args.args[3], 2)
+        np.testing.assert_array_equal(
+            unfused.call_args.args[2].numpy(), np.full([1, 3, 2], 0.5)
+        )
         cudnn.assert_not_called()
 
 
