@@ -467,6 +467,12 @@ class LlmMetaConfig:
             "Update rate for MoE router biases (only effective if `moe_router_enable_expert_bias=True`). Controls the magnitude of bias adjustments to prevent unstable updates. Defaults to 0.001.",
         ),
         (
+            "moe_router_use_fp32_master",
+            bool,
+            False,
+            "Keep the accuracy-compatible router master weight in FP32.",
+        ),
+        (
             "moe_shared_expert_overlap",
             bool,
             True,

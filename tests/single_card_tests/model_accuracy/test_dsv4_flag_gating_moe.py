@@ -236,9 +236,9 @@ class TestDeepEPRestoreProbsGating(unittest.TestCase):
 class TestExpertForwardKernelProbsGating(unittest.TestCase):
     """The flag relaxes the ``global_input_probs`` requirement in expert_forward.
 
-    moe_layer.py:1012 - with ``FLAGS_use_accuracy_compatible_kernel`` on, the
-    non-grouped ``expert_forward`` demands router probs from the dispatcher and
-    raises ``RuntimeError`` when they are missing -- unless the DSV4 flag is on,
+    moe_layer.py - with ``use_accuracy_compatible`` on, the non-grouped
+    ``expert_forward`` demands router probs from the dispatcher and raises
+    ``RuntimeError`` when they are missing -- unless the DSV4 flag is on,
     which is allowed to run without them. An empty (zero-token) dispatch keeps
     the expert loop from touching any real expert module, so the branch is
     exercised on a single card.
@@ -247,15 +247,13 @@ class TestExpertForwardKernelProbsGating(unittest.TestCase):
     def _owner(self):
         return types.SimpleNamespace(
             _use_grouped_mlp_expert=False,
+            use_accuracy_compatible=True,
             token_dispatcher=types.SimpleNamespace(global_input_probs=None),
         )
 
     def test_flag_off_requires_dispatched_probs(self):
         with (
             _dsv4_flag(moe_layer, False),
-            patch.object(
-                moe_layer, "use_accuracy_compatible_kernel", return_value=True
-            ),
             self.assertRaises(RuntimeError),
         ):
             moe_layer.MoELayer.expert_forward(
@@ -265,12 +263,7 @@ class TestExpertForwardKernelProbsGating(unittest.TestCase):
             )
 
     def test_flag_on_runs_without_dispatched_probs(self):
-        with (
-            _dsv4_flag(moe_layer, True),
-            patch.object(
-                moe_layer, "use_accuracy_compatible_kernel", return_value=True
-            ),
-        ):
+        with _dsv4_flag(moe_layer, True):
             out = moe_layer.MoELayer.expert_forward(
                 self._owner(),
                 paddle.zeros([0, 4], dtype="float32"),
