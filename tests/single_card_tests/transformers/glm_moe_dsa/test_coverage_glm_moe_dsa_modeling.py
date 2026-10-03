@@ -240,7 +240,7 @@ class CausalLmEntrypointTests(unittest.TestCase):
     def setUp(self):
         _RecordingProvider.last = None
         patcher = patch.object(
-            modeling.GLMMoEModelProvider,
+            modeling.GlmMoeDsaModelProvider,
             "from_config",
             _fake_from_config,
         )
@@ -310,7 +310,7 @@ class CausalLmPipeEntrypointTests(unittest.TestCase):
     def setUp(self):
         _RecordingProvider.last = None
         patcher = patch.object(
-            modeling.GLMMoEModelProvider,
+            modeling.GlmMoeDsaModelProvider,
             "from_config",
             _fake_from_config,
         )
