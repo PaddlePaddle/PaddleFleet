@@ -120,7 +120,9 @@ class _ExplodingOptimizer:
 
 def _model(params):
     """Model stand-in exposing only the parameter iteration protocol."""
-    return SimpleNamespace(named_parameters=lambda: list(params))
+    return SimpleNamespace(
+        named_parameters=lambda remove_duplicate=True: list(params)
+    )
 
 
 class RestoreFusedExpert3dLayoutTests(unittest.TestCase):
@@ -303,7 +305,7 @@ class SaveFlexOptimizerStateTests(unittest.TestCase):
         key = "layers.0.linear.weight"
         model_shard = ShardedWeight(key, param, (4, 2), (4, 2), (0, 0))
         model = SimpleNamespace(
-            named_parameters=lambda: [(key, param)],
+            named_parameters=lambda remove_duplicate=True: [(key, param)],
             sharded_state_dict=lambda: {key: model_shard},
         )
         seen = {}
