@@ -2752,12 +2752,19 @@ class CompressedSparseAttention(FleetLayer):
                         ),
                     )
             else:  # No loss (coeff == 0 or no-grad first recompute pass); only materialize unfused top-k for attention.
-                _, topk_indices_compressed = self.indexer(
-                    x_det,
-                    qr_det,
-                    mask=causal_mask,
-                    docmask_meta=docmask_meta,
-                )
+                with grad_ctx():
+                    q_indexer, k_indexer, weights_indexer = (
+                        self.indexer.forward_before_topk(
+                            x_det, qr_det, docmask_meta=docmask_meta
+                        )
+                    )
+                    _, topk_indices_compressed = fused_qk_topk_naive(
+                        q_indexer,
+                        k_indexer,
+                        weights_indexer * self.indexer.softmax_scale,
+                        topk_effective,
+                        causal_mask,
+                    )
 
         if indexer_backend in ("cudnn", "tilelang") and need_indexer_loss:
             tilelang_indexer_loss_state = TilelangIndexerLossState(
