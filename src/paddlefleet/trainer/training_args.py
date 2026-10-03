@@ -1591,6 +1591,12 @@ class TrainingArguments:
             "help": "Override the MTP loss weight; None preserves the model configuration default."
         },
     )
+    defer_token_normalization: bool = field(
+        default=False,
+        metadata={
+            "help": "Normalize accuracy-compatible token-loss gradients after reduction; requires gradient_accumulation_steps=1."
+        },
+    )
     profile: bool = field(
         default=False, metadata={"help": "Enable nsys profiling."}
     )
