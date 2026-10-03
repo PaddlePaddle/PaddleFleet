@@ -637,6 +637,30 @@ class LlmMetaConfig:
             "Whether to enable multi-latent attention mechanism. Defaults to False.",
         ),
         (
+            "dsa_indexer_topk_freq",
+            int,
+            1,
+            "Frequency of DSA indexer top-k computation across layers.",
+        ),
+        (
+            "dsa_indexer_skip_topk_offset",
+            int,
+            0,
+            "One-indexed offset for periodic DSA top-k computation.",
+        ),
+        (
+            "dsa_indexer_types",
+            Optional[List[str]],
+            None,
+            "Per-layer DSA indexer layout using full/shared entries.",
+        ),
+        (
+            "dsa_index_share_for_mtp_iteration",
+            bool,
+            False,
+            "Whether MTP iterations reuse the decoder indexer's top-k.",
+        ),
+        (
             "csa_indexer_backend",
             str,
             "tilelang",

@@ -29,6 +29,13 @@ class DeepseekV32Config(PretrainedConfig):
 
     model_type = "deepseek_v32"
     keys_to_ignore_at_inference = ["past_key_values"]
+    attribute_map = {
+        "num_classes": "num_labels",
+        "dsa_indexer_topk_freq": "index_topk_freq",
+        "dsa_indexer_skip_topk_offset": "index_skip_topk_offset",
+        "dsa_indexer_types": "indexer_types",
+        "dsa_index_share_for_mtp_iteration": "index_share_for_mtp_iteration",
+    }
 
     def __init__(
         self,

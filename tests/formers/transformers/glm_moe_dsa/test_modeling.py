@@ -129,6 +129,7 @@ class GlmMoeDsaModelTester:
             choice_labels = ids_tensor([self.batch_size], self.num_choices)
 
         config = self.get_config()
+        self.parent.assertTrue(config.use_qk_norm)
         return (
             config,
             input_ids,

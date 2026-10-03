@@ -1471,6 +1471,7 @@ class MultiTokenPredictionLayer(FleetLayer):
         mtp_hidden_inputs_mask: paddle.Tensor | None = None,
         input_ids: paddle.Tensor | None = None,
         position_ids: paddle.Tensor | None = None,
+        _block_cache_meta: dict | None = None,
         **kwargs,
     ) -> paddle.Tensor:
         """
@@ -1504,6 +1505,9 @@ class MultiTokenPredictionLayer(FleetLayer):
                 "input_ids": input_ids,
                 "position_ids": position_ids,
             }
+            # Carry the decoder's holder into the MTP layer and its replay.
+            if _block_cache_meta is not None:
+                input_dict["_block_cache_meta"] = _block_cache_meta
             rst_dict = self.transformer_layer(input_dict)
 
         hidden_states = rst_dict["hidden_states"]
@@ -1613,6 +1617,7 @@ class MultiTokenPredictionLayer(FleetLayer):
                 else None,
                 input_ids=input_ids if input_ids is not None else None,
                 position_ids=position_ids if position_ids is not None else None,
+                _block_cache_meta=kwargs.get("_block_cache_meta"),
             )
 
         if self.config.recompute_method == "uniform":
@@ -1936,6 +1941,11 @@ class MultiTokenPredictionLayer(FleetLayer):
             for extra_key in ("position_ids", "attention_bias", "blocks"):
                 if extra_key in dict_args and dict_args[extra_key] is not None:
                     new_args[extra_key] = dict_args[extra_key]
+            # Later MTP depths consume the same decoder top-k producer.
+            # Fleet drops this metadata key at a PP boundary instead of
+            # sending it.
+            if dict_args.get("_block_cache_meta") is not None:
+                new_args["_block_cache_meta"] = dict_args["_block_cache_meta"]
 
             # mHC: pass multi-stream output to next MTP layer
             if (

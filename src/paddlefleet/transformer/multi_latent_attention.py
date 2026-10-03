@@ -890,6 +890,16 @@ class MultiLatentAttention(Attention):
         # against the callee's signature.
         if self.mqa_latent and kwargs.get("docmask_mb_idx") is not None:
             core_attn_extra["docmask_mb_idx"] = kwargs["docmask_mb_idx"]
+        dsa_topk_holder = kwargs.get("dsa_topk_holder")
+        if dsa_topk_holder is not None:
+            if not getattr(
+                self.core_attention, "supports_index_share_topk", False
+            ):
+                raise TypeError(
+                    "dsa_topk_holder was supplied to a core attention that "
+                    "does not implement DSA top-k sharing"
+                )
+            core_attn_extra["dsa_topk_holder"] = dsa_topk_holder
         # ``dsa_indexer_loss_bwd_p2p_overlap`` must tell the real forward pass
         # from the recompute replay, and the two differ only in whether the layer
         # body is wrapped at all -- a per-layer property
