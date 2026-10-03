@@ -76,6 +76,14 @@ def default_logdir() -> str:
     return os.path.join("runs", current_time + "_" + socket.gethostname())
 
 
+def _resolve_save_hf_steps(save_hf_steps, save_steps, save_to_hf):
+    """save_to_hf follows save_steps unless save_hf_steps is set explicitly."""
+    if save_to_hf and (save_hf_steps is None or save_hf_steps <= 0):
+        if save_steps is not None and save_steps > 0:
+            return save_steps
+    return save_hf_steps
+
+
 @dataclass
 class TrainingArguments:
     """
@@ -1158,8 +1166,7 @@ class TrainingArguments:
     prefetch_factor: int = field(
         default=2,
         metadata={
-            "help": "Number of batch data the DataLoader would prefetch if use_buffer_reader=True. "
-            "Default 2."
+            "help": "Number of batch data the DataLoader would prefetch if use_buffer_reader=True. Default 2."
         },
     )
 
@@ -1502,6 +1509,15 @@ class TrainingArguments:
         default=True,
         metadata={"help": "Save model to HuggingFace safetensors."},
     )
+    save_to_hf: Optional[bool] = field(
+        default=False,
+        metadata={
+            "help": (
+                "Export HuggingFace safetensors on the save_steps cadence. "
+                "Default False keeps existing jobs on save_hf_steps=-1."
+            )
+        },
+    )
     nccl_comm_group_config: Optional[str] = field(
         default=None,
         metadata={
@@ -1588,6 +1604,20 @@ class TrainingArguments:
     save_hf_steps: int = field(
         default=-1,
         metadata={"help": "Save huggingface checkpoint every X updates steps."},
+    )
+    save_hf_output_dir: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Optional root for mid-training hf_checkpoint-* snapshots. "
+                "Default None keeps the historical layout "
+                "{output_dir}/hf_checkpoint-{step}, which resume, "
+                "get_last_checkpoint, save_hf_total_limit rotation, and "
+                "best-checkpoint consumers already know. Set this only when "
+                "an oracle (mrk checkpoint) rglob's output_dir and must not "
+                "see nested cadence copies of the same tensor names."
+            )
+        },
     )
     save_hf_total_limit: Optional[int] = field(
         default=None,
@@ -1957,8 +1987,7 @@ class TrainingArguments:
         default=0.95,
         metadata={
             "help": (
-                "Momentum coefficient for Muon optimizer. "
-                "Default: 0.95. Only used when optim=muon."
+                "Momentum coefficient for Muon optimizer. Default: 0.95. Only used when optim=muon."
             )
         },
     )
@@ -1989,8 +2018,7 @@ class TrainingArguments:
         default=5,
         metadata={
             "help": (
-                "Number of Newton-Schulz iteration steps for Muon optimizer. "
-                "Default: 5. Only used when optim=muon."
+                "Number of Newton-Schulz iteration steps for Muon optimizer. Default: 5. Only used when optim=muon."
             )
         },
     )
@@ -2184,6 +2212,11 @@ class TrainingArguments:
         self.evaluation_strategy = IntervalStrategy(self.evaluation_strategy)
         self.logging_strategy = IntervalStrategy(self.logging_strategy)
         self.save_strategy = IntervalStrategy(self.save_strategy)
+        # Resolve the HF cadence once: the save callback and the EMA/ZCC
+        # savers all read save_hf_steps and must agree on it.
+        self.save_hf_steps = _resolve_save_hf_steps(
+            self.save_hf_steps, self.save_steps, self.save_to_hf
+        )
 
         self.lr_scheduler_type = SchedulerType(self.lr_scheduler_type)
         if (
@@ -3556,14 +3589,20 @@ class TrainingArguments:
                 self.expert_model_parallel_size = -1
                 self.expert_tensor_model_parallel_size = -1
 
-        # NOTE(Waynezee): when moe_expert_fusion is true and sharding_parallel_size = 1,  checkpoint will fail to save
+        # fused MoE + sharding=1 used to abort because grouped-GEMM weights
+        # flatten to 2-D. Model export now restores 3-D layout, so this is a
+        # warning rather than a hard gate.
         if (
             hasattr(self, "moe_expert_fusion")
             and self.moe_expert_fusion
             and self.world_size > 1
+            and self.sharding_parallel_size <= 1
+            and getattr(self.save_strategy, "value", self.save_strategy) != "no"
         ):
-            assert self.sharding_parallel_size > 1, (
-                "Checkpoint will fail to save when moe_expert_fusion is true and sharding_parallel_size = 1, please set moe_expert_fusion to false"
+            logger.warning(
+                "moe_expert_fusion=true with sharding_parallel_size="
+                f"{self.sharding_parallel_size}; fused-expert checkpoint save "
+                "keeps 3-D grouped_gemm weights."
             )
 
         if self.hybrid_parallel_topo_order is None:
