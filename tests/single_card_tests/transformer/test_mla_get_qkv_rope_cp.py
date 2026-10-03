@@ -258,6 +258,7 @@ class TestMLAGetQKVRopeContextParallel(unittest.TestCase):
             MLASelfAttention._is_cudagraph_active, layer
         )
         layer.config = types.SimpleNamespace(
+            use_accuracy_compatible=False,
             q_lora_rank=None,
             hidden_size=hidden,
             kv_lora_rank=kv_lora,
@@ -1020,6 +1021,7 @@ class TestLatentMQARopeFusion(unittest.TestCase):
             MLASelfAttention._is_cudagraph_active, layer
         )
         layer.config = types.SimpleNamespace(
+            use_accuracy_compatible=False,
             q_lora_rank=None,
             hidden_size=hidden,
             kv_lora_rank=kv_lora,
