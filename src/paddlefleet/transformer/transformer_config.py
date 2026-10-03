@@ -21,6 +21,7 @@ import functools
 import logging
 import math
 from dataclasses import dataclass
+from numbers import Real
 from typing import TYPE_CHECKING, Literal
 
 import paddle.nn.functional as F
@@ -188,7 +189,99 @@ class TransformerConfig(ModelParallelConfig):
     """When True, MTP layers use dense MLP instead of MoE in their internal transformer block."""
 
     mtp_shared_last_layer: bool = False
-    """When True, MTP layers share the last backbone TransformerLayer parameters."""
+    """When True, MTP layers share the last backbone TransformerLayer parameters.
+
+    Pivot = that backbone layer, scope = the MTP body only
+    (shared_weight_attr="transformer_layer_weights"). Orthogonal to
+    mtp_shared_weights, which has a different pivot (MTP depth 0) and a wider
+    scope (body + per-depth fusion); see that field for why one flag cannot
+    express both.
+
+    Neither flag implies the other. This one works at num_nextn_predict_layers=1,
+    where mtp_shared_weights is rejected outright, so the single-depth
+    configurations can only be expressed here; and at D>1 this flag alone is a
+    meaningful shape of its own -- the heavy body is tied to the backbone while
+    every depth keeps its own small fusion modules."""
+
+    mtp_shared_weights: bool = False
+    """When True, ALL MTP depths share one MultiTokenPredictionLayer's parameters --
+    the internal transformer_layer body AND the per-depth fusion modules
+    (enorm / hnorm / eh_proj or e_proj+h_proj / norm).
+
+    This is NOT a redundant spelling of mtp_shared_last_layer: the two differ in
+    both pivot and scope, and all four combinations are distinct.
+      - mtp_shared_last_layer: pivot = the last backbone TransformerLayer,
+        scope = transformer_layer_weights (the MTP body only).
+      - mtp_shared_weights: pivot = MTP depth 0, scope = all_weights (body plus
+        the per-depth fusion modules). Requires num_nextn_predict_layers >= 2.
+    At D=3, mtp_shared_weights alone gives three depths that share everything with
+    each other but nothing with the backbone -- a shape mtp_shared_last_layer
+    cannot express, since it would tie the bodies to the backbone and still leave
+    three independent fusion parameter sets.
+
+    Implemented through paddle's SharedLayerDesc: every depth is emitted under the
+    single key "mtp_shared_all" with shared_submodule_weight_only=True and
+    shared_weight_attr="all_weights". The first desc on the pivot stage becomes the
+    shared layer, the rest are aliased onto it (GPTModel._alias_shared_layer widens
+    paddle's `transformer_layer`-only default to the whole MTP layer), and every
+    parameter is registered in PipelineLayer.shared_comm, so the cross-stage
+    broadcast and gradient allreduce work at pipeline_model_parallel_size > 1.
+    Parameter identity is shared, so the LayerDesc tree is preserved and AOA still
+    emits per-MTP checkpoint keys; on load, whichever depth's keys are read last
+    wins. mtp_embed is deliberately left out of the shared set -- GPTModel already
+    syncs it through _tie_mtp_embed_weights_intra_rank and the
+    _mtp_embed_global_group broadcast (see all_weights).
+
+    The cross-stage path means this flag tolerates MTP depths split across
+    stages, and so does mtp_depth_sampling -- it derives K from (seed, train step)
+    at each site rather than shipping it between them -- so the two combine with
+    no extra placement constraint.
+
+    Can be combined with mtp_shared_last_layer. In that mode,
+    mtp_shared_last_layer shares each MTP transformer's body with the last
+    backbone TransformerLayer, while this flag shares the per-depth fusion
+    parameters across MTP depths. A single SharedLayerDesc key cannot express both
+    pivots -- paddle keys shared_layers by the desc's single layer_name -- so the
+    fusion parameters are aliased rank-locally after construction
+    (GPTModel._alias_mtp_fusion_weights) and the combined mode therefore requires
+    all MTP depths on one pipeline stage, which GPTModel validates at build time.
+    Within that constraint the rank-local alias is equivalent to what shared_comm
+    would do. Expressing it through the framework instead needs paddle to let one
+    layer join several shared keys with disjoint parameter sets; that is left to a
+    follow-up. Requires num_nextn_predict_layers >= 2. Not usable with the
+    dualpipev scheduler, which paddle rejects for SharedLayerDesc outright."""
+
+    mtp_depth_sampling: list | None = None
+    """Per-step random sampling of how many MTP depths to actually run, to keep MTP
+    compute close to num_nextn_predict_layers=1 while still training deeper depths
+    occasionally.
+    - None: disabled — always run all num_nextn_predict_layers depths (default).
+    - list[float] of length D=num_nextn_predict_layers: a probability distribution
+      P(K=k), k=1..D (must sum to 1). Each optimizer step samples a prefix length K
+      and runs only MTP depths 1..K; depths >K are skipped (no transformer_layer
+      forward, no vocab projection, no loss). The loss averages over the K computed
+      depths, so depth j's effective weight is w_j = E[1{K>=j}/K] and
+      sum_j w_j == 1. K is a pure function of (config.seed, train step): the RNG is
+      seeded per call from those two values, with the step read from the
+      TRAINER_GLOBAL_STEP environment variable the trainer exports before every
+      forward (falling back to PDC_INIT_STEP, the same pair and order
+      recompute_utils.has_recovered already reads), and config.seed defaulting to
+      0 since TransformerConfig has no seed field of its own. No state is kept
+      anywhere, so every rank and every call site derives the same K with no
+      collective -- MoE expert-parallel all-to-all stays consistent, and resuming
+      from a checkpoint continues the same K sequence for free because global_step
+      is restored before the first forward. All micro-batches of one optimizer
+      step share a K, which also keeps the per-rank compute of a pipeline step
+      balanced.
+    Works under pipeline_model_parallel_size > 1 with no layout restriction: the MTP
+    depths and the MTP LM head may land on different pipeline chunks, since each
+    re-derives K from (seed, step) rather than reading it off dict_args. dict_args
+    still caches the value within a chunk to avoid re-drawing.
+    Covered by
+    tests/multi_card_tests/pipeline_parallel/test_gpt_pp_mtp_depth_sampling.py.
+    Works under expert_model_parallel_size > 1: every EP rank derives the same K,
+    so the MoE all-to-all of each computed depth stays matched; covered by
+    tests/multi_card_tests/moe/test_gpt_mtp_depth_sampling_ep.py."""
 
     separate_mtp_headloss: bool = False
     """Separate MTP LMHead & Loss calculate for pipeline balance."""
@@ -2349,6 +2442,17 @@ class TransformerConfig(ModelParallelConfig):
                     f"{self.virtual_pipeline_model_parallel_size}"
                 )
 
+        if self.mtp_shared_weights:
+            # Raise, not assert: ``python -O`` strips assertions, and an invalid
+            # depth count would otherwise fail deep inside shared-layer bookkeeping.
+            if self.num_nextn_predict_layers < 2:
+                raise ValueError(
+                    "mtp_shared_weights requires num_nextn_predict_layers >= 2, got "
+                    f"num_nextn_predict_layers={self.num_nextn_predict_layers}. With "
+                    "a single depth there is nothing to share and the flag would "
+                    "silently do nothing."
+                )
+
         if self.mtp_shared_last_layer:
             # When MTP reuses the last backbone TransformerLayer's parameters,
             # the MTP transformer block must have an identical structure to the
@@ -2391,6 +2495,66 @@ class TransformerConfig(ModelParallelConfig):
                     "mtp_load_weight_only=True. GPTEmbedding does not build the "
                     "shifted MTP embeddings in that mode, so separate_mtp_input "
                     "would silently do nothing."
+                )
+
+        if self.mtp_depth_sampling is not None:
+            # Raise, not assert: ``python -O`` strips assertions, and every check
+            # below guards a path that would otherwise fail silently (sampling
+            # accepted but never applied) or much later inside the loss.
+            for _flag in (
+                "enable_mtp_magic_send",
+                "separate_mtp_headloss",
+                "mtp_distillation_loss",
+                "use_erndata",
+                "mtp_load_weight_only",
+            ):
+                if getattr(self, _flag, False):
+                    raise ValueError(
+                        f"mtp_depth_sampling={self.mtp_depth_sampling} requires "
+                        f"{_flag}=False, got {_flag}=True. Reasons per flag: "
+                        "enable_mtp_magic_send / separate_mtp_headloss route MTP "
+                        "logits through a different LM head that emits no None "
+                        "placeholders; mtp_distillation_loss iterates every entry "
+                        "of mtp_logits and would dereference those placeholders; "
+                        "use_erndata dispatches MultiTokenPredictionLayer.forward "
+                        "to _forward_megatron_style before the sampling hook, so "
+                        "depths would silently not be skipped; "
+                        "mtp_load_weight_only swaps in WeightOnlyMTPLayer, whose "
+                        "forward returns dict_args before the sampling hook and "
+                        "whose LM head branch is skipped entirely, so sampling "
+                        "would be accepted and never applied."
+                    )
+            _d = self.num_nextn_predict_layers
+            if (
+                not isinstance(self.mtp_depth_sampling, (list, tuple))
+                or len(self.mtp_depth_sampling) != _d
+            ):
+                raise ValueError(
+                    "mtp_depth_sampling must be a list/tuple of length "
+                    f"num_nextn_predict_layers={_d} holding P(K=k) for k=1..{_d}, "
+                    f"got {self.mtp_depth_sampling!r} of length "
+                    f"{len(self.mtp_depth_sampling) if isinstance(self.mtp_depth_sampling, (list, tuple)) else 'n/a'}"
+                )
+            if any(
+                isinstance(p, bool)
+                or not isinstance(p, Real)
+                or not math.isfinite(float(p))
+                for p in self.mtp_depth_sampling
+            ):
+                raise ValueError(
+                    "mtp_depth_sampling entries must be finite real numbers, "
+                    f"got {self.mtp_depth_sampling}"
+                )
+            if any(p < 0.0 for p in self.mtp_depth_sampling):
+                raise ValueError(
+                    "mtp_depth_sampling entries are probabilities and must all be "
+                    f">= 0, got {self.mtp_depth_sampling}"
+                )
+            _s = float(sum(self.mtp_depth_sampling))
+            if abs(_s - 1.0) >= 1e-3:
+                raise ValueError(
+                    "mtp_depth_sampling must sum to 1.0 (it is the distribution "
+                    f"P(K=k)), got sum={_s} for {self.mtp_depth_sampling}"
                 )
 
         if self.enable_mtp_magic_send:

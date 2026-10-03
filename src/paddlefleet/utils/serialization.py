@@ -116,7 +116,7 @@ def _storage_type_to_dtype_to_map():
         "ByteStorage": np.uint8,
         "BoolStorage": np.bool_,
         "ComplexDoubleStorage": np.cdouble,
-        "ComplexFloatStorage": np.cfloat,
+        "ComplexFloatStorage": np.complex128,
         "BFloat16Storage": np.uint16,  # support bf16
     }
 
