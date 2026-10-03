@@ -186,16 +186,19 @@ class DeferredWeightGradLinear(paddle.autograd.PyLayer):
         dx = paddle.matmul(out_grad, weight, transpose_y=True)
 
         if not weight.stop_gradient:
-            WeightGradStore.enabled = True
-            WeightGradStore.put(
-                partial(
-                    _compute_weight_grad,
-                    x.detach(),
-                    out_grad.detach(),
-                    weight,
+            was_enabled = WeightGradStore.enabled
+            try:
+                WeightGradStore.enabled = True
+                WeightGradStore.put(
+                    partial(
+                        _compute_weight_grad,
+                        x.detach(),
+                        out_grad.detach(),
+                        weight,
+                    )
                 )
-            )
-            WeightGradStore.enabled = False
+            finally:
+                WeightGradStore.enabled = was_enabled
 
         return dx, None
 
