@@ -164,7 +164,11 @@ class _AccuracyCompatibleQKMatmul(paddle.autograd.PyLayer):
         grad_key_per_head = paddle.matmul(
             query.transpose([0, 1, 3, 2]), grad_output
         )
-        grad_key = paddle.sum(grad_key_per_head, axis=1, keepdim=True)
+        grad_key = (
+            paddle.sum(grad_key_per_head, axis=1, keepdim=True)
+            if key.shape[1] == 1
+            else grad_key_per_head
+        )
         return grad_query, grad_key
 
 
