@@ -359,7 +359,8 @@ def restore_fused_expert_3d_layout(model, model_sharded_state_dict):
         if len(local.shape) != 2:
             continue
         if named_params is None:
-            named_params = dict(model.named_parameters())
+            # Checkpoint mappings may choose an alias of a shared parameter.
+            named_params = dict(model.named_parameters(remove_duplicate=False))
         param = _sharded_parameter(model, named_params, key)
         if param is None:
             raise ValueError(
@@ -408,7 +409,7 @@ def _fused_expert_optimizer_save_views(
     their dictionary entries even when sharded-state construction fails.
     Returned ShardedWeights retain the views through synchronous serialization.
     """
-    named_params = dict(model.named_parameters())
+    named_params = dict(model.named_parameters(remove_duplicate=False))
     parameter_shapes = {}
     for key, shard in model_sharded_state_dict.items():
         if not isinstance(shard, ShardedWeight):
