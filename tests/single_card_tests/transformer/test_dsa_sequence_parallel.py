@@ -89,7 +89,10 @@ class TestDSASequenceParallel(unittest.TestCase):
                         return None, paddle.to_tensor(topk, dtype="int64")
 
                     layer = SimpleNamespace(
-                        config=SimpleNamespace(sequence_parallel=True),
+                        config=SimpleNamespace(
+                            sequence_parallel=True,
+                            use_accuracy_compatible=False,
+                        ),
                         pg_collection=SimpleNamespace(tp=group),
                         indexer=SimpleNamespace(forward=index),
                         skip_topk=False,
