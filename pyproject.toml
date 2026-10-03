@@ -160,7 +160,8 @@ test-formers = [
     "pytest-cov",
     "pytest-xdist",
     "pytest-timeout",
-    "paddleocr",
+    # DocParser uses PPStructure and PaddleOCR(show_log=...), both removed in 3.x.
+    "paddleocr<3",
     "pre-commit",
     "wandb",
     "swanlab",
