@@ -120,7 +120,9 @@ class _ExplodingOptimizer:
 
 def _model(params):
     """Model stand-in exposing only the parameter iteration protocol."""
-    return SimpleNamespace(named_parameters=lambda: list(params))
+    return SimpleNamespace(
+        named_parameters=lambda remove_duplicate=True: list(params)
+    )
 
 
 class RestoreFusedExpert3dLayoutTests(unittest.TestCase):
@@ -303,7 +305,7 @@ class SaveFlexOptimizerStateTests(unittest.TestCase):
         key = "layers.0.linear.weight"
         model_shard = ShardedWeight(key, param, (4, 2), (4, 2), (0, 0))
         model = SimpleNamespace(
-            named_parameters=lambda: [(key, param)],
+            named_parameters=lambda remove_duplicate=True: [(key, param)],
             sharded_state_dict=lambda: {key: model_shard},
         )
         seen = {}
@@ -1035,6 +1037,90 @@ class MaybeLogSaveEvaluateTests(unittest.TestCase):
 
         self.assertEqual(logged[0][0]["loss"], 0.0)
         self.assertEqual(stub._total_loss_scalar, 0.0)
+
+    def test_mtp_md5_reports_the_replica_mean_without_mutating_the_tracker(
+        self,
+    ):
+        for selected in ("check", "sharding", "data"):
+            with self.subTest(selected=selected):
+                groups = {
+                    name: _Group(1) for name in ("check", "sharding", "data")
+                }
+                groups[selected] = _Group(2)
+                hcg = SimpleNamespace(
+                    get_check_parallel_group=lambda: groups["check"],
+                    get_sharding_parallel_group=lambda: groups["sharding"],
+                    get_data_parallel_group=lambda: groups["data"],
+                )
+                local_mtp = _scalar(2.0)
+                logged = []
+                stub, _calls = self._stub(False, None, logged)
+                reduced = []
+
+                def add_remote_loss(tensor, group):
+                    reduced.append((float(tensor), group))
+                    tensor.set_value(tensor + 8.0)
+
+                with (
+                    mock.patch.dict(os.environ, {"LOG_LOSS_MD5": "1"}),
+                    mock.patch.object(
+                        loss_mod.LanguageLoss,
+                        "mtp_loss_tracker",
+                        {"mtp_1 loss": local_mtp},
+                    ),
+                    mock.patch.object(
+                        paddle.distributed.fleet,
+                        "get_hybrid_communicate_group",
+                        return_value=hcg,
+                    ),
+                    mock.patch.object(
+                        paddle.distributed, "all_reduce", add_remote_loss
+                    ),
+                ):
+                    Trainer._maybe_log_save_evaluate(
+                        stub, _scalar(10.0), None, 0, None
+                    )
+
+                self.assertEqual(reduced, [(2.0, groups[selected])])
+                self.assertEqual(float(local_mtp), 2.0)
+                self.assertEqual(logged[0][0]["mtp_1 loss"], 5.0)
+                self.assertEqual(
+                    logged[0][0]["mtp_1 loss_md5"],
+                    "81f59a56037568dab0bc398f29b92e45",
+                )
+
+    def test_mtp_md5_refuses_a_distributed_run_without_a_replica_group(self):
+        hcg = SimpleNamespace(
+            get_check_parallel_group=lambda: None,
+            get_sharding_parallel_group=lambda: None,
+            get_data_parallel_group=lambda: None,
+        )
+        logged = []
+        stub, _calls = self._stub(False, None, logged)
+        with (
+            mock.patch.dict(os.environ, {"LOG_LOSS_MD5": "1"}),
+            mock.patch.object(
+                loss_mod.LanguageLoss,
+                "mtp_loss_tracker",
+                {"mtp_1 loss": _scalar(2.0)},
+            ),
+            mock.patch.object(
+                paddle.distributed.fleet,
+                "get_hybrid_communicate_group",
+                return_value=hcg,
+            ),
+            mock.patch.object(
+                paddle.distributed, "get_world_size", return_value=2
+            ),
+            mock.patch.object(paddle.distributed, "all_reduce") as reduce,
+            self.assertRaisesRegex(
+                RuntimeError, "data-parallel-equivalent process group"
+            ),
+        ):
+            Trainer._maybe_log_save_evaluate(stub, _scalar(10.0), None, 0, None)
+
+        reduce.assert_not_called()
+        self.assertEqual(logged, [])
 
 
 class BuildGradClipTests(unittest.TestCase):
