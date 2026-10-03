@@ -355,8 +355,13 @@ class ApplyPermutedProbs(PyLayer):
             grad_probs = (
                 permuted_tokens.cast("float32") * grad_output.cast("float32")
             ).sum(axis=-1)
-        return grad_tokens.cast(ctx.input_dtype), grad_probs.cast(
-            permuted_probs.dtype
+        return (
+            None
+            if permuted_tokens.stop_gradient
+            else grad_tokens.cast(ctx.input_dtype),
+            None
+            if permuted_probs.stop_gradient
+            else grad_probs.cast(permuted_probs.dtype),
         )
 
 
@@ -417,7 +422,7 @@ class _PermuteAlignedPyLayer(PyLayer):
                     acc = acc + gathered[:, slot]
             return acc.cast(ctx.input_dtype)
 
-        # gather → [N*topk, H] in fp32 → reshape [N, topk, H] → sum(axis=1)
+        # Gather in expert-major order before accumulating each runtime top-k slot.
         gathered = grad_permuted.cast("float32").index_select(
             axis=0, index=gather_index_flat
         )
@@ -427,7 +432,12 @@ class _PermuteAlignedPyLayer(PyLayer):
             gathered = gathered * valid_rows.cast("float32").reshape(
                 [ctx.num_tokens, 1, 1]
             )
-        grad_tokens = gathered.sum(axis=1)
+        # Match deterministic scatter-add order, then round once to input dtype.
+        grad_tokens = paddle.zeros(
+            [ctx.num_tokens, ctx.hidden], dtype="float32"
+        )
+        for expert_slot in range(ctx.topk):
+            grad_tokens = grad_tokens + gathered[:, expert_slot, :]
         return grad_tokens.cast(ctx.input_dtype)
 
 
@@ -533,7 +543,7 @@ def unpermute(
         permuted_probs = probs.T.contiguous().masked_select(
             routing_map.T.contiguous().cast(paddle.bool)
         )
-        if use_accuracy_compatible_kernel():
+        if use_accuracy_compatible:
             permuted_tokens = ApplyPermutedProbs.apply(
                 permuted_tokens, permuted_probs, use_accuracy_compatible
             )
@@ -553,7 +563,7 @@ def unpermute(
             use_accuracy_compatible,
         )
 
-    if use_accuracy_compatible_kernel():
+    if use_accuracy_compatible:
         output_tokens = _unpermute_fp32_accum(
             permuted_tokens, sorted_indices, restore_shape
         )
