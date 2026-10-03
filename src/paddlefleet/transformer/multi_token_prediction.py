@@ -81,6 +81,10 @@ def _apply_mtp_layer_masks(dict_args, depth, config):
     mtp_hidden_inputs_mask_all = dict_args.pop(
         "mtp_hidden_inputs_mask_all", None
     )
+    if mtp_attn_mask is not None and mtp_hidden_inputs_mask_all is None:
+        raise ValueError(
+            "a dense mtp_attn_mask requires mtp_hidden_inputs_mask_all"
+        )
     if mtp_startend_row_indices_all is not None:
         if config.gpt_model_use_experimental_version:
             dict_args["attn_mask_startend_row_indices"] = (
