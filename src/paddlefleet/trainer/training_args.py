@@ -587,6 +587,10 @@ class TrainingArguments:
         and decreased for the experts with more assigned tokens."""
         },
     )
+    moe_token_dispatcher_type: str = field(
+        default="alltoall",
+        metadata={"help": "MoE token dispatcher implementation."},
+    )
     freeze_training: bool = field(
         default=False,
         metadata={
@@ -1518,6 +1522,21 @@ class TrainingArguments:
             )
         },
     )
+    bias_activation_fusion: Optional[bool] = field(
+        default=None,
+        metadata={
+            "help": "Fuse bias and activation; None preserves the model provider default."
+        },
+    )
+    moe_expert_fusion: Optional[bool] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Whether to fuse MoE experts into grouped GEMM. None keeps the "
+                "model-config value. YAML can set true for GLM-5.2."
+            )
+        },
+    )
     nccl_comm_group_config: Optional[str] = field(
         default=None,
         metadata={
@@ -1541,6 +1560,12 @@ class TrainingArguments:
     num_nextn_predict_layers: int = field(
         default=0, metadata={"help": "Number of nextn predict layers."}
     )
+    fp32_residual_connection: Optional[bool] = field(
+        default=None,
+        metadata={
+            "help": "Whether residual connections use FP32 accumulation; None keeps the model configuration."
+        },
+    )
     train_mtp_only: bool = field(
         default=False, metadata={"help": "Whether to train MTP only."}
     )
@@ -1552,6 +1577,12 @@ class TrainingArguments:
         default=0,
         metadata={
             "help": "Whether to use Autoregressive MTP Training, activate if > 1."
+        },
+    )
+    mtp_loss_scaling_factor: Optional[float] = field(
+        default=None,
+        metadata={
+            "help": "Override the MTP loss weight; None preserves the model configuration default."
         },
     )
     profile: bool = field(
@@ -2131,7 +2162,10 @@ class TrainingArguments:
                     f"Invalid fa_version: {self.fa_version}. Supported versions are: 2 on non-CUDA devices."
                 )
         else:
-            if paddle.base.core.is_compiled_with_cuda():
+            if (
+                paddle.base.core.is_compiled_with_cuda()
+                and paddle.device.get_device().startswith("gpu")
+            ):
                 is_sm100 = paddle_device.get_device_capability()[0] == 10
                 is_sm90 = (
                     paddle_device.get_device_capability()[0] == 9
