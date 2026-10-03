@@ -131,10 +131,10 @@ ci = [
 test-formers = [
     { include-group = "test" },
     { include-group = "ci" },
-    # Torch>=2.1,<2.11 is installed separately in CI, with its own dependencies,
-    # so that its bundled nvidia-nvshmem-cu12 (manylinux) takes precedence over
-    # paddle-nvidia-nvshmem-cu12, which needs GLIBC_2.38 at torch import time.
-    # Torch's non-CUDA runtime dependencies are kept explicit in this group.
+    # CI jointly resolves Torch 2.7.1+cu118 with these dependencies. Its cu11
+    # packages coexist with Paddle's exact cu12 pins; newer cu12 Torch wheels
+    # require conflicting versions of the same NVIDIA distributions.
+    # Keep the non-CUDA dependencies available to local test environments too.
     "filelock",
     "fsspec>=0.8.5",
     "networkx>=2.5.1",
@@ -160,7 +160,8 @@ test-formers = [
     "pytest-cov",
     "pytest-xdist",
     "pytest-timeout",
-    "paddleocr",
+    # DocParser uses PPStructure and PaddleOCR(show_log=...), both removed in 3.x.
+    "paddleocr<3",
     "pre-commit",
     "wandb",
     "swanlab",
