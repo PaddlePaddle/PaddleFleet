@@ -102,23 +102,15 @@ for test_file in $(find $test_dir -type f -name "test_*.py"); do
     # workers; it returns 124 on timeout, which falls through to the FAILED
     # path so the loop continues with the next test.
     timeout --kill-after=30s 10m \
-        coverage run -m paddle.distributed.launch --gpus "$gpus_arg" "$test_file" \
+        coverage run -m paddle.distributed.launch --gpus "$gpus_arg" "$test_file" 2>&1 \
         | tee "./$(basename ${test_file%.*})_multi_card.log"
-    check_exit_code=${PIPESTATUS[0]}
-    if [ $check_exit_code -ne 0 ]; then
-        if [ $check_exit_code -eq 124 ]; then
+    pipeline_status=("${PIPESTATUS[@]}")
+    if [ "${pipeline_status[0]}" -ne 0 ] || [ "${pipeline_status[1]}" -ne 0 ]; then
+        failed_tests+=("$test_file")
+        if [ "${pipeline_status[0]}" -eq 124 ]; then
             echo "Test TIMEOUT: $test_file exceeded the 10m per-case limit and was killed."
-            failed_tests+=("$test_file")
         else
-            echo "Test FAILED: $test_file, see log for details..."
-            python $work_dir/ci/check_log_for_exitcode.py "./$(basename ${test_file%.*})_multi_card.log" "OK"
-            exit_code=$?
-            if [ $exit_code -ne 0 ]; then
-                failed_tests+=("$test_file")
-                echo "Log check failed for $test_file."
-            else
-                echo "Log check passed for $test_file."
-            fi
+            echo "Test FAILED: $test_file (launcher=${pipeline_status[0]}, log=${pipeline_status[1]}), see log for details..."
         fi
     else
         echo "Test PASSED: $test_file"
