@@ -73,8 +73,10 @@ def _make_loss():
     loss.loss_subbatch_sequence_length = 0
     loss.use_subbatch = False
     # Normally set in __init__, which __new__ skips; the plain reduction
-    # branch reads it directly.
+    # branch reads them directly.
     loss.use_accuracy_compatible = False
+    loss.defer_token_normalization = False
+    loss._deferred_main_tokens = None
 
     def _stub_loss_func(logits, labels):
         # Per-token CE shaped like labels, distinct per position so a
