@@ -591,6 +591,12 @@ class TrainingArguments:
         default="alltoall",
         metadata={"help": "MoE token dispatcher implementation."},
     )
+    moe_router_use_fp32_master: bool = field(
+        default=False,
+        metadata={
+            "help": "Keep the accuracy-compatible MoE router master weight in FP32."
+        },
+    )
     freeze_training: bool = field(
         default=False,
         metadata={

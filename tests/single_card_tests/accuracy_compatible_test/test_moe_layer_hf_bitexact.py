@@ -44,6 +44,7 @@ the *target name* rather than a bare ``True`` -- ``True`` normalizes to
 import os
 import sys
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
@@ -225,6 +226,8 @@ class _StubMoELayer(MoELayer):
         self.gate = _FixedGate(self.probs, self.routing_map, idx, wgt)
         self.num_experts = num_experts
         self.use_accuracy_compatible = target
+        self.config = SimpleNamespace(use_accuracy_compatible=target)
+        self.tensor_model_parallel_size = 1
         self.expert_model_parallel_size = expert_model_parallel_size
         self.sequence_parallel = False
         self.layer_number = 0
@@ -244,11 +247,18 @@ class _StubMoELayer(MoELayer):
             # The sonic branch returns a bare tensor, not ``(out, bias)``.
             self.grouped_gemm_experts = lambda x, *a, **k: x * 2.0
         else:
-            self.grouped_gemm_experts = lambda x, tpe: (x * 2.0, None)
+            self.grouped_gemm_experts = self._grouped_gemm
         # Only reached by the ``moe_expert_fusion=False`` / EP>1 gating tests;
         # the dense and EP code paths are not what this file covers.
         self._forward_single_card_moe = lambda x, *a, **k: x * 2.0
         self.custom_forward = lambda x, *a, **k: x * 2.0
+
+    @staticmethod
+    def _grouped_gemm(x, tpe, permuted_probs=None, row_owner=None):
+        output = x * 2.0
+        if permuted_probs is not None:
+            output = output * permuted_probs.unsqueeze(-1)
+        return output, None
 
 
 class TestHFMoeFanoutTailOrder(unittest.TestCase):
@@ -760,6 +770,8 @@ class _GemmOnlyMoELayer(MoELayer):
         paddle.nn.Layer.__init__(self)
         self.using_sonic_moe = False
         self.use_accuracy_compatible = target
+        self.config = SimpleNamespace(use_accuracy_compatible=target)
+        self.tensor_model_parallel_size = 1
         self.grouped_gemm_experts = lambda x, tokens_per_expert: (x * 2.0, None)
 
 
