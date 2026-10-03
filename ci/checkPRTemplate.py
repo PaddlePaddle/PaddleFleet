@@ -21,15 +21,9 @@ import requests
 
 PR_checkTemplate = ["PaddleFleet"]
 
-BRANCH = os.environ["BRANCH"]
-if BRANCH.startswith("develop"):
-    REPO_TEMPLATE = {
-        "PaddleFleet": r"""### PR Category(.*[^\s].*)### PR Types(.*[^\s].*)### Description(.*[^\s].*)"""
-    }
-elif BRANCH.startswith("release"):
-    REPO_TEMPLATE = {
-        "PaddleFleet": r"""### PR Category(.*[^\s].*)### PR Types(.*[^\s].*)### Description(.*[^\s].*)"""
-    }
+REPO_TEMPLATE = {
+    "PaddleFleet": r"""### PR Category(.*[^\s].*)### PR Types(.*[^\s].*)### Description(.*[^\s].*)"""
+}
 
 
 def re_rule(body, CHECK_TEMPLATE):

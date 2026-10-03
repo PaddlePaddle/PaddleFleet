@@ -33,6 +33,7 @@ jobs:
         # 使用 GitHub Actions 的内置上下文检查 PR 内容
         run: |
           pip install httpx requests
+          python -m unittest discover -s tests/ci -p test_pr_template.py
           python ci/checkPRTemplate.py
       - name: Check uv.lock is not deleted
         run: |

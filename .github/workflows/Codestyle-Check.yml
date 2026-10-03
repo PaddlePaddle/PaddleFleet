@@ -56,6 +56,10 @@ jobs:
         run: |
           ast-grep test
 
+      - name: Test multi-card runner exit handling
+        if: steps.check-bypass.outputs.can-skip != 'true'
+        run: python ci/test_multi_card_runner.py
+
       - name: Check pre-commit
         id: pre-commit
         if: steps.check-bypass.outputs.can-skip != 'true'
