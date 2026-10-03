@@ -1,0 +1,16 @@
+--- a/csrc/kernels/launch.cuh
++++ b/csrc/kernels/launch.cuh
+@@ -29,0 +30 @@
++#if CUDA_VERSION >= 13000
+@@ -40,0 +42,11 @@
++#else
++#define SETUP_OVERLAP_LAUNCH_CONFIG(num_sms, num_threads, stream) \
++    cudaLaunchConfig_t cfg = {(num_sms), (num_threads), 0, stream, nullptr, 0}; \
++    cudaLaunchAttribute attr[1]; \
++    attr[0].id = cudaLaunchAttributeClusterDimension; \
++    attr[0].val.clusterDim.x = (num_sms % 2 == 0 ? 2 : 1); \
++    attr[0].val.clusterDim.y = 1; \
++    attr[0].val.clusterDim.z = 1; \
++    cfg.attrs = attr; \
++    cfg.numAttrs = 1;
++#endif
