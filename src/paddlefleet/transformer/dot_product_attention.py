@@ -531,6 +531,7 @@ class DotProductAttention(FleetLayer):
         k_pos_emb: paddle.Tensor = None,
         q_absorbed: paddle.Tensor = None,
         v_b_proj_weight: paddle.Tensor = None,
+        k_abs_weight: paddle.Tensor = None,
     ):
         """Forward."""
 
