@@ -669,7 +669,7 @@ def fram_wave(
             frame = waveform[i : i + fft_window_size]
             frame_width = frame.shape[0]
             if frame_width < waveform.shape[0]:
-                frame = np.lib.pad(
+                frame = np.pad(
                     frame,
                     pad_width=(0, fft_window_size - frame_width),
                     mode="constant",
