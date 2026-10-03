@@ -15,6 +15,10 @@ extend-ignore-re = [
     "(?s)(#|//)\\s*typos:\\s*off.*?\\n\\s*(#|//)\\s*typos:\\s*on"
 ]
 
+[default.extend-identifiers]
+# Existing public PaddleFormers audio API; retain its compatibility spelling.
+fram_wave = "fram_wave"
+
 [default.extend-words]
 # FleetCore specific words
 arange = "arange"

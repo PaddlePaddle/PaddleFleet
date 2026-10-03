@@ -165,6 +165,12 @@ class TestRestoreFusedExpert3DLayout(unittest.TestCase):
 
 
 class TestFusedExpertOptimizerSave(unittest.TestCase):
+    def setUp(self):
+        import paddle
+
+        self.addCleanup(paddle.set_device, paddle.get_device())
+        paddle.set_device("gpu:0")
+
     def make_trainer(self, dtype="bfloat16"):
         import paddle
         from paddle.distributed import ShardedWeight

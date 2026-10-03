@@ -90,6 +90,10 @@ from paddle.distributed.fleet.meta_parallel.zero_bubble_utils import (
     SplitBWLinear,
     WeightGradStore,
 )
+from paddle.distributed.fleet.utils.mix_precision_utils import (
+    MixPrecisionLayer,
+    MixPrecisionOptimizer,
+)
 from paddle.io import DataLoader, Dataset
 from paddle.nn import Layer, Linear
 
@@ -164,7 +168,6 @@ class DeferredLinearPipe(Layer):
     def __init__(self, hidden):
         super().__init__()
         self.weight = self.create_parameter([hidden, hidden])
-        self.weight.main_grad = None
 
     def forward(self, input):
         if self.use_deferred:
@@ -292,8 +295,11 @@ class TestPpDwRecomputeOverlap(unittest.TestCase):
             num_stages=PP_DEGREE,
             num_virtual_pipeline_stages=VPP,
         )
-        optimizer = paddle.optimizer.SGD(
-            learning_rate=0.01, parameters=model.parameters()
+        MixPrecisionLayer(model, dtype="bfloat16")
+        optimizer = MixPrecisionOptimizer(
+            paddle.optimizer.SGD(
+                learning_rate=0.01, parameters=model.parameters()
+            )
         )
         return fleet.distributed_model(model), fleet.distributed_optimizer(
             optimizer
